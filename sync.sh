@@ -15,7 +15,7 @@ done
 for f in AGENTS.md models.json subagents.json provider-fallback.json mcp-adapter.json; do
   cp "$PI/$f" "agent/$f"
 done
-jq 'del(.deviceId, .lastChangelogVersion)' "$PI/settings.json" > agent/settings.json
+jq 'del(.deviceId, .lastChangelogVersion) | .packages |= map(if test("^\\./local-packages/pi-(jobs|recover)$") then "npm:@woksin/" + ltrimstr("./local-packages/") else . end)' "$PI/settings.json" > agent/settings.json
 jq '{name, private, dependencies}' "$PI/npm/package.json" > agent/npm-package.json
 
 for s in ai-work-lifecycle github-issue-hygiene; do
