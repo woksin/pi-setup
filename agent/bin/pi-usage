@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""pi-usage — provider balance and limit pressure from pi session logs (read-only).
+
+Usage: pi-usage [DAYS]   (default 7)
+
+Reports, per provider: model calls, tokens, output tokens and list-price cost
+(API-equivalent, NOT subscription cost); plan/rate-limit hits per day; subagent
+spawns by type; and main-session context size. The limit hits are the numbers that
+show which subscription is actually constrained.
+"""
+import collections, glob, gzip, json, os, re, statistics, sys, time
+from datetime import datetime
+
+DAYS = float(sys.argv[1]) if len(sys.argv) > 1 else 7
+ROOT = os.path.expanduser("~/.pi/agent/sessions")
+now = time.time()
+cutoff = now - DAYS * 86400
+
+LIMIT_PATTERNS = [
+    ("anthropic", re.compile(r"rate_limit_error|exceed your account's rate limit")),
+    ("openai", re.compile(r"ChatGPT usage limit|usage limit has been reached")),
+]
+
+usage = collections.defaultdict(lambda: [0, 0, 0, 0, 0.0])  # calls, total, output, cacheRead, cost
+limits = collections.defaultdict(collections.Counter)  # provider -> day -> hits
+spawns = collections.Counter()
+main_ctx = collections.defaultdict(list)
+
+
+def provider_of(p):
+    return "openai" if p and "openai" in p else ("anthropic" if p and "anthropic" in p else str(p))
+
+
+# Old sessions are gzipped in place by pi-cleanup (mtime preserved), so read both.
+paths = glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True) + glob.glob(
+    os.path.join(ROOT, "**", "*.jsonl.gz"), recursive=True)
+for path in paths:
+    if os.path.getmtime(path) < cutoff:
+        continue
+    header = None
+    seen_errors = set()
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt", errors="ignore") as fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if header is None:
+                header = d
+            ts = d.get("timestamp")
+            if not ts:
+                continue
+            try:
+                t = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            if t < cutoff:
+                continue
+            m = d.get("message") or {}
+            if m.get("role") != "assistant":
+                continue
+            prov = provider_of(m.get("provider"))
+            err = m.get("errorMessage") or ""
+            if err:
+                for p, rx in LIMIT_PATTERNS:
+                    if rx.search(err) and d.get("id") not in seen_errors:
+                        seen_errors.add(d.get("id"))
+                        limits[p][ts[:10]] += 1
+            u = m.get("usage") or {}
+            if u.get("totalTokens"):
+                a = usage[(prov, m.get("model"))]
+                a[0] += 1
+                a[1] += u.get("totalTokens", 0)
+                a[2] += u.get("output", 0)
+                a[3] += u.get("cacheRead", 0)
+                a[4] += (u.get("cost") or {}).get("total", 0) or 0
+                if not (header or {}).get("parentSession") and "pi-agent-" not in path:
+                    main_ctx[m.get("model")].append(
+                        u.get("input", 0) + u.get("cacheRead", 0) + u.get("cacheWrite", 0))
+            for c in m.get("content") or []:
+                if isinstance(c, dict) and c.get("type") == "toolCall" and c.get("name") == "Agent":
+                    spawns[(c.get("arguments") or {}).get("subagent_type", "?")] += 1
+
+print(f"== last {DAYS:g} days (by message timestamp)\n")
+print(f"{'provider':9} {'model':22} {'calls':>7} {'Mtok':>7} {'outMtok':>8} {'cacheRd%':>8} {'list$':>8}")
+tot = collections.defaultdict(lambda: [0, 0, 0, 0, 0.0])
+for (p, mo), a in sorted(usage.items(), key=lambda x: -x[1][1]):
+    print(f"{p:9} {str(mo):22} {a[0]:7} {a[1]/1e6:7.0f} {a[2]/1e6:8.1f} {100*a[3]/max(a[1],1):7.0f}% {a[4]:8.0f}")
+    for i in range(5):
+        tot[p][i] += a[i]
+print()
+for p, a in tot.items():
+    print(f"{p:9} {'TOTAL':22} {a[0]:7} {a[1]/1e6:7.0f} {a[2]/1e6:8.1f} {100*a[3]/max(a[1],1):7.0f}% {a[4]:8.0f}")
+
+print("\n== limit hits per day (rate/usage-limit errors; the real constraint signal)")
+days = sorted({d for c in limits.values() for d in c})
+for day in days:
+    print(f"  {day}  " + "  ".join(f"{p}: {limits[p][day]:4}" for p in ("anthropic", "openai")))
+if not days:
+    print("  none")
+
+print("\n== subagent spawns via Agent tool (excludes workflow-internal agents)")
+for k, v in spawns.most_common():
+    print(f"  {k:18} {v}")
+
+print("\n== main-session request context (input + cache), top-level sessions only")
+for mo, xs in sorted(main_ctx.items(), key=lambda x: -len(x[1])):
+    if len(xs) < 20:
+        continue
+    over = sum(1 for x in xs if x > 400_000)
+    print(f"  {str(mo):22} n={len(xs):6}  median={statistics.median(xs)/1e3:5.0f}k  >400k={100*over/len(xs):3.0f}%")

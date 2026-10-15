@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""pi-account — manually switch pi's Anthropic login between saved accounts.
+
+Usage:
+  pi-account save <name>     save the current pi Anthropic login as <name> (after /login)
+  pi-account use <name>      switch pi to <name> (stores the outgoing account's refreshed tokens first)
+  pi-account next            switch to the next saved account (alphabetical, wraps)
+  pi-account list            list saved accounts (* = active)
+  pi-account current         print the active account name
+  pi-account remove <name>   delete a saved account
+
+Switching is always user-initiated; nothing here rotates automatically.
+Tokens are never printed. Saved logins live in ~/.pi/agent/accounts/anthropic/ (0600).
+Running pi sessions re-read auth.json per request, so a switch applies to their next request.
+"""
+import json, os, sys, time, hashlib, shutil
+from datetime import datetime
+
+PROVIDER = "anthropic"
+AGENT = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", "~/.pi/agent"))
+AUTH = os.path.join(AGENT, "auth.json")
+LOCK = AUTH + ".lock"  # same lock dir proper-lockfile (used by pi) creates
+STORE = os.path.join(AGENT, "accounts", PROVIDER)
+STATE = os.path.join(STORE, ".state.json")
+
+
+def die(msg, code=1):
+    print(f"pi-account: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def fp(entry):
+    r = (entry or {}).get("refresh", "")
+    return hashlib.sha256(r.encode()).hexdigest()[:12] if r else ""
+
+
+def read_json(path, default=None):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+
+
+def write_json(path, data):
+    tmp = f"{path}.tmp-{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+class Lock:
+    def __enter__(self):
+        deadline = time.time() + 10
+        while True:
+            try:
+                os.mkdir(LOCK)
+                return self
+            except FileExistsError:
+                if time.time() > deadline:
+                    age = time.time() - os.stat(LOCK).st_mtime
+                    die(f"auth.json is locked by another process ({LOCK}, {age:.0f}s old). "
+                        "Retry; if no pi process is running and it stays, remove that directory.")
+                time.sleep(0.1)
+
+    def __exit__(self, *a):
+        try:
+            os.rmdir(LOCK)
+        except OSError:
+            pass
+
+
+def ensure_store():
+    os.makedirs(STORE, mode=0o700, exist_ok=True)
+    os.chmod(STORE, 0o700)
+
+
+def acct_path(name):
+    if not name or "/" in name or name.startswith("."):
+        die(f"invalid account name: {name!r}")
+    return os.path.join(STORE, f"{name}.json")
+
+
+def names():
+    if not os.path.isdir(STORE):
+        return []
+    return sorted(f[:-5] for f in os.listdir(STORE) if f.endswith(".json") and not f.startswith("."))
+
+
+def state():
+    return read_json(STATE, {}) or {}
+
+
+def set_state(**kv):
+    s = state(); s.update(kv); write_json(STATE, s)
+
+
+def current_entry():
+    auth = read_json(AUTH, {}) or {}
+    return auth, auth.get(PROVIDER)
+
+
+def owner_of(entry):
+    """Name of the saved account whose stored refresh token matches entry, if any."""
+    f = fp(entry)
+    for n in names():
+        if f and fp(read_json(acct_path(n))) == f:
+            return n
+    return None
+
+
+def store_account(name, entry):
+    path = acct_path(name)
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".prev")
+        os.chmod(path + ".prev", 0o600)
+    write_json(path, entry)
+
+
+def cmd_save(name):
+    ensure_store()
+    with Lock():
+        _, entry = current_entry()
+        if not entry:
+            die("pi has no Anthropic login; run /login in pi first.")
+        other = owner_of(entry)
+        if other and other != name:
+            die(f"this login is already saved as '{other}'. Use /login in pi for a different account first.")
+        store_account(name, entry)
+    set_state(active=name, **{f"used:{name}": time.time()})
+    print(f"saved current login as '{name}' (now active)")
+
+
+def cmd_use(name):
+    ensure_store()
+    target_path = acct_path(name)
+    target = read_json(target_path)
+    if not target:
+        die(f"no saved account '{name}'. Saved: {', '.join(names()) or 'none'}")
+    active = state().get("active")
+    with Lock():
+        auth, entry = current_entry()
+        if entry and active and active != name:
+            other = owner_of(entry)
+            if other and other != active:
+                print(f"warning: current login matches '{other}', not '{active}'; storing it as '{other}'",
+                      file=sys.stderr)
+                active = other
+            # Store the outgoing account's (possibly refreshed) tokens so its saved copy stays valid.
+            store_account(active, entry)
+        elif entry and not active and not owner_of(entry):
+            die("current login is not saved under any name; run 'pi-account save <name>' first "
+                "so it is not lost.")
+        auth[PROVIDER] = target
+        write_json(AUTH, auth)
+    set_state(active=name, **{f"used:{name}": time.time()})
+    print(f"pi Anthropic login -> '{name}'")
+
+
+def cmd_next():
+    ns = names()
+    if not ns:
+        die("no saved accounts")
+    active = state().get("active")
+    nxt = ns[(ns.index(active) + 1) % len(ns)] if active in ns else ns[0]
+    if nxt == active:
+        die("only one saved account")
+    cmd_use(nxt)
+
+
+def fmt_ts(t):
+    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M") if t else "-"
+
+
+def cmd_list():
+    s = state(); active = s.get("active")
+    ns = names()
+    if not ns:
+        print("no saved accounts — log in with /login in pi, then: pi-account save <name>")
+        return
+    print(f"{'':2}{'name':<16}{'last switched to':<20}{'token expires'}")
+    for n in ns:
+        e = read_json(acct_path(n)) or {}
+        if n == active:
+            _, live = current_entry()
+            e = live or e
+        exp = e.get("expires")
+        exp_s = fmt_ts(exp / 1000 if exp and exp > 1e12 else exp)
+        print(f"{'*' if n == active else ' ':2}{n:<16}{fmt_ts(s.get(f'used:{n}')):<20}{exp_s}")
+
+
+def cmd_remove(name):
+    path = acct_path(name)
+    if not os.path.exists(path):
+        die(f"no saved account '{name}'")
+    if state().get("active") == name:
+        die(f"'{name}' is active; switch to another account first")
+    os.remove(path)
+    if os.path.exists(path + ".prev"):
+        os.remove(path + ".prev")
+    print(f"removed '{name}'")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip()); return
+    cmd, args = argv[0], argv[1:]
+    one = lambda: args[0] if len(args) == 1 else die(f"usage: pi-account {cmd} <name>")
+    if cmd == "save": cmd_save(one())
+    elif cmd == "use": cmd_use(one())
+    elif cmd == "next": cmd_next()
+    elif cmd in ("list", "ls"): cmd_list()
+    elif cmd == "current": print(state().get("active") or "(none)")
+    elif cmd in ("remove", "rm"): cmd_remove(one())
+    else: die(f"unknown command '{cmd}' (see --help)")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

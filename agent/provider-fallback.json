@@ -1,0 +1,30 @@
+{
+  "enabled": false,
+  "defaultLimitMinutes": 60,
+  "maxFallbacksPerPrompt": 2,
+  "restoreWhenExpired": true,
+  "limitPatterns": {
+    "anthropic": [
+      "rate_limit_error",
+      "exceed your account's rate limit"
+    ],
+    "openai-codex": [
+      "ChatGPT usage limit",
+      "usage limit has been reached"
+    ]
+  },
+  "pairs": [
+    [
+      "anthropic/claude-opus-5-5",
+      "openai-codex/gpt-6-astra"
+    ],
+    [
+      "anthropic/claude-sonnet-5-5",
+      "openai-codex/gpt-6.1-sol"
+    ],
+    [
+      "anthropic/claude-haiku-4-5",
+      "openai-codex/gpt-6-luna"
+    ]
+  ]
+}

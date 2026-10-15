@@ -1,0 +1,22 @@
+{
+  "settings": {
+    "allowInstall": false,
+    "hostConfigDiscovery": "off",
+    "deferWithMissingMetadata": true,
+    "approveTools": [
+      "chronicle*_delete_*",
+      "chronicle*_stop_*",
+      "chronicle*_resume_*",
+      "screenplay*_apply",
+      "screenplay*_recover-workspace",
+      "screenplay*_recover_workspace"
+    ]
+  },
+  "mcpServers": {
+    "codescene": {
+      "command": "/opt/homebrew/bin/cs-mcp",
+      "args": [],
+      "lifecycle": "lazy-keep-alive"
+    }
+  }
+}

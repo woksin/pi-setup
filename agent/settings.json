@@ -1,0 +1,58 @@
+{
+  "theme": "dark",
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-opus-5-5",
+  "defaultThinkingLevel": "medium",
+  "enabledModels": [
+    "anthropic/claude-opus-5-5",
+    "anthropic/claude-sonnet-5-5",
+    "anthropic/claude-haiku-5-5",
+    "openai-codex/gpt-6.1-sol",
+    "openai-codex/gpt-6-astra",
+    "openai-codex/gpt-6-luna"
+  ],
+  "compaction": {
+    "enabled": false,
+    "reserveTokens": 32768
+  },
+  "httpIdleTimeoutMs": 60000,
+  "markdown": {
+    "mermaid": "streaming"
+  },
+  "defaultProjectTrust": "ask",
+  "tuiMode": "fullscreen",
+  "packages": [
+    "./early-extensions/mcp-project-trust.ts",
+    "npm:@gotgenes/pi-anthropic-auth",
+    "npm:pi-web-access",
+    "npm:@tintinweb/pi-subagents",
+    "npm:pi-mcp-adapter",
+    "./local-packages/pi-jobs",
+    "./local-packages/pi-recover",
+    "npm:pi-browser-use",
+    "npm:donsetch"
+  ],
+  "hideThinkingBlock": true,
+  "modelThinkingLevels": {
+    "anthropic/claude-opus-5-5": "medium",
+    "openai-codex/gpt-6-sol": "medium",
+    "anthropic/claude-fable-5": "high",
+    "anthropic/claude-opus-4-5": "medium",
+    "anthropic/claude-sonnet-5": "high",
+    "openai-codex/gpt-5.6-sol": "high",
+    "openai-codex/gpt-5.6-terra": "high",
+    "openai-codex/gpt-5.6-luna": "high",
+    "openai-codex/gpt-5.5": "medium",
+    "openai-codex/gpt-6-astra": "high",
+    "openai-codex/gpt-6-luna": "low",
+    "anthropic/claude-haiku-4-5": "low",
+    "anthropic/claude-sonnet-5-5": "medium",
+    "openai-codex/gpt-6.1-sol": "high"
+  },
+  "collapseChangelog": true,
+  "cacheWarming": "idle",
+  "showCacheMissNotices": true,
+  "extensions": [
+    "-builtin:mcp"
+  ]
+}

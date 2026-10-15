@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""pi-profile — switch pi agent model/effort profiles.
+
+Profiles live in ~/.pi/agent/profiles/<name>/:
+  agents/*.md          agent definitions (copied over ~/.pi/agent/agents/)
+  workflows/*.js       workflow overrides (copied over ~/.pi/agent/workflows/)
+  routing.md           "## Model routing" section spliced into ~/.pi/agent/AGENTS.md
+
+Usage:
+  pi-profile                 show the active profile and whether live files match it
+  pi-profile list            list profiles
+  pi-profile use <name>      activate a profile (refuses if live files were edited; --force overrides)
+  pi-profile save            copy the live files back into the active profile
+
+Changes take effect for new sessions (and new subagents; restart pi to be sure).
+"""
+import filecmp
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path.home() / ".pi" / "agent"
+PROFILES = ROOT / "profiles"
+ACTIVE = PROFILES / "ACTIVE"
+AGENTS_MD = ROOT / "AGENTS.md"
+START = "<!-- pi-profile:routing:start"
+END = "<!-- pi-profile:routing:end -->"
+
+
+def profiles():
+    return sorted(p.name for p in PROFILES.iterdir() if p.is_dir())
+
+
+def active():
+    return ACTIVE.read_text().strip() if ACTIVE.exists() else None
+
+
+def split_agents_md():
+    text = AGENTS_MD.read_text()
+    s = text.find(START)
+    e = text.find(END)
+    if s < 0 or e < 0 or e < s:
+        sys.exit(f"routing markers not found in {AGENTS_MD}")
+    s_body = text.index("\n", s) + 1
+    return text[:s_body], text[s_body:e], text[e:]
+
+
+def managed_files(name):
+    """(profile file, live file) pairs for a profile."""
+    base = PROFILES / name
+    pairs = []
+    for sub in ("agents", "workflows"):
+        d = base / sub
+        if d.is_dir():
+            for f in sorted(d.iterdir()):
+                if f.is_file():
+                    pairs.append((f, ROOT / sub / f.name))
+    return pairs
+
+
+def drift(name):
+    """Live files that differ from the given profile."""
+    out = []
+    for src, dst in managed_files(name):
+        if not dst.exists() or not filecmp.cmp(src, dst, shallow=False):
+            out.append(str(dst.relative_to(ROOT)))
+    routing = PROFILES / name / "routing.md"
+    if routing.exists() and split_agents_md()[1] != routing.read_text():
+        out.append("AGENTS.md (routing section)")
+    return out
+
+
+def cmd_status():
+    name = active()
+    print(f"active profile: {name or '(none)'}")
+    if name:
+        d = drift(name)
+        print("live files match profile" if not d else "live files differ from profile:\n  " + "\n  ".join(d))
+    print("available: " + ", ".join(profiles()))
+
+
+def cmd_use(name, force):
+    if name not in profiles():
+        sys.exit(f"unknown profile '{name}'. available: {', '.join(profiles())}")
+    cur = active()
+    if cur and cur != name and not force:
+        d = drift(cur)
+        if d:
+            sys.exit(
+                f"live files were edited since '{cur}' was applied:\n  " + "\n  ".join(d)
+                + f"\nrun 'pi-profile save' to keep them in '{cur}', or 'pi-profile use {name} --force' to discard"
+            )
+    for src, dst in managed_files(name):
+        shutil.copy2(src, dst)
+    routing = PROFILES / name / "routing.md"
+    if routing.exists():
+        head, _, tail = split_agents_md()
+        AGENTS_MD.write_text(head + routing.read_text() + tail)
+    ACTIVE.write_text(name + "\n")
+    print(f"activated '{name}'. Start a new pi session (or /reload) for it to take effect.")
+
+
+def cmd_save():
+    name = active()
+    if not name:
+        sys.exit("no active profile")
+    for src, dst in managed_files(name):
+        if dst.exists():
+            shutil.copy2(dst, src)
+    routing = PROFILES / name / "routing.md"
+    if routing.exists():
+        routing.write_text(split_agents_md()[1])
+    print(f"saved live files into '{name}'")
+
+
+def main(argv):
+    if not argv:
+        return cmd_status()
+    if argv[0] == "list":
+        cur = active()
+        for p in profiles():
+            print(("* " if p == cur else "  ") + p)
+    elif argv[0] == "use" and len(argv) >= 2:
+        cmd_use(argv[1], "--force" in argv[2:])
+    elif argv[0] == "save":
+        cmd_save()
+    else:
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

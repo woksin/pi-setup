@@ -1,0 +1,3 @@
+#!/bin/sh
+# Reviewed local copy, deliberately not a live import from a working checkout.
+exec python3 $HOME/.local/share/ai-work-lifecycle/ai-work-lifecycle.py "$@"

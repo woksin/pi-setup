@@ -1,0 +1,8 @@
+{
+  "toolDescriptionMode": "compact",
+  "widgetMode": "off",
+  "maxConcurrent": 3,
+  "maxConcurrentForeground": 2,
+  "scopeModels": true,
+  "agentMentions": "direct"
+}

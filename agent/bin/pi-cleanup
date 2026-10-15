@@ -1,0 +1,1858 @@
+#!/usr/bin/env python3
+"""pi-cleanup — safe, repeatable disk cleanup for git checkouts, worktrees and docker.
+
+Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-days N]
+                  [--image-age-days N]
+                  [--nuget-age-days N] [--session-age-days N] [--if-free-below GIB]
+                  [--roots PATH ...] [--json] [--scheduled]
+
+  (default)          dry run: print the plan, change nothing (see note on fetch below)
+  --apply            execute the plan
+  --only STEPS       comma list of build,worktrees,docker,caches (default: all four)
+  --idle-days N      a repo/worktree modified within N days is ACTIVE (default 3; when
+                     --scheduled and not given, only the build step uses 0.25)
+  --worktree-min-idle-days N  minimum idle age for worktree removal (default 1; may be 0).
+                     Effective worktree idle threshold = max(--idle-days, this value)
+  --nuget-age-days N remote-sourced ~/.nuget/packages versions older than N days are
+                     removed by the caches step (default 14)
+  --session-age-days N pi session .jsonl files not modified for N days are gzipped in
+                     place by the caches step (default 30)
+  --if-free-below GIB exit 0 with "free space OK" (doing nothing) when the home volume
+                     and every root have at least GIB GiB free
+  --image-age-days N docker images older than N days and used by no container are
+                     removed with `docker rmi <id>` (default 7)
+  --roots PATH ...   directories searched for git checkouts (default:
+                     /Volumes/sourcecode/repos, skipped if not mounted)
+  --json             machine-readable output on stdout
+  --scheduled        forces --only build,docker,caches,worktrees and --apply; appends a
+                     summary to ~/.pi/agent/logs/pi-cleanup.log (kept under 1 MB). Used by
+                     the launchd jobs com.sindrewilting.pi-cleanup (daily 03:00) and
+                     com.sindrewilting.pi-cleanup-lowdisk (every 30 min, with
+                     --if-free-below 40). If another --apply run holds the lock, a
+                     scheduled run logs one line and exits 0.
+
+Exit codes: 0 ok, 1 error, 2 partial (some deletions failed).
+
+Global guard. A checkout/worktree is ACTIVE when any process has its cwd or an open
+file inside it (`lsof -nP -d cwd -Fn` + `lsof -nP -Fn`, taken once and refreshed
+before applying). For `build`, a checkout is also ACTIVE when the newest mtime among its
+git admin files (index, HEAD, logs/HEAD) and its root dir is younger than --idle-days.
+For `worktrees`, only the process guard plus idleness (below) apply. ACTIVE roots are
+skipped, with the reason printed. lsof only sees this user's processes.
+
+Steps
+  build      rmtree ignored+untracked build-output dirs (bin, obj, node_modules, ...)
+             in non-ACTIVE checkouts/worktrees. A dir is skipped if git tracks anything
+             inside, it contains a known root or a .git entry, or a process holds a file
+             in it. Never deletes a root itself. Sizes are not measured (use df).
+  worktrees  remove linked worktrees that are idle >= max(--idle-days,
+             --worktree-min-idle-days); idle age is that of the newest of the worktree
+             git-dir's logs/HEAD and HEAD mtimes (commit/checkout/reset/rebase), so
+             index rewrites by `git status` and root-dir mtime are ignored. The process
+             guard stays mandatory. A worktree must also be
+             clean, hold no sensitive/unknown ignored files, and whose HEAD is on
+             origin/<default> after `git fetch --prune origin` of the parent (basis
+             "on-default"), or is covered by a merged PR seen via gh (basis
+             "merged-pr", listed separately). .ai-work is rsynced to
+             <parent>/.ai-work/keep/removed-worktrees/<name>/ first. Right before
+             removal: not ACTIVE, still clean, HEAD unchanged. `git worktree remove`
+             is never forced; a failure stops worktree processing (exit 2).
+             The fetch runs even in a dry run (it only updates refs/remotes).
+  docker     container prune (24h), image prune (dangling), builder prune (72h), and
+             rmi of images used by no container (matched by image ID) older than
+             --image-age-days. Never touches volumes or networks; never system prune.
+             Skipped gracefully if docker is not running.
+
+  caches     go build cache (`go clean -cache`, only if GOCACHE > 10 GiB and no
+             go/compile/golangci-lint/gopls process); NuGet http-cache and temp, and
+             ~/.nuget/packages versions whose .nupkg.metadata source is
+             https://api.nuget.org/ or https://pkgs.dev.azure.com/dnceng/ and that are
+             older than --nuget-age-days (never local/file feeds; skipped when a
+             dotnet/MSBuild/VBCSCompiler process runs); `yarn cache clean` and
+             `npm cache clean --force`; gzip in place of old, unopened pi session
+             .jsonl files (never deleted); `git worktree prune` in every discovered
+             repo (only drops admin entries whose directory is gone).
+
+Suggestions (never done): dangling docker volumes, ~/.nuget/packages size, total size
+of the worktrees that are kept.
+"""
+from __future__ import annotations
+
+import argparse
+import bisect
+import fcntl
+import gzip
+import json
+import math
+import os
+import re
+import hashlib
+import shutil
+import stat as statmod
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+# ----------------------------------------------------------------------------
+# constants
+# ----------------------------------------------------------------------------
+DEFAULT_ROOTS = ["/Volumes/sourcecode/repos"]
+STEPS_ALL = ["build", "worktrees", "docker", "caches"]
+LOG_DIR = os.path.expanduser("~/.pi/agent/logs")
+LOG_FILE = os.path.join(LOG_DIR, "pi-cleanup.log")
+LOCK_FILE = os.path.join(LOG_DIR, "pi-cleanup.lock")
+LOG_MAX = 900_000  # bytes; truncate oldest lines above this (limit is 1 MB)
+LOG_KEEP = 600_000
+POOL = 8
+SIZE_BUDGET_S = 30  # total wall-clock budget for worktree `du` measurements
+
+BUILD_DIRS = {
+    "bin", "obj", "node_modules", "dist", "TestResults", "coverage", "coverage-results",
+    ".vite", ".turbo", ".next", ".nuxt", ".parcel-cache", "playwright-report", "test-results",
+    "storybook-static", ".docusaurus", ".astro", ".angular", ".eslintcache", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".gradle", ".kotlin", "build", "out", "target",
+    "wwwroot", "Artifacts",
+}
+BUILD_SKIP_RE = re.compile(r"(^|/)(\.ai-work|\.worktrees|[^/]*-worktrees|\.git)(/|$)")
+
+# ignored paths that are safe to lose with a worktree (from audit_wt.py)
+BUILD_IGNORED_RE = re.compile(
+    r"(^|/)(bin|obj|node_modules|dist|build|out|target|TestResults|coverage|\.vite|\.turbo|\.next|\.nuxt|"
+    r"\.cache|\.parcel-cache|\.pytest_cache|__pycache__|\.gradle|\.kotlin|\.idea|\.vs|\.DS_Store|"
+    r"\.eslintcache|artifacts|\.yarn/cache|\.yarn/install-state\.gz|playwright-report|test-results|"
+    r"storybook-static|\.docusaurus|\.astro|_site|\.jekyll-cache|\.sass-cache|\.venv|venv|\.tox|"
+    r"\.mypy_cache|\.ruff_cache|\.angular)(/|$)|\.tsbuildinfo$|\.log$|\.pyc$|"
+    r"(^|/)\.ai-work/(cache|output)(/|$)"
+)
+# audit_wt.py's SENSITIVE minus its `.ai-work/keep/` alternative: .ai-work is archived
+# before removal, so keep/ content is preserved rather than a blocker. Anything else in
+# .ai-work that looks sensitive (.env, keys, ...) still blocks.
+SENSITIVE_RE = re.compile(
+    r"(^|/)\.env|appsettings\.[^/]*\.json$|\.(pem|key|pfx|p12|db|sqlite|sqlite3|mdf)$|"
+    r"(^|/)secrets?|credentials"
+)
+ARCHIVE_EXCLUDE = ["obj/", "bin/", "node_modules/", "cache/", "output/", ".store/",
+                   "TestResults/", "*.nupkg", ".lifecycle/"]
+ARCHIVE_EXCLUDE_DIRS = {"obj", "bin", "node_modules", "cache", "output", ".store", "TestResults", ".lifecycle"}
+
+ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GH_PROMPT_DISABLED="1",
+           GH_NO_UPDATE_NOTIFIER="1", LC_ALL="C")
+
+_progress_t0 = time.time()
+
+
+def progress(msg: str) -> None:
+    if sys.stderr.isatty():
+        print(f"[{time.time() - _progress_t0:6.1f}s] {msg}", file=sys.stderr, flush=True)
+
+
+def run(args, cwd=None, timeout=60, detach=False, env=None):
+    """Run a command; returns (rc, stdout, stderr). 124 timeout, 127 missing, 126 OS error."""
+    try:
+        r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, errors="replace",
+                           timeout=timeout, stdin=subprocess.DEVNULL, env=env or ENV, start_new_session=detach)
+        return r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+    except FileNotFoundError:
+        return 127, "", f"{args[0]}: not found"
+    except OSError as e:
+        return 126, "", str(e)
+
+
+def git(args, cwd, timeout=60, detach=False):
+    return run(["git", *args], cwd=cwd, timeout=timeout, detach=detach)
+
+
+def human(n) -> str:
+    if n is None:
+        return "?"
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(n) < 1024 or unit == "TiB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return str(n)
+
+
+def short(p: str, n: int = 80) -> str:
+    return p if len(p) <= n else "..." + p[-(n - 3):]
+
+
+def du_bytes(path: str, timeout: float):
+    rc, out, _ = run(["du", "-sk", path], timeout=max(1.0, timeout))
+    if rc != 0:
+        return None
+    try:
+        return int(out.split()[0]) * 1024
+    except (IndexError, ValueError):
+        return None
+
+
+# ----------------------------------------------------------------------------
+# path sets and the lsof snapshot
+# ----------------------------------------------------------------------------
+class PathSet:
+    """Case-insensitive (APFS-safe, errs toward 'match') set with descendant queries."""
+
+    def __init__(self, paths):
+        self._orig = {}
+        for p in paths:
+            if p:
+                self._orig.setdefault(p.lower().rstrip("/") or "/", p)
+        self._items = sorted(self._orig)
+        self._set = set(self._items)
+
+    def first_inside(self, path: str):
+        """A member (original case) equal to `path` or below it, else None."""
+        p = path.lower().rstrip("/")
+        if p in self._set:
+            return self._orig[p]
+        pre = p + "/"
+        i = bisect.bisect_left(self._items, pre)
+        if i < len(self._items) and self._items[i].startswith(pre):
+            return self._orig[self._items[i]]
+        return None
+
+    def overlaps(self, path: str) -> bool:
+        """Member below OR above `path` (a mount of an ancestor also holds it)."""
+        if self.first_inside(path):
+            return True
+        p = path.lower().rstrip("/")
+        while p and p != "/":
+            if p in self._set:
+                return True
+            p = os.path.dirname(p)
+        return False
+
+
+class SnapshotError(Exception):
+    pass
+
+
+def _parse_lsof(out: str, me: int, into: set) -> None:
+    skip = False
+    for line in out.splitlines():
+        c, v = line[:1], line[1:]
+        if c == "p":
+            skip = v == str(me)
+        elif c == "R":
+            if v == str(me):
+                skip = True
+        elif c == "n" and not skip and v.startswith("/"):
+            into.add(v)
+
+
+def take_snapshot() -> PathSet:
+    """All cwds and open files of visible processes, excluding this process and its children."""
+    me = os.getpid()
+    with ThreadPoolExecutor(2) as ex:
+        f_all = ex.submit(run, ["lsof", "-nP", "-FpRn"], None, 120)
+        f_cwd = ex.submit(run, ["lsof", "-nP", "-d", "cwd", "-FpRn"], None, 60)
+        results = [f_all.result(), f_cwd.result()]
+    paths: set = set()
+    for rc, out, err in results:
+        if rc in (124, 126, 127) or not out:
+            raise SnapshotError(f"lsof failed (rc={rc}): {err.strip()[:200]}")
+        _parse_lsof(out, me, paths)
+    return PathSet(paths)
+
+
+# ----------------------------------------------------------------------------
+# checkouts
+# ----------------------------------------------------------------------------
+class Checkout:
+    def __init__(self, path, kind, gitdir=None, parent=None, head=None, branch=None,
+                 locked=None, prunable=None):
+        self.path = path
+        self.kind = kind  # main | linked
+        self.gitdir = gitdir
+        self.parent = parent  # path of the main worktree
+        self.head = head
+        self.branch = branch
+        self.locked = locked
+        self.prunable = prunable
+        self.exists = os.path.isdir(path)
+
+
+def resolve_gitdir(d: str):
+    g = os.path.join(d, ".git")
+    try:
+        if os.path.isdir(g):
+            return os.path.realpath(g)
+        with open(g) as f:
+            line = f.read().strip()
+    except OSError:
+        return None
+    if line.startswith("gitdir:"):
+        t = line[7:].strip()
+        if not os.path.isabs(t):
+            t = os.path.join(d, t)
+        return os.path.realpath(t)
+    return None
+
+
+def common_dir(gitdir: str) -> str:
+    try:
+        with open(os.path.join(gitdir, "commondir")) as f:
+            rel = f.read().strip()
+        return os.path.realpath(os.path.join(gitdir, rel))
+    except OSError:
+        return gitdir
+
+
+def parse_worktree_list(out: str):
+    entries, cur = [], None
+    for line in out.splitlines() + [""]:
+        if not line:
+            if cur:
+                entries.append(cur)
+            cur = None
+            continue
+        key, _, val = line.partition(" ")
+        if key == "worktree":
+            cur = {"path": val}
+        elif cur is not None:
+            cur[key] = val if val else True
+    return entries
+
+
+def discover(roots, notes):
+    """Find git checkouts under roots (find -maxdepth 5, node_modules pruned) plus every
+    linked worktree of each discovered repo (which can live anywhere)."""
+    found = set()
+    for root in roots:
+        rc, out, err = run(["find", root, "-maxdepth", "5", "(", "-name", "node_modules", "-prune", ")",
+                            "-o", "(", "-name", ".git", "-print", "-prune", ")"], timeout=110)
+        if rc == 124:
+            notes.append(f"discovery timed out under {root}; results incomplete")
+        for line in out.splitlines():
+            found.add(os.path.realpath(os.path.dirname(line)))
+    repos: dict = {}
+    for d in sorted(found):
+        gd = resolve_gitdir(d)
+        if not gd:
+            continue
+        repos.setdefault(common_dir(gd), []).append((d, gd))
+
+    def list_repo(item):
+        common, dirs = item
+        dirs = sorted(dirs, key=lambda x: os.path.exists(os.path.join(x[1], "commondir")))
+        cwd = dirs[0][0]
+        rc, out, err = git(["worktree", "list", "--porcelain"], cwd, timeout=60)
+        return common, dirs, rc, out, err
+
+    checkouts = {}
+    with ThreadPoolExecutor(POOL) as ex:
+        for common, dirs, rc, out, err in ex.map(list_repo, list(repos.items())):
+            if rc != 0:
+                notes.append(f"git worktree list failed for {dirs[0][0]}: {err.strip()[:100]}")
+                for d, gd in dirs:
+                    linked = os.path.exists(os.path.join(gd, "commondir"))
+                    checkouts.setdefault(d, Checkout(d, "linked" if linked else "main", gd, None))
+                continue
+            entries = parse_worktree_list(out)
+            if not entries:
+                continue
+            main_path = os.path.realpath(entries[0]["path"])
+            for i, e in enumerate(entries):
+                if e.get("bare"):
+                    continue
+                p = os.path.realpath(e["path"])
+                gd = resolve_gitdir(p) if os.path.isdir(p) else None
+                checkouts.setdefault(p, Checkout(
+                    p, "main" if i == 0 else "linked", gd, main_path, e.get("HEAD"),
+                    e["branch"].replace("refs/heads/", "", 1) if isinstance(e.get("branch"), str) else None,
+                    e.get("locked"), e.get("prunable")))
+    return sorted(checkouts.values(), key=lambda c: c.path)
+
+
+def newest_mtime(c: Checkout):
+    best = None
+    cands = [c.path]
+    if c.gitdir:
+        cands += [os.path.join(c.gitdir, "index"), os.path.join(c.gitdir, "HEAD"),
+                  os.path.join(c.gitdir, "logs", "HEAD")]
+    for p in cands:
+        try:
+            m = os.stat(p).st_mtime
+        except OSError:
+            continue
+        if best is None or m > best:
+            best = m
+    return best
+
+
+def wt_newest_mtime(c: Checkout):
+    """Worktree idleness: newest of the git-dir's logs/HEAD and HEAD mtimes (commit/checkout/
+    reset/rebase activity). Index and root-dir mtimes are ignored (`git status` rewrites the index)."""
+    best = None
+    if c.gitdir:
+        for p in (os.path.join(c.gitdir, "logs", "HEAD"), os.path.join(c.gitdir, "HEAD")):
+            try:
+                m = os.stat(p).st_mtime
+            except OSError:
+                continue
+            if best is None or m > best:
+                best = m
+    return best
+
+
+def wt_idle_days(args):
+    return max(args.idle_days, args.worktree_min_idle_days)
+
+
+def age_str(seconds: float) -> str:
+    return f"{seconds / 3600:.0f}h" if seconds < 48 * 3600 else f"{seconds / 86400:.1f}d"
+
+
+class Ctx:
+    def __init__(self, args):
+        self.args = args
+        self.now = time.time()
+        self.snap: PathSet = PathSet([])
+        self.roots: PathSet = PathSet([])
+        self.mounts: PathSet = PathSet([])
+        self.docker_up = None
+
+    def active_reason(self, c: Checkout, idle=None, worktree=False):
+        """ACTIVE: a process holds something inside, or modified within `idle` days
+        (default --idle-days). worktree=True uses the worktree idleness mtime
+        (logs/HEAD, HEAD) and the effective worktree idle threshold."""
+        if worktree:
+            idle = wt_idle_days(self.args)
+        else:
+            idle = self.args.idle_days if idle is None else idle
+        hit = self.snap.first_inside(c.path)
+        if hit:
+            return f"ACTIVE: process cwd/open file {short(hit, 90)}"
+        newest = wt_newest_mtime(c) if worktree else newest_mtime(c)
+        if newest is None:
+            return "ACTIVE: cannot stat git admin files"
+        age = time.time() - newest
+        if age < idle * 86400:
+            return f"ACTIVE: modified {age_str(age)} ago"
+        return None
+
+
+# ----------------------------------------------------------------------------
+# docker helpers
+# ----------------------------------------------------------------------------
+def docker_running() -> bool:
+    rc, out, _ = run(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=20)
+    return rc == 0 and bool(out.strip())
+
+
+def docker_mounts_all():
+    """Bind-mount sources of ALL containers (running or stopped, stopped ones can restart)."""
+    rc, ids, _ = run(["docker", "ps", "-a", "-q"], timeout=30)
+    ids = ids.split()
+    if rc != 0 or not ids:
+        return []
+    rc, out, _ = run(["docker", "inspect", "-f", "{{range .Mounts}}{{.Source}}\n{{end}}", *ids], timeout=60)
+    return [x for x in out.splitlines() if x.startswith("/")] if rc == 0 else []
+
+
+# ----------------------------------------------------------------------------
+# step: build
+# ----------------------------------------------------------------------------
+def plan_root_build(ctx: Ctx, c: Checkout, queued: set):
+    row = {"path": c.path, "kind": c.kind, "skip": None, "dirs": []}
+    if not c.exists:
+        row["skip"] = "missing"
+        return row
+    reason = ctx.active_reason(c, ctx.args.build_idle_days)
+    if reason:
+        row["skip"] = reason
+        return row
+    if c.path in queued:
+        row["skip"] = "queued for worktree removal"
+        return row
+    rc, out, err = git(["ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"], c.path, timeout=90)
+    if rc != 0:
+        row["skip"] = f"git-error: {err.strip()[:80] or rc}"
+        return row
+    cands = []
+    for rel in out.split("\0"):
+        if not rel.endswith("/"):
+            continue
+        rel = rel.rstrip("/")
+        if os.path.basename(rel) in BUILD_DIRS and not BUILD_SKIP_RE.search(rel):
+            cands.append(rel)
+    if not cands:
+        return row
+    rc, tout, err = git(["ls-files", "-z"], c.path, timeout=90)
+    if rc != 0:
+        row["skip"] = f"git-error (ls-files): {err.strip()[:80] or rc}"
+        return row
+    tracked = sorted(x for x in tout.split("\0") if x)
+    for rel in cands:
+        p = os.path.join(c.path, rel)
+        d = {"path": p, "name": os.path.basename(rel), "action": "delete", "reason": None}
+        row["dirs"].append(d)
+        if os.path.islink(p) or not os.path.isdir(p):
+            d.update(action="skip", reason="not-a-directory")
+            continue
+        i = bisect.bisect_left(tracked, rel + "/")
+        if (i < len(tracked) and tracked[i].startswith(rel + "/")) or rel in tracked:
+            d.update(action="skip", reason="tracked-content")
+            continue
+        rp = os.path.realpath(p)
+        if ctx.roots.first_inside(rp) or os.path.exists(os.path.join(p, ".git")):
+            d.update(action="skip", reason="nested-git")
+            continue
+        if ctx.snap.first_inside(rp):
+            d.update(action="skip", reason="open-file")
+            continue
+        if ctx.mounts.overlaps(rp):
+            d.update(action="skip", reason="docker-mount")
+            continue
+    return row
+
+
+def plan_build(ctx: Ctx, checkouts, queued: set):
+    with ThreadPoolExecutor(POOL) as ex:
+        return list(ex.map(lambda c: plan_root_build(ctx, c, queued), checkouts))
+
+
+def apply_build(ctx: Ctx, rows, by_path):
+    """Delete planned dirs after a fresh snapshot and a per-root ACTIVE re-check."""
+    ctx.snap = take_snapshot()
+    jobs = []
+    for row in rows:
+        todo = [d for d in row["dirs"] if d["action"] == "delete"]
+        if not todo:
+            continue
+        reason = ctx.active_reason(by_path[row["path"]], ctx.args.build_idle_days)
+        if reason:
+            row["skip"] = f"{reason} (re-check before delete)"
+            for d in todo:
+                d.update(action="skip", reason="root-became-active")
+            continue
+        for d in todo:
+            if ctx.snap.first_inside(os.path.realpath(d["path"])):
+                d.update(action="skip", reason="open-file")
+            else:
+                jobs.append(d)
+
+    def rm(d):
+        try:
+            shutil.rmtree(d["path"])
+            d["result"] = "deleted"
+        except Exception as e:  # report and continue; counted as partial
+            d["result"] = "failed: " + str(e)[:150]
+
+    with ThreadPoolExecutor(4) as ex:
+        list(ex.map(rm, jobs))
+
+
+# ----------------------------------------------------------------------------
+# step: worktrees
+# ----------------------------------------------------------------------------
+def scan_ai_work(root: str):
+    """Sensitive-looking files in the part of .ai-work that will be archived."""
+    sens = []
+    for dp, dns, fns in os.walk(os.path.join(root, ".ai-work")):
+        dns[:] = [x for x in dns if x not in ARCHIVE_EXCLUDE_DIRS]
+        for f in fns:
+            if f.endswith(".nupkg"):
+                continue
+            rel = os.path.relpath(os.path.join(dp, f), root)
+            if SENSITIVE_RE.search(rel):
+                sens.append(rel)
+    return sens
+
+
+def audit_status(path: str):
+    """One `git status` call → dirty entries, sensitive ignored, unknown ignored."""
+    rc, out, err = git(["status", "--porcelain=v1", "-z", "--ignored"], path, timeout=180)
+    if rc != 0:
+        return {"error": f"git status failed: {err.strip()[:100] or rc}"}
+    dirty, sens, unknown = [], [], []
+    parts = out.split("\0")
+    i = 0
+    while i < len(parts):
+        e = parts[i]
+        i += 1
+        if not e:
+            continue
+        if e.startswith("!! "):
+            p = e[3:]
+            bare = p.rstrip("/")
+            if bare == ".ai-work" or bare.startswith(".ai-work/"):
+                sens += scan_ai_work(path)
+            elif SENSITIVE_RE.search(p):
+                sens.append(p)
+            elif not BUILD_IGNORED_RE.search(p):
+                unknown.append(p)
+        else:
+            dirty.append(e)
+            if e[0] in "RC":
+                i += 1  # rename/copy carries the origin path as a second field
+    return {"dirty": dirty, "sensitive": sorted(set(sens)), "unknown": unknown}
+
+
+def default_ref(parent: str):
+    rc, out, _ = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], parent)
+    cands = ([out.strip()] if rc == 0 and out.strip() else []) + ["origin/main", "origin/master"]
+    for ref in cands:
+        if git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], parent)[0] == 0:
+            return ref
+    return None
+
+
+def merged_pr(parent: str, branch: str, head: str, base: str):
+    """(url|None, note) for a merged PR into `base` whose head is HEAD or contains HEAD."""
+    rc, out, err = run(["gh", "pr", "list", "--state", "merged", "--head", branch, "--json",
+                        "number,headRefOid,baseRefName,url", "--limit", "10"], cwd=parent, timeout=60)
+    if rc != 0:
+        return None, f"gh failed: {err.strip()[:60] or rc}"
+    try:
+        prs = json.loads(out or "[]")
+    except ValueError:
+        return None, "gh returned bad JSON"
+    for pr in prs:
+        if pr.get("baseRefName") != base:
+            continue
+        oid = pr.get("headRefOid") or ""
+        if oid == head:
+            return pr["url"], ""
+        if oid and git(["cat-file", "-e", oid + "^{commit}"], parent)[0] == 0 and \
+                git(["merge-base", "--is-ancestor", head, oid], parent)[0] == 0:
+            return pr["url"], ""
+    return None, ""
+
+
+def plan_worktrees(ctx: Ctx, checkouts, notes):
+    idle_s = wt_idle_days(ctx.args) * 86400
+    rows = []
+    linked = [c for c in checkouts if c.kind == "linked"]
+
+    def pre(c: Checkout):
+        r = {"path": c.path, "name": os.path.basename(c.path), "parent": c.parent, "head": c.head,
+             "branch": c.branch, "blockers": [], "basis": None, "note": None, "size": None,
+             "planned_newest": None, "ai_work": False, "action": None}
+        if not c.exists:
+            r["blockers"].append("missing (prunable)" if c.prunable else "missing")
+            return r
+        if not c.gitdir or "/worktrees/" not in c.gitdir:
+            r["blockers"].append("not-a-linked-worktree")
+            return r
+        if not c.parent or not os.path.isdir(c.parent):
+            r["blockers"].append("parent-repo-missing")
+            return r
+        reason = ctx.active_reason(c, worktree=True)
+        if reason:
+            r["blockers"].append(reason)
+            return r
+        newest = wt_newest_mtime(c)
+        r["planned_newest"] = newest
+        if time.time() - newest < idle_s:
+            r["blockers"].append(f"idle<{age_str(idle_s)}")
+        if c.locked:
+            r["blockers"].append("locked")
+        if ctx.mounts.overlaps(c.path):
+            r["blockers"].append("docker-mount")
+        if not c.head:
+            r["blockers"].append("no-HEAD")
+        st = audit_status(c.path)
+        if "error" in st:
+            r["blockers"].append(st["error"])
+            return r
+        if st["dirty"]:
+            r["blockers"].append(f"dirty({len(st['dirty'])})")
+        if st["sensitive"]:
+            r["blockers"].append("sensitive-ignored: " + ", ".join(st["sensitive"][:3]))
+        if st["unknown"]:
+            r["blockers"].append("unknown-ignored: " + ", ".join(st["unknown"][:3]))
+        ai = os.path.join(c.path, ".ai-work")
+        if os.path.islink(ai):
+            r["blockers"].append("ai-work-is-symlink")
+        r["ai_work"] = os.path.isdir(ai) and not os.path.islink(ai)
+        return r
+
+    progress(f"worktrees: auditing {len(linked)} linked worktrees")
+    with ThreadPoolExecutor(POOL) as ex:
+        rows = list(ex.map(pre, linked))
+    by = {c.path: c for c in linked}
+
+    # fetch each parent that still has a candidate, once
+    parents = sorted({r["parent"] for r in rows if not r["blockers"]})
+    progress(f"worktrees: fetching {len(parents)} parent repos")
+
+    def fetch(parent):
+        rc, out, err = git(["fetch", "--prune", "origin"], parent, timeout=120, detach=True)
+        return parent, rc, err.strip()[:100]
+
+    fetched = {}
+    with ThreadPoolExecutor(POOL) as ex:
+        for parent, rc, err in ex.map(fetch, parents):
+            fetched[parent] = (rc, err)
+            if rc != 0:
+                notes.append(f"fetch failed for {parent}: {err}")
+    refs = {p: default_ref(p) for p in parents if fetched[p][0] == 0}
+
+    def merge(r):
+        if r["blockers"]:
+            return
+        parent = r["parent"]
+        if fetched[parent][0] != 0:
+            r["blockers"].append("fetch-failed")
+            return
+        ref = refs.get(parent)
+        if not ref:
+            r["blockers"].append("no-origin-default-branch")
+            return
+        rc, out, err = git(["rev-list", "--count", f"{ref}..{r['head']}"], parent)
+        if rc != 0:
+            r["blockers"].append("merge-check-failed")
+            return
+        ahead = int(out.strip() or -1)
+        if ahead == 0:
+            r["basis"] = f"on-default ({ref})"
+            return
+        if r["branch"]:
+            url, note = merged_pr(parent, r["branch"], r["head"], ref.split("/", 1)[1])
+            if url:
+                r["basis"] = "merged-pr"
+                r["note"] = url
+                return
+            if note:
+                r["note"] = note
+        r["blockers"].append(f"unmerged({ahead} ahead of {ref})")
+
+    with ThreadPoolExecutor(POOL) as ex:
+        list(ex.map(merge, rows))
+    for r in rows:
+        r["action"] = "keep" if r["blockers"] else "remove"
+    return rows
+
+
+def measure_sizes(rows):
+    """du -sk with a global wall-clock budget; removable worktrees first."""
+    deadline = time.time() + SIZE_BUDGET_S
+    todo = sorted((r for r in rows if os.path.isdir(r["path"])), key=lambda r: r["action"] != "remove")
+
+    def one(r):
+        left = deadline - time.time()
+        if left <= 1:
+            return
+        r["size"] = du_bytes(r["path"], min(20, left))
+
+    with ThreadPoolExecutor(POOL) as ex:
+        list(ex.map(one, todo))
+
+
+def fresh_recheck(ctx: Ctx, c: Checkout, r):
+    """Blocker string or None: not ACTIVE, unchanged mtime, still clean, HEAD unchanged."""
+    ctx.snap = take_snapshot()
+    reason = ctx.active_reason(c, worktree=True)
+    if reason:
+        return reason
+    if wt_newest_mtime(c) != r["planned_newest"]:
+        return "changed since planning (HEAD/logs/HEAD mtime)"
+    st = audit_status(c.path)
+    if "error" in st:
+        return st["error"]
+    if st["dirty"]:
+        return f"dirty({len(st['dirty'])}) on re-check"
+    if st["sensitive"] or st["unknown"]:
+        return "new sensitive/unknown ignored files on re-check"
+    rc, head, _ = git(["rev-parse", "HEAD"], c.path)
+    if rc != 0 or head.strip() != r["head"]:
+        return "HEAD changed since planning"
+    return None
+
+
+def archive_ai_work(r):
+    """rsync .ai-work → <parent>/.ai-work/keep/removed-worktrees/<name>/. Returns error or None."""
+    parent, name = r["parent"], r["name"]
+    ok = git(["check-ignore", "-q", f".ai-work/keep/removed-worktrees/{name}/x"], parent)[0]
+    if ok != 0:
+        return "parent's .ai-work is not git-ignored (or git failed); refusing to archive into it"
+    base = os.path.join(parent, ".ai-work", "keep", "removed-worktrees")
+    dest = os.path.join(base, name)
+    if os.path.exists(dest):
+        dest = f"{dest}-{datetime.now():%Y%m%d%H%M%S}"
+    try:
+        os.makedirs(dest)
+    except OSError as e:
+        return f"cannot create {dest}: {e}"
+    cmd = ["rsync", "-a"] + [x for e in ARCHIVE_EXCLUDE for x in ("--exclude", e)] + \
+          [os.path.join(r["path"], ".ai-work") + "/", dest + "/"]
+    rc, out, err = run(cmd, timeout=300)
+    if rc != 0:
+        return f"rsync failed (rc={rc}): {err.strip()[:120]}"
+    r["archive"] = dest
+    if not any(files for _, _, files in os.walk(dest)):  # nothing worth keeping: drop our empty dir tree
+        shutil.rmtree(dest, ignore_errors=True)
+        r["archive"] = None
+    return None
+
+
+def apply_worktrees(ctx: Ctx, rows, by_path):
+    """Sequential archive → re-check → `git worktree remove` (never --force) → prune.
+    A removal failure stops all worktree processing."""
+    for r in rows:
+        if r["action"] != "remove":
+            continue
+        c = by_path[r["path"]]
+        if r["ai_work"]:
+            err = archive_ai_work(r)
+            if err:
+                r.update(action="failed", result="archive aborted: " + err)
+                continue
+        blocker = fresh_recheck(ctx, c, r)
+        if blocker:
+            r.update(action="keep", result=None)
+            r["blockers"].append(blocker)
+            continue
+        rc, out, err = git(["worktree", "remove", r["path"]], r["parent"], timeout=300)
+        if rc != 0:
+            r.update(action="failed", result="git worktree remove FAILED: " + (err.strip() or out.strip())[:300])
+            for rest in rows:
+                if rest["action"] == "remove":
+                    rest.update(action="keep")
+                    rest["blockers"].append("not processed: stopped after an earlier removal failure")
+            return r  # stop processing
+        git(["worktree", "prune"], r["parent"])
+        r.update(action="removed", result="removed")
+    return None
+
+
+# ----------------------------------------------------------------------------
+# step: docker
+# ----------------------------------------------------------------------------
+DOCKER_PRUNES = [
+    ("containers (until=24h)", ["docker", "container", "prune", "-f", "--filter", "until=24h"]),
+    ("dangling images", ["docker", "image", "prune", "-f"]),
+    ("build cache (until=72h)", ["docker", "builder", "prune", "-f", "--filter", "until=72h"]),
+]
+
+
+def parse_ts(s: str):
+    m = re.match(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)?", s or "")
+    if not m:
+        return None
+    import calendar
+    y, mo, d, h, mi, se = (int(x) for x in m.groups()[:6])
+    try:
+        t = calendar.timegm((y, mo, d, h, mi, se))
+    except (ValueError, OverflowError):
+        return None
+    tz = m.group(7)
+    if tz and tz != "Z":
+        off = (int(tz[1:3]) * 3600 + int(tz[4:6]) * 60) * (1 if tz[0] == "+" else -1)
+        t -= off
+    return t
+
+
+def plan_rmi(age_days: float):
+    """(candidates, kept-notes, error). Images used by no container (by image ID and by name)."""
+    rc, out, err = run(["docker", "image", "ls", "-a", "--no-trunc", "-q"], timeout=60)
+    if rc != 0:
+        return [], [], "docker image ls failed"
+    img_ids = sorted(set(out.split()))
+    rc, out, err = run(["docker", "ps", "-a", "-q", "--no-trunc"], timeout=60)
+    if rc != 0:
+        return [], [], "docker ps failed"
+    cids = out.split()
+    used_ids, used_names = set(), set()
+    for i in range(0, len(cids), 100):
+        rc, out, err = run(["docker", "inspect", "-f", "{{.Image}}|{{.Config.Image}}", *cids[i:i + 100]], timeout=60)
+        if rc != 0:
+            return [], [], "docker inspect (containers) failed: cannot tell which images are used"
+        for line in out.splitlines():
+            iid, _, name = line.partition("|")
+            used_ids.add(iid)
+            used_names.add(name)
+    cands, kept = [], []
+    cutoff = time.time() - age_days * 86400
+    for i in range(0, len(img_ids), 100):
+        chunk = img_ids[i:i + 100]
+        rc, out, err = run(["docker", "image", "inspect", "-f",
+                            "{{.Id}}|{{.Created}}|{{json .RepoTags}}|{{.Size}}", *chunk], timeout=120)
+        if rc != 0 and not out:
+            return [], [], "docker image inspect failed"
+        for line in out.splitlines():
+            iid, created, tags, size = (line.split("|", 3) + ["", "", ""])[:4]
+            try:
+                tags = json.loads(tags) or []
+            except ValueError:
+                tags = []
+            ts = parse_ts(created)
+            item = {"id": iid, "tags": tags, "size": int(size) if size.isdigit() else None,
+                    "age_days": None if ts is None else round((time.time() - ts) / 86400, 1)}
+            if iid in used_ids or any(t in used_names for t in tags):
+                continue  # in use: not a candidate, not worth listing
+            if ts is None or ts > cutoff:
+                continue
+            if len(tags) > 1:
+                item["reason"] = f"{len(tags)} tags; `docker rmi <id>` needs -f, left alone"
+                kept.append(item)
+            else:
+                cands.append(item)
+    return cands, kept, None
+
+
+def plan_docker(ctx: Ctx):
+    d = {"up": ctx.docker_up, "prunes": [], "rmi": [], "rmi_kept": [], "info": [], "error": None}
+    if not ctx.docker_up:
+        d["skip"] = "docker not running (or not installed)"
+        return d
+    for label, cmd in DOCKER_PRUNES:
+        d["prunes"].append({"label": label, "cmd": " ".join(cmd), "action": "prune"})
+    rc, out, _ = run(["docker", "system", "df", "--format", "{{.Type}}: {{.Size}} (reclaimable {{.Reclaimable}})"], timeout=60)
+    if rc == 0:
+        d["info"] = out.strip().splitlines()
+    cands, kept, err = plan_rmi(ctx.args.image_age_days)
+    d["rmi"], d["rmi_kept"], d["error"] = cands, kept, err
+    return d
+
+
+def apply_docker(ctx: Ctx, d):
+    if d.get("skip"):
+        return
+    for p in d["prunes"]:
+        cmd = p["cmd"].split()
+        rc, out, err = run(cmd, timeout=300)
+        m = re.search(r"Total reclaimed space:\s*(.+)", out)
+        p["result"] = ("ok, reclaimed " + m.group(1).strip()) if rc == 0 and m else ("ok" if rc == 0 else
+                       f"failed (rc={rc}): {err.strip()[:150]}")
+        p["failed"] = rc != 0
+    cands, kept, err = plan_rmi(ctx.args.image_age_days)  # recompute: prunes may free images
+    d["rmi"], d["rmi_kept"], d["error"] = cands, kept, err
+    for it in cands:
+        rc, out, e = run(["docker", "rmi", it["id"]], timeout=120)
+        if rc == 0:
+            it["result"] = "removed"
+        elif re.search(r"dependent child|must be forced|in use|conflict|being used", e):
+            it["result"] = "skipped: " + e.strip().splitlines()[-1][:120]
+        else:
+            it["result"] = "failed: " + e.strip()[:150]
+            it["failed"] = True
+
+
+# ----------------------------------------------------------------------------
+# step: caches
+# ----------------------------------------------------------------------------
+EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/share/dotnet", "/usr/local/go/bin"]
+NUGET_REMOTE_PREFIXES = ("https://api.nuget.org/", "https://pkgs.dev.azure.com/dnceng/")
+GO_CACHE_MIN = 10 * 1024 ** 3
+SESSIONS_DIR = os.path.expanduser("~/.pi/agent/sessions")
+NUGET_PACKAGES = os.path.expanduser("~/.nuget/packages")
+
+
+def extend_path() -> None:
+    """launchd gives a minimal PATH; add the usual tool dirs (incl. nvm node bins)."""
+    import glob
+    extra = EXTRA_PATH + sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin")), reverse=True)
+    cur = ENV.get("PATH", "").split(":")
+    ENV["PATH"] = ":".join(cur + [p for p in extra if p not in cur and os.path.isdir(p)])
+
+
+def which(tool: str):
+    return shutil.which(tool, path=ENV.get("PATH"))
+
+
+def procs_running(names):
+    """Names of running processes (exact match) among `names`. Fails closed: any pgrep
+    outcome other than exit 1 (no match) counts as running."""
+    found = []
+    for n in names:
+        rc, out, _ = run(["pgrep", "-x", n], timeout=10)
+        if rc == 1:
+            continue  # no match
+        found.append(n if rc == 0 else f"{n}(pgrep rc={rc}, assumed running)")
+    return found
+
+
+def nuget_eligible(vd: str, cutoff: float, root_real: str):
+    """True if version dir `vd` is a remote-sourced, old, symlink-free package version.
+    Returns (eligible, is_local_source)."""
+    try:
+        idp = os.path.dirname(vd)
+        if os.path.dirname(idp) != NUGET_PACKAGES:
+            return False, False
+        for q in (idp, vd):
+            if not statmod.S_ISDIR(os.lstat(q).st_mode):  # lstat: symlinks are not dirs
+                return False, False
+        rp = os.path.realpath(vd)
+        if not rp.startswith(root_real + os.sep):
+            return False, False
+        meta = os.path.join(vd, ".nupkg.metadata")
+        if not statmod.S_ISREG(os.lstat(meta).st_mode):
+            return False, False
+        with open(meta) as f:
+            src = json.load(f).get("source") or ""
+        if not isinstance(src, str) or not src.startswith(NUGET_REMOTE_PREFIXES):
+            return False, True
+        if os.lstat(vd).st_mtime >= cutoff or os.lstat(meta).st_mtime >= cutoff:
+            return False, False
+        return True, False
+    except (OSError, ValueError, AttributeError):
+        return False, False
+
+
+def plan_nuget_trim(ctx: Ctx):
+    cutoff = ctx.now - ctx.args.nuget_age_days * 86400
+    cands, kept_local = [], 0
+    try:
+        root_real = os.path.realpath(NUGET_PACKAGES)
+        ids = sorted(os.listdir(NUGET_PACKAGES))
+    except OSError:
+        return cands, kept_local
+    for pid in ids:
+        idp = os.path.join(NUGET_PACKAGES, pid)
+        try:
+            if not statmod.S_ISDIR(os.lstat(idp).st_mode):
+                continue
+            vers = os.listdir(idp)
+        except OSError:
+            continue
+        for v in vers:
+            vd = os.path.join(idp, v)
+            ok, local = nuget_eligible(vd, cutoff, root_real)
+            if local:
+                kept_local += 1
+            elif ok:
+                cands.append(vd)
+    return cands, kept_local
+
+
+def plan_session_gzip(ctx: Ctx):
+    cutoff = ctx.now - ctx.args.session_age_days * 86400
+    cands, open_skipped = [], 0
+    for dp, dns, fns in os.walk(SESSIONS_DIR):
+        for fn in fns:
+            if not fn.endswith(".jsonl"):
+                continue
+            p = os.path.join(dp, fn)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if not os.path.isfile(p) or os.path.islink(p) or st.st_mtime >= cutoff or os.path.exists(p + ".gz"):
+                continue
+            if ctx.snap.first_inside(p):
+                open_skipped += 1
+                continue
+            cands.append({"path": p, "size": st.st_size, "mtime": st.st_mtime})
+    return cands, open_skipped
+
+
+def plan_caches(ctx: Ctx, checkouts):
+    """Plan items: {name, action: run|skip, reason, ...}."""
+    items = []
+
+    def item(name, action, reason=None, **kw):
+        d = {"name": name, "action": action, "reason": reason, **kw}
+        items.append(d)
+        return d
+
+    # a. go (GOCACHE from env or the macOS default; `go env` is not run)
+    if not which("go"):
+        item("go build cache", "skip", "go not on PATH")
+    else:
+        busy = procs_running(["go", "compile", "golangci-lint", "gopls"])
+        gc = os.environ.get("GOCACHE") or os.path.expanduser("~/Library/Caches/go-build")
+        if busy:
+            item("go build cache", "skip", "running: " + ",".join(busy))
+        elif not os.path.isdir(gc):
+            item("go build cache", "skip", f"{gc} not found")
+        else:
+            size = du_bytes(gc, 120)
+            if size is None:
+                item("go build cache", "skip", "size could not be measured (du failed/timed out)")
+            elif size <= GO_CACHE_MIN:
+                item("go build cache", "skip", f"only {human(size)} (<= {human(GO_CACHE_MIN)})", size=size)
+            else:
+                item("go build cache", "run", cmd=["go", "clean", "-cache"], size=size, gocache=gc)
+    # b. nuget
+    if not which("dotnet"):
+        item("nuget", "skip", "dotnet not on PATH")
+    else:
+        busy = procs_running(["dotnet", "MSBuild", "VBCSCompiler"])
+        if busy:
+            item("nuget", "skip", "running: " + ",".join(busy))
+        else:
+            item("nuget http-cache", "run", cmd=["dotnet", "nuget", "locals", "http-cache", "--clear"])
+            item("nuget temp", "run", cmd=["dotnet", "nuget", "locals", "temp", "--clear"])
+            cands, kept_local = plan_nuget_trim(ctx)
+            item("nuget packages trim", "run" if cands else "skip", None if cands else "nothing old enough",
+                 paths=cands, note=f"{kept_local} local/other-source versions never touched")
+    # c. yarn / npm
+    for tool, cmd in (("yarn", ["yarn", "cache", "clean"]), ("npm", ["npm", "cache", "clean", "--force"])):
+        if which(tool):
+            item(f"{tool} cache", "run", cmd=cmd)
+        else:
+            item(f"{tool} cache", "skip", f"{tool} not on PATH")
+    # d. sessions
+    cands, open_skipped = plan_session_gzip(ctx)
+    item("pi session gzip", "run" if cands else "skip", None if cands else "nothing old enough",
+         files=cands, note=f"{open_skipped} open files skipped" if open_skipped else None)
+    # e. worktree prune
+    parents = sorted({c.parent or c.path for c in checkouts if c.exists and (c.parent or c.kind == "main")
+                      and os.path.isdir(c.parent or c.path)})
+    stale = []
+    for pth in parents:
+        rc, out, err = git(["worktree", "prune", "--dry-run", "-v"], pth, timeout=60)
+        if rc == 0 and out.strip():
+            stale.append({"repo": pth, "lines": out.strip().splitlines()})
+    item("git worktree prune", "run" if stale else "skip", None if stale else f"nothing stale in {len(parents)} repos",
+         repos=stale)
+    return {"items": items}
+
+
+def file_open_state(path: str):
+    """True if some process has `path` open, False if none; None if unknown (fail closed)."""
+    rc, out, err = run(["lsof", "-nP", "-Fn", "--", path], timeout=30)
+    if rc == 1 and not out.strip() and not err.strip():
+        return False  # clean "nothing open"; any stderr diagnostics mean unknown
+    if rc == 0 and out.strip():
+        return True
+    return None
+
+
+def _sig(st):
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def gzip_session(ctx: Ctx, f: dict):
+    """Gzip `f` in place. The original is removed only after verification and a final
+    inode/mtime_ns/size + lsof re-check; the residual stat->unlink window is accepted
+    because the files are at least --session-age-days old."""
+    p = f["path"]
+    dest = p + ".gz"
+    tmp = None
+    linked = False
+    try:
+        st = os.lstat(p)
+        if not statmod.S_ISREG(st.st_mode):
+            return "skipped: not a regular file (symlink?)"
+        if st.st_mtime != f["mtime"] or st.st_size != f["size"]:
+            return "skipped: changed since planning"
+        if os.path.lexists(dest):
+            return "skipped: .gz already exists"
+        if ctx.snap.first_inside(p):
+            return "skipped: open (snapshot)"
+        o = file_open_state(p)
+        if o is None:
+            return "skipped: lsof failed (fail closed)"
+        if o:
+            return "skipped: open"
+        sig = _sig(st)
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as src:
+            if _sig(os.fstat(src.fileno())) != sig:
+                return "skipped: changed before read"
+            tfd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix="." + os.path.basename(p) + ".", suffix=".gz.tmp")
+            h1 = hashlib.sha256()
+            with os.fdopen(tfd, "wb") as raw:
+                os.fchmod(raw.fileno(), statmod.S_IMODE(st.st_mode))
+                with gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=6) as gz:
+                    while True:
+                        b = src.read(1 << 20)
+                        if not b:
+                            break
+                        h1.update(b)
+                        gz.write(b)
+                raw.flush()
+                os.fsync(raw.fileno())
+            if _sig(os.fstat(src.fileno())) != sig:
+                os.remove(tmp)
+                return "skipped: changed while compressing"
+        h2, n = hashlib.sha256(), 0
+        with gzip.open(tmp, "rb") as chk:
+            while True:
+                b = chk.read(1 << 20)
+                if not b:
+                    break
+                n += len(b)
+                h2.update(b)
+        if n != st.st_size or h1.digest() != h2.digest():
+            os.remove(tmp)
+            return "failed: verification mismatch"
+        if _sig(os.lstat(p)) != sig:
+            os.remove(tmp)
+            return "skipped: changed after compressing"
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+        try:
+            os.link(tmp, dest)  # never overwrites
+            linked = True
+        except FileExistsError:
+            os.remove(tmp)
+            return "skipped: .gz already exists"
+        os.remove(tmp)
+        tmp = None
+        # Remaining stat->unlink window is accepted: sources are >= --session-age-days old.
+        if _sig(os.lstat(p)) != sig or file_open_state(p) is not False:
+            os.remove(dest)
+            return "skipped: changed or open before removal"
+        os.remove(p)
+        return "gzipped"
+    except Exception as e:
+        if linked:
+            try:
+                if os.path.exists(p):
+                    os.remove(dest)
+            except OSError:
+                pass
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return "failed: " + str(e)[:150]
+
+
+NUGET_PROCS = ["dotnet", "MSBuild", "VBCSCompiler"]
+
+
+def apply_caches(ctx: Ctx, plan):
+    ctx.snap = take_snapshot()  # refreshed open-file view, used below
+    for it in plan["items"]:
+        if it["action"] != "run":
+            continue
+        n = it["name"]
+        if n.startswith("nuget"):
+            busy = procs_running(NUGET_PROCS)
+            if busy:
+                it.update(action="skip", reason="running: " + ",".join(busy))
+                continue
+        if "cmd" in it:
+            if n == "go build cache":
+                busy = procs_running(["go", "compile", "golangci-lint", "gopls"])
+                if busy:
+                    it.update(action="skip", reason="running: " + ",".join(busy))
+                    continue
+            env = dict(ENV, GOCACHE=it["gocache"]) if it.get("gocache") else None
+            rc, out, err = run(it["cmd"], timeout=300, env=env)
+            it["result"] = "ok" if rc == 0 else f"failed: rc={rc} {(err.strip() or out.strip())[:120]}"
+        elif n == "nuget packages trim":
+            res = {"deleted": 0, "failed": 0, "skipped": 0}
+            cutoff = ctx.now - ctx.args.nuget_age_days * 86400
+            root_real = os.path.realpath(NUGET_PACKAGES)
+            ids = set()
+            for i, vd in enumerate(it["paths"]):
+                if i and i % 100 == 0 and procs_running(NUGET_PROCS):
+                    res["skipped"] += len(it["paths"]) - i
+                    res["first_error"] = "dotnet started during trim; stopped"
+                    break
+                ok, _ = nuget_eligible(vd, cutoff, root_real)
+                if not ok:
+                    res["skipped"] += 1
+                    continue
+                try:
+                    shutil.rmtree(vd)
+                    res["deleted"] += 1
+                except Exception as e:
+                    res["failed"] += 1
+                    res["first_error"] = res.get("first_error") or f"{vd}: {str(e)[:100]}"
+                ids.add(os.path.dirname(vd))
+            for idp in ids:
+                try:
+                    if statmod.S_ISDIR(os.lstat(idp).st_mode):
+                        os.rmdir(idp)  # only succeeds when empty
+                except OSError:
+                    pass
+            it["result"] = res
+        elif n == "pi session gzip":
+            res = {"gzipped": 0, "skipped": 0, "failed": 0, "saved": 0}
+            for f in it["files"]:
+                r = gzip_session(ctx, f)
+                if r == "gzipped":
+                    res["gzipped"] += 1
+                    try:
+                        res["saved"] += f["size"] - os.path.getsize(f["path"] + ".gz")
+                    except OSError:
+                        pass
+                elif r.startswith("skipped"):
+                    res["skipped"] += 1
+                else:
+                    res["failed"] += 1
+                    res["first_error"] = res.get("first_error") or f"{f['path']}: {r}"
+            it["result"] = res
+        elif n == "git worktree prune":
+            res = {"pruned": 0, "failed": 0}
+            for r in it["repos"]:
+                rc, out, err = git(["worktree", "prune"], r["repo"], timeout=60)
+                if rc == 0:
+                    res["pruned"] += len(r["lines"])
+                else:
+                    res["failed"] += 1
+                    res["first_error"] = res.get("first_error") or f"{r['repo']}: {err.strip()[:100]}"
+            it["result"] = res
+
+
+def caches_failures(plan) -> int:
+    n = 0
+    for it in plan["items"]:
+        r = it.get("result")
+        if isinstance(r, str) and r.startswith("failed"):
+            n += 1
+        elif isinstance(r, dict):
+            n += r.get("failed", 0)
+    return n
+
+
+def render_caches(plan, apply, out):
+    rows = []
+    for it in plan["items"]:
+        if it["action"] == "skip":
+            rows.append([it["name"], "skip", it["reason"] or ""])
+            continue
+        r = it.get("result")
+        if "cmd" in it:
+            act = (r or "ok") if apply else "would run"
+            rows.append([it["name"], act, " ".join(it["cmd"]) + (f"  [{it['note']}]" if it.get("note") else "")
+                         + (f"  (cache {human(it['size'])})" if it.get("size") else "")])
+        elif it["name"] == "nuget packages trim":
+            det = f"{len(it['paths'])} versions" + (f"; {it['note']}" if it.get("note") else "")
+            rows.append([it["name"], (f"deleted {r['deleted']}, failed {r['failed']}" if r else "would delete") if apply else "would delete", det])
+        elif it["name"] == "pi session gzip":
+            tot = sum(f["size"] for f in it["files"])
+            det = f"{len(it['files'])} files, {human(tot)} raw" + (f"; {it['note']}" if it.get("note") else "")
+            rows.append([it["name"], (f"gzipped {r['gzipped']}, skipped {r['skipped']}, failed {r['failed']}, saved {human(r['saved'])}" if r else "gzip") if apply else "would gzip", det])
+        elif it["name"] == "git worktree prune":
+            det = f"{sum(len(x['lines']) for x in it['repos'])} stale entries in {len(it['repos'])} repos"
+            rows.append([it["name"], (f"pruned {r['pruned']}, failed {r['failed']}" if r else "prune") if apply else "would prune", det])
+    table(["what", "action", "detail"], rows, out)
+    for it in plan["items"]:
+        r = it.get("result")
+        if isinstance(r, dict) and r.get("first_error"):
+            out.append(f"  {it['name']} first error: {r['first_error']}")
+
+
+def caches_summary_lines(plan, apply):
+    L = []
+    for it in plan["items"]:
+        r = it.get("result")
+        if it["action"] == "skip":
+            L.append(f"caches/{it['name']}: skipped ({it['reason']})")
+        elif isinstance(r, dict):
+            L.append(f"caches/{it['name']}: " + ", ".join(f"{k}={v}" for k, v in r.items() if k != "first_error"))
+        else:
+            L.append(f"caches/{it['name']}: {r if apply else 'planned'}")
+    return L
+
+
+# ----------------------------------------------------------------------------
+# df
+# ----------------------------------------------------------------------------
+def df_free(path: str):
+    rc, out, _ = run(["df", "-k", path], timeout=20)
+    lines = out.strip().splitlines()
+    if rc != 0 or len(lines) < 2:
+        return None
+    parts = lines[-1].split(None, 8)
+    try:
+        return {"mount": parts[8] if len(parts) > 8 else parts[0], "free": int(parts[3]) * 1024}
+    except (IndexError, ValueError):
+        return None
+
+
+def fs_key(path: str):
+    while path and not os.path.exists(path):
+        path = os.path.dirname(path)
+    try:
+        return os.stat(path or "/").st_dev, path or "/"
+    except OSError:
+        return None, path
+
+
+# ----------------------------------------------------------------------------
+# reporting
+# ----------------------------------------------------------------------------
+def table(headers, rows, out):
+    rows = [[str(x) for x in r] for r in rows]
+    widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
+    out.append("  " + "  ".join(h.ljust(w) for h, w in zip(headers, widths)).rstrip())
+    for r in rows:
+        out.append("  " + "  ".join(x.ljust(w) for x, w in zip(r, widths)).rstrip())
+
+
+def summarize_build(rows, apply):
+    s = {"roots": len(rows), "roots_skipped": 0, "skip_reasons": {}, "dirs_planned": 0,
+         "dirs_deleted": 0, "dirs_failed": 0, "dirs_skipped": 0}
+    for r in rows:
+        if r["skip"]:
+            s["roots_skipped"] += 1
+            key = re.sub(r"[:(].*", "", r["skip"]).strip() or r["skip"]
+            key = "ACTIVE(process)" if r["skip"].startswith("ACTIVE: process") else \
+                "ACTIVE(recent)" if r["skip"].startswith("ACTIVE: modified") else key
+            s["skip_reasons"][key] = s["skip_reasons"].get(key, 0) + 1
+        for d in r["dirs"]:
+            if d["action"] == "skip":
+                s["dirs_skipped"] += 1
+                k = "dir:" + d["reason"]
+                s["skip_reasons"][k] = s["skip_reasons"].get(k, 0) + 1
+            elif d.get("result") == "deleted":
+                s["dirs_deleted"] += 1
+            elif d.get("result", "").startswith("failed"):
+                s["dirs_failed"] += 1
+            else:
+                s["dirs_planned"] += 1
+    return s
+
+
+def render_build(rows, apply, out):
+    show = []
+    for r in rows:
+        dirs = r["dirs"]
+        dele = [d for d in dirs if d["action"] == "delete"]
+        skipd = [d for d in dirs if d["action"] == "skip"]
+        if not (r["skip"] or dirs):
+            continue
+        names: dict = {}
+        for d in dele:
+            names[d["name"]] = names.get(d["name"], 0) + 1
+        det = " ".join(f"{k}x{v}" if v > 1 else k for k, v in sorted(names.items())) or "-"
+        if r["skip"]:
+            action, note = "skip", r["skip"]
+        else:
+            failed = [d for d in dele if d.get("result", "").startswith("failed")]
+            done = [d for d in dele if d.get("result") == "deleted"]
+            if apply:
+                action = f"deleted {len(done)}" + (f", FAILED {len(failed)}" if failed else "") if dele else "-"
+            else:
+                action = f"delete {len(dele)}" if dele else "-"
+            reasons: dict = {}
+            for d in skipd:
+                reasons[d["reason"]] = reasons.get(d["reason"], 0) + 1
+            note = "; ".join(f"{k}x{v}" for k, v in sorted(reasons.items()))
+            if failed:
+                note = (note + "; " if note else "") + failed[0]["result"]
+        show.append([r["path"], det, action, note])
+    if show:
+        table(["path", "dirs", "action", "skip reason / note"], show, out)
+    quiet = len(rows) - len(show)
+    if quiet:
+        out.append(f"  ({quiet} roots with nothing to purge omitted)")
+
+
+def render_worktrees(rows, apply, out):
+    if not rows:
+        out.append("  (no linked worktrees found)")
+        return
+    order = {"removed": 0, "remove": 0, "failed": 1, "keep": 2}
+    trs = []
+    for r in sorted(rows, key=lambda r: (order.get(r["action"], 3), r["path"])):
+        size = human(r["size"]) if r["size"] is not None else "-"
+        if r["action"] in ("remove", "removed"):
+            basis = r["basis"] + (f" {r['note']}" if r["basis"] == "merged-pr" and r["note"] else "")
+            extra = "; archive .ai-work" if r["ai_work"] else ""
+            act = "REMOVED" if r["action"] == "removed" else "remove"
+            trs.append([r["path"], size, act, f"basis: {basis}{extra}"])
+        elif r["action"] == "failed":
+            trs.append([r["path"], size, "FAILED", r["result"]])
+        else:
+            trs.append([r["path"], size, "keep", "; ".join(r["blockers"]) + (f" [{r['note']}]" if r["note"] else "")])
+    table(["path", "size", "action", "basis / blockers"], trs, out)
+
+
+def render_docker(d, apply, out):
+    if d.get("skip"):
+        out.append(f"  skipped: {d['skip']}")
+        return
+    rows = []
+    for p in d["prunes"]:
+        rows.append([p["label"], p.get("result", "prune") if apply else "would run", p["cmd"]])
+    for it in d["rmi"]:
+        rows.append([f"rmi {it['id'][7:19]} {','.join(it['tags']) or '<none>'}",
+                     it.get("result", "remove") if apply else "would remove",
+                     f"created {it['age_days']}d ago, {human(it['size'])}"])
+    for it in d["rmi_kept"]:
+        rows.append([f"rmi {it['id'][7:19]} {','.join(it['tags'])}", "keep", it["reason"]])
+    table(["what", "action", "detail"], rows, out)
+    if d["error"]:
+        out.append(f"  rmi planning error: {d['error']}")
+    if d["info"] and not apply:
+        out.append("  docker system df (upper bound of reclaimable; prune filters are narrower):")
+        out += [f"    {x}" for x in d["info"]]
+
+
+def build_summary_lines(rep):
+    L = []
+    b, w, dk = rep["steps"].get("build"), rep["steps"].get("worktrees"), rep["steps"].get("docker")
+    if b:
+        s = b["summary"]
+        L.append(f"build: {s['roots']} roots ({s['roots_skipped']} skipped), dirs "
+                 f"{'deleted ' + str(s['dirs_deleted']) if rep['apply'] else 'to delete ' + str(s['dirs_planned'])}"
+                 f", failed {s['dirs_failed']}, skipped {s['dirs_skipped']}")
+        if s["skip_reasons"]:
+            L.append("  skip reasons: " + ", ".join(f"{k}={v}" for k, v in sorted(s["skip_reasons"].items())))
+    if w:
+        s = w["summary"]
+        L.append(f"worktrees: {s['total']} linked; {'removed ' + str(s['removed']) if rep['apply'] else 'removable ' + str(s['removable'])}"
+                 f" (on-default {s['on_default']}, merged-pr {s['merged_pr']}), kept {s['kept']}, failed {s['failed']}")
+        if s["blockers"]:
+            L.append("  keep reasons: " + ", ".join(f"{k}={v}" for k, v in sorted(s["blockers"].items())))
+    if dk:
+        if dk.get("skip"):
+            L.append(f"docker: skipped ({dk['skip']})")
+        else:
+            L.append(f"docker: {len(dk['prunes'])} prunes{'' if rep['apply'] else ' (planned)'}, rmi "
+                     f"{'removed ' + str(sum(1 for i in dk['rmi'] if i.get('result') == 'removed')) if rep['apply'] else 'candidates ' + str(len(dk['rmi']))}"
+                     f", kept-multitag {len(dk['rmi_kept'])}")
+            if rep["apply"]:
+                for p in dk["prunes"]:
+                    L.append(f"  {p['label']}: {p.get('result')}")
+    if "caches" in rep["steps"]:
+        L += caches_summary_lines(rep["steps"]["caches"], rep["apply"])
+    for f in rep["df"]:
+        line = f"df {f['mount']}: free {human(f['before'])}"
+        if rep["apply"] and f.get("after") is not None:
+            line += f" -> {human(f['after'])} ({'+' if f['after'] >= f['before'] else '-'}{human(abs(f['after'] - f['before']))})"
+        L.append(line)
+    for n in rep["notes"]:
+        L.append(f"note: {n}")
+    for e in rep["errors"]:
+        L.append(f"ERROR: {e}")
+    return L
+
+
+def render_text(rep):
+    out = [f"pi-cleanup {'APPLY' if rep['apply'] else 'DRY RUN (no changes made)'}  steps={','.join(rep['steps_selected'])}  "
+           f"idle-days: build={rep['build_idle_days']:g} worktrees={rep['idle_days']:g}  roots={', '.join(rep['roots']) or '-'}"]
+    if rep.get("discovered") is not None:
+        out.append(f"checkouts discovered: {rep['discovered']['total']} "
+                   f"({rep['discovered']['main']} main, {rep['discovered']['linked']} linked)")
+    if "build" in rep["steps"]:
+        out += ["", "== build =="]
+        render_build(rep["steps"]["build"]["rows"], rep["apply"], out)
+    if "worktrees" in rep["steps"]:
+        out += ["", "== worktrees =="]
+        render_worktrees(rep["steps"]["worktrees"]["rows"], rep["apply"], out)
+    if "docker" in rep["steps"]:
+        out += ["", "== docker =="]
+        render_docker(rep["steps"]["docker"], rep["apply"], out)
+    if "caches" in rep["steps"]:
+        out += ["", "== caches =="]
+        render_caches(rep["steps"]["caches"], rep["apply"], out)
+    sg = rep["suggestions"]
+    out += ["", "== suggestions (not done) =="]
+    if sg.get("dangling_volumes") is not None:
+        v = sg["dangling_volumes"]
+        names = [x[:16] + "..." if len(x) > 40 else x for x in v[:10]]
+        out.append(f"  dangling docker volumes: {len(v)}" + (f" ({', '.join(names)}{' ...' if len(v) > 10 else ''})" if v else "")
+                   + ("  -> review, then `docker volume rm NAME`" if v else ""))
+    if sg.get("nuget_bytes") is not None:
+        out.append(f"  ~/.nuget/packages: {human(sg['nuget_bytes'])}  -> `dotnet nuget locals all --clear` if you need it")
+    if sg.get("kept_worktrees") is not None:
+        k = sg["kept_worktrees"]
+        out.append(f"  remaining kept worktrees: {k['count']} totalling {human(k['bytes'])}"
+                   + (f" (+{k['unmeasured']} not measured within {SIZE_BUDGET_S}s)" if k["unmeasured"] else ""))
+    out += ["", "== summary =="] + [f"  {x}" for x in build_summary_lines(rep)]
+    out.append(f"  runtime: {rep['runtime_s']:.1f}s   exit: {rep['exit']}")
+    return "\n".join(out)
+
+
+def write_log(rep):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    head = f"=== {datetime.now():%Y-%m-%d %H:%M:%S} pi-cleanup --scheduled exit={rep['exit']} runtime={rep['runtime_s']:.0f}s"
+    body = "\n".join([head] + [f"  {x}" for x in build_summary_lines(rep)] + [""])
+    with open(LOG_FILE, "a") as f:
+        f.write(body + "\n")
+    trim_log()
+
+
+def _log_line(msg: str) -> None:
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(f"=== {datetime.now():%Y-%m-%d %H:%M:%S} pi-cleanup --scheduled {msg}\n")
+        trim_log()
+    except OSError:
+        pass
+
+
+def trim_log():
+    try:
+        if os.path.getsize(LOG_FILE) <= LOG_MAX:
+            return
+        with open(LOG_FILE, "rb") as f:
+            f.seek(-LOG_KEEP, os.SEEK_END)
+            data = f.read()
+        data = data[data.find(b"\n") + 1:]  # drop the partial first line
+        tmp = LOG_FILE + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, LOG_FILE)
+    except OSError:
+        pass
+
+
+# ----------------------------------------------------------------------------
+# main
+# ----------------------------------------------------------------------------
+def nonneg_float(v):
+    x = float(v)  # ValueError -> argparse "invalid value"
+    if not math.isfinite(x) or x < 0:
+        raise argparse.ArgumentTypeError(f"must be a finite number >= 0, got {v!r}")
+    return x
+
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(prog="pi-cleanup", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog="See the header of this file for the safety rules.")
+    ap.error = lambda msg: (ap.print_usage(sys.stderr), print(f"pi-cleanup: error: {msg}", file=sys.stderr),
+                            sys.exit(1))  # exit 2 is reserved for "partial"
+    ap.add_argument("--apply", action="store_true", help="execute (default is a dry run)")
+    ap.add_argument("--only", default=",".join(STEPS_ALL), help="comma list of " + ",".join(STEPS_ALL))
+    ap.add_argument("--idle-days", type=nonneg_float, default=None)
+    ap.add_argument("--worktree-min-idle-days", type=nonneg_float, default=1)
+    ap.add_argument("--nuget-age-days", type=nonneg_float, default=14)
+    ap.add_argument("--session-age-days", type=nonneg_float, default=30)
+    ap.add_argument("--if-free-below", type=nonneg_float, default=None, metavar="GIB")
+    ap.add_argument("--image-age-days", type=nonneg_float, default=7)
+    ap.add_argument("--roots", nargs="+", default=None, metavar="PATH")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--scheduled", action="store_true")
+    a = ap.parse_args(argv)
+    steps = [s.strip() for s in a.only.split(",") if s.strip()]
+    bad = [s for s in steps if s not in STEPS_ALL]
+    if bad or not steps:
+        ap.error(f"--only: unknown step(s) {bad or a.only!r}; choose from {','.join(STEPS_ALL)}")
+    if a.idle_days is None:
+        a.idle_days = 3
+        a.build_idle_days = 0.25 if a.scheduled else 3
+    else:
+        a.build_idle_days = a.idle_days
+    if a.scheduled:
+        steps, a.apply = ["build", "docker", "caches", "worktrees"], True
+    a.steps = [s for s in STEPS_ALL if s in steps]
+    return a
+
+
+def main(argv=None):
+    t0 = time.time()
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    notes, errors = [], []
+    rep = {"apply": args.apply, "steps_selected": args.steps, "idle_days": args.idle_days,
+           "build_idle_days": args.build_idle_days, "roots": [],
+           "steps": {}, "suggestions": {}, "df": [], "notes": notes, "errors": errors,
+           "discovered": None, "runtime_s": 0, "exit": 0}
+    if args.scheduled:
+        notes.append("--scheduled: forced --only build,docker,caches,worktrees and --apply")
+
+    if args.if_free_below is not None:
+        need = args.if_free_below * 1024 ** 3
+        probes, low, failed = [], [], []
+        paths = [os.path.expanduser("~")] + list(args.roots or DEFAULT_ROOTS)
+        for pth in paths:
+            pth = os.path.realpath(os.path.expanduser(pth))
+            if pth != os.path.realpath(os.path.expanduser("~")) and not os.path.isdir(pth):
+                probes.append({"path": pth, "skipped": "not available"})
+                continue
+            try:
+                free = shutil.disk_usage(pth).free
+            except OSError as e:
+                probes.append({"path": pth, "error": str(e)})
+                failed.append(f"{pth}: {e}")
+                continue
+            probes.append({"path": pth, "free": free})
+            if free < need:
+                low.append(f"{pth}: {human(free)}")
+        if not low and not failed:
+            if args.json:
+                print(json.dumps({"free_space_ok": True, "threshold_gib": args.if_free_below, "probes": probes}, indent=1))
+            else:
+                print("free space OK")
+            if args.scheduled:
+                _log_line(f"free space OK (>= {args.if_free_below:g} GiB on {', '.join(p['path'] for p in probes if 'free' in p)}); nothing to do")
+            return 0
+        if low:
+            notes.append("low free space: " + "; ".join(low))
+        if failed:
+            notes.append("free-space probe failed, proceeding with cleanup: " + "; ".join(failed))
+
+    lock_fh = None
+    if args.apply:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        lock_fh = open(LOCK_FILE, "w")
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("pi-cleanup: another --apply run is in progress (lock held); exiting", file=sys.stderr)
+            if args.scheduled:
+                _log_line("another run holds the lock; exiting")
+                return 0
+            return 1
+
+    ctx = Ctx(args)
+    failures = 0
+    checkouts = []
+    by_path = {}
+    nuget_f = None
+    pool = ThreadPoolExecutor(4)
+    try:
+        # roots
+        roots = []
+        for r in (args.roots or DEFAULT_ROOTS):
+            r = os.path.realpath(os.path.expanduser(r))
+            if os.path.isdir(r):
+                roots.append(r)
+            else:
+                notes.append(f"root not available, skipped: {r}")
+        rep["roots"] = roots
+        if args.roots and not roots and ("build" in args.steps or "worktrees" in args.steps):
+            errors.append("none of the given --roots exist")
+            raise RuntimeError("no roots")
+
+        need_fs = any(s in args.steps for s in ("build", "worktrees", "caches"))
+        if "caches" in args.steps:
+            extend_path()
+        if "docker" in args.steps or need_fs:
+            ctx.docker_up = docker_running()
+        if not ctx.docker_up:
+            notes.append("docker is not running: docker step skipped, container mounts not checked")
+
+        if need_fs:
+            progress("lsof snapshot")
+            ctx.snap = take_snapshot()
+            progress("discovering checkouts")
+            checkouts = discover(roots, notes)
+            by_path = {c.path: c for c in checkouts}
+            ctx.roots = PathSet([c.path for c in checkouts])
+            rep["discovered"] = {"total": len(checkouts), "main": sum(c.kind == "main" for c in checkouts),
+                                 "linked": sum(c.kind == "linked" for c in checkouts)}
+            progress(f"{len(checkouts)} checkouts")
+            if ctx.docker_up:
+                ctx.mounts = PathSet(docker_mounts_all())
+
+        # suggestion gathering that can overlap with planning
+        nuget = os.path.expanduser("~/.nuget/packages")
+        if os.path.isdir(nuget):
+            nuget_f = pool.submit(du_bytes, nuget, 30)
+
+        wt_rows = []
+        queued = set()
+        if "worktrees" in args.steps:
+            wt_rows = plan_worktrees(ctx, checkouts, notes)
+            queued = {r["path"] for r in wt_rows if r["action"] == "remove"}
+            progress(f"worktrees planned: {len(queued)} removable of {len(wt_rows)}")
+        build_rows = []
+        if "build" in args.steps:
+            build_rows = plan_build(ctx, checkouts, queued)
+            progress("build planned")
+        docker_plan = plan_docker(ctx) if "docker" in args.steps else None
+        if docker_plan is not None:
+            progress("docker planned")
+        caches_plan = None
+        if "caches" in args.steps:
+            caches_plan = plan_caches(ctx, checkouts)
+            progress("caches planned")
+        if wt_rows:
+            measure_sizes(wt_rows)
+
+        # df before, for every filesystem that any planned action touches
+        touched = {os.path.expanduser("~")} if docker_plan and not docker_plan.get("skip") else set()
+        if caches_plan is not None:
+            touched.add(os.path.expanduser("~"))
+        touched |= {r["path"] for r in build_rows if any(d["action"] == "delete" for d in r["dirs"])}
+        touched |= {r["path"] for r in wt_rows if r["action"] == "remove"}
+        fs = {}
+        for p in sorted(touched):
+            dev, real = fs_key(p)
+            if dev not in fs:
+                info = df_free(real)
+                if info:
+                    fs[dev] = {"mount": info["mount"], "before": info["free"], "probe": real}
+        rep["df"] = list(fs.values())
+
+        if args.apply:
+            if "build" in args.steps:
+                progress("applying build purge")
+                apply_build(ctx, build_rows, by_path)
+            if "worktrees" in args.steps:
+                progress("applying worktree removal")
+                failed = apply_worktrees(ctx, wt_rows, by_path)
+                if failed:
+                    errors.append(f"worktree removal failed, worktree processing stopped: {failed['path']}: {failed['result']}")
+            if docker_plan is not None:
+                progress("applying docker cleanup")
+                apply_docker(ctx, docker_plan)
+            if caches_plan is not None:
+                progress("applying caches cleanup")
+                apply_caches(ctx, caches_plan)
+            for f in fs.values():
+                info = df_free(f["probe"])
+                f["after"] = info["free"] if info else None
+
+        # step reports
+        if "build" in args.steps:
+            rep["steps"]["build"] = {"rows": build_rows, "summary": summarize_build(build_rows, args.apply)}
+        if "worktrees" in args.steps:
+            blockers: dict = {}
+            for r in wt_rows:
+                if r["action"] == "keep":
+                    for b in r["blockers"]:
+                        k = re.sub(r"[:(].*", "", b).strip()
+                        k = "ACTIVE" if b.startswith("ACTIVE") else k
+                        blockers[k] = blockers.get(k, 0) + 1
+            cnt = lambda a: sum(1 for r in wt_rows if r["action"] == a)
+            basis = lambda p: sum(1 for r in wt_rows if r["action"] in ("remove", "removed") and (r["basis"] or "").startswith(p))
+            rep["steps"]["worktrees"] = {"rows": wt_rows, "summary": {
+                "total": len(wt_rows), "removable": cnt("remove"), "removed": cnt("removed"), "kept": cnt("keep"),
+                "failed": cnt("failed"), "on_default": basis("on-default"), "merged_pr": basis("merged-pr"),
+                "blockers": blockers}}
+        if docker_plan is not None:
+            rep["steps"]["docker"] = docker_plan
+        if caches_plan is not None:
+            rep["steps"]["caches"] = caches_plan
+
+        # suggestions
+        sg = rep["suggestions"]
+        if ctx.docker_up:
+            rc, out, _ = run(["docker", "volume", "ls", "-q", "-f", "dangling=true"], timeout=30)
+            sg["dangling_volumes"] = out.split() if rc == 0 else None
+        if nuget_f is not None:
+            sg["nuget_bytes"] = nuget_f.result()
+        if wt_rows:
+            left = [r for r in wt_rows if r["action"] in ("keep", "failed") and os.path.isdir(r["path"])]
+            sg["kept_worktrees"] = {"count": len(left), "bytes": sum(r["size"] or 0 for r in left),
+                                    "unmeasured": sum(1 for r in left if r["size"] is None)}
+
+        # failures → exit code
+        failures += sum(1 for r in build_rows for d in r["dirs"] if d.get("result", "").startswith("failed"))
+        failures += sum(1 for r in wt_rows if r["action"] == "failed")
+        if docker_plan is not None:
+            failures += sum(1 for p in docker_plan["prunes"] if p.get("failed"))
+            failures += sum(1 for i in docker_plan["rmi"] if i.get("failed"))
+        if caches_plan is not None:
+            failures += caches_failures(caches_plan)
+        rep["exit"] = 2 if failures else 0
+    except SnapshotError as e:
+        errors.append(f"cannot determine which repos are in use, refusing to continue: {e}")
+        rep["exit"] = 1
+    except Exception as e:
+        errors.append(f"{type(e).__name__}: {e}")
+        if not isinstance(e, RuntimeError):
+            errors.append(traceback.format_exc(limit=6))
+        rep["exit"] = 1
+    finally:
+        pool.shutdown(wait=False)
+    if errors and rep["exit"] == 0:
+        rep["exit"] = 1
+    rep["runtime_s"] = time.time() - t0
+
+    if args.json:
+        print(json.dumps(rep, indent=1, default=str))
+    else:
+        print(render_text(rep))
+    if args.scheduled:
+        try:
+            write_log(rep)
+        except OSError as e:
+            print(f"pi-cleanup: cannot write log: {e}", file=sys.stderr)
+    return rep["exit"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())
