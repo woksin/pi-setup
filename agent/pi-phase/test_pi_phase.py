@@ -8,9 +8,13 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pi_phase
 
 HERE = Path(__file__).resolve().parent
-AI_WORK = HERE.parent / ".ai-work"
+AI_WORK = HERE.parent.parent / ".ai-work"
 ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from pi_phase import main; sys.exit(main(sys.argv[4:], state=sys.argv[2], configuration=sys.argv[3]))"
 
 
@@ -96,6 +100,272 @@ class PhaseTests(unittest.TestCase):
 
     def intervals(self, *names):
         return [json.loads((self.root / f"{name}.json").read_text()) for name in names]
+
+    def waiter(self, label, priority="normal", kind="build"):
+        self.state.mkdir(exist_ok=True)
+        args = SimpleNamespace(priority=priority, kind=kind, label=label)
+        ready, fd = pi_phase.register_waiter(self.state, args, label)
+        self.assertTrue(ready)
+        self.addCleanup(os.close, fd)
+        return label
+
+    def admit(self, token, kind="build", heavy=1, integration=1):
+        held = pi_phase.claim(self.state, pi_phase.slot_paths(self.state, kind, heavy, integration, ()),
+                              time.monotonic() + 1, lambda: False, token, (heavy, integration))
+        if held:
+            self.addCleanup(lambda: [os.close(fd) for _, fd in held])
+        return held
+
+    def test_fifo_including_equal_timestamps_and_sequence(self):
+        with patch.object(pi_phase.time, "time", return_value=100):
+            first = self.waiter("first")
+            second = self.waiter("second")
+        self.assertIsNone(self.admit(second))
+        held = self.admit(first)
+        self.assertTrue(held)
+        self.assertFalse((self.state / "waiters" / "first.json").exists())
+
+    def test_high_before_earlier_normal_and_normal_before_low(self):
+        normal = self.waiter("normal")
+        self.assertEqual(self.done(self.start("grant-priority"))[0], 0)
+        high = self.waiter("high", "high")
+        low = self.waiter("low", "low")
+        self.assertIsNone(self.admit(normal))
+        self.assertIsNone(self.admit(low))
+        self.assertTrue(self.admit(high))
+
+    def test_later_normal_before_earlier_low(self):
+        low = self.waiter("low", "low")
+        normal = self.waiter("normal")
+        self.assertIsNone(self.admit(low))
+        self.assertTrue(self.admit(normal))
+
+    def test_unsatisfiable_integration_waiter_does_not_block_build(self):
+        integration = self.waiter("integration", kind="integration")
+        build = self.waiter("build")
+        fd = pi_phase.lock_file(self.state / "integration-0.lock")
+        self.addCleanup(os.close, fd)
+        self.assertIsNone(self.admit(integration, kind="integration"))
+        self.assertTrue(self.admit(build))
+
+    def test_satisfiable_integration_reserves_both_permits(self):
+        self.waiter("integration", kind="integration")
+        build = self.waiter("build")
+        self.assertIsNone(self.admit(build))
+        self.assertTrue(self.admit(build, heavy=2))
+
+    def test_stale_unlocked_waiter_is_removed_regardless_of_pid(self):
+        mine = self.waiter("mine")
+        path = self.state / "waiters" / "stale.json"
+        path.write_text(json.dumps(dict(token="stale", pid=os.getpid(), priority="high",
+                                       kind="build", enqueued=0, seq=0)))
+        self.assertTrue(self.admit(mine))
+        self.assertFalse(path.exists())
+
+    def test_locked_waiter_is_live_regardless_of_pid(self):
+        first = self.waiter("first")
+        path = self.state / "waiters" / f"{first}.json"
+        data = json.loads(path.read_text())
+        data["pid"] = 2147483647
+        path.write_text(json.dumps(data))
+        second = self.waiter("second")
+        self.assertIsNone(self.admit(second))
+        self.assertTrue(self.admit(first))
+
+    def test_waiter_scan_survives_unlink_during_open_or_trylock(self):
+        for when in ("before_open", "after_trylock"):
+            with self.subTest(when=when):
+                token = self.waiter(when)
+                path = self.state / "waiters" / f"{token}.json"
+                raced = self.root / f"race-{when}"
+                setup = ("import pathlib,os\n"
+                         f"victim = pathlib.Path({str(path)!r})\n"
+                         f"raced = pathlib.Path({str(raced)!r})\n")
+                if when == "before_open":
+                    interleave = ("original = pi_phase.os.open\n"
+                                  "def racing_open(path, *args, **kwargs):\n"
+                                  "    if pathlib.Path(path) == victim and victim.exists():\n"
+                                  "        victim.unlink()\n"
+                                  "        raced.touch()\n"
+                                  "    return original(path, *args, **kwargs)\n"
+                                  "pi_phase.os.open = racing_open")
+                else:
+                    interleave = (f"inode = {path.stat().st_ino}\n"
+                                  "original = pi_phase.fcntl.flock\n"
+                                  "def racing_flock(fd, operation):\n"
+                                  "    try:\n"
+                                  "        return original(fd, operation)\n"
+                                  "    except BlockingIOError:\n"
+                                  "        if os.fstat(fd).st_ino == inode:\n"
+                                  "            victim.unlink(missing_ok=True)\n"
+                                  "            raced.touch()\n"
+                                  "        raise\n"
+                                  "pi_phase.fcntl.flock = racing_flock")
+                job, marker = self.patched_phase(setup + interleave)
+                code, out = self.done(job)
+                self.assertEqual(code, 0, out)
+                self.assertTrue(raced.exists())
+                self.assertTrue(marker.exists())
+                self.assertNotIn("unreadable live waiter", out)
+
+    def test_deregister_unlinks_and_releases_waiter_under_coordinator(self):
+        self.state.mkdir()
+        args = SimpleNamespace(priority="normal", kind="build", label="deregister")
+        ready, fd = pi_phase.register_waiter(self.state, args, "deregister")
+        self.assertTrue(ready)
+        path = self.state / "waiters" / "deregister.json"
+        original_unlink = Path.unlink
+        original_unlock = pi_phase.unlock
+        events = []
+
+        def assert_coordinator_held(event):
+            probe = pi_phase.lock_file(self.state / "coordinator.lock")
+            if probe is not None:
+                original_unlock(probe)
+            self.assertIsNone(probe, event)
+            events.append(event)
+
+        def unlink_waiter(target, *args, **kwargs):
+            if target == path:
+                assert_coordinator_held("unlink")
+            return original_unlink(target, *args, **kwargs)
+
+        def unlock_waiter(target):
+            if target == fd:
+                assert_coordinator_held("unlock")
+            return original_unlock(target)
+
+        try:
+            with patch.object(Path, "unlink", unlink_waiter), patch.object(pi_phase, "unlock", unlock_waiter):
+                pi_phase.deregister_waiter(self.state, "deregister", fd)
+            self.assertEqual(events, ["unlink", "unlock"])
+            self.assertFalse(path.exists())
+        finally:
+            try:
+                os.fstat(fd)
+            except OSError:
+                pass
+            else:
+                os.close(fd)
+
+    def test_high_missing_grant_fails_before_queueing(self):
+        code, out = self.done(self.run_phase(extra=("--priority", "high")))
+        self.assertEqual(code, 125, out)
+        self.assertIn("pi-phase: " + pi_phase.APPROVAL_REQUIRED, out)
+        self.assertFalse((self.state / "waiters").exists())
+
+    def test_single_use_grant_is_consumed_atomically(self):
+        code, out = self.done(self.start("grant-priority"))
+        self.assertEqual(code, 0, out)
+        jobs = [self.run_phase(extra=("--priority", "high")) for _ in range(2)]
+        self.assertEqual(sorted(self.done(job)[0] for job in jobs), [0, 125])
+        self.assertFalse((self.state / "priority-grant.json").exists())
+
+    def test_unlimited_grant_remains_until_expiry(self):
+        self.assertEqual(self.done(self.start("grant-priority", "--minutes", "30"))[0], 0)
+        path = self.state / "priority-grant.json"
+        data = json.loads(path.read_text())
+        self.assertIsNone(data["uses"])
+        for _ in range(2):
+            code, out = self.done(self.run_phase(extra=("--priority=high",)))
+            self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(path.read_text()), data)
+        data["expires"] = time.time() - 1
+        path.write_text(json.dumps(data))
+        code, out = self.done(self.run_phase(extra=("--priority", "high")))
+        self.assertEqual(code, 125, out)
+        self.assertFalse(path.exists())
+
+    def test_invalid_and_exhausted_grants_are_removed(self):
+        self.state.mkdir()
+        path = self.state / "priority-grant.json"
+        for uses in (0, -1, True, "1", 21):
+            path.write_text(json.dumps(dict(expires=time.time() + 60, created=time.time(),
+                                           granted_by="user", uses=uses)))
+            code, out = self.done(self.run_phase(extra=("--priority", "high")))
+            self.assertEqual(code, 125, out)
+            self.assertFalse(path.exists())
+
+    def test_grant_bounds_revoke_and_status(self):
+        for option, invalid in (("--uses", "0"), ("--uses", "21"), ("--minutes", "0"), ("--minutes", "481")):
+            self.assertEqual(self.done(self.start("grant-priority", option, invalid))[0], 125)
+        self.assertEqual(self.done(self.start("grant-priority", "--uses", "20"))[0], 0)
+        data = json.loads((self.state / "priority-grant.json").read_text())
+        self.assertEqual(data["uses"], 20)
+        self.assertAlmostEqual(data["expires"] - data["created"], 3600)
+        self.waiter("normal")
+        self.waiter("high", "high")
+        code, out = self.done(self.start("status"))
+        self.assertEqual(code, 0, out)
+        self.assertRegex(out, r"priority=high kind=build label=high waited=\d+s rank=1")
+        self.assertRegex(out, r"priority=normal kind=build label=normal waited=\d+s rank=2")
+        self.assertIn("19 use(s) remaining", out)
+        self.assertRegex(out, r"expires in \d+s at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+        self.assertIn(time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(data["expires"])), out)
+        self.assertNotIn("e+", out)
+        self.assertEqual(self.done(self.start("revoke-priority"))[0], 0)
+        self.assertFalse((self.state / "priority-grant.json").exists())
+
+    def test_waiter_removed_on_queue_timeout_cancel_and_exception(self):
+        self.state.mkdir()
+        fd = pi_phase.lock_file(self.state / "heavy-0.lock")
+        self.addCleanup(os.close, fd)
+        self.config.write_text('{"heavy_slots": 1, "integration_slots": 1}')
+        job = self.run_phase(queue=".3")
+        self.wait_for(lambda: bool(list((self.state / "waiters").glob("*.json"))))
+        self.assertEqual(self.done(job)[0], 75)
+        self.assertEqual(list((self.state / "waiters").glob("*.json")), [])
+        job = self.run_phase(queue="4")
+        self.wait_for(lambda: bool(list((self.state / "waiters").glob("*.json"))))
+        job.send_signal(signal.SIGTERM)
+        self.assertEqual(self.done(job)[0], 143)
+        self.assertEqual(list((self.state / "waiters").glob("*.json")), [])
+        job, marker = self.patched_phase("pi_phase.config = lambda path: (_ for _ in ()).throw(ValueError('broken config'))")
+        code, out = self.done(job)
+        self.assertEqual(code, 125, out)
+        self.assertFalse(marker.exists())
+        self.assertEqual(list((self.state / "waiters").glob("*.json")), [])
+
+    def test_queue_order_across_processes(self):
+        self.config.write_text('{"heavy_slots": 1, "integration_slots": 1}')
+        self.state.mkdir()
+        blocker = pi_phase.lock_file(self.state / "heavy-0.lock")
+        try:
+            jobs = []
+            for label in ("first", "second", "third"):
+                jobs.append(self.run_phase(label=label, queue="8", command=self.marker_job(label, .1)))
+                self.wait_for(lambda: len(list((self.state / "waiters").glob("*.json"))) == len(jobs))
+        finally:
+            os.close(blocker)
+        for job in jobs:
+            code, out = self.done(job)
+            self.assertEqual(code, 0, out)
+        first, second, third = self.intervals("first", "second", "third")
+        self.assertLess(first[0], second[0])
+        self.assertLess(second[0], third[0])
+        self.assertEqual(list((self.state / "waiters").glob("*.json")), [])
+
+    def test_crashed_waiter_is_reaped_by_status(self):
+        self.config.write_text('{"heavy_slots": 1, "integration_slots": 1}')
+        self.state.mkdir()
+        blocker = pi_phase.lock_file(self.state / "heavy-0.lock")
+        self.addCleanup(os.close, blocker)
+        job = self.run_phase(queue="5")
+        self.wait_for(lambda: bool(list((self.state / "waiters").glob("*.json"))))
+        job.kill()
+        job.communicate(timeout=3)
+        code, out = self.done(self.start("status"))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("queued priority=", out)
+        self.assertEqual(list((self.state / "waiters").glob("*.json")), [])
+
+    def test_old_caller_without_registry_still_claims(self):
+        self.waiter("queued")
+        held = pi_phase.claim(self.state, pi_phase.slot_paths(self.state, "build", 1, 1, ()),
+                              time.monotonic() + 1, lambda: False)
+        self.assertTrue(held)
+        for _, fd in held:
+            os.close(fd)
 
     def test_exact_exit_and_no_secret_in_status(self):
         secret = "TOP_SECRET_COMMAND_ARGUMENT"
@@ -211,10 +481,10 @@ class PhaseTests(unittest.TestCase):
             code, out = self.done(job)
             self.assertEqual(code, 0, out)
         intervals = self.intervals("a", "b", "c")
-        self.assertTrue(any(sum(start <= instant < end for start, end in intervals) == 2
-                            for instant in (start + .3 for start, _ in intervals)), intervals)
-        self.assertLess(max(sum(start <= instant < end for start, end in intervals)
-                            for instant in (start + .3 for start, _ in intervals)), 3)
+        concurrency = [sum(start <= instant < end for start, end in intervals)
+                       for instant, _ in intervals]
+        self.assertIn(2, concurrency, intervals)
+        self.assertLess(max(concurrency), 3, intervals)
 
     def test_integration_exclusivity_and_no_deadlock(self):
         jobs = [self.run_phase(kind=kind, label=name, command=self.marker_job(name, .45))
@@ -395,6 +665,21 @@ class PhaseTests(unittest.TestCase):
         self.assertFalse((self.root / "blocked.json").exists())
         self.wait_for(lambda: self.done(self.start("status"))[1].strip() == "pi-phase: no active phases", seconds=4)
         self.assertEqual(self.done(self.run_phase())[0], 0)
+
+    def test_ci_rejects_non_normal_priority_without_touching_grant(self):
+        self.assertEqual(self.done(self.start("grant-priority"))[0], 0)
+        grant = self.state / "priority-grant.json"
+        before = grant.read_bytes()
+        options = ("--repo", "org/repo", "--pr", "42", "--commit", "abc123")
+        for priority in ("low", "high"):
+            code, out = self.done(self.run_phase(kind="ci", extra=(*options, "--priority", priority)))
+            self.assertEqual(code, 125, out)
+            self.assertIn("ci does not queue; --priority must be normal", out)
+            self.assertEqual(grant.read_bytes(), before)
+            self.assertFalse((self.state / "waiters").exists())
+        code, out = self.done(self.run_phase(kind="ci", extra=(*options, "--priority", "normal")))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(grant.read_bytes(), before)
 
     def test_ci_duplicate_does_not_spawn_or_consume_build_slots(self):
         opts = ("--repo", "org/repo", "--pr", "42", "--commit", "abc123")

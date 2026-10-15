@@ -129,9 +129,161 @@ def slot_paths(state, kind, heavy, integration, ci_key):
     return [[h] for h in heavy_paths]
 
 
-def claim(state, candidates, deadline, cancelled):
+PRIORITIES = {"low": 0, "normal": 1, "high": 2}
+APPROVAL_REQUIRED = ("high priority needs user approval (grant with: pi-phase grant-priority, "
+                     "or /phase-priority allow in pi)")
+
+
+def priority_grant(state):
+    """Validate and discard unusable grants; caller holds the coordinator."""
+    path = state / "priority-grant.json"
+    data = metadata(path)
+    uses = data.get("uses")
+    valid = (set(data) == {"expires", "uses", "granted_by", "created"}
+             and all(type(data.get(key)) in (int, float) and math.isfinite(data[key])
+                     for key in ("expires", "created"))
+             and data["expires"] > time.time() and data["expires"] > data["created"]
+             and isinstance(data.get("granted_by"), str) and bool(data["granted_by"])
+             and (uses is None or type(uses) is int and 1 <= uses <= 20))
+    if not valid:
+        path.unlink(missing_ok=True)
+        return None
+    return data
+
+
+def consume_priority(state):
+    grant = priority_grant(state)
+    if grant is None:
+        raise ValueError(APPROVAL_REQUIRED)
+    if grant["uses"] is not None:
+        grant["uses"] -= 1
+        if grant["uses"]:
+            save(state / "priority-grant.json", grant)
+        else:
+            (state / "priority-grant.json").unlink(missing_ok=True)
+
+
+def grant_priority(state, uses, minutes):
+    if uses is not None and not 1 <= uses <= 20:
+        raise ValueError("uses must be 1-20")
+    if minutes is not None and not 1 <= minutes <= 480:
+        raise ValueError("minutes must be 1-480")
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        now = time.time()
+        save(state / "priority-grant.json", dict(expires=now + (minutes or 60) * 60,
+             uses=None if minutes is not None else (uses or 1), granted_by="user", created=now))
+    duration = (f"unlimited for {minutes} minutes" if minutes is not None
+                else f"{uses or 1} use(s), expires in 60 minutes")
+    note(f"high priority granted ({duration})")
+    return 0
+
+
+def revoke_priority(state):
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        (state / "priority-grant.json").unlink(missing_ok=True)
+    note("high priority revoked")
+    return 0
+
+
+def register_waiter(state, args, token):
+    """Nonblocking registration, including atomic grant consumption and FIFO sequence."""
+    coordinator = lock_file(state / "coordinator.lock")
+    if coordinator is None:
+        return False, None
+    path = state / "waiters" / f"{token}.json"
+    fd = None
+    try:
+        if args.priority == "high":
+            consume_priority(state)
+        if args.kind == "ci":
+            return True, None
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        counter = state / "waiter-seq.json"
+        seq = metadata(counter).get("seq", 0) + 1
+        save(counter, {"seq": seq})
+        fd = lock_file(path)
+        if fd is None:
+            raise ValueError("cannot lock new waiter")
+        data = dict(token=token, pid=os.getpid(), priority=args.priority, kind=args.kind,
+                    label=args.label, cwd=os.getcwd(), enqueued=time.time(), seq=seq)
+        os.write(fd, json.dumps(data).encode())
+        return True, fd
+    except BaseException:
+        path.unlink(missing_ok=True)
+        if fd is not None:
+            unlock(fd)
+        raise
+    finally:
+        unlock(coordinator)
+
+
+def deregister_waiter(state, token, fd):
+    """Keep unlink and lock release atomic with respect to queue scans."""
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        try:
+            (state / "waiters" / f"{token}.json").unlink(missing_ok=True)
+        finally:
+            unlock(fd)
+
+
+def live_waiters(state, cancelled=lambda: False):
+    """Kernel locks, not PIDs, define liveness. Caller holds the coordinator."""
+    waiters = []
+    for path in (state / "waiters").glob("*.json"):
+        if cancelled():
+            return []
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except FileNotFoundError:
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Read the inode we probed, even if an older waiter unlinks its path.
+                with os.fdopen(fd, "r", closefd=False) as stream:
+                    data = json.load(stream)
+                if (not isinstance(data, dict) or data.get("priority") not in PRIORITIES
+                        or data.get("kind") not in ("build", "test", "integration")
+                        or type(data.get("seq")) is not int
+                        or type(data.get("enqueued")) not in (int, float)
+                        or not math.isfinite(data["enqueued"])):
+                    raise ValueError("unreadable live waiter")
+                waiters.append(data)
+            else:
+                path.unlink(missing_ok=True)
+        finally:
+            os.close(fd)
+    return sorted(waiters, key=lambda w: (-PRIORITIES[w["priority"]], w["enqueued"], w["seq"]))
+
+
+def ordered_candidate(state, available, token, cancelled):
+    """Reserve satisfiable earlier waiters virtually; blocked ones take nothing."""
+    heavy = sorted(p for p in available if p.name.startswith("heavy-"))
+    integration = sorted(p for p in available if p.name.startswith("integration-"))
+    for waiter in live_waiters(state, cancelled):
+        candidate = ([heavy[0]] if heavy else [])
+        if waiter["kind"] == "integration":
+            candidate = candidate + [integration[0]] if candidate and integration else []
+        if waiter.get("token") == token:
+            return candidate
+        if candidate:
+            heavy.pop(0)
+            if waiter["kind"] == "integration":
+                integration.pop(0)
+    return []
+
+
+def claim(state, candidates, deadline, cancelled, waiter=None, limits=None):
     """One bounded admission scan; kernel locks and metadata identity are checked atomically."""
     paths = {path for candidate in candidates for path in candidate}
+    if waiter is not None:
+        paths.update(state / f"integration-{n}.lock" for n in range(limits[1]))
     prior = {}
     for path in paths:
         if cancelled() or time.monotonic() >= deadline:
@@ -145,29 +297,33 @@ def claim(state, candidates, deadline, cancelled):
     coordinator = lock_file(state / "coordinator.lock")
     if coordinator is None:
         return None  # A busy coordinator is retried by the outer queue loop.
+    available = {}
     try:
-        for candidate in candidates:
-            held = []
-            for path in candidate:
-                if cancelled() or time.monotonic() >= deadline:
-                    break
-                fd = lock_file(path)
-                if fd is None:
-                    break
-                # A new owner may have changed metadata since our snapshot.
-                # Never trust a stale negative process-list result for that owner.
-                entry = metadata(path.with_suffix(".json"))
-                if entry != prior[path] or entry.get("unreadable") or entry.get("pgid") in live:
-                    unlock(fd)
-                    break
-                held.append((path, fd))
-            if len(held) == len(candidate) and not cancelled() and time.monotonic() < deadline:
-                return held
-            for _, fd in held:
-                unlock(fd)
+        for path in sorted(paths):
             if cancelled() or time.monotonic() >= deadline:
-                break
+                return None
+            fd = lock_file(path)
+            if fd is None:
+                continue
+            # A new owner may have changed metadata since our snapshot.
+            # Never trust a stale negative process-list result for that owner.
+            entry = metadata(path.with_suffix(".json"))
+            if entry != prior[path] or entry.get("unreadable") or entry.get("pgid") in live:
+                unlock(fd)
+                continue
+            available[path] = fd
+        if waiter is not None:
+            candidate = ordered_candidate(state, available, waiter,
+                                          lambda: cancelled() or time.monotonic() >= deadline)
+        else:
+            candidate = next((c for c in candidates if all(p in available for p in c)), [])
+        if candidate and not cancelled() and time.monotonic() < deadline:
+            if waiter is not None:
+                (state / "waiters" / f"{waiter}.json").unlink(missing_ok=True)
+            return [(path, available.pop(path)) for path in candidate]
     finally:
+        for fd in available.values():
+            unlock(fd)
         unlock(coordinator)
     return None
 
@@ -207,6 +363,8 @@ def status(state):
             if fd is not None:
                 unlock(fd)
             owners.append((path, data, busy))
+        waiters = live_waiters(state)
+        grant = priority_grant(state)
     # No slow ps probe or terminal write while holding the shared coordinator.
     live = live_groups(2) if any(not busy and data.get("pgid") for _, data, busy in owners) else set()
     seen = set()
@@ -224,6 +382,15 @@ def status(state):
              f"elapsed={age}s {'orphan-group' if orphan else 'running'}")
     if not seen:
         note("no active phases")
+    for rank, waiter in enumerate(waiters, 1):
+        age = max(0, int(time.time() - waiter["enqueued"]))
+        note(f"queued priority={waiter['priority']} kind={waiter['kind']} "
+             f"label={waiter.get('label', '?')} waited={age}s rank={rank}")
+    if grant:
+        remaining = "unlimited uses" if grant["uses"] is None else f"{grant['uses']} use(s) remaining"
+        seconds = max(0, math.ceil(grant["expires"] - time.time()))
+        expiry = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(grant["expires"]))
+        note(f"high priority grant: {remaining}; expires in {seconds}s at {expiry}")
     return 0
 
 
@@ -288,6 +455,8 @@ def run(args, state, configuration, output=None):
     bounded(args.timeout, "timeout", args.approved_long_timeout)
     bounded(args.queue_timeout, "queue-timeout", args.approved_long_timeout)
     if args.kind == "ci":
+        if args.priority != "normal":
+            raise ValueError("ci does not queue; --priority must be normal")
         if not all((args.repo, args.pr, args.commit)):
             raise ValueError("ci requires --repo, --pr, and --commit (explicit watcher identity)")
     elif any((args.repo, args.pr, args.commit)):
@@ -331,6 +500,8 @@ def run(args, state, configuration, output=None):
     started = None
     return_code = 125
     safe = False
+    registered = False
+    waiter_fd = None
     try:
         while True:
             if cancelled[0]:
@@ -339,9 +510,15 @@ def run(args, state, configuration, output=None):
             if time.monotonic() >= deadline:
                 note(f"queue timeout ({args.queue_timeout:g}s); command not started")
                 return 75
+            if not registered:
+                registered, waiter_fd = register_waiter(state, args, token)
+                if not registered:
+                    time.sleep(min(TICK, max(0, deadline - time.monotonic())))
+                    continue
             heavy, integration = config(configuration)
             held = claim(state, slot_paths(state, args.kind, heavy, integration, ci_key),
-                         deadline, lambda: bool(cancelled[0]))
+                         deadline, lambda: bool(cancelled[0]),
+                         token if waiter_fd is not None else None, (heavy, integration))
             if cancelled[0]:
                 note("cancelled during admission; command not started")
                 return 128 + cancelled[0]
@@ -420,6 +597,8 @@ def run(args, state, configuration, output=None):
         note(f"finished kind={args.kind} label={args.label} exit={return_code}")
         return return_code
     finally:
+        if waiter_fd is not None:
+            deregister_waiter(state, token, waiter_fd)
         # A failed launch sees EOF at its gate. An unexpected exception during
         # execution must also terminate the owned group before releasing a lease.
         if proc is not None and proc.returncode is None:
@@ -438,10 +617,16 @@ def run(args, state, configuration, output=None):
 def main(argv=None, *, state=None, configuration=None):
     parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner")
     commands = parser.add_subparsers(dest="action", required=True)
-    commands.add_parser("status", help="show current lease owners (never command arguments)")
+    commands.add_parser("status", help="show leases, queue and priority grant (never command arguments)")
+    grant = commands.add_parser("grant-priority", help="grant user-approved high priority")
+    duration = grant.add_mutually_exclusive_group()
+    duration.add_argument("--uses", type=int, help="1-20 uses, expires after 60 minutes (default 1)")
+    duration.add_argument("--minutes", type=int, help="unlimited uses for 1-480 minutes")
+    commands.add_parser("revoke-priority", help="revoke high priority approval")
     runner = commands.add_parser("run", help="run a single explicit command in one phase")
     runner.add_argument("--kind", choices=("build", "test", "integration", "ci"), required=True)
     runner.add_argument("--label", required=True)
+    runner.add_argument("--priority", choices=tuple(PRIORITIES), default="normal")
     runner.add_argument("--timeout", type=float, default=None, help="execution seconds (default 300 build/test/integration, 120 ci)")
     runner.add_argument("--queue-timeout", type=float, default=120, help="separate permit wait in seconds")
     runner.add_argument("--approved-long-timeout", action="store_true", help="declare explicit user approval for >600 seconds")
@@ -473,6 +658,10 @@ def main(argv=None, *, state=None, configuration=None):
     try:
         if args.action == "status":
             return status(state)
+        if args.action == "grant-priority":
+            return grant_priority(state, args.uses, args.minutes)
+        if args.action == "revoke-priority":
+            return revoke_priority(state)
         if args.timeout is None:
             args.timeout = 120 if args.kind == "ci" else 300
         if args.log is not None:
