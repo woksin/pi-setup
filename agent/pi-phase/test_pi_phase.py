@@ -172,6 +172,82 @@ class PhaseTests(unittest.TestCase):
         self.assertIsNone(self.admit(second))
         self.assertTrue(self.admit(first))
 
+    def test_waiter_scan_survives_unlink_during_open_or_trylock(self):
+        for when in ("before_open", "after_trylock"):
+            with self.subTest(when=when):
+                token = self.waiter(when)
+                path = self.state / "waiters" / f"{token}.json"
+                raced = self.root / f"race-{when}"
+                setup = ("import pathlib,os\n"
+                         f"victim = pathlib.Path({str(path)!r})\n"
+                         f"raced = pathlib.Path({str(raced)!r})\n")
+                if when == "before_open":
+                    interleave = ("original = pi_phase.os.open\n"
+                                  "def racing_open(path, *args, **kwargs):\n"
+                                  "    if pathlib.Path(path) == victim and victim.exists():\n"
+                                  "        victim.unlink()\n"
+                                  "        raced.touch()\n"
+                                  "    return original(path, *args, **kwargs)\n"
+                                  "pi_phase.os.open = racing_open")
+                else:
+                    interleave = (f"inode = {path.stat().st_ino}\n"
+                                  "original = pi_phase.fcntl.flock\n"
+                                  "def racing_flock(fd, operation):\n"
+                                  "    try:\n"
+                                  "        return original(fd, operation)\n"
+                                  "    except BlockingIOError:\n"
+                                  "        if os.fstat(fd).st_ino == inode:\n"
+                                  "            victim.unlink(missing_ok=True)\n"
+                                  "            raced.touch()\n"
+                                  "        raise\n"
+                                  "pi_phase.fcntl.flock = racing_flock")
+                job, marker = self.patched_phase(setup + interleave)
+                code, out = self.done(job)
+                self.assertEqual(code, 0, out)
+                self.assertTrue(raced.exists())
+                self.assertTrue(marker.exists())
+                self.assertNotIn("unreadable live waiter", out)
+
+    def test_deregister_unlinks_and_releases_waiter_under_coordinator(self):
+        self.state.mkdir()
+        args = SimpleNamespace(priority="normal", kind="build", label="deregister")
+        ready, fd = pi_phase.register_waiter(self.state, args, "deregister")
+        self.assertTrue(ready)
+        path = self.state / "waiters" / "deregister.json"
+        original_unlink = Path.unlink
+        original_unlock = pi_phase.unlock
+        events = []
+
+        def assert_coordinator_held(event):
+            probe = pi_phase.lock_file(self.state / "coordinator.lock")
+            if probe is not None:
+                original_unlock(probe)
+            self.assertIsNone(probe, event)
+            events.append(event)
+
+        def unlink_waiter(target, *args, **kwargs):
+            if target == path:
+                assert_coordinator_held("unlink")
+            return original_unlink(target, *args, **kwargs)
+
+        def unlock_waiter(target):
+            if target == fd:
+                assert_coordinator_held("unlock")
+            return original_unlock(target)
+
+        try:
+            with patch.object(Path, "unlink", unlink_waiter), patch.object(pi_phase, "unlock", unlock_waiter):
+                pi_phase.deregister_waiter(self.state, "deregister", fd)
+            self.assertEqual(events, ["unlink", "unlock"])
+            self.assertFalse(path.exists())
+        finally:
+            try:
+                os.fstat(fd)
+            except OSError:
+                pass
+            else:
+                os.close(fd)
+
     def test_high_missing_grant_fails_before_queueing(self):
         code, out = self.done(self.run_phase(extra=("--priority", "high")))
         self.assertEqual(code, 125, out)
@@ -224,6 +300,9 @@ class PhaseTests(unittest.TestCase):
         self.assertRegex(out, r"priority=high kind=build label=high waited=\d+s rank=1")
         self.assertRegex(out, r"priority=normal kind=build label=normal waited=\d+s rank=2")
         self.assertIn("19 use(s) remaining", out)
+        self.assertRegex(out, r"expires in \d+s at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+        self.assertIn(time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(data["expires"])), out)
+        self.assertNotIn("e+", out)
         self.assertEqual(self.done(self.start("revoke-priority"))[0], 0)
         self.assertFalse((self.state / "priority-grant.json").exists())
 
@@ -402,10 +481,10 @@ class PhaseTests(unittest.TestCase):
             code, out = self.done(job)
             self.assertEqual(code, 0, out)
         intervals = self.intervals("a", "b", "c")
-        self.assertTrue(any(sum(start <= instant < end for start, end in intervals) == 2
-                            for instant in (start + .3 for start, _ in intervals)), intervals)
-        self.assertLess(max(sum(start <= instant < end for start, end in intervals)
-                            for instant in (start + .3 for start, _ in intervals)), 3)
+        concurrency = [sum(start <= instant < end for start, end in intervals)
+                       for instant, _ in intervals]
+        self.assertIn(2, concurrency, intervals)
+        self.assertLess(max(concurrency), 3, intervals)
 
     def test_integration_exclusivity_and_no_deadlock(self):
         jobs = [self.run_phase(kind=kind, label=name, command=self.marker_job(name, .45))
@@ -586,6 +665,21 @@ class PhaseTests(unittest.TestCase):
         self.assertFalse((self.root / "blocked.json").exists())
         self.wait_for(lambda: self.done(self.start("status"))[1].strip() == "pi-phase: no active phases", seconds=4)
         self.assertEqual(self.done(self.run_phase())[0], 0)
+
+    def test_ci_rejects_non_normal_priority_without_touching_grant(self):
+        self.assertEqual(self.done(self.start("grant-priority"))[0], 0)
+        grant = self.state / "priority-grant.json"
+        before = grant.read_bytes()
+        options = ("--repo", "org/repo", "--pr", "42", "--commit", "abc123")
+        for priority in ("low", "high"):
+            code, out = self.done(self.run_phase(kind="ci", extra=(*options, "--priority", priority)))
+            self.assertEqual(code, 125, out)
+            self.assertIn("ci does not queue; --priority must be normal", out)
+            self.assertEqual(grant.read_bytes(), before)
+            self.assertFalse((self.state / "waiters").exists())
+        code, out = self.done(self.run_phase(kind="ci", extra=(*options, "--priority", "normal")))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(grant.read_bytes(), before)
 
     def test_ci_duplicate_does_not_spawn_or_consume_build_slots(self):
         opts = ("--repo", "org/repo", "--pr", "42", "--commit", "abc123")

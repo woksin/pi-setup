@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { highPriorityRequests, priorityCommandArgs, readGrant, validateGrant } from "./phase-priority.ts";
+import { grantPriorityRequests, highPriorityRequests, priorityCommandArgs, readGrant, referencesGrantFile, validateGrant } from "./phase-priority.ts";
 import extension from "../extensions/phase-priority.ts";
 
 const run = "~/.pi/agent/bin/pi-phase run --kind build --label 'Release build' --priority high -- dotnet build";
@@ -57,6 +57,49 @@ test("quoted mentions, comments, heredoc bodies and producer arguments do not re
 	assert.deepEqual(highPriorityRequests("cat <<EOF\n" + run + "\nEOF\n" + run), [request]);
 });
 
+test("detects explicit grants via runner paths and Python scripts with the same shell splitter", () => {
+	for (const program of ["pi-phase", "/any/path/pi-phase", "./pi_phase.py",
+		"/usr/bin/python3 -B /any/path/pi_phase.py", "python -u -- ./pi_phase.py",
+		"python3.14 -X dev -W ignore './path with spaces/pi_phase.py'"]) {
+		assert.deepEqual(grantPriorityRequests(`${program} grant-priority --minutes 480`), [["--minutes", "480"]]);
+	}
+	assert.deepEqual(grantPriorityRequests("X=1 env rtk proxy pi-phase grant-priority --uses=2"), [["--uses=2"]]);
+	assert.deepEqual(grantPriorityRequests("bash -lc 'pi-phase grant-priority --uses 1'"), [["--uses", "1"]]);
+	assert.deepEqual(grantPriorityRequests("pi-phase grant-priority; ./pi_phase.py grant-priority --minutes 30"),
+		[[], ["--minutes", "30"]]);
+	for (const command of ["pi-phase revoke-priority", "./pi_phase.py status", "echo pi-phase grant-priority",
+		"printf '%s' 'pi-phase grant-priority --minutes 480'", "# pi-phase grant-priority",
+		"cat <<'EOF'\npi-phase grant-priority --minutes 480\nEOF",
+		"python3 -c 'print(1)' pi_phase.py grant-priority", "python3 -m other pi_phase.py grant-priority",
+		"pi-phase run --kind build --label 'grant-priority' -- echo grant-priority",
+	]) assert.deepEqual(grantPriorityRequests(command), [], command);
+});
+
+test("raw grant-file references are blocked only for bash and write/edit paths", () => {
+	for (const command of ["echo '{}' > priority-grant.json", "rm ~/.pi/agent/pi-phase/state/priority-grant.json",
+		"python3 -c \"open('priority-grant.json', 'w').write('{}')\"", "echo 'priority-grant.json'",
+		"cat <<EOF\npriority-grant.json\nEOF",
+	]) assert.equal(referencesGrantFile("bash", { command }), true, command);
+	for (const toolName of ["write", "edit"]) {
+		for (const path of ["priority-grant.json", "./state/priority-grant.json", "/any/path/priority-grant.json"])
+			assert.equal(referencesGrantFile(toolName, { path }), true);
+		assert.equal(referencesGrantFile(toolName, { path: "other.json" }), false);
+		assert.equal(referencesGrantFile(toolName, { path: "priority-grant.json.backup" }), false);
+		assert.equal(referencesGrantFile(toolName, { command: "priority-grant.json" }), false);
+		assert.equal(referencesGrantFile(toolName, { path: null }), false);
+	}
+	assert.equal(referencesGrantFile("read", { path: "priority-grant.json" }), false);
+	assert.equal(referencesGrantFile("bash", { command: "pi-phase grant-priority --uses 1" }), false);
+	assert.equal(referencesGrantFile("bash", { command: "pi-phase revoke-priority" }), false);
+});
+
+test("CI high priority never requests approval, including Python runner paths", () => {
+	for (const program of ["pi-phase", "/any/path/pi_phase.py", "python3 -B ./pi_phase.py"]) {
+		assert.deepEqual(highPriorityRequests(`${program} run --priority high --kind ci --label watcher -- gh run watch 1`), []);
+		assert.deepEqual(highPriorityRequests(`${program} run --kind=ci --priority=high --label=watcher -- gh run watch 1`), []);
+	}
+});
+
 test("validates grants strictly with epoch-second expiry, count and unlimited uses", () => {
 	assert.deepEqual(validateGrant(grant, 150), grant);
 	assert.deepEqual(validateGrant({ ...grant, uses: null }, 150), { ...grant, uses: null });
@@ -94,6 +137,7 @@ function fake(hasUI = true) {
 	extension(pi);
 	return { ctx, selections, notices, choose: (value: string | undefined) => { choice = value; },
 		fire: (command = run, toolName = "bash") => handlers.get("tool_call")!({ toolName, input: { command } }, ctx),
+		tool: (toolName: string, input: unknown) => handlers.get("tool_call")!({ toolName, input }, ctx),
 		command: (args: string) => commands.get("phase-priority").handler(args, ctx),
 	};
 }
@@ -122,6 +166,57 @@ test("denial, dismissal and headless requests block without creating grants", as
 	assert.deepEqual(await headless.fire(), { block: true,
 		reason: "high priority needs user approval; ask the parent session/user, who can run /phase-priority allow" });
 	assert.equal(headless.selections.length, 0);
+	assert.equal(calls.length, 0);
+});
+
+test("direct grant creation prompts even with an existing grant and only Allow proceeds", async () => {
+	contents = JSON.stringify({ ...grant, expires: Date.now() / 1000 + 60 });
+	for (const command of ["pi-phase grant-priority --minutes 480", "python3 -B /any/path/pi_phase.py grant-priority --minutes 480"]) {
+		const app = fake();
+		for (const choice of ["Deny", undefined]) {
+			app.choose(choice);
+			assert.equal((await app.fire(command))?.block, true);
+		}
+		app.choose("Allow");
+		assert.equal(await app.fire(command), undefined);
+		assert.deepEqual(app.selections.at(-1), {
+			title: "Agent wants to grant high queue priority: --minutes 480", options: ["Allow", "Deny"],
+		});
+		const headless = fake(false);
+		assert.deepEqual(await headless.fire(command), { block: true,
+			reason: "high priority needs user approval; ask the parent session/user, who can run /phase-priority allow" });
+		assert.equal(headless.selections.length, 0);
+	}
+	assert.equal(calls.length, 0, "the allowed tool call, not the extension, executes an explicit grant");
+});
+
+test("grant-file bash references and write/edit paths block without a prompt in all modes", async () => {
+	contents = JSON.stringify({ ...grant, expires: Date.now() / 1000 + 60 });
+	for (const hasUI of [true, false]) {
+		const app = fake(hasUI);
+		for (const [toolName, input] of [
+			["bash", { command: "echo '{}' > /any/path/priority-grant.json" }],
+			["bash", { command: "pi-phase grant-priority; cat priority-grant.json" }],
+			["write", { path: "/any/path/priority-grant.json", content: "{}" }],
+			["edit", { path: "priority-grant.json", oldText: "1", newText: "20" }],
+		] as const) assert.deepEqual(await app.tool(toolName, input), {
+			block: true, reason: "grants are created only via user approval (/phase-priority)",
+		});
+		assert.equal(app.selections.length, 0);
+		assert.equal(await app.tool("read", { path: "priority-grant.json" }), undefined);
+		assert.equal(await app.tool("write", { path: "other.json", content: "priority-grant.json" }), undefined);
+	}
+	assert.equal(calls.length, 0);
+});
+
+test("revocation stays allowed and CI high priority does not prompt", async () => {
+	for (const hasUI of [true, false]) {
+		const app = fake(hasUI);
+		assert.equal(await app.fire("pi-phase revoke-priority"), undefined);
+		assert.equal(await app.fire("python3 ./pi_phase.py revoke-priority"), undefined);
+		assert.equal(await app.fire(run.replace("--kind build", "--kind ci")), undefined);
+		assert.equal(app.selections.length, 0);
+	}
 	assert.equal(calls.length, 0);
 });
 

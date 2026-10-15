@@ -221,6 +221,16 @@ def register_waiter(state, args, token):
         unlock(coordinator)
 
 
+def deregister_waiter(state, token, fd):
+    """Keep unlink and lock release atomic with respect to queue scans."""
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        try:
+            (state / "waiters" / f"{token}.json").unlink(missing_ok=True)
+        finally:
+            unlock(fd)
+
+
 def live_waiters(state, cancelled=lambda: False):
     """Kernel locks, not PIDs, define liveness. Caller holds the coordinator."""
     waiters = []
@@ -235,8 +245,10 @@ def live_waiters(state, cancelled=lambda: False):
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                data = metadata(path)
-                if (data.get("priority") not in PRIORITIES
+                # Read the inode we probed, even if an older waiter unlinks its path.
+                with os.fdopen(fd, "r", closefd=False) as stream:
+                    data = json.load(stream)
+                if (not isinstance(data, dict) or data.get("priority") not in PRIORITIES
                         or data.get("kind") not in ("build", "test", "integration")
                         or type(data.get("seq")) is not int
                         or type(data.get("enqueued")) not in (int, float)
@@ -376,7 +388,9 @@ def status(state):
              f"label={waiter.get('label', '?')} waited={age}s rank={rank}")
     if grant:
         remaining = "unlimited uses" if grant["uses"] is None else f"{grant['uses']} use(s) remaining"
-        note(f"high priority grant: {remaining}; expires={grant['expires']:g}")
+        seconds = max(0, math.ceil(grant["expires"] - time.time()))
+        expiry = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(grant["expires"]))
+        note(f"high priority grant: {remaining}; expires in {seconds}s at {expiry}")
     return 0
 
 
@@ -441,6 +455,8 @@ def run(args, state, configuration, output=None):
     bounded(args.timeout, "timeout", args.approved_long_timeout)
     bounded(args.queue_timeout, "queue-timeout", args.approved_long_timeout)
     if args.kind == "ci":
+        if args.priority != "normal":
+            raise ValueError("ci does not queue; --priority must be normal")
         if not all((args.repo, args.pr, args.commit)):
             raise ValueError("ci requires --repo, --pr, and --commit (explicit watcher identity)")
     elif any((args.repo, args.pr, args.commit)):
@@ -582,10 +598,7 @@ def run(args, state, configuration, output=None):
         return return_code
     finally:
         if waiter_fd is not None:
-            try:
-                (state / "waiters" / f"{token}.json").unlink(missing_ok=True)
-            finally:
-                unlock(waiter_fd)
+            deregister_waiter(state, token, waiter_fd)
         # A failed launch sees EOF at its gate. An unexpected exception during
         # execution must also terminate the owned group before releasing a lease.
         if proc is not None and proc.returncode is None:

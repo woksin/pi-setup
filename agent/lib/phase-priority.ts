@@ -100,27 +100,59 @@ function request(args: string[]): PriorityRequest | undefined {
 		const key = at === -1 ? args[i] : args[i].slice(0, at);
 		options[key] = at === -1 ? (args[++i] ?? "") : args[i].slice(at + 1);
 	}
-	return options["--priority"] === "high" ? {
+	return options["--priority"] === "high" && options["--kind"] !== "ci" ? {
 		kind: options["--kind"] ?? "unknown", label: options["--label"] ?? "unlabelled",
 	} : undefined;
 }
 
-/** Detect real pi-phase invocations, not mentions in printf/commit messages or heredocs. */
-export function highPriorityRequests(command: string, depth = 0): PriorityRequest[] {
+/** Resolve direct runners and Python script execution without treating Python -c/-m data as a path. */
+function phaseArgs(words: string[], index: number): string[] | undefined {
+	if (/^python(?:\d+(?:\.\d+)*)?$/.test(words[index]?.split("/").pop() ?? "")) {
+		index++;
+		while (words[index]?.startsWith("-")) {
+			const flag = words[index++];
+			if (flag === "--") break;
+			if (/^-[cm]/.test(flag)) return undefined;
+			if (flag === "-W" || flag === "-X") index++;
+		}
+	}
+	return ["pi-phase", "pi_phase.py"].includes(words[index]?.split("/").pop() ?? "")
+		? words.slice(index + 1) : undefined;
+}
+
+/** Detect command-position invocations, not mentions in printf/commit messages or heredocs. */
+function phaseInvocations(command: string, depth = 0): string[][] {
 	if (depth > 3) return [];
-	const found: PriorityRequest[] = [];
+	const found: string[][] = [];
 	for (const words of simpleCommands(command)) {
 		const i = programIndex(words);
-		const program = words[i]?.split("/").pop();
-		if (program === "pi-phase") {
-			const high = request(words.slice(i + 1));
-			if (high) found.push(high);
-		} else if (["bash", "sh", "zsh", "dash"].includes(program ?? "")) {
+		const args = phaseArgs(words, i);
+		if (args) found.push(args);
+		else if (["bash", "sh", "zsh", "dash"].includes(words[i]?.split("/").pop() ?? "")) {
 			const c = words.findIndex((w, k) => k > i && /^-[a-z]*c[a-z]*$/.test(w));
-			if (c > i && words[c + 1]) found.push(...highPriorityRequests(words[c + 1], depth + 1));
+			if (c > i && words[c + 1]) found.push(...phaseInvocations(words[c + 1], depth + 1));
 		}
 	}
 	return found;
+}
+
+export function highPriorityRequests(command: string): PriorityRequest[] {
+	return phaseInvocations(command).flatMap(args => {
+		const high = request(args);
+		return high ? [high] : [];
+	});
+}
+
+/** Explicit grant creation always needs approval, even when a grant already exists. */
+export function grantPriorityRequests(command: string): string[][] {
+	return phaseInvocations(command).filter(args => args[0] === "grant-priority").map(args => args.slice(1));
+}
+
+/** Raw grant-file access is never approved through agent tools, including mentions in bash data. */
+export function referencesGrantFile(toolName: string, input: { command?: unknown; path?: unknown }): boolean {
+	if (toolName === "bash") return String(input.command ?? "").includes("priority-grant.json");
+	return (toolName === "write" || toolName === "edit") &&
+		typeof input.path === "string" && input.path.endsWith("priority-grant.json");
 }
 
 export function priorityCommandArgs(input: string): string[] {

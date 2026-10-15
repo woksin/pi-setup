@@ -2,7 +2,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { highPriorityRequests, priorityCommandArgs, readGrant } from "../lib/phase-priority.ts";
+import { grantPriorityRequests, highPriorityRequests, priorityCommandArgs, readGrant, referencesGrantFile } from "../lib/phase-priority.ts";
+
+const APPROVAL_NEEDED = "high priority needs user approval; ask the parent session/user, who can run /phase-priority allow";
 
 function phaseCommand(args: string[]): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -22,12 +24,27 @@ function notify(ctx: ExtensionContext, message: string, type: "info" | "error") 
 
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
+		const input = event.input as { command?: unknown; path?: unknown };
+		if (referencesGrantFile(event.toolName, input)) return {
+			block: true, reason: "grants are created only via user approval (/phase-priority)",
+		};
 		if (event.toolName !== "bash") return undefined;
-		const requests = highPriorityRequests(String((event.input as { command?: unknown }).command ?? ""));
+		const command = String(input.command ?? "");
+		const grants = grantPriorityRequests(command);
+		if (grants.length) {
+			if (!ctx.hasUI) return { block: true, reason: APPROVAL_NEEDED };
+			const choice = await ctx.ui.select(
+				`Agent wants to grant high queue priority: ${grants.map(args => args.join(" ")).join("; ")}`,
+				["Allow", "Deny"]);
+			return choice === "Allow" ? undefined : {
+				block: true, reason: "High queue priority grant denied; use /phase-priority for user approval.",
+			};
+		}
+		const requests = highPriorityRequests(command);
 		if (!requests.length || readGrant(join(homedir(), ".pi", "agent", "pi-phase", "state", "priority-grant.json"))) return undefined;
 		if (!ctx.hasUI) return {
 			block: true,
-			reason: "high priority needs user approval; ask the parent session/user, who can run /phase-priority allow",
+			reason: APPROVAL_NEEDED,
 		};
 		const { kind, label } = requests[0];
 		const choice = await ctx.ui.select(`Agent asks for high queue priority: ${kind} '${label}'`,
