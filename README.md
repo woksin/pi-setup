@@ -30,6 +30,7 @@ Some of it is tied to my workflow: `AGENTS.md` contains rules for [Cratis](https
 | `extensions/wait-guard.ts` | Blocks long foreground waits and repeated CI status polling. |
 | `extensions/cratis-cli-guard.ts` | Blocks state-changing `cratis chronicle` commands unless approved. |
 | `extensions/issue-work.ts` | `issue_work` tool: claim, update and list the GitHub issues a session is working on, with leases across sessions and checks for new activity (logic in `lib/issue-work.ts`). |
+| `extensions/phase-priority.ts` | Asks you before an agent gets high priority in the `pi-phase` queue (`--priority high`); blocks subagents and self-granting. `/phase-priority` grants or revokes. |
 | `extensions/provider-fallback.ts` | Falls back to another provider's model when a usage or rate limit is hit (`provider-fallback.json`). |
 | `extensions/cache-retention.ts` | Defaults Anthropic prompt caching to the 1-hour tier. |
 | `extensions/ai-work-lifecycle.ts` | Integrates the `ai-work-lifecycle` task-output tool. |
@@ -38,7 +39,7 @@ Some of it is tied to my workflow: `AGENTS.md` contains rules for [Cratis](https
 | `workflows/bulk-edit.js` | One mechanical change across many files, then verified. |
 | `workflows/loose-threads-plan.js` | Turns a `loose-threads` inventory into a cleanup plan. |
 | `loose-threads/` | Weekly audit of leftover worktrees, branches, stashes and Docker volumes. |
-| `pi-phase/`, `bin/pi-phase` | Wrapper for build and test commands with time limits, a queue and logs. |
+| `pi-phase/`, `bin/pi-phase` | Wrapper for build and test commands with time limits, logs and a shared queue ordered by priority (`low`, `normal`, `high`), then first come first served. |
 | `bin/pi-profile` | Switch model-routing profiles. |
 | `bin/pi-account` | Switch between saved Anthropic logins (tokens are never printed or stored here). |
 | `bin/pi-usage` | Provider usage and limit pressure from session logs. |
