@@ -26,7 +26,7 @@ Prefer `--log FILE` over shell redirects or output pipes: it overwrites FILE (cr
 
 ## Capacity and timeouts
 
-Defaults: heavy capacity **2** (build/test/integration); integration additionally occupies **1** integration permit (atomic claim, no deadlock). CI watchers take **no heavy permits**. Config is shared in `~/.pi/agent/pi-phase/config.json`, optional, for example:
+The shipped config sets heavy capacity **4** (build/test/integration); without a config file the fallback is **2**. Integration additionally occupies **1** integration permit (atomic claim, no deadlock). CI watchers take **no heavy permits**. Config is shared in `~/.pi/agent/pi-phase/config.json`, optional, for example:
 
 ```json
 {"heavy_slots": 2, "integration_slots": 1}
@@ -35,6 +35,39 @@ Defaults: heavy capacity **2** (build/test/integration); integration additionall
 Change this single config for *all cooperating sessions*, not a per-invocation override. Prefer changing limits when idle; lowering them mid-run does not evict current jobs. Do not modify/delete `state/` lock or owner files while jobs are active. Locks are kernel-backed; owner JSON is only diagnostics plus a conservative guard for a crashed supervisor whose child group remains alive. A status entry marked `orphan-group` means a slot remains unavailable until that group goes away; investigate the recorded PID/group rather than deleting state. Crash between launcher creation and metadata publication is guarded by an execution gate: the command never starts until metadata exists. The producer inherits its lease FD. The supervisor starts a new process group, sends TERM then KILL **only to that group** on timeout, cancellation or completed-leader cleanup, and does not kill GitHub CI or other local jobs. Programs deliberately creating new sessions, leaving that group, moving to another user, or escaping inherited descriptors/group tracking cannot be guaranteed; this is not a sandbox. Detached grandchildren can inherit terminal output: they may keep a caller's output pipe open after a crash.
 
 Admission uses one deadline-bounded process-list snapshot per scan outside the shared coordinator; a failed/slow probe conservatively defers admission rather than taking an orphaned permit. Cancellation is checked after admission and before the launcher receives its execution gate, so an already-cancelled command does not start. Execution defaults to **300s** for build/test/integration and **120s** for CI, with a **separate 120s queue budget** (queue time does not consume execution time). Choose ~120s for known short targeted checks; 300s for a build/test phase; longer than 600s for either budget requires the `--approved-long-timeout` declaration, which the agent adds itself when it has a concrete runtime basis (run such phases in the background, not as a foreground bash call) (e.g. `--timeout 900 --approved-long-timeout`). Do not use speculative long limits. No stdout-silence killer or automatic retries. Exit 124 means phase timeout; 130/143 mean SIGINT/SIGTERM cancellation; 75 means queue timeout or duplicate CI watcher (neither is a test/CI failure); 125 means wrapper/config/cleanup failure; 126/127 mean command could not be executed; otherwise the exact producer exit (a producer itself can return one of these codes). Timeouts/CI cancellation are **incomplete/unknown**, never a pass or evidence of a remote CI failure. For long-running diagnostics prefer native runner hang support when compatible, not a generic silence timeout.
+
+## Queue ordering and user-approved priority
+
+`run --priority low|normal|high` defaults to `normal`. Build, test and integration waiters are ranked by **high before normal before low**, then enqueue time and a monotonically increasing FIFO sequence for ties. Admission reserves currently free permits virtually for earlier, satisfiable waiters. An integration waiter blocked on its integration permit takes no heavy permit and does not block a later build/test. Priority never preempts a running phase; sustained higher-priority work can delay lower priorities. CI watchers retain their separate duplicate-watcher check and do not join this queue.
+
+Waiters hold exclusive kernel locks on `state/waiters/<token>.json`; a PID alone is never proof of liveness. Unlocked stale files are removed under the shared coordinator. Waiter files are removed on admission, queue timeout, cancellation or an exception. `pi-phase status` additionally shows queued priority, kind, label, waited seconds and rank, plus any active high-priority grant's remaining uses and expiry (epoch seconds). It never lists command arguments. Older runner versions can coexist safely using the same permit locks, but ignore queue ordering during rollout.
+
+Low and normal priority require no approval. High priority requires a user grant shared across cooperating sessions in `state/priority-grant.json`. Each high-priority invocation consumes one use atomically **before queueing**, even if it later times out or is cancelled. Missing, expired or exhausted approval exits **125** without registering a waiter. A time-limited grant allows unlimited high-priority invocations until expiry. Revocation affects future invocations, not already-approved waiters or running phases.
+
+The user can grant or revoke approval directly:
+
+```sh
+~/.pi/agent/bin/pi-phase grant-priority             # one use, expires after 60 minutes
+~/.pi/agent/bin/pi-phase grant-priority --uses 3    # 1–20 uses, expires after 60 minutes
+~/.pi/agent/bin/pi-phase grant-priority --minutes 30 # unlimited uses for 1–480 minutes
+~/.pi/agent/bin/pi-phase revoke-priority
+```
+
+The `phase-priority` pi extension prompts when an agent's bash call requests `--priority high` (also `--priority=high`) without a valid grant, showing kind and label: **Allow once / Allow for 30 minutes / Deny**. Denial means rerun without high priority. Headless subagents cannot approve themselves: ask the parent session/user, who can run `/phase-priority allow`. Agents must not create grants themselves or edit the grant file; approval is cooperative, not a security boundary against arbitrary local shell access. The Python runner remains authoritative if another session consumes a grant between the extension's check and admission.
+
+User commands in pi:
+
+- `/phase-priority` or `/phase-priority status`: show phases, queue and grant.
+- `/phase-priority allow [minutes]`: allow high priority for 30 minutes by default (1–480).
+- `/phase-priority allow-once`: one use, expiring after 60 minutes.
+- `/phase-priority revoke`: remove approval.
+
+Example after user approval:
+
+```sh
+~/.pi/agent/bin/pi-phase run --kind build --label 'urgent Release build' \
+  --priority high --timeout 300 --queue-timeout 120 -- dotnet build My.sln -c Release
+```
 
 ## VSTest opt-in (not MTP)
 
