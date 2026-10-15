@@ -57,11 +57,11 @@ The `ai-work-lifecycle` CLI that the skill and extension use.
 
 ## Related repositories
 
-- [woksin/pi-jobs](https://github.com/woksin/pi-jobs): background shell jobs and watches that wake the agent when they finish (`job_start`, `job_watch`).
-- [woksin/pi-recover](https://github.com/woksin/pi-recover): `/recover` picks up subagents, jobs and workflows from a session that stopped abruptly.
+- [woksin/pi-jobs](https://github.com/woksin/pi-jobs) (npm: [`@woksin/pi-jobs`](https://www.npmjs.com/package/@woksin/pi-jobs)): background shell jobs and watches that wake the agent when they finish (`job_start`, `job_watch`).
+- [woksin/pi-recover](https://github.com/woksin/pi-recover) (npm: [`@woksin/pi-recover`](https://www.npmjs.com/package/@woksin/pi-recover)): `/recover` picks up subagents, jobs and workflows from a session that stopped abruptly.
 
 Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subagents`, `pi-mcp-adapter`, `pi-web-access`, `pi-browser-use`, `@gotgenes/pi-anthropic-auth`, `donsetch`. The CodeScene skills come from CodeScene's MCP server, and the `pi-extensions` skill from [Dwsy/pi-extensions-skill](https://github.com/Dwsy/pi-extensions-skill).
 
 ## Keeping it up to date
 
-`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings and runs `gitleaks`. Review the diff before committing.
+`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings, points local checkouts of pi-jobs and pi-recover at their npm packages, and runs `gitleaks`. Review the diff before committing.

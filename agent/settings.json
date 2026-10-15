@@ -27,8 +27,8 @@
     "npm:pi-web-access",
     "npm:@tintinweb/pi-subagents",
     "npm:pi-mcp-adapter",
-    "./local-packages/pi-jobs",
-    "./local-packages/pi-recover",
+    "npm:@woksin/pi-jobs",
+    "npm:@woksin/pi-recover",
     "npm:pi-browser-use",
     "npm:donsetch"
   ],
