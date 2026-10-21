@@ -57,7 +57,7 @@ phases: >50% CPU sustained ≥30 min or <1% group CPU over ≥2h (fuse 5).
 Persistent `~/.pi` profiles and user Chrome are never killed. Idle pi sessions
 (≥4h CPU inactivity) and their helper RSS are suggest-only. `--quiet` prints only
 successful actions; docker-guardian runs the narrow cleanup checks at most every
-15 minutes. No sudo, Docker settings, image/volume pruning, or checkout file deletion.
+15 minutes. The doctor never uses sudo, changes Docker settings, prunes images/volumes or deletes checkout files.
 
 CPU anchors and observed Docker peaks are kept in
 `~/.pi/agent/dev-doctor/samples.json` (`DEV_DOCTOR_STATE_DIR` overrides its directory).
@@ -78,6 +78,17 @@ The pi-phase config flags `msbuild_max_cpu` (default off),
 `container_test_detection` (default hint-only), and `cold_worktree_hint`
 (default on, hint-only) provide opt-in caps and advisory performance guidance.
 Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your version.
+
+Guardian image hygiene (15-minute pass, no running integration phase; unknown
+status blocks it) uses only `docker rmi` **without force**, never `prune -a`.
+It removes older semver-like tags only when a newer local tag exists, retaining
+the newest two per repository; dangling images qualify only after 24h. All images
+used by any container (even exited), created within 6h, floating tags (`latest`,
+`*-development`, `local-*`) and pinned globs are kept. Install seeds
+`~/.pi/agent/docker-guardian/pinned.txt` only when absent from
+`agent/docker-guardian/pinned.example.txt` (Mongo, Keycloak, Vault, Playwright, Ryuk).
+Review/add pins before enabling cleanup. Shared layers mean modest actual savings:
+about 1 GB on a 13.7 GB "reclaimable" report, not the reported total.
 
 ## What's in it
 
@@ -106,7 +117,7 @@ Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your ver
 | `loose-threads/` | Weekly audit of leftover worktrees, branches, stashes and Docker volumes. |
 | `pi-phase/`, `bin/pi-phase` | Wrapper for build and test commands with time limits, logs and a shared queue ordered by priority (`low`, `normal`, `high`), then first come first served. |
 | `bin/dev-doctor`, `dev-doctor.example.json` | Bounded diagnostics and safe, fused cleanup for old exited/label-owned containers and temporary browsers. |
-| `bin/docker-guardian` | macOS: checks that Docker Desktop answers every 2 minutes, restarts it within a budget, removes dead containers and old build cache, never prunes images. Run it from the launchd template in `launchd/`. |
+| `bin/docker-guardian` | macOS: checks that Docker Desktop answers every 2 minutes, restarts it within a budget, removes dead containers and old build cache, only removes superseded semver tags/dangling old images under the narrow rule below. Run it from the launchd template in `launchd/`. |
 | `bin/inbox-watch` | Polls a directory of files that parallel agent sessions use as messages; pair it with one `job_watch`. Set `INBOX_DIR`. |
 | `bin/gpt-meter` | Read-only spend meter for OpenAI usage from session logs. |
 | `launchd/` | Templates for the `docker-guardian` and `pi-cleanup` schedules (placeholders instead of my user name). |

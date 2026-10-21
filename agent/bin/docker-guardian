@@ -7,7 +7,7 @@
 #  - Not running at all => start it.
 #  - Hygiene every 15 min while healthy: remove exited/dead containers finished >20 min ago,
 #    prune unused networks older than 30 min, unused anonymous volumes, build cache above 8 GB.
-#    NEVER prunes images (pinned integration images must stay).
+#    Images: only superseded semver tags (keep newest 2) / dangling >24h; pinned/in-use/recent/floating stay.
 # Authorised (2026-10-20): "the agents need to be able to do what it needs to do".
 set -u
 # DOCKER_GUARDIAN_TEST_PATH/_STATE/_LOG exist only for the dry-run harness (docker-guardian/test/run-scenarios.sh).
@@ -31,6 +31,171 @@ dl(){ local t=$1; shift; "$@" & local p=$!; local end=$((SECONDS+t))
 # INFO_OK records whether the engine API answered, so the load deferral can tell a slow listing from an outage.
 healthy(){ INFO_OK=0; dl 20 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || return 1; INFO_OK=1; dl 25 docker ps -q >/dev/null 2>&1; }
 load1(){ sysctl -n vm.loadavg | awk '{print int($2)}'; }
+
+# Narrow image cleanup: no force/prune, fail closed on missing inventory or phase state.
+prune_superseded_images(){ python3 - "$S/pinned.txt" "$HOME/.pi/agent/bin/pi-phase" <<'PY'
+import datetime as dt
+import fnmatch
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+end = time.monotonic() + 45
+
+def run(cmd):
+    remaining = end - time.monotonic()
+    if remaining <= 0:
+        return None
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=min(10, remaining))
+        return p.stdout + p.stderr if p.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+def phases_safe():
+    text = run([sys.argv[2], 'status'])
+    if text is None:
+        return False
+    active = re.findall(r'^pi-phase: (\S+) .*elapsed=\d+s (?:running|orphan-group)$', text, re.M)
+    return (all(kind in ('build', 'test', 'ci') for kind in active)
+            and (bool(active) or 'pi-phase: no active phases' in text.splitlines()))
+
+def decode(output):
+    try:
+        return json.loads(output)
+    except (TypeError, ValueError):
+        return None
+
+def valid_id(value):
+    return isinstance(value, str) and bool(re.fullmatch(r'(?:sha256:)?[a-f0-9]{64}', value))
+
+def used_images():
+    output = run(['docker', 'ps', '-aq', '--no-trunc'])
+    if output is None:
+        return None
+    ids = output.splitlines()
+    if len(ids) > 500 or any(not re.fullmatch(r'[a-f0-9]{12,64}', cid) for cid in ids):
+        return None
+    if not ids:
+        return set()
+    output = run(['docker', 'inspect', '--format', '{{.Image}}', *ids])
+    if output is None:
+        return None
+    images = output.splitlines()
+    return set(images) if len(images) == len(ids) and all(valid_id(i) for i in images) else None
+
+def version(tag):
+    m = re.fullmatch(r'v?(\d+)\.(\d+)(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?', tag)
+    if not m:
+        return None
+    pre = tuple((0, int(p)) if p.isdigit() else (1, p) for p in (m[4] or '').split('.'))
+    return int(m[1]), int(m[2]), int(m[3] or 0), not bool(m[4]), pre
+
+def age(created):
+    try:
+        return (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(created.replace('Z', '+00:00'))).total_seconds()
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+def floating(tag):
+    return tag == 'latest' or tag.endswith('-development') or tag.startswith('local-')
+
+def main():
+    if not phases_safe():
+        print('images: skipped (integration running or phase state unknown)')
+        return
+    context = run(['docker', 'context', 'show'])
+    if (context is None or context.strip() not in ('default', 'desktop-linux')
+            or (os.environ.get('DOCKER_HOST') and not os.environ['DOCKER_HOST'].startswith('unix://'))):
+        print('images: skipped (not a verified local context)')
+        return
+    host = decode(run(['docker', 'context', 'inspect', context.strip(), '--format', '{{json .Endpoints.docker.Host}}']))
+    if not isinstance(host, str) or not host.startswith('unix://'):
+        print('images: skipped (not a local Unix endpoint)')
+        return
+    try:
+        pins = [line.strip() for line in Path(sys.argv[1]).read_text().splitlines()
+                if line.strip() and not line.lstrip().startswith('#')]
+    except OSError:
+        print('images: skipped (pin list unreadable)')
+        return
+    output = run(['docker', 'image', 'ls', '-aq', '--no-trunc'])
+    if output is None:
+        print('images: skipped (image inventory unavailable)')
+        return
+    ids = list(dict.fromkeys(output.splitlines()))
+    if len(ids) > 300 or any(not valid_id(i) for i in ids):
+        print('images: skipped (inventory invalid or exceeds 300-image budget)')
+        return
+    if not ids:
+        print('images: checked 0')
+        return
+    images = decode(run(['docker', 'image', 'inspect', *ids]))
+    used = used_images()
+    if (used is None or not isinstance(images, list) or len(images) != len(ids)
+            or any(not isinstance(i, dict) or not valid_id(i.get('Id')) for i in images)):
+        print('images: skipped (image/container inventory unknown)')
+        return
+    repositories = {}
+    for image in images:
+        tags = image.get('RepoTags') or []
+        if not isinstance(tags, list):
+            print('images: skipped (malformed tag inventory)')
+            return
+        for ref in tags:
+            if not isinstance(ref, str):
+                return
+            repo, _, tag = ref.rpartition(':')
+            value = version(tag)
+            if repo and value is not None and not floating(tag):
+                repositories.setdefault(repo, {})[ref] = value
+    keep = {ref for tags in repositories.values()
+            for ref in sorted(tags, key=lambda ref: (tags[ref], ref), reverse=True)[:2]}
+    candidates = []
+    for image in images:
+        iid, tags = image['Id'], image.get('RepoTags') or []
+        hours = age(image.get('Created')) / 3600
+        if (iid in used or hours < 6
+                or any(fnmatch.fnmatchcase(ref, pin) for ref in [iid, *tags] for pin in pins)):
+            continue
+        actual_tags = [ref for ref in tags if ref != '<none>:<none>']
+        if not actual_tags:
+            if hours > 24:
+                candidates.append((iid, iid))
+            continue
+        # A floating alias protects its whole image, not just that alias.
+        if any(floating(ref.rpartition(':')[2]) for ref in actual_tags):
+            continue
+        for ref in actual_tags:
+            repo, _, tag = ref.rpartition(':')
+            value = version(tag)
+            if value is not None and ref not in keep and any(v > value for v in repositories.get(repo, {}).values()):
+                candidates.append((ref, iid))
+    for ref, iid in candidates:
+        if not phases_safe():
+            print('images: stopped (integration/unknown phase state)')
+            break
+        current_used = used_images()
+        if current_used is None:
+            print('images: stopped (container inventory unknown)')
+            break
+        if iid in current_used:
+            continue
+        current = decode(run(['docker', 'image', 'inspect', ref]))
+        if not isinstance(current, list) or len(current) != 1 or current[0].get('Id') != iid:
+            continue  # Tag changed since the snapshot.
+        if run(['docker', 'rmi', ref]) is not None:
+            print('images: removed ' + ref + ' (' + iid + ')')
+        else:
+            print('images: kept ' + ref + ' (rmi refused/unknown)')
+
+main()
+PY
+}
 
 # single instance (a restart can take ~4 min, longer than the launchd interval)
 if ! mkdir "$S/lock.d" 2>/dev/null; then
@@ -69,6 +234,10 @@ if [ "${PLANNED:-0}" != 1 ] && healthy; then
   last=$(cat "$S/last-gc" 2>/dev/null || echo 0)
   if [ $((now-last)) -ge 900 ]; then
     echo "$now" > "$S/last-gc"; n=0
+    image_actions=$(dl 55 prune_superseded_images 2>&1)
+    image_exit=$?
+    while IFS= read -r action; do [ -z "$action" ] || log "$action"; done <<< "$image_actions"
+    [ "$image_exit" -eq 0 ] || log "images: failed/timeout exit=$image_exit (guardian continues)"
     for id in $(dl 30 docker ps -aq --filter status=exited --filter status=dead 2>/dev/null); do
       f=$(dl 10 docker inspect -f '{{.State.FinishedAt}}' "$id" 2>/dev/null) || continue
       t=$(date -j -u -f '%Y-%m-%dT%H:%M:%S' "${f%%.*}" +%s 2>/dev/null) || continue

@@ -1,0 +1,6 @@
+# Integration/base images: keep every tag. Add local globs as needed.
+mongo:*
+quay.io/keycloak/*
+hashicorp/vault:*
+mcr.microsoft.com/playwright:*
+testcontainers/ryuk:*

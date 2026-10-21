@@ -462,11 +462,16 @@ class AddendumTests(unittest.TestCase):
                                     cwd=SCRIPT.parents[2], env=env, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             config = home / '.pi/agent/dev-doctor.json'
+            pins = home / '.pi/agent/docker-guardian/pinned.txt'
             if first:
                 self.assertIn('owned_container_rules', json.loads(config.read_text()))
+                self.assertIn('mongo:*', pins.read_text())
+                self.assertIn('mcr.microsoft.com/playwright:*', pins.read_text())
+                pins.write_text('my-local-repo:*\n')
                 config.write_text('{"owned_container_rules":[]}')
             else:
                 self.assertEqual(config.read_text(), '{"owned_container_rules":[]}')
+                self.assertEqual(pins.read_text(), 'my-local-repo:*\n')
         self.assertTrue(os.access(home / '.pi/agent/bin/dev-doctor', os.X_OK))
         self.assertTrue((home / '.agents/skills/dev-machine-performance/SKILL.md').is_file())
 
