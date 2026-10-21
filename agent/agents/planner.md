@@ -28,4 +28,4 @@ Part 2:
 - `## Risks and open questions`: questions that need the user first, each marked BLOCKING; then other risks.
 
 ## Final reply (at most 1k characters)
-The plan path; the approach in 2 lines; BLOCKING questions (or "none"); the recommended implementer type: `implementer` for clear testable work, `careful-implementer` for behaviour-preserving, UI or text work, `grunt` for mechanical work, `opus-implementer` only with a named open design question.
+The plan path; the approach in 2 lines; BLOCKING questions (or "none"); the recommended implementer type: `implementer` for clear testable work, `careful-implementer` for behaviour-preserving, UI or text work, `grunt` for mechanical work, `opus-implementer` only with a named open design question. Then a `Status summary:` line (≤ 300 characters: approach and key decision) for the issue status block.

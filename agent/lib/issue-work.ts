@@ -5,7 +5,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 export type IssueState = "in-progress" | "in-review" | "blocked" | "paused" | "done" | "unknown";
@@ -301,7 +301,7 @@ export function statusStateIsHolding(value: string | undefined): boolean {
 	return !!value && /^(in progress|in review)\b/i.test(value);
 }
 
-const FIELD_ORDER = ["State", "Branch", "Scope", "Delivered", "Remaining", "Follow-ups"];
+const FIELD_ORDER = ["State", "Branch", "Scope", "Plan", "Delivered", "Remaining", "Follow-ups"];
 const fieldRe = (name: string) => new RegExp(`^\\s*\\*\\*${name.replace(/[-]/g, "\\-")}:\\*\\*`);
 
 function setField(lines: string[], name: string, value: string): void {
@@ -337,7 +337,7 @@ export function statusTemplate(state: IssueState, branch: string | undefined, no
 	].join("\n");
 }
 
-export interface StatusChange { state: IssueState; branch?: string; note?: string; pr?: string; claim?: boolean }
+export interface StatusChange { state: IssueState; branch?: string; note?: string; pr?: string; claim?: boolean; plan?: string }
 
 /**
  * Rewrite only the State (and Branch / PR) lines of an existing block, preserving every other
@@ -356,6 +356,8 @@ export function rewriteStatusBlock(existing: string | undefined, change: StatusC
 		if (!sameBranch) setField(lines, "Branch", change.branch);
 	}
 	if (change.pr) addPr(lines, change.pr, change.state === "done");
+	const plan = planLine(change.plan);
+	if (plan) setField(lines, "Plan", plan);
 	return lines.join("\n").trim();
 }
 
@@ -376,6 +378,14 @@ function addPr(lines: string[], pr: string, delivered: boolean): void {
 	const value = raw === "-" ? "" : raw;
 	const m = value.match(/^(.*)\(([^()]*)\)\s*$/);
 	lines[idx] = m ? `**Branch:** ${m[1].trim()} (${m[2].trim()}, ${pr})`.replace("( ,", "(") : `**Branch:** ${value ? `${value} ` : ""}(${pr})`;
+}
+
+const PLAN_MAX = 600;
+/** The plan summary collapsed to one line and capped at PLAN_MAX characters; undefined when empty. */
+function planLine(plan: string | undefined): string | undefined {
+	const t = (plan ?? "").replace(/\s+/g, " ").trim();
+	if (!t) return undefined;
+	return t.length > PLAN_MAX ? `${t.slice(0, PLAN_MAX - 1).trimEnd()}…` : t;
 }
 
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 300);
@@ -455,6 +465,8 @@ export interface Deps {
 	/** Per-issue cross-process lock; defaults to an flock held by issue-work-lock.py. */
 	lock?: IssueLocker;
 	lockTimeoutMs?: number;
+	/** Path of a plan file mentioning the issue under the session's git root; defaults to a bounded scan of .ai-work plan.md files. Never throws. */
+	findPlan?: (s: SessionInfo, repo: string, issue: number) => Promise<string | undefined>;
 }
 
 export interface SessionInfo { sessionId: string; sessionFile?: string; cwd: string; branch?: string; model?: string; pid: number }
@@ -921,7 +933,43 @@ export async function check(d: Deps, s: SessionInfo, a: { repo: string; issue: n
 	return result.text + await recordActivity(d, s, a.repo, a.issue, result);
 }
 
-export interface ClaimArgs { repo: string; issue: number; note?: string; force?: boolean }
+export interface ClaimArgs { repo: string; issue: number; note?: string; force?: boolean; plan?: string }
+
+const PLAN_MAX_DIRS = 50;
+const PLAN_MAX_BYTES = 256 * 1024;
+
+function mentionsIssue(text: string, repo: string, issue: number): boolean {
+	if (text.includes(issueUrl(repo, issue))) return true;
+	const escaped = repo.replace(/\W/g, "\\$&");
+	return new RegExp(`(?:^|[^\\w/#-])(?:${escaped})?#${issue}(?![\\w-])`, "im").test(text);
+}
+
+/** Cheap, bounded lookup of a plan file for the issue; any error means no plan. */
+async function defaultFindPlan(d: Deps, s: SessionInfo, repo: string, issue: number): Promise<string | undefined> {
+	try {
+		let root = s.cwd;
+		try {
+			const top = (await d.run("git", ["rev-parse", "--show-toplevel"], { timeout: 10000, cwd: s.cwd })).stdout.trim();
+			if (top) root = top;
+		} catch { /* not a git repo: use the cwd */ }
+		const base = join(root, ".ai-work");
+		const names = (await readdir(base, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name).sort().slice(0, PLAN_MAX_DIRS);
+		for (const name of names) {
+			const file = join(base, name, "plan.md");
+			try {
+				if ((await stat(file)).size > PLAN_MAX_BYTES) continue;
+				if (mentionsIssue(await readFile(file, "utf8"), repo, issue)) return file;
+			} catch { /* missing or unreadable plan: skip */ }
+		}
+	} catch { /* no .ai-work */ }
+	return undefined;
+}
+
+async function planReminder(d: Deps, s: SessionInfo, repo: string, issue: number): Promise<string> {
+	let found: string | undefined;
+	try { found = await (d.findPlan ? d.findPlan(s, repo, issue) : defaultFindPlan(d, s, repo, issue)); } catch { found = undefined; }
+	return found ? `\nPlan: ${found}` : "\nNo plan found for this issue: for non-trivial work run the `planner` agent first (skip for trivial/mechanical changes).";
+}
 
 /**
  * Claim an issue: refuse if another live session holds it; then assign @me, rewrite the status
@@ -966,14 +1014,14 @@ async function claimLocked(d: Deps, s: SessionInfo, a: ClaimArgs): Promise<strin
 	const fetched = activity.data ?? await step("gh issue view", () => fetchIssue(d, a.repo, a.issue));
 	checkClaimable(fetched);
 	await step("gh issue edit --add-assignee", () => d.run("gh", ["issue", "edit", String(a.issue), "--repo", a.repo, "--add-assignee", "@me"], { timeout: 60000 }));
-	const { data, text, out } = await writeRewritten(d, s, a.repo, a.issue, fetched, { state: "in-progress", branch: s.branch, note: a.note, claim: true }, checkClaimable);
+	const { data, text, out } = await writeRewritten(d, s, a.repo, a.issue, fetched, { state: "in-progress", branch: s.branch, note: a.note, claim: true, plan: a.plan }, checkClaimable);
 	await appendEvent(d, event(s, now(), { repo: a.repo, issue: a.issue, url: data.url, title: data.title, state: "in-progress", note: a.note }));
 	await mergeCache(d, a.repo, a.issue, { ...infoFrom(data, now()), statusState: statusStateOf(text) });
 	const recorded = await recordActivity(d, s, a.repo, a.issue, activity, true);
-	return `Claimed ${a.repo}#${a.issue} "${data.title}" (${data.url}): assigned @me, status In progress${s.branch ? ` on ${s.branch}` : ""}. ${out}\n${activity.text}${recorded}`;
+	return `Claimed ${a.repo}#${a.issue} "${data.title}" (${data.url}): assigned @me, status In progress${s.branch ? ` on ${s.branch}` : ""}. ${out}\n${activity.text}${recorded}${await planReminder(d, s, a.repo, a.issue)}`;
 }
 
-export interface UpdateArgs { repo: string; issue: number; state: IssueState; note?: string; pr?: string }
+export interface UpdateArgs { repo: string; issue: number; state: IssueState; note?: string; pr?: string; plan?: string }
 
 export async function update(d: Deps, s: SessionInfo, a: UpdateArgs): Promise<string> {
 	validate(a.repo, a.issue);
@@ -984,7 +1032,7 @@ export async function update(d: Deps, s: SessionInfo, a: UpdateArgs): Promise<st
 	if (a.state === "done" && (activity.hasNew || activity.unresolved))
 		return `${activity.text}\n${activity.unresolved ? RECENT_GATE : ACTIVITY_GATE}${await recordActivity(d, s, a.repo, a.issue, activity)}`;
 	const fetched = activity.data ?? await step("gh issue view", () => fetchIssue(d, a.repo, a.issue));
-	const { data, text, out } = await writeRewritten(d, s, a.repo, a.issue, fetched, { state: a.state, branch: s.branch, note: a.note, pr: a.pr });
+	const { data, text, out } = await writeRewritten(d, s, a.repo, a.issue, fetched, { state: a.state, branch: s.branch, note: a.note, pr: a.pr, plan: a.plan });
 	await appendEvent(d, event(s, now(), { repo: a.repo, issue: a.issue, url: data.url, title: data.title, state: a.state, note: a.note, pr: a.pr }));
 	await mergeCache(d, a.repo, a.issue, { ...infoFrom(data, now()), statusState: statusStateOf(text) });
 	const closeHint = a.state === "done" && data.state === "OPEN" ? " The issue is still open: close it explicitly with gh issue close (--reason completed and a closing comment) when its scope is delivered." : "";

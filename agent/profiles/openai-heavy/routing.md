@@ -35,7 +35,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 - Main session: Opus 5.5 medium by default (OpenAI-heavy: GPT-6.1 Sol high). Raise to high only for difficult design/debugging, then lower it.
 - `implementer` for clear, testable work; `careful-implementer` for behaviour-preserving changes; `opus-implementer` only when you can name the unresolved design question or hard-bug judgement.
-- Plan, then implement: once a request is decided to become an issue/task, run `planner` (high) to write `<repo>/.ai-work/<task>/plan.md`; read it, resolve BLOCKING questions, then hand the plan to the cheaper implementer it recommends. Skip the planner for trivial or mechanical changes (a known one-file edit, renames, bumps). The planner is read-only apart from that one file.
+- Plan, then implement: once a request is decided to become an issue/task, run `planner` (high) to write `<repo>/.ai-work/<task>/plan.md`; read it, resolve BLOCKING questions, then hand the plan to the cheaper implementer it recommends. Skip the planner for trivial or mechanical changes (a known one-file edit, renames, bumps). After accepting the plan, pass a 1–3 sentence approach summary as `issue_work update plan=...` (or on claim). The planner is read-only apart from that one file.
 - `cleanup-steward` performs post-work inventory and only explicitly authorised, safety-checked cleanup.
 - Cross-provider review: `reviewer` reviews GPT-written work; `sol-reviewer` or `second-opinion` reviews Claude-written work. Before merge run the `review` workflow.
 - Start a fresh parent session from a short `.ai-work/` handoff around ~600k tokens (hard ceiling 800k; see "Orchestrator context" in the global rules).

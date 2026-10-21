@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1200,4 +1200,67 @@ test("D: background close confirmation does not touch the ctx after shutdown", a
 	await Promise.all(background);
 	assert.equal(touches, before, "no status bar update after shutdown");
 	assert.equal(foldRegistry(await readEvents(deps())).get("o/r#3")!.state, "done", "the confirmed done is still recorded");
+});
+
+// ---------- plan reminder and plan summary ----------
+
+const writePlan = (root: string, name: string, text: string) => {
+	mkdirSync(join(root, ".ai-work", name), { recursive: true });
+	const file = join(root, ".ai-work", name, "plan.md");
+	writeFileSync(file, text);
+	return file;
+};
+const planRunner = (root: string): Runner => async (cmd, args, opts) =>
+	cmd === "git" && args[0] === "rev-parse" ? { stdout: `${root}\n`, stderr: "" } : fakeRun(cmd, args, opts);
+
+test("claim without a plan ends with the planner reminder", async () => {
+	const root = mkdtempSync(join(tmpdir(), "issue-work-plan-"));
+	try {
+		const out = await claim({ ...deps(), run: planRunner(root) }, session(), { repo: "o/r", issue: 5 });
+		assert.match(out, /\nNo plan found for this issue: .*`planner` agent first \(skip for trivial\/mechanical changes\)\.$/);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("claim names a matching plan file, and ignores plans for other issues", async () => {
+	const root = mkdtempSync(join(tmpdir(), "issue-work-plan-"));
+	try {
+		writePlan(root, "other", "Plan for #123 and o/r#1230");
+		const d = { ...deps(), run: planRunner(root) };
+		assert.doesNotMatch(await claim(d, session(), { repo: "o/r", issue: 12 }), /\nPlan: /, "#123 must not match #12");
+		const own = writePlan(root, "x", "# Plan\nIssue #5 approach");
+		assert.ok((await claim(d, session("s2", 112), { repo: "o/r", issue: 5 })).endsWith(`\nPlan: ${own}`));
+		const url = writePlan(root, "y", "see https://github.com/o/r/issues/77");
+		assert.ok((await claim(d, session("s3", 113), { repo: "o/r", issue: 77 })).endsWith(`\nPlan: ${url}`));
+		const qualified = writePlan(root, "z", "o/r#88 done");
+		assert.ok((await claim(d, session("s4", 114), { repo: "o/r", issue: 88 })).endsWith(`\nPlan: ${qualified}`));
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("claim uses an injected plan lookup and survives its failure", async () => {
+	assert.ok((await claim({ ...deps(), findPlan: async () => "/p/plan.md" }, session(), { repo: "o/r", issue: 5 })).endsWith("\nPlan: /p/plan.md"));
+	assert.match(await claim({ ...deps(), findPlan: async () => { throw new Error("boom"); } }, session("s2", 112), { repo: "o/r", issue: 6 }), /No plan found/);
+});
+
+test("plan param writes or replaces the Plan field after Scope and keeps other lines", () => {
+	const base = "## Status\n**State:** In progress\n**Branch:** b\n**Scope:** s\n**Delivered:** Nothing yet.\n**Custom:** keep";
+	const added = rewriteStatusBlock(base, { state: "in-progress", plan: "Do  A\nthen B" });
+	assert.equal(added, "## Status\n**State:** In progress\n**Branch:** b\n**Scope:** s\n**Plan:** Do A then B\n**Delivered:** Nothing yet.\n**Custom:** keep");
+	const replaced = rewriteStatusBlock(added, { state: "in-review", plan: "New approach" });
+	assert.match(replaced, /\*\*Scope:\*\* s\n\*\*Plan:\*\* New approach\n\*\*Delivered:\*\*/);
+	assert.equal(replaced.match(/\*\*Plan:\*\*/g)!.length, 1);
+	assert.match(replaced, /\*\*Custom:\*\* keep/);
+});
+
+test("plan is truncated at 600 characters and absent when not given", () => {
+	const long = rewriteStatusBlock("## Status\n**Scope:** s", { state: "paused", plan: `  ${"a".repeat(700)}  ` });
+	const line = long.split("\n").find((l) => l.startsWith("**Plan:**"))!;
+	assert.equal(line, `**Plan:** ${"a".repeat(599)}…`);
+	assert.doesNotMatch(rewriteStatusBlock(undefined, { state: "in-progress", branch: "b", claim: true }), /Plan/);
+	assert.doesNotMatch(rewriteStatusBlock("## Status\n**Scope:** s", { state: "paused", plan: "   " }), /Plan/);
+});
+
+test("update with plan writes the Plan field to GitHub", async () => {
+	issueBody = `Body\n\n<!-- agent-status:start -->\n## Status\n**State:** In progress\n**Branch:** feat/x\n**Scope:** s\n<!-- agent-status:end -->`;
+	await update(deps(), session(), { repo: "o/r", issue: 5, state: "in-progress", plan: "Approach X" });
+	assert.match(calls.find((c) => c.cmd === "python3")!.file!, /\*\*Scope:\*\* s\n\*\*Plan:\*\* Approach X/);
 });
