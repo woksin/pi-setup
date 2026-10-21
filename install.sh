@@ -32,8 +32,8 @@ for f in settings.json models.json subagents.json provider-fallback.json mcp-ada
 done
 [[ -e $PI/npm/package.json ]] || put agent/npm-package.json "$PI/npm/package.json"
 for s in skills/*/; do tree "$s" "$HOME/.agents/$s"; done
-mkdir -p "$PI/skills"
+[[ $DRY == --dry-run ]] || mkdir -p "$PI/skills"
 [[ -e $PI/skills/ai-work-lifecycle || $DRY == --dry-run ]] || ln -s "$HOME/.agents/skills/ai-work-lifecycle" "$PI/skills/ai-work-lifecycle"
 tree tools/ai-work-lifecycle "$HOME/.local/share/ai-work-lifecycle"
 put tools/bin/ai-work-lifecycle "$HOME/.local/bin/ai-work-lifecycle"
-echo "Done. Install the npm packages: (cd $PI/npm && npm install), then restart pi."
+echo "Done. Install the npm packages: (cd $PI/npm && npm install --legacy-peer-deps), then restart pi."
