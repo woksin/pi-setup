@@ -91,6 +91,7 @@ def main():
         loose = Path("agent/loose-threads")
         paths = [Path(p) for p in TEMPLATES] + [loose / "README.md"]
         paths += list(loose.glob("*.py")) + list(loose.glob("*.sh"))
+        paths += list(Path("agent/agents").glob("*.md"))
         for path in paths:
             if path.is_file():
                 text = path.read_text()
