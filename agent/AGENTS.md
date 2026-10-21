@@ -243,6 +243,11 @@ Plans, handovers, session notes, continuation prompts, status boards, scratch an
 - When a worktree's branch is merged to `origin/<default>` (pushed is not merged), remove the worktree in the same session using the skill's checks (`git worktree remove` without `--force`, then `git worktree prune`). If the worktree stays, delete its `bin/`, `obj/` and `node_modules/` once nothing tracked is inside and no process holds them; they are the bulk of the disk use.
 - `pi-cleanup` runs daily, and every 30 minutes when free space is below 40 GiB. It is a backstop, not a substitute for cleaning up at the end of the task.
 
+## Maintaining and publishing this setup
+
+- This agent setup (`~/.pi/agent`, its extensions, skills and local packages) is published so others can use it. When a change to it is finished and working: commit it in its own repository (local packages), run `sync.sh` in the `pi-setup` checkout, review the diff (gitleaks runs; no secrets, personal paths or names), commit, push, and cut a dated release (`gh release create vYYYY.MM.DD[.n]`, notes listing the user-facing changes). A package published to npm also gets a version bump, a CHANGELOG entry and a GitHub release when its code changed; `publish.yml` publishes it through trusted publishing.
+- Only the session that owns the change publishes, and related changes go out together in one release. Without publishing rights (you installed someone else's setup), skip this.
+
 ## Destructive-action safety
 
 - A request to clean up is not authorization to skip checks. Never blanket-delete `.ai-work/`, `git clean -fdx`, or force-remove a worktree; preserve uncommitted and untracked work and unreferenced commits.
