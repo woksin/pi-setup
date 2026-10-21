@@ -256,7 +256,7 @@ class IntegrationBurst:
                 self.docker_percent = read_docker_memory_percent(deadline)
             if self.docker_percent is None or self.docker_percent >= self.settings["max_docker_mem_percent"]:
                 return configured
-            return self.settings["slots"]
+            return max(configured, self.settings["slots"])
         except (OSError, ValueError, subprocess.SubprocessError):
             return configured  # Burst is strictly fail-closed, unlike memory admission.
 
@@ -916,12 +916,12 @@ def run(args, state, configuration, output=None):
                     time.sleep(min(TICK, max(0, deadline - time.monotonic())))
                     continue
             heavy, integration = settings
-            if burst and args.kind != "ci":
+            if burst and admission_args.kind == "integration":
                 integration = burst.effective(integration, deadline)
             held = claim(state, slot_paths(state, admission_args.kind, heavy, integration, ci_key),
                          deadline, lambda: bool(cancelled[0]),
                          token if waiter_fd is not None else None, (heavy, integration), admission,
-                         integration if burst and args.kind != "ci" else None)
+                         integration if burst and admission_args.kind == "integration" else None)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
                 return 128 + cancelled[0]
