@@ -4,7 +4,6 @@
 # settings.json, models.json and the other JSON configs are only written when absent.
 # agent/launchd/*.plist are templates and are not installed; see README.
 set -euo pipefail
-cd "$(dirname "$0")"
 PI="$HOME/.pi/agent"
 TS=$(date +%Y%m%d-%H%M%S)
 DRY=
@@ -15,11 +14,13 @@ while (( $# )); do
     --dry-run) DRY=--dry-run; shift ;;
     --user|--repos-root)
       [[ $# -ge 2 && -n $2 && $2 != --* ]] || { echo "Missing value for $1" >&2; exit 1; }
-      if [[ $1 == --user ]]; then GITHUB_USER=$2; else REPOS_ROOT=$2; fi
+      if [[ $1 == --user ]]; then GITHUB_USER=$2
+      else REPOS_ROOT=$2; [[ $REPOS_ROOT == /* || $REPOS_ROOT == "~"* ]] || REPOS_ROOT="$PWD/$REPOS_ROOT"; fi
       shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+cd "$(dirname "$0")"
 SETTINGS=$(python3 setup-user.py config "$PI/user.json" "$GITHUB_USER" "$REPOS_ROOT")
 TMP=
 trap '[[ -z $TMP ]] || rm -rf "$TMP"' EXIT

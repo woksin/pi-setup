@@ -52,8 +52,8 @@ def resolve(path, user, root):
             print(f"Repositories root [{root}]: ", end="", file=sys.stderr, flush=True)
             root = input().strip() or root
     root = os.path.abspath(os.path.expanduser(root))
-    if any(c in root for c in "\n\r\x00"):
-        raise ValueError("Repositories root must be a single-line directory path.")
+    if any(c in root for c in "\n\r\x00\"'$`\\"):
+        raise ValueError("Repositories root must be a single-line path without quotes, $, backticks or backslashes.")
     return {"githubUser": user, "reposRoot": root}
 
 
