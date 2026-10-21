@@ -5,6 +5,7 @@ metadata guards against a dead supervisor whose descendant closed inherited FDs.
 """
 import argparse
 from collections import deque
+from datetime import datetime
 import errno
 import fcntl
 import hashlib
@@ -15,7 +16,10 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import random
+import re
 import time
 import uuid
 
@@ -39,16 +43,372 @@ def safe_label(value):
     return value
 
 
-def config(path):
-    if not path.exists():
-        return 2, 1
-    data = json.loads(path.read_text())
-    if set(data) != {"heavy_slots", "integration_slots"}:
-        raise ValueError("config.json needs exactly heavy_slots and integration_slots")
-    heavy, integration = data["heavy_slots"], data["integration_slots"]
-    if any(type(n) is not int or n < 1 or n > 32 for n in (heavy, integration)):
-        raise ValueError("slot limits must be integers from 1 to 32")
-    return heavy, integration
+class PhaseConfig(tuple):
+    """Keep the slot-pair API while carrying optional performance settings."""
+    def __new__(cls, heavy, integration, options):
+        result = super().__new__(cls, (heavy, integration))
+        result.options = options
+        return result
+
+
+def config(path, *, notes=None):
+    def warn(message):
+        if notes is None or message not in notes:
+            note(message)
+            if notes is not None:
+                notes.add(message)
+
+    defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
+                    container_test_detection="hint", cold_worktree_hint=True, memory_admission=False)
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(data, dict):
+            raise ValueError("expected an object")
+    except (ValueError, OSError) as exc:
+        warn(f"invalid config.json ({exc}); using defaults")
+        data = {}
+    for key in data.keys() - defaults.keys():
+        warn(f"unknown config key {key}; ignored")
+    values = defaults.copy()
+    for key, default in defaults.items():
+        value = data.get(key, default)
+        if key in ("heavy_slots", "integration_slots"):
+            valid = type(value) is int and 1 <= value <= 32
+        elif key == "msbuild_max_cpu":
+            valid = value == "auto" or type(value) is int and value >= 0
+        elif key == "memory_admission":
+            values[key] = memory_admission_config(value, warn)
+            continue
+        elif key == "container_test_detection":
+            valid = value in ("off", "hint", "promote")
+        else:
+            valid = type(value) is bool
+        if valid:
+            values[key] = value
+        else:
+            warn(f"invalid {key}; using default {default!r}")
+    heavy = values.pop("heavy_slots")
+    integration = values.pop("integration_slots")
+    return PhaseConfig(heavy, integration, values)
+
+
+def memory_admission_config(value, warn=None):
+    warn = warn or note
+    defaults = dict(min_free_percent=30, min_swap_free_mb=500)
+    if value is False:
+        return False
+    if value is True:
+        return defaults
+    if isinstance(value, dict):
+        for key in value.keys() - defaults.keys() - {"integration_burst"}:
+            warn(f"unknown memory_admission key {key}; ignored")
+        settings = {key: value.get(key, default) for key, default in defaults.items()}
+        if (all(type(n) in (int, float) and 0 <= n <= sys.float_info.max for n in settings.values())
+                and settings["min_free_percent"] <= 100):
+            burst = integration_burst_config(value.get("integration_burst"), warn)
+            if burst:
+                settings["integration_burst"] = burst
+            return settings
+    warn("invalid memory_admission; using default False")
+    return False
+
+
+def integration_burst_config(value, warn):
+    if value is None or value is False:
+        return None
+    defaults = dict(slots=2, min_free_percent=50, max_load_per_core=1.5,
+                    max_docker_mem_percent=70)
+    if isinstance(value, dict):
+        for key in value.keys() - defaults.keys():
+            warn(f"unknown integration_burst key {key}; ignored")
+        settings = {key: value.get(key, default) for key, default in defaults.items()}
+        if (type(settings["slots"]) is int and 1 <= settings["slots"] <= 32
+                and all(type(n) in (int, float) and 0 <= n <= sys.float_info.max
+                        for key, n in settings.items() if key != "slots")
+                and settings["min_free_percent"] <= 100 and settings["max_docker_mem_percent"] <= 100):
+            return settings
+    warn("invalid integration_burst; burst disabled")
+    return None
+
+
+def parse_macos_memory(pressure, swap):
+    free = re.search(r"System-wide memory free percentage:\s*(\d+(?:\.\d+)?)%", pressure)
+    swap_free = re.search(r"\bfree\s*=\s*(\d+(?:\.\d+)?)([KMGT])\b", swap)
+    if not free or not swap_free:
+        raise ValueError("unrecognized macOS memory output")
+    percent = float(free[1])
+    megabytes = float(swap_free[1]) * {"K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 ** 2}[swap_free[2]]
+    if not 0 <= percent <= 100 or not math.isfinite(megabytes):
+        raise ValueError("invalid macOS memory values")
+    total = re.search(r"\btotal\s*=\s*(\d+(?:\.\d+)?)[KMGT]\b", swap)
+    return percent, None if total and float(total[1]) == 0 else megabytes
+
+
+def parse_linux_memory(text):
+    values = {}
+    for line in text.splitlines():
+        fields = line.split()
+        if fields and fields[0] in ("MemAvailable:", "MemTotal:", "SwapFree:"):
+            if len(fields) != 3 or fields[2] != "kB":
+                raise ValueError("unrecognized /proc/meminfo units")
+            values[fields[0][:-1]] = int(fields[1])
+    total, available, swap = (values[key] for key in ("MemTotal", "MemAvailable", "SwapFree"))
+    if total <= 0 or not 0 <= available <= total or swap < 0:
+        raise ValueError("invalid /proc/meminfo values")
+    return available * 100 / total, swap / 1024
+
+
+def read_host_memory(deadline):
+    if sys.platform == "darwin":
+        outputs = []
+        for command in (["memory_pressure", "-Q"], ["sysctl", "-n", "vm.swapusage"]):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("memory probe queue deadline expired")
+            outputs.append(subprocess.run(command, capture_output=True, text=True, check=True,
+                                          timeout=min(1, remaining)).stdout)
+        return parse_macos_memory(*outputs)
+    if sys.platform.startswith("linux"):
+        with open("/proc/meminfo") as stream:
+            return parse_linux_memory(stream.read(65536))
+    raise ValueError("memory admission is unsupported on this platform")
+
+
+class MemoryAdmission:
+    """Per-phase, at-most-five-second cache; all probes run outside the coordinator."""
+    def __init__(self, thresholds):
+        self.thresholds = thresholds
+        self.checked = None
+        self.sample = None
+        self.noted = False
+        self.failure_noted = False
+
+    def reading(self, deadline):
+        now = time.monotonic()
+        if self.checked is None or now - self.checked >= 5:
+            self.checked = now
+            try:
+                self.sample = read_host_memory(deadline)
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+                self.sample = None
+                if not self.failure_noted:
+                    note(f"memory measurement failed ({exc}); admitting (fail-open)")
+                    self.failure_noted = True
+        return self.sample
+
+    def reason(self, deadline):
+        self.reading(deadline)
+        if self.sample is None:
+            return None
+        free, swap_free = self.sample
+        minimum = self.thresholds["min_free_percent"]
+        if free < minimum:
+            return f"memory free {free:g}% < {minimum:g}%"
+        minimum = self.thresholds["min_swap_free_mb"]
+        if swap_free is not None and swap_free < minimum:
+            return f"swap free {swap_free:g} MB < {minimum:g} MB"
+        return None
+
+    def waiting(self, reason):
+        if not self.noted:
+            note(f"waiting: {reason}")
+            self.noted = True
+
+
+def read_docker_memory_percent(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Docker memory probe queue deadline expired")
+    result = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{.MemPerc}}"],
+                            capture_output=True, text=True, check=True, timeout=min(5, remaining))
+    total = 0
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        if not line.strip().endswith("%"):
+            raise ValueError("unrecognized Docker memory percentage")
+        value = float(line.strip()[:-1])
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("invalid Docker memory percentage")
+        total += value
+    return total
+
+
+class IntegrationBurst:
+    def __init__(self, admission, settings):
+        self.admission = admission
+        self.settings = settings
+        self.docker_checked = None
+        self.docker_percent = None
+
+    def effective(self, configured, deadline):
+        try:
+            sample = self.admission.reading(deadline)
+            if sample is None or sample[0] < self.settings["min_free_percent"]:
+                return configured
+            load = os.getloadavg()[1]
+            if not math.isfinite(load) or load > (os.cpu_count() or 1) * self.settings["max_load_per_core"]:
+                return configured
+            now = time.monotonic()
+            if self.docker_checked is None or now - self.docker_checked >= 30:
+                self.docker_checked = now
+                self.docker_percent = None
+                self.docker_percent = read_docker_memory_percent(deadline)
+            if self.docker_percent is None or self.docker_percent >= self.settings["max_docker_mem_percent"]:
+                return configured
+            return max(configured, self.settings["slots"])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return configured  # Burst is strictly fail-closed, unlike memory admission.
+
+
+def lease_running(path, prior, live):
+    """Caller holds the coordinator; account for both locked and orphan leases."""
+    fd = lock_file(path)
+    if fd is None:
+        return True
+    try:
+        entry = metadata(path.with_suffix(".json"))
+        return entry != prior.get(path) or entry.get("unreadable") or entry.get("pgid") in live
+    finally:
+        unlock(fd)
+
+
+def burst_available(state, available, prior, live, ceiling):
+    active = sum(bool(lease_running(path, prior, live)) for path in state.glob("integration-*.lock")
+                 if path not in available)
+    free = sorted(path for path in available if path.name.startswith("integration-"))
+    allowed = set(free[:max(0, ceiling - active)])
+    return {path: fd for path, fd in available.items()
+            if not path.name.startswith("integration-") or path in allowed}
+
+
+def phases_running(state, available, prior, live):
+    """Caller holds the coordinator; do not mistake our tentative locks for owners."""
+    return any(lease_running(path, prior, live) for path in state.glob("*.lock")
+               if path.name.startswith(("heavy-", "integration-", "ci-")) and path not in available)
+
+
+def msbuild_cap(value, heavy):
+    return max(2, (os.cpu_count() or 1) // heavy) if value == "auto" else value
+
+
+def shim_environment(directory, cap):
+    shim = directory / "dotnet"
+    shim.write_bytes((ROOT / "dotnet-shim.sh").read_bytes())
+    shim.chmod(0o700)
+    (directory / "test-runner.py").write_bytes((ROOT / "dotnet-test-runner.py").read_bytes())
+    env = os.environ.copy()
+    original_path = os.environ.get("PATH", os.defpath)
+    inherited_shim = env.get("PI_PHASE_SHIM_DIR")
+    if inherited_shim:
+        # Nested phases must not select their parent's shim as the real dotnet.
+        original_path = os.pathsep.join(part for part in original_path.split(os.pathsep)
+                                        if os.path.realpath(part or ".") != inherited_shim)
+    env.update(PI_PHASE_ORIGINAL_PATH=original_path,
+               PI_PHASE_SHIM_DIR=str(directory.resolve()), PI_PHASE_MSBUILD_MAX_CPU=str(cap),
+               PI_PHASE_PYTHON=sys.executable)
+    env["PATH"] = str(directory) + os.pathsep + env["PI_PHASE_ORIGINAL_PATH"]
+    return env
+
+
+def test_fingerprint(cwd, command):
+    return hashlib.sha1("\0".join([os.path.realpath(cwd), *command]).encode()).hexdigest()
+
+
+def begin_test_attribution(state, token):
+    """A generation change remembers even a peer that exits between Docker polls."""
+    paths = [p for p in state.glob("*.lock")
+             if p.name.startswith(("heavy-", "integration-", "ci-"))]
+    prior = {p: metadata(p.with_suffix(".json")) for p in paths}
+    competitors = [entry for entry in prior.values() if entry.get("token") != token
+                   and entry.get("kind") not in ("build", "ci")]
+    live = live_groups(0.5) if any(entry.get("pgid") for entry in competitors) else set()
+    solo = live is not None
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        for path in state.glob("*.lock"):
+            if not path.name.startswith(("heavy-", "integration-", "ci-")):
+                continue
+            entry = metadata(path.with_suffix(".json"))
+            if entry.get("token") == token or entry.get("kind") in ("build", "ci"):
+                continue
+            fd = lock_file(path)
+            busy = fd is None
+            if fd is not None:
+                unlock(fd)
+            if (busy or entry.get("unreadable") or entry != prior.get(path, {})
+                    or live is None or entry.get("pgid") in live):
+                solo = False
+        save(state / "test-generation.json", {"token": token})
+    return token if solo else None
+
+
+def record_container_test(state, fingerprint, attribution=None):
+    # A later peer invalidates attribution even after its lease has disappeared.
+    if attribution is None or metadata(state / "test-generation.json").get("token") != attribution:
+        return
+    # Separate from admission: a slow hint must never hold the coordinator.
+    with open(state / "container-tests.guard", "a+b") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        known = metadata(state / "container-tests.json")
+        known[fingerprint] = True
+        save(state / "container-tests.json", known)
+
+
+def container_test_poller(state, fingerprint, started, stopped, attribution=None):
+    """Read-only Docker probe in a daemon; neither join nor delay the phase."""
+    while not stopped.is_set():
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "label=org.testcontainers=true",
+                 "--format", "{{.ID}} {{.CreatedAt}}"],
+                capture_output=True, text=True, timeout=5, check=True)
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) < 4:
+                    continue
+                created = datetime.strptime(" ".join(fields[1:4]),
+                                            "%Y-%m-%d %H:%M:%S %z").timestamp()
+                if created > started and not stopped.is_set():
+                    note("hint: this test phase started Testcontainers containers; CI usually "
+                         "runs these as integration — use --kind integration or CI's filter")
+                    record_container_test(state, fingerprint, attribution)
+                    return
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass  # Detection is best effort, including missing/unavailable Docker.
+        if stopped.wait(15):
+            return
+
+
+def cold_worktree(cwd):
+    """At most 1000 entries, three levels, no symlink traversal or git subprocess."""
+    cwd = Path(cwd).resolve()
+    for top in (cwd, *cwd.parents):
+        if (top / ".git").is_file():
+            break
+        if (top / ".git").is_dir():
+            return False
+    else:
+        return False
+    pending = [(top, 0)]
+    budget = 1000
+    try:
+        while pending:
+            directory, depth = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    budget -= 1
+                    if budget < 0:
+                        return False  # Inconclusive, not necessarily cold.
+                    if entry.name in ("node_modules", ".git") or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if entry.name == "obj":
+                        return False
+                    if depth < 2:
+                        pending.append((Path(entry.path), depth + 1))
+    except OSError:
+        return False
+    return True
 
 
 def lock_file(path):
@@ -283,13 +643,22 @@ def ordered_candidate(state, available, token, cancelled):
     return []
 
 
-def claim(state, candidates, deadline, cancelled, waiter=None, limits=None):
+def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None,
+          integration_ceiling=None):
     """One bounded admission scan; kernel locks and metadata identity are checked atomically."""
     paths = {path for candidate in candidates for path in candidate}
     if waiter is not None:
         paths.update(state / f"integration-{n}.lock" for n in range(limits[1]))
+    reason = admission.reason(deadline) if admission and any(
+        path.name.startswith("heavy-") for path in paths) else None
+    snapshot_paths = paths.copy()
+    if reason:
+        snapshot_paths.update(path for path in state.glob("*.lock")
+                              if path.name.startswith(("heavy-", "integration-", "ci-")))
+    if integration_ceiling is not None:
+        snapshot_paths.update(state.glob("integration-*.lock"))
     prior = {}
-    for path in paths:
+    for path in snapshot_paths:
         if cancelled() or time.monotonic() >= deadline:
             return None
         prior[path] = metadata(path.with_suffix(".json"))
@@ -302,6 +671,7 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None):
     if coordinator is None:
         return None  # A busy coordinator is retried by the outer queue loop.
     available = {}
+    memory_held = False
     try:
         for path in sorted(paths):
             if cancelled() or time.monotonic() >= deadline:
@@ -316,11 +686,16 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None):
                 unlock(fd)
                 continue
             available[path] = fd
+        if reason and phases_running(state, available, prior, live):
+            memory_held = True
+            return None
+        eligible = (burst_available(state, available, prior, live, integration_ceiling)
+                    if integration_ceiling is not None else available)
         if waiter is not None:
-            candidate = ordered_candidate(state, available, waiter,
+            candidate = ordered_candidate(state, eligible, waiter,
                                           lambda: cancelled() or time.monotonic() >= deadline)
         else:
-            candidate = next((c for c in candidates if all(p in available for p in c)), [])
+            candidate = next((c for c in candidates if all(p in eligible for p in c)), [])
         if candidate and not cancelled() and time.monotonic() < deadline:
             if waiter is not None:
                 (state / "waiters" / f"{waiter}.json").unlink(missing_ok=True)
@@ -329,6 +704,8 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None):
         for fd in available.values():
             unlock(fd)
         unlock(coordinator)
+        if memory_held:
+            admission.waiting(reason)
     return None
 
 
@@ -489,7 +866,9 @@ def run(args, state, configuration, output=None):
 
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     ci_key = (args.repo, args.pr, args.commit)
-    deadline = time.monotonic() + args.queue_timeout
+    queued = time.monotonic()
+    deadline = queued + args.queue_timeout
+    long_queue_hint = False
     next_heartbeat = 0
     cancelled = [None]
 
@@ -506,23 +885,43 @@ def run(args, state, configuration, output=None):
     safe = False
     registered = False
     waiter_fd = None
+    shim_dir = None
+    detector_stopped = threading.Event()
+    fingerprint = test_fingerprint(os.getcwd(), command)
+    admission_args = argparse.Namespace(**vars(args))
     try:
+        config_notes = set()
+        settings = config(configuration, notes=config_notes)
+        options = settings.options
+        admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
+        burst_settings = options["memory_admission"].get("integration_burst") if admission else None
+        burst = IntegrationBurst(admission, burst_settings) if burst_settings else None
+        if (args.kind == "test" and options["container_test_detection"] == "promote"
+                and metadata(state / "container-tests.json").get(fingerprint) is True):
+            admission_args.kind = "integration"
+            note("recorded container test: also claiming an integration permit (container_test_detection)")
         while True:
             if cancelled[0]:
                 note("cancelled while queued")
                 return 128 + cancelled[0]
+            if not long_queue_hint and time.monotonic() - queued > 600:
+                note(f"long queue ({int(time.monotonic() - queued)}s): run dev-doctor to look for contention")
+                long_queue_hint = True
             if time.monotonic() >= deadline:
                 note(f"queue timeout ({args.queue_timeout:g}s); command not started")
                 return 75
             if not registered:
-                registered, waiter_fd = register_waiter(state, args, token)
+                registered, waiter_fd = register_waiter(state, admission_args, token)
                 if not registered:
                     time.sleep(min(TICK, max(0, deadline - time.monotonic())))
                     continue
-            heavy, integration = config(configuration)
-            held = claim(state, slot_paths(state, args.kind, heavy, integration, ci_key),
+            heavy, integration = settings
+            if burst and admission_args.kind == "integration":
+                integration = burst.effective(integration, deadline)
+            held = claim(state, slot_paths(state, admission_args.kind, heavy, integration, ci_key),
                          deadline, lambda: bool(cancelled[0]),
-                         token if waiter_fd is not None else None, (heavy, integration))
+                         token if waiter_fd is not None else None, (heavy, integration), admission,
+                         integration if burst and admission_args.kind == "integration" else None)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
                 return 128 + cancelled[0]
@@ -544,15 +943,28 @@ def run(args, state, configuration, output=None):
                 note(f"queued kind={args.kind} label={args.label} remaining={max(0, int(deadline-now))}s")
                 next_heartbeat = now + HEARTBEAT
             time.sleep(min(QUEUE_TICK + random.uniform(0, 0.5), max(0, deadline-now)))
+            settings = config(configuration, notes=config_notes)
         if cancelled[0]:
             note("cancelled after admission; command not started")
             return 128 + cancelled[0]
+        child_env = None
+        cap = msbuild_cap(options["msbuild_max_cpu"], heavy)
+        if cap and args.kind in ("build", "test", "integration"):
+            try:
+                shim_dir = tempfile.TemporaryDirectory(prefix="dotnet-shim-", dir=state)
+                child_env = shim_environment(Path(shim_dir.name), cap)
+            except OSError as exc:
+                note(f"msbuild shim unavailable ({exc}); running uncapped")
+            else:
+                note(f"msbuild cap -m:{cap} (msbuild_max_cpu)")
+        if options["cold_worktree_hint"] and args.kind in ("build", "test") and cold_worktree(os.getcwd()):
+            note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
         read_gate, write_gate = os.pipe()
         try:
             launcher = [sys.executable, str(Path(__file__).resolve()), "_launch", str(read_gate), "--", *command]
             output_options = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
             proc = subprocess.Popen(launcher, pass_fds=[read_gate, *(fd for _, fd in held)],
-                                    start_new_session=True, **output_options)
+                                    start_new_session=True, env=child_env, **output_options)
             os.close(read_gate)
             read_gate = -1
             publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, cwd=os.getcwd(),
@@ -560,6 +972,8 @@ def run(args, state, configuration, output=None):
             if cancelled[0]:
                 note("cancelled before execution; command not started")
                 return 128 + cancelled[0]
+            attribution = begin_test_attribution(state, token) if args.kind in ("test", "integration") else None
+            detection_started = time.time()
             os.write(write_gate, b"1")
             started = time.monotonic()  # No execution budget consumed waiting for a permit.
         finally:
@@ -567,6 +981,10 @@ def run(args, state, configuration, output=None):
                 os.close(read_gate)
             os.close(write_gate)
         note(f"running kind={args.kind} label={args.label} pid={proc.pid} timeout={args.timeout:g}s")
+        if args.kind == "test" and options["container_test_detection"] != "off":
+            threading.Thread(target=container_test_poller,
+                             args=(state, fingerprint, detection_started, detector_stopped, attribution),
+                             daemon=True).start()
         next_heartbeat = started + HEARTBEAT
         while True:
             if cancelled[0]:
@@ -601,6 +1019,7 @@ def run(args, state, configuration, output=None):
         note(f"finished kind={args.kind} label={args.label} exit={return_code}")
         return return_code
     finally:
+        detector_stopped.set()
         if waiter_fd is not None:
             deregister_waiter(state, token, waiter_fd)
         # A failed launch sees EOF at its gate. An unexpected exception during
@@ -614,6 +1033,8 @@ def run(args, state, configuration, output=None):
             safe = not group_alive({"pgid": proc.pid})
         if held:
             release(state, held, token, safe or proc is None)
+        if shim_dir is not None:
+            shim_dir.cleanup()
         signal.signal(signal.SIGINT, old_int)
         signal.signal(signal.SIGTERM, old_term)
 

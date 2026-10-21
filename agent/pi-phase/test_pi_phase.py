@@ -6,6 +6,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+from datetime import datetime, timezone
 import time
 import unittest
 from types import SimpleNamespace
@@ -26,6 +28,13 @@ class PhaseTests(unittest.TestCase):
         self.root = Path(self.owned.name)
         self.state = self.root / "state"
         self.config = self.root / "config.json"
+        # Default hint probes must never reach the host's Docker daemon.
+        self.fake_bin = self.root / "fake-bin"
+        self.fake_bin.mkdir()
+        self.executable(self.fake_bin / "docker", "#!/bin/sh\nexit 1\n")
+        environment = patch.dict(os.environ, PATH=str(self.fake_bin) + os.pathsep + os.environ["PATH"])
+        environment.start()
+        self.addCleanup(environment.stop)
         self.children = []
         self.addCleanup(self.finish_children)
 
@@ -115,6 +124,573 @@ class PhaseTests(unittest.TestCase):
         if held:
             self.addCleanup(lambda: [os.close(fd) for _, fd in held])
         return held
+
+    def executable(self, path, content):
+        path.write_text(content)
+        path.chmod(0o700)
+        return path
+
+    def configure(self, **options):
+        self.config.write_text(json.dumps(dict(heavy_slots=2, integration_slots=1, **options)))
+
+    def fake_docker(self, created):
+        stamp = datetime.fromtimestamp(created, timezone.utc).strftime("%Y-%m-%d %H:%M:%S %z UTC")
+        self.executable(self.fake_bin / "docker", "#!/bin/sh\nprintf '%s\\n' 'container " + stamp + "'\n")
+
+    def test_performance_config_defaults_and_auto(self):
+        settings = pi_phase.config(self.config)
+        self.assertEqual(settings, (2, 1))
+        self.assertEqual(settings.options, dict(msbuild_max_cpu=0, container_test_detection="hint",
+                                                cold_worktree_hint=True, memory_admission=False))
+        for cores, slots, expected in ((12, 2, 6), (12, 4, 3), (1, 4, 2), (None, 2, 2)):
+            with self.subTest(cores=cores, slots=slots), patch.object(pi_phase.os, "cpu_count", return_value=cores):
+                self.assertEqual(pi_phase.msbuild_cap("auto", slots), expected)
+        self.assertEqual(pi_phase.msbuild_cap(7, 2), 7)
+        self.assertEqual(pi_phase.msbuild_cap(0, 2), 0)
+
+    def test_config_invalid_values_and_unknown_keys_fall_back(self):
+        for value in (-1, True, "bad", 2.5, None, [], {}):
+            with self.subTest(value=value):
+                self.config.write_text(json.dumps(dict(heavy_slots=0, integration_slots="1",
+                     msbuild_max_cpu=value, container_test_detection=value, cold_worktree_hint=value, unknown=4)))
+                with patch.object(pi_phase, "note") as note:
+                    settings = pi_phase.config(self.config)
+                self.assertEqual(settings, (2, 1))
+                self.assertEqual(settings.options["msbuild_max_cpu"], 0)
+                self.assertEqual(settings.options["container_test_detection"], "hint")
+                self.assertEqual(settings.options["cold_worktree_hint"], value if type(value) is bool else True)
+                self.assertTrue(note.called)
+        for text in ("[1]", "null", "{"):
+            self.config.write_text(text)
+            with patch.object(pi_phase, "note") as note:
+                self.assertEqual(pi_phase.config(self.config), (2, 1))
+                note.assert_called_once()
+        self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
+        self.assertEqual(pi_phase.config(self.config).options,
+                         dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False))
+
+    def test_dotnet_shim_insertion_and_passthrough(self):
+        # Real shell execution, including spaces, empty arguments and a shim PATH alias.
+        real = self.root / "real bin"
+        real.mkdir()
+        self.executable(real / "dotnet", "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
+        shim = self.root / "shim"
+        shim.mkdir()
+        alias = self.root / "alias"
+        alias.symlink_to(shim, target_is_directory=True)
+        original = str(alias) + os.pathsep + str(real) + os.pathsep + os.environ["PATH"]
+        with patch.dict(os.environ, PATH=original):
+            env = pi_phase.shim_environment(shim, 3)
+        for subcommand in ("build", "test", "publish", "pack", "msbuild", "restore"):
+            for prefix in ([], ["--diagnostics"]):
+                args = [*prefix, subcommand, "a b", "", "--no-build"]
+                result = subprocess.run([str(shim / "dotnet"), *args], env=env,
+                                        capture_output=True, text=True, timeout=3)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = [*prefix, subcommand, "-m:3", "a b", "", "--no-build"]
+                self.assertEqual(result.stdout.splitlines(), [f"<{arg}>" for arg in expected])
+        cases = [["test", flag] for flag in ("-m", "-M:2", "/m", "/M:4", "-maxcpucount",
+                 "-MaxCpuCount:8", "/MAXCPUCOUNT:2", "--maxcpucount=6")]
+        cases += [[], ["--info"], ["run", "build"], ["app.dll"], ["--version"], ["TEST", "x"]]
+        for args in cases:
+            with self.subTest(args=args):
+                result = subprocess.run([str(shim / "dotnet"), *args], env=env,
+                                        capture_output=True, text=True, timeout=3)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = [f"<{arg}>" for arg in args] if args else ["<>"]
+                self.assertEqual(result.stdout.splitlines(), expected)
+        nested = self.root / "nested-shim"
+        nested.mkdir()
+        with patch.dict(os.environ, env):
+            nested_env = pi_phase.shim_environment(nested, 2)
+        result = subprocess.run([str(nested / "dotnet"), "build"], env=nested_env,
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["<build>", "<-m:2>"])
+        env["PI_PHASE_ORIGINAL_PATH"] = str(alias)
+        result = subprocess.run([str(shim / "dotnet"), "build"], env=env,
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 127, result.stderr)
+
+    def test_shim_reaches_script_dotnet_and_is_phase_private(self):
+        self.configure(msbuild_max_cpu=4, container_test_detection="off")
+        self.executable(self.fake_bin / "dotnet", "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
+        code, out = self.done(self.run_phase(kind="build", command=["sh", "-c", "dotnet build 'a b'"]))
+        self.assertEqual(code, 0, out)
+        self.assertIn("msbuild cap -m:4 (msbuild_max_cpu)", out)
+        self.assertIn("<build>\n<-m:4>\n<a b>", out)
+        self.assertEqual(list(self.state.glob("dotnet-shim-*")), [])
+        for kind in ("test", "integration", "ci"):
+            extra = ("--repo", "repo", "--pr", "1", "--commit", "abc") if kind == "ci" else ()
+            code, out = self.done(self.run_phase(kind=kind, command=["dotnet", "test"], extra=extra))
+            self.assertEqual(code, 0, out)
+            self.assertEqual("msbuild cap" in out, kind != "ci")
+            self.assertEqual("<-m:4>" in out, kind != "ci")
+        self.configure(msbuild_max_cpu=0, container_test_detection="off")
+        code, out = self.done(self.run_phase(command=["dotnet", "test"]))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("msbuild cap", out)
+        self.assertNotIn("<-m:", out)
+
+    def test_container_hint_records_fingerprint_once_using_fake_docker(self):
+        self.configure(container_test_detection="hint", cold_worktree_hint=False)
+        self.fake_docker(time.time() + 2)
+        command = [sys.executable, "-c", "import time;time.sleep(.4)"]
+        code, out = self.done(self.run_phase(command=command))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("hint: this test phase started Testcontainers containers"), 1)
+        fingerprint = pi_phase.test_fingerprint(os.getcwd(), command)
+        self.assertEqual(json.loads((self.state / "container-tests.json").read_text()), {fingerprint: True})
+        alias = self.root / "cwd-alias"
+        alias.symlink_to(Path.cwd(), target_is_directory=True)
+        self.assertEqual(pi_phase.test_fingerprint(alias, command), fingerprint)
+        self.assertNotEqual(pi_phase.test_fingerprint(os.getcwd(), [*command, "different"]), fingerprint)
+
+    def test_container_detection_off_old_missing_failed_and_timeout(self):
+        self.state.mkdir()
+        self.fake_docker(time.time() - 60)
+        stopped = threading.Event()
+        # One probe, then stop without waiting 15 seconds.
+        with patch.object(stopped, "wait", return_value=True) as wait, patch.object(pi_phase, "note") as note:
+            pi_phase.container_test_poller(self.state, "old", time.time(), stopped)
+            wait.assert_called_once_with(15)
+            note.assert_not_called()
+        for error in (FileNotFoundError(), subprocess.CalledProcessError(1, "docker"),
+                      subprocess.TimeoutExpired("docker", 5)):
+            with patch.object(pi_phase.subprocess, "run", side_effect=error) as run, \
+                    patch.object(stopped, "wait", return_value=True), patch.object(pi_phase, "note") as note:
+                pi_phase.container_test_poller(self.state, "failed", time.time(), stopped)
+                self.assertEqual(run.call_args.kwargs["timeout"], 5)
+                note.assert_not_called()
+        self.configure(container_test_detection="off")
+        self.fake_docker(time.time() + 2)
+        code, out = self.done(self.run_phase())
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Testcontainers", out)
+        self.assertFalse((self.state / "container-tests.json").exists())
+
+    def test_recorded_test_promotes_and_claims_both_permits_atomically(self):
+        self.configure(container_test_detection="promote", cold_worktree_hint=False)
+        self.fake_docker(time.time() + 2)
+        command = [sys.executable, "-c", "import time;time.sleep(.4)"]
+        code, out = self.done(self.run_phase(command=command))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("also claiming", out)  # First discovery only hints.
+        self.assertTrue((self.state / "container-tests.json").exists())
+        blocker = pi_phase.lock_file(self.state / "integration-0.lock")
+        try:
+            job = self.run_phase(command=command)
+            self.wait_for(lambda: bool(list((self.state / "waiters").glob("*.json"))))
+            waiter = json.loads(next((self.state / "waiters").glob("*.json")).read_text())
+            self.assertEqual(waiter["kind"], "integration")
+            for index in range(2):
+                fd = pi_phase.lock_file(self.state / f"heavy-{index}.lock")
+                self.assertIsNotNone(fd)  # No heavy lease held while integration is blocked.
+                pi_phase.unlock(fd)
+        finally:
+            pi_phase.unlock(blocker)
+        self.wait_for(lambda: (self.state / "integration-0.json").exists())
+        owners = [json.loads(path.read_text()) for path in self.state.glob("heavy-*.json")]
+        integration = json.loads((self.state / "integration-0.json").read_text())
+        self.assertTrue(any(owner["token"] == integration["token"] for owner in owners))
+        code, out = self.done(job)
+        self.assertEqual(code, 0, out)
+        self.assertIn("also claiming an integration permit", out)
+
+    def test_cold_worktree_hint_bounded_depth_and_skips(self):
+        top = self.root / "worktree"
+        top.mkdir()
+        (top / ".git").write_text("gitdir: /unused")
+        child = top / "one" / "two"
+        child.mkdir(parents=True)
+        self.assertTrue(pi_phase.cold_worktree(child))
+        ignored = top / "node_modules" / "obj"
+        ignored.mkdir(parents=True)
+        (top / "external").symlink_to(ignored, target_is_directory=True)
+        self.assertTrue(pi_phase.cold_worktree(child))
+        deep = child / "three" / "obj"
+        deep.mkdir(parents=True)
+        self.assertTrue(pi_phase.cold_worktree(child))  # Depth four is not scanned.
+        (child / "obj").mkdir()
+        self.assertFalse(pi_phase.cold_worktree(child))
+        (child / "obj").rmdir()
+        self.configure(container_test_detection="off")
+        with patch.object(pi_phase, "cold_worktree", return_value=True), patch.object(pi_phase, "note") as note:
+            code = pi_phase.main(["run", "--kind", "build", "--label", "cold", "--", sys.executable, "-c", "pass"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, 0)
+        self.assertTrue(any("warm lane worktree" in str(call) for call in note.call_args_list))
+        (top / ".git").unlink()
+        (top / ".git").mkdir()
+        self.assertFalse(pi_phase.cold_worktree(child))
+        self.configure(cold_worktree_hint=False, container_test_detection="off")
+        with patch.object(pi_phase, "cold_worktree") as cold:
+            self.assertEqual(pi_phase.main(["run", "--kind", "test", "--label", "disabled", "--",
+                                           sys.executable, "-c", "pass"],
+                                          state=self.state, configuration=self.config), 0)
+            cold.assert_not_called()
+
+    def test_long_queue_hint_once_without_waiting_ten_minutes(self):
+        self.configure(container_test_detection="off")
+        args = SimpleNamespace(label="queue", timeout=1, queue_timeout=900, approved_long_timeout=True,
+            kind="build", priority="normal", repo=None, pr=None, commit=None,
+            command=[sys.executable, "-c", "pass"], vstest_hang_minutes=None, vstest_confirmed=False)
+        # Queue starts at zero, then ticks past 600 twice and finally times out.
+        with patch.object(pi_phase.time, "monotonic", side_effect=[0, 601, 601, 601, 601, 602, 602, 602, 901]), \
+                patch.object(pi_phase.time, "sleep"), patch.object(pi_phase, "claim", return_value=None), \
+                patch.object(pi_phase, "note") as note:
+            self.assertEqual(pi_phase.run(args, self.state, self.config), 75)
+        hints = [call.args[0] for call in note.call_args_list if call.args[0].startswith("long queue")]
+        self.assertEqual(hints, ["long queue (601s): run dev-doctor to look for contention"])
+
+    def test_memory_admission_config_defaults_validation_and_overrides(self):
+        self.assertIs(pi_phase.config(self.config).options["memory_admission"], False)
+        for value, expected in ((True, dict(min_free_percent=30, min_swap_free_mb=500)),
+                ({}, dict(min_free_percent=30, min_swap_free_mb=500)),
+                (dict(min_free_percent=20), dict(min_free_percent=20, min_swap_free_mb=500)),
+                (dict(min_free_percent=0, min_swap_free_mb=0), dict(min_free_percent=0, min_swap_free_mb=0))):
+            with self.subTest(value=value):
+                self.configure(memory_admission=value)
+                self.assertEqual(pi_phase.config(self.config).options["memory_admission"], expected)
+        for value in (None, 1, "true", [], dict(min_free_percent=-1), dict(min_free_percent=101),
+                      dict(min_free_percent=True), dict(min_swap_free_mb="500"),
+                      dict(min_swap_free_mb=-1), dict(min_swap_free_mb=float("inf"))):
+            with self.subTest(value=value):
+                self.configure(memory_admission=value)
+                with patch.object(pi_phase, "note") as note:
+                    self.assertIs(pi_phase.config(self.config).options["memory_admission"], False)
+                note.assert_called_once_with("invalid memory_admission; using default False")
+        self.configure(memory_admission=dict(unknown=1))
+        with patch.object(pi_phase, "note") as note:
+            self.assertEqual(pi_phase.config(self.config).options["memory_admission"]["min_free_percent"], 30)
+            note.assert_called_once_with("unknown memory_admission key unknown; ignored")
+
+    def test_memory_parsers_for_macos_and_linux(self):
+        pressure = "System-wide memory free percentage: 25%\n"
+        for free, expected in (("512.00M", 512), ("1.50G", 1536), ("2048K", 2), ("0.5T", 524288)):
+            with self.subTest(free=free):
+                self.assertEqual(pi_phase.parse_macos_memory(pressure,
+                    f"total = 6144.00M  used = 4096.00M  free = {free} (encrypted)"), (25, expected))
+        meminfo = "MemTotal: 1000000 kB\nMemAvailable: 400000 kB\nSwapFree: 1024000 kB\nIgnored: 3 kB\n"
+        self.assertEqual(pi_phase.parse_linux_memory(meminfo), (40, 1000))
+        for text in ("", "MemTotal: 0 kB\nMemAvailable: 0 kB\nSwapFree: 0 kB",
+                     meminfo.replace("MemAvailable: 400000 kB", "MemAvailable: 400000 MB")):
+            with self.subTest(text=text), self.assertRaises((ValueError, KeyError)):
+                pi_phase.parse_linux_memory(text)
+        for pressure, swap in (("bad", "bad"), ("System-wide memory free percentage: 101%", "free = 0M")):
+            with self.assertRaises(ValueError):
+                pi_phase.parse_macos_memory(pressure, swap)
+
+    def test_host_memory_readers_are_bounded_and_select_platform(self):
+        outputs = [SimpleNamespace(stdout="System-wide memory free percentage: 31%"),
+                   SimpleNamespace(stdout="total = 2G used = 1G free = 1G")]
+        with patch.object(pi_phase.sys, "platform", "darwin"), \
+                patch.object(pi_phase.subprocess, "run", side_effect=outputs) as run:
+            self.assertEqual(pi_phase.read_host_memory(time.monotonic() + 3), (31, 1024))
+            self.assertEqual([call.args[0] for call in run.call_args_list],
+                             [["memory_pressure", "-Q"], ["sysctl", "-n", "vm.swapusage"]])
+            for call in run.call_args_list:
+                self.assertLessEqual(call.kwargs["timeout"], 1)
+                self.assertTrue(call.kwargs["check"])
+        text = "MemTotal: 1000 kB\nMemAvailable: 500 kB\nSwapFree: 1024 kB\n"
+        from unittest.mock import mock_open
+        with patch.object(pi_phase.sys, "platform", "linux"), patch("builtins.open", mock_open(read_data=text)) as stream:
+            self.assertEqual(pi_phase.read_host_memory(time.monotonic() + 1), (50, 1))
+            stream.assert_called_once_with("/proc/meminfo")
+            stream().read.assert_called_once_with(65536)
+
+    def test_memory_admission_cache_thresholds_and_fail_open(self):
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase.time, "monotonic", side_effect=[0, 4.99, 5, 10]), \
+                patch.object(pi_phase, "read_host_memory", side_effect=[(20, 1000), (30, 499), (30, 500)]) as read:
+            self.assertEqual(admission.reason(100), "memory free 20% < 30%")
+            self.assertEqual(admission.reason(100), "memory free 20% < 30%")
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual(admission.reason(100), "swap free 499 MB < 500 MB")
+            self.assertIsNone(admission.reason(100))
+            self.assertEqual(read.call_count, 3)
+        for error in (OSError("unavailable"), ValueError("bad output"), KeyError("MemAvailable"),
+                      subprocess.TimeoutExpired("memory_pressure", 1)):
+            with self.subTest(error=error):
+                admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+                with patch.object(pi_phase, "read_host_memory", side_effect=error), patch.object(pi_phase, "note") as note:
+                    self.assertIsNone(admission.reason(time.monotonic() + 1))
+                    self.assertIsNone(admission.reason(time.monotonic() + 1))
+                    note.assert_called_once()
+                    self.assertIn("admitting (fail-open)", note.call_args.args[0])
+
+    def memory_claim(self, kind="build", admission=None, cleanup=True):
+        self.state.mkdir(exist_ok=True)
+        held = pi_phase.claim(self.state, pi_phase.slot_paths(self.state, kind, 2, 1, ("repo", "1", "sha")),
+                              time.monotonic() + 2, lambda: False, admission=admission)
+        if held and cleanup:
+            self.addCleanup(lambda: [os.close(fd) for _, fd in held])
+        return held
+
+    def test_memory_guard_defers_without_holding_permits_and_prints_once(self):
+        self.state.mkdir()
+        running = pi_phase.lock_file(self.state / "heavy-0.lock")
+        self.addCleanup(os.close, running)
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        def sample(_deadline):
+            coordinator = pi_phase.lock_file(self.state / "coordinator.lock")
+            self.assertIsNotNone(coordinator)  # Never measure under the coordinator.
+            pi_phase.unlock(coordinator)
+            return 20, 1000
+        with patch.object(pi_phase, "read_host_memory", side_effect=sample), patch.object(pi_phase, "note") as note:
+            self.assertIsNone(self.memory_claim(admission=admission))
+            self.assertIsNone(self.memory_claim(kind="integration", admission=admission))
+            note.assert_called_once_with("waiting: memory free 20% < 30%")
+        for name in ("heavy-1.lock", "integration-0.lock"):
+            fd = pi_phase.lock_file(self.state / name)
+            self.assertIsNotNone(fd)
+            pi_phase.unlock(fd)
+        admission.checked = None
+        with patch.object(pi_phase, "read_host_memory", return_value=(50, 1000)):
+            self.assertTrue(self.memory_claim(admission=admission))
+
+    def test_memory_starvation_guard_accounts_for_ci_and_orphan_phases(self):
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase, "read_host_memory", return_value=(10, 0)):
+            held = self.memory_claim(admission=admission, cleanup=False)  # Idle host still starts one phase.
+        self.assertTrue(held)
+        for _, fd in held:
+            os.close(fd)
+        ci = pi_phase.lock_file(self.state / "ci-running.lock")
+        try:
+            with patch.object(pi_phase, "read_host_memory", return_value=(10, 0)):
+                self.assertIsNone(self.memory_claim(admission=admission))
+                # CI watchers never acquire heavy permits or invoke memory probes.
+                with patch.object(pi_phase, "read_host_memory") as read:
+                    held = self.memory_claim(kind="ci", admission=admission, cleanup=False)
+                    self.assertTrue(held)
+                    for _, fd in held:
+                        os.close(fd)
+                    read.assert_not_called()
+        finally:
+            pi_phase.unlock(ci)
+        orphan = self.state / "heavy-9.json"  # Includes slots outside a lowered ceiling.
+        orphan.write_text(json.dumps(dict(pgid=4242, token="orphan")))
+        (self.state / "heavy-9.lock").touch()
+        with patch.object(pi_phase, "live_groups", return_value={4242}):
+            self.assertIsNone(self.memory_claim(admission=admission))
+        with patch.object(pi_phase, "live_groups", return_value=set()):
+            self.assertTrue(self.memory_claim(admission=admission))
+
+    def test_memory_measurement_failure_admits_even_with_another_phase(self):
+        self.state.mkdir()
+        running = pi_phase.lock_file(self.state / "heavy-0.lock")
+        self.addCleanup(os.close, running)
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase, "read_host_memory", side_effect=OSError("failed")), patch.object(pi_phase, "note") as note:
+            self.assertTrue(self.memory_claim(admission=admission))
+            self.assertIn("fail-open", note.call_args.args[0])
+
+    def test_macos_without_swap_skips_swap_threshold_but_linux_does_not(self):
+        reading = pi_phase.parse_macos_memory("System-wide memory free percentage: 80%",
+                                              "total = 0.00M used = 0.00M free = 0.00M")
+        self.assertEqual(reading, (80, None))
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase, "read_host_memory", return_value=reading):
+            self.assertIsNone(admission.reason(time.monotonic() + 2))
+        admission.checked = None
+        with patch.object(pi_phase, "read_host_memory", return_value=(80, 0)):
+            self.assertEqual(admission.reason(time.monotonic() + 2), "swap free 0 MB < 500 MB")
+
+    def test_config_and_memory_failure_notes_are_deduplicated_for_a_phase(self):
+        self.config.write_text('{"heavy_slots": 0, "memory_admission": "bad"}')
+        notes = set()
+        with patch.object(pi_phase, "note") as note:
+            for _ in range(3):
+                pi_phase.config(self.config, notes=notes)
+            self.assertEqual(note.call_count, 2)
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase.time, "monotonic", side_effect=[0, 6, 12]), \
+                patch.object(pi_phase, "read_host_memory", side_effect=OSError("failed")) as read, \
+                patch.object(pi_phase, "note") as note:
+            for _ in range(3):
+                self.assertIsNone(admission.reason(100))
+            self.assertEqual(read.call_count, 3)
+            note.assert_called_once()
+
+    def test_missing_or_unreadable_shim_runs_uncapped(self):
+        self.configure(msbuild_max_cpu=4, container_test_detection="off")
+        for error in (FileNotFoundError("shim missing"), PermissionError("shim unreadable")):
+            with self.subTest(error=error), patch.object(pi_phase, "shim_environment", side_effect=error), \
+                    patch.object(pi_phase, "note") as note:
+                self.assertEqual(pi_phase.main(["run", "--kind", "build", "--label", "fallback", "--",
+                                               sys.executable, "-c", "pass"],
+                                              state=self.state, configuration=self.config), 0)
+                warnings = [call.args[0] for call in note.call_args_list if "running uncapped" in call.args[0]]
+                self.assertEqual(len(warnings), 1)
+        self.assertEqual(list(self.state.glob("dotnet-shim-*")), [])
+
+    def test_attribution_rejects_existing_and_short_lived_test_peers(self):
+        self.state.mkdir()
+        peer_lock = self.state / "heavy-1.lock"
+        peer = pi_phase.lock_file(peer_lock)
+        try:
+            pi_phase.save(peer_lock.with_suffix(".json"), dict(kind="integration", token="peer"))
+            self.assertIsNone(pi_phase.begin_test_attribution(self.state, "own"))
+        finally:
+            pi_phase.unlock(peer)
+            peer_lock.with_suffix(".json").unlink()
+        attribution = pi_phase.begin_test_attribution(self.state, "own")
+        self.assertEqual(attribution, "own")
+        # A peer begins and ends entirely between the owner's Docker polls.
+        pi_phase.begin_test_attribution(self.state, "short-peer")
+        self.fake_docker(time.time() + 2)
+        with patch.object(pi_phase, "note") as note:
+            pi_phase.container_test_poller(self.state, "fingerprint", time.time(), threading.Event(), attribution)
+            note.assert_called_once()
+        self.assertFalse((self.state / "container-tests.json").exists())
+        attribution = pi_phase.begin_test_attribution(self.state, "solo")
+        pi_phase.record_container_test(self.state, "solo-fingerprint", attribution)
+        self.assertEqual(pi_phase.metadata(self.state / "container-tests.json"), {"solo-fingerprint": True})
+
+    def test_test_shim_skips_assemblies_and_nearest_testing_platform_config(self):
+        self.executable(self.fake_bin / "dotnet", "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
+        shim = self.root / "safe-shim"
+        shim.mkdir()
+        env = pi_phase.shim_environment(shim, 3)
+        child = self.root / "nested"
+        child.mkdir()
+        def invoke(args, capped):
+            result = subprocess.run([str(shim / "dotnet"), *args], cwd=child, env=env,
+                                    capture_output=True, text=True, timeout=3)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual("<-m:3>" in result.stdout, capped, result.stdout)
+        for args, capped in ((["test", "assembly.dll"], False), (["test", "ASSEMBLY.EXE"], False),
+                             (["build", "assembly.dll"], True), (["test", "--flag.dll"], True),
+                             (["test", "project.csproj"], True)):
+            invoke(args, capped)
+        (self.root / "global.json").write_text('{"test":{"runner":"Microsoft.Testing.Platform"}}')
+        invoke(["test", "project.csproj"], False)
+        (child / "global.json").write_text('{"sdk":{"version":"10.0.100"}}')
+        invoke(["test", "project.csproj"], True)
+        (child / "global.json").write_text('{')
+        invoke(["test", "project.csproj"], False)
+
+    def test_integration_burst_config_is_opt_in_and_validated(self):
+        self.configure(memory_admission=True)
+        self.assertNotIn("integration_burst", pi_phase.config(self.config).options["memory_admission"])
+        self.configure(memory_admission=dict(integration_burst={}))
+        expected = dict(slots=2, min_free_percent=50, max_load_per_core=1.5, max_docker_mem_percent=70)
+        self.assertEqual(pi_phase.config(self.config).options["memory_admission"]["integration_burst"], expected)
+        for value in (True, [], dict(slots=0), dict(slots=33), dict(slots=True), dict(min_free_percent=101),
+                      dict(max_load_per_core=-1), dict(max_docker_mem_percent=float("nan")),
+                      dict(max_docker_mem_percent=101)):
+            with self.subTest(value=value):
+                self.configure(memory_admission=dict(integration_burst=value))
+                with patch.object(pi_phase, "note") as note:
+                    options = pi_phase.config(self.config).options["memory_admission"]
+                    self.assertNotIn("integration_burst", options)
+                    self.assertEqual(options["min_free_percent"], 30)
+                    note.assert_called_once_with("invalid integration_burst; burst disabled")
+
+    def test_docker_burst_reader_sums_percentages_and_is_bounded(self):
+        with patch.object(pi_phase.subprocess, "run", return_value=SimpleNamespace(stdout="20.0%\n 30.5%\n")) as run:
+            self.assertEqual(pi_phase.read_docker_memory_percent(time.monotonic() + 10), 50.5)
+            self.assertEqual(run.call_args.args[0], ["docker", "stats", "--no-stream", "--format", "{{.MemPerc}}"])
+            self.assertLessEqual(run.call_args.kwargs["timeout"], 5)
+            self.assertTrue(run.call_args.kwargs["check"])
+        for text in ("bad", "NaN%", "-2%", "inf%"):
+            with self.subTest(text=text), patch.object(pi_phase.subprocess, "run", return_value=SimpleNamespace(stdout=text)):
+                with self.assertRaises(ValueError):
+                    pi_phase.read_docker_memory_percent(time.monotonic() + 10)
+
+    def integration_burst(self, sample=(60, 1000)):
+        return pi_phase.IntegrationBurst(SimpleNamespace(reading=lambda deadline: sample),
+            dict(slots=2, min_free_percent=50, max_load_per_core=1.5, max_docker_mem_percent=70))
+
+    def test_burst_requires_all_three_thresholds_and_uses_five_minute_load(self):
+        for free, load, docker, expected in ((50, 12, 69.9, 2), (49.9, 0, 0, 1),
+                                           (80, 12.1, 0, 1), (80, 0, 70, 1), (80, 0, 99, 1)):
+            with self.subTest(free=free, load=load, docker=docker), \
+                    patch.object(pi_phase.os, "getloadavg", return_value=(999, load, 999)), \
+                    patch.object(pi_phase.os, "cpu_count", return_value=8), \
+                    patch.object(pi_phase, "read_docker_memory_percent", return_value=docker):
+                self.assertEqual(self.integration_burst((free, None)).effective(1, 1000), expected)
+        with patch.object(pi_phase.os, "getloadavg", return_value=(0, 1.5, 0)), \
+                patch.object(pi_phase.os, "cpu_count", return_value=None), \
+                patch.object(pi_phase, "read_docker_memory_percent", return_value=0):
+            self.assertEqual(self.integration_burst().effective(1, 1000), 2)
+
+    def test_burst_fails_closed_and_caches_docker_for_thirty_seconds(self):
+        with patch.object(pi_phase.os, "getloadavg", return_value=(0, 0, 0)):
+            self.assertEqual(self.integration_burst(None).effective(1, 1000), 1)
+            for error in (OSError("missing Docker"), ValueError("bad stats"), subprocess.TimeoutExpired("docker", 5)):
+                burst = self.integration_burst()
+                with patch.object(pi_phase.time, "monotonic", side_effect=[0, 29.99, 30]), \
+                        patch.object(pi_phase, "read_docker_memory_percent", side_effect=[error, 20]) as read:
+                    self.assertEqual(burst.effective(1, 1000), 1)
+                    self.assertEqual(burst.effective(1, 1000), 1)
+                    self.assertEqual(read.call_count, 1)
+                    self.assertEqual(burst.effective(1, 1000), 2)
+                    self.assertEqual(read.call_count, 2)
+            burst = self.integration_burst()
+            with patch.object(pi_phase.time, "monotonic", side_effect=[0, 29.99, 30]), \
+                    patch.object(pi_phase, "read_docker_memory_percent", side_effect=[20, 80]) as read:
+                self.assertEqual(burst.effective(1, 1000), 2)
+                self.assertEqual(burst.effective(1, 1000), 2)
+                self.assertEqual(burst.effective(1, 1000), 1)
+                self.assertEqual(read.call_count, 2)
+        with patch.object(pi_phase.os, "getloadavg", side_effect=OSError("no load average")):
+            self.assertEqual(self.integration_burst().effective(1, 1000), 1)
+
+    def test_burst_reduction_counts_running_overflow_without_preemption(self):
+        self.state.mkdir()
+        owners = []
+        def acquire(ceiling, kind="integration"):
+            held = pi_phase.claim(self.state, pi_phase.slot_paths(self.state, kind, 2, ceiling, ()),
+                                  time.monotonic() + 2, lambda: False, integration_ceiling=ceiling)
+            if held:
+                owners.extend(held)
+            return held
+        def close(held):
+            for path, fd in held:
+                os.close(fd)
+                owners.remove((path, fd))
+        try:
+            first, second = acquire(2), acquire(2)
+            self.assertTrue(first)
+            self.assertTrue(second)
+            close(first)
+            self.assertIsNone(acquire(1))  # integration-0 is free, but overflow still consumes the ceiling.
+            self.assertIsNone(pi_phase.lock_file(self.state / "integration-1.lock"))
+            build = acquire(1, "build")  # Pressure reduction does not block ordinary heavy work.
+            self.assertTrue(build)
+            close(build)
+            close(second)
+            self.assertTrue(acquire(1))
+        finally:
+            close(owners[:])
+
+    def test_burst_reduction_counts_orphan_integration_leases(self):
+        self.state.mkdir()
+        (self.state / "integration-1.lock").touch()
+        pi_phase.save(self.state / "integration-1.json", dict(pgid=4242, kind="integration"))
+        candidates = pi_phase.slot_paths(self.state, "integration", 2, 1, ())
+        with patch.object(pi_phase, "live_groups", return_value={4242}):
+            self.assertIsNone(pi_phase.claim(self.state, candidates, time.monotonic() + 2, lambda: False,
+                                            integration_ceiling=1))
+        with patch.object(pi_phase, "live_groups", return_value=set()):
+            held = pi_phase.claim(self.state, candidates, time.monotonic() + 2, lambda: False, integration_ceiling=1)
+            self.assertTrue(held)
+            for _, fd in held:
+                os.close(fd)
+
+    def test_run_uses_burst_ceiling_and_existing_atomic_integration_admission(self):
+        self.configure(memory_admission=dict(integration_burst={}), container_test_detection="off")
+        with patch.object(pi_phase, "read_host_memory", return_value=(80, None)), \
+                patch.object(pi_phase.os, "getloadavg", return_value=(0, 0, 0)), \
+                patch.object(pi_phase, "read_docker_memory_percent", return_value=0), \
+                patch.object(pi_phase, "claim", wraps=pi_phase.claim) as claim:
+            self.assertEqual(pi_phase.main(["run", "--kind", "integration", "--label", "burst", "--",
+                                           sys.executable, "-c", "pass"],
+                                          state=self.state, configuration=self.config), 0)
+            self.assertEqual(claim.call_args.args[-1], 2)
+            self.assertEqual(claim.call_args.args[-3], (2, 2))
 
     def test_fifo_including_equal_timestamps_and_sequence(self):
         with patch.object(pi_phase.time, "time", return_value=100):
@@ -320,7 +896,7 @@ class PhaseTests(unittest.TestCase):
         job.send_signal(signal.SIGTERM)
         self.assertEqual(self.done(job)[0], 143)
         self.assertEqual(list((self.state / "waiters").glob("*.json")), [])
-        job, marker = self.patched_phase("pi_phase.config = lambda path: (_ for _ in ()).throw(ValueError('broken config'))")
+        job, marker = self.patched_phase("pi_phase.config = lambda path, **kwargs: (_ for _ in ()).throw(ValueError('broken config'))")
         code, out = self.done(job)
         self.assertEqual(code, 125, out)
         self.assertFalse(marker.exists())
