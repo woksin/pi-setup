@@ -141,7 +141,7 @@ class PhaseTests(unittest.TestCase):
         settings = pi_phase.config(self.config)
         self.assertEqual(settings, (2, 1))
         self.assertEqual(settings.options, dict(msbuild_max_cpu=0, container_test_detection="hint",
-                                                cold_worktree_hint=True, memory_admission=False))
+                                                cold_worktree_hint=True, memory_admission=False, phase_nice=0))
         for cores, slots, expected in ((12, 2, 6), (12, 4, 3), (1, 4, 2), (None, 2, 2)):
             with self.subTest(cores=cores, slots=slots), patch.object(pi_phase.os, "cpu_count", return_value=cores):
                 self.assertEqual(pi_phase.msbuild_cap("auto", slots), expected)
@@ -167,7 +167,7 @@ class PhaseTests(unittest.TestCase):
                 note.assert_called_once()
         self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
         self.assertEqual(pi_phase.config(self.config).options,
-                         dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False))
+                         dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0))
 
     def test_dotnet_shim_insertion_and_passthrough(self):
         # Real shell execution, including spaces, empty arguments and a shim PATH alias.
@@ -211,6 +211,40 @@ class PhaseTests(unittest.TestCase):
         result = subprocess.run([str(shim / "dotnet"), "build"], env=env,
                                 capture_output=True, text=True, timeout=3)
         self.assertEqual(result.returncode, 127, result.stderr)
+
+    def test_phase_nice_lowers_producer_priority_for_heavy_kinds_only(self):
+        probe = [sys.executable, "-c", "import os; print('prio=%d env=%s' % (os.getpriority(os.PRIO_PROCESS, 0), 'PI_PHASE_NICE' in os.environ))"]
+        base = os.getpriority(os.PRIO_PROCESS, 0)
+        self.configure(phase_nice=7, container_test_detection="off")
+        for kind in ("build", "test", "integration"):
+            with self.subTest(kind=kind):
+                code, out = self.done(self.run_phase(kind=kind, label=f"nice-{kind}", command=probe))
+                self.assertEqual(code, 0, out)
+                self.assertIn("nice 7 (phase_nice)", out)
+                self.assertIn(f"prio={max(base, 7)} env=False", out)
+        self.configure(container_test_detection="off")
+        code, out = self.done(self.run_phase(kind="build", label="nice-off", command=probe))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("phase_nice", out)
+        self.assertIn(f"prio={base} env=False", out)
+
+    def test_phase_nice_config_validation(self):
+        for value, expected in ((10, 10), (0, 0), (19, 19), (20, 0), (-1, 0), (True, 0), ("10", 0), (2.5, 0)):
+            with self.subTest(value=value):
+                self.config.write_text(json.dumps(dict(phase_nice=value)))
+                with patch.object(pi_phase, "note"):
+                    self.assertEqual(pi_phase.config(self.config).options["phase_nice"], expected)
+
+    def test_apply_nice_never_raises_priority_and_tolerates_bad_values(self):
+        with patch.object(pi_phase.os, "getpriority", return_value=12), patch.object(pi_phase.os, "setpriority") as setp:
+            pi_phase.apply_nice("5")
+            pi_phase.apply_nice(None)
+            setp.assert_not_called()
+            pi_phase.apply_nice("15")
+            setp.assert_called_once_with(pi_phase.os.PRIO_PROCESS, 0, 15)
+        with patch.object(pi_phase.os, "setpriority", side_effect=PermissionError("no")), patch.object(pi_phase.os, "getpriority", return_value=0):
+            pi_phase.apply_nice("10")
+        pi_phase.apply_nice("junk")
 
     def test_shim_reaches_script_dotnet_and_is_phase_private(self):
         self.configure(msbuild_max_cpu=4, container_test_detection="off")

@@ -59,7 +59,8 @@ def config(path, *, notes=None):
                 notes.add(message)
 
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
-                    container_test_detection="hint", cold_worktree_hint=True, memory_admission=False)
+                    container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
+                    phase_nice=0)
     try:
         data = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(data, dict):
@@ -76,6 +77,8 @@ def config(path, *, notes=None):
             valid = type(value) is int and 1 <= value <= 32
         elif key == "msbuild_max_cpu":
             valid = value == "auto" or type(value) is int and value >= 0
+        elif key == "phase_nice":
+            valid = type(value) is int and 0 <= value <= 19
         elif key == "memory_admission":
             values[key] = memory_admission_config(value, warn)
             continue
@@ -775,6 +778,20 @@ def status(state):
     return 0
 
 
+NICE_ENV = "PI_PHASE_NICE"
+
+
+def apply_nice(value):
+    """Lower the producer's CPU priority to at least `value` (never raises it); failures are noted, not fatal."""
+    try:
+        wanted = int(value) if value else 0
+        current = os.getpriority(os.PRIO_PROCESS, 0)
+        if wanted > current:
+            os.setpriority(os.PRIO_PROCESS, 0, wanted)
+    except (ValueError, OSError) as exc:
+        print(f"pi-phase: nice {value!r} not applied ({exc})", file=sys.stderr, flush=True)
+
+
 def launch(gate, command):
     """Internal gate: never execute a producer before its supervisor publishes metadata."""
     try:
@@ -783,6 +800,7 @@ def launch(gate, command):
         os.close(gate)
     if ready != b"1":
         return 125
+    apply_nice(os.environ.pop(NICE_ENV, None))
     try:
         os.execvp(command[0], command)
     except OSError as exc:
@@ -957,6 +975,9 @@ def run(args, state, configuration, output=None):
                 note(f"msbuild shim unavailable ({exc}); running uncapped")
             else:
                 note(f"msbuild cap -m:{cap} (msbuild_max_cpu)")
+        if options["phase_nice"] and args.kind in ("build", "test", "integration"):
+            child_env = dict(os.environ if child_env is None else child_env, **{NICE_ENV: str(options["phase_nice"])})
+            note(f"nice {options['phase_nice']} (phase_nice)")
         if options["cold_worktree_hint"] and args.kind in ("build", "test") and cold_worktree(os.getcwd()):
             note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
         read_gate, write_gate = os.pipe()
