@@ -13,6 +13,8 @@ git clone https://github.com/woksin/pi-setup && cd pi-setup
 (cd ~/.pi/agent/npm && npm install --legacy-peer-deps)
 ```
 
+Install requires Python 3. Flags may be given in any order: `--user <login>`, `--repos-root <dir>` and `--dry-run` (writes nothing). The operator settings are saved in `~/.pi/agent/user.json` as `{"githubUser": "<login>", "reposRoot": "<dir>"}` and reused on later installs unless flags override them. Without a saved login, the installer uses the authenticated `gh api user --jq .login`, then prompts in a terminal; noninteractive installs must supply `--user` if gh cannot identify you. Without a saved repositories root, it prompts with `$HOME/repos` as the default, or uses that default noninteractively. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you.
+
 `--legacy-peer-deps` is needed: the packages declare conflicting peer ranges for `@earendil-works/pi-*` (for example `@vigolium/piolium` wants `^0.74`, `@tintinweb/pi-subagents` wants `>=1.1.0`), so a plain `npm install` fails with ERESOLVE.
 
 `settings.json`, `models.json` and the other JSON configs are only written when they don't exist yet. `efficiency.json` and `context-budget.json` follow the same rule. Restart pi afterwards.
@@ -21,7 +23,24 @@ Optional, macOS only: `agent/launchd/*.plist` are templates for the `docker-guar
 
 `settings.json` lists the packages I load. Local checkouts are mapped to their npm packages (`npm:@woksin/pi-jobs`, `npm:@woksin/pi-recover`, `npm:@woksin/pi-context-budget`, `npm:@woksin/pi-orch`). Remove the ones you don't want.
 
-Some of it is tied to my workflow: `AGENTS.md` contains rules for [Cratis](https://github.com/Cratis) repositories and my GitHub user (`woksin`), and `pi-cleanup`, `loose-threads` and `ai-work-lifecycle` assume repositories live under `/Volumes/sourcecode/repos`. Change those before you use them. `cratis-cli-guard`, the `cratis-cli` agent and the MCP approval patterns in `mcp-adapter.json` are Cratis-specific too.
+## For Cratis team members
+
+```sh
+git clone https://github.com/woksin/pi-setup && cd pi-setup
+./install.sh --user <your-github-login> --repos-root <where-your-repos-live>
+cd ~/.pi/agent/npm && npm install --legacy-peer-deps
+```
+
+Restart pi. Agents assign issues and PRs to you and request you as reviewer (skipping the review request when you are the PR author). They merge Cratis PRs themselves once required CI is green and the final review passes, but never PRs that trigger major releases.
+
+Remove the parts you don't want:
+
+- **docker-guardian:** a macOS launchd template, not installed by default. If you installed it, run `launchctl unload ~/Library/LaunchAgents/com.example.docker-guardian.plist` (use your actual plist name if renamed), then remove that plist to prevent future loads.
+- **pi-orch:** remove `npm:@woksin/pi-orch` from `packages` in `~/.pi/agent/settings.json`.
+- **loose-threads:** remove `~/.pi/agent/loose-threads` and its entry from `AGENTS.md`; it is a manually invoked backstop, not a scheduled service.
+- **Cratis-specific rules:** remove the Cratis sections of `AGENTS.md`, the `cratis-cli-guard` extension, the `cratis-cli` agent and the Cratis MCP approval patterns in `mcp-adapter.json` if they don't apply. `pi-cleanup`, `loose-threads` and `ai-work-lifecycle` use your configured repositories root.
+
+Reinstalling restores shared files, so also remove unwanted components from your setup checkout.
 
 ## What's in it
 
@@ -97,8 +116,8 @@ Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subage
 - `local-packages/`: published separately (see above). The unloaded `model-safety-*` and `pi-subagents-reliability-*` packages are not part of the setup.
 - Retired profiles, `*.bak*` files, and the `fd` and `rg` binaries in `bin/`.
 - The CodeScene skills (see above).
-- The `/Volumes/sourcecode/repos` layout is mine and is kept in `pi-cleanup`, `loose-threads` and `ai-work-lifecycle`; adjust it for your machine.
+- `user.json`: operator identity and repositories root are local install settings, never synced into this repo.
 
 ## Keeping it up to date
 
-`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings, points local checkouts of pi-jobs, pi-recover, pi-context-budget and pi-orch at their npm packages (deduplicated), replaces my user name in the launchd templates, and runs `gitleaks`. Review the diff before committing.
+`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings, points local checkouts of pi-jobs, pi-recover, pi-context-budget and pi-orch at their npm packages (deduplicated), replaces the local user name in the launchd templates, and runs `gitleaks`. It reverse-maps operator references and the repositories root in the copied templates to `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`, using `~/.pi/agent/user.json`. For older installs without that file it uses the original author's login and `/Volumes/sourcecode/repos`; it does not write to the live install. Links, npm names, launchd labels and test fixtures stay unchanged. Review the diff before committing.

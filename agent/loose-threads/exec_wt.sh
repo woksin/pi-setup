@@ -6,7 +6,7 @@ set -u
 LOG=${LT_OUT:-$HOME/.ai-work/loose-threads}/exec-wt.log
 LSOF=$(mktemp); lsof -nP 2>/dev/null | awk '{print $NF}' > "$LSOF"
 for rel in "$@"; do
-  wt=/Volumes/sourcecode/repos/$rel
+  wt="{{REPOS_ROOT}}/$rel"
   [ -d "$wt" ] || { echo "SKIP $rel missing" >> $LOG; continue; }
   if grep -q "^$wt" "$LSOF"; then echo "SKIP $rel in use" >> $LOG; continue; fi
   common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir); main=$(dirname "$common")

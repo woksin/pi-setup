@@ -1,7 +1,7 @@
 #!/bin/bash
 # Outputs: main.tsv (per repo main checkout), worktrees.tsv, branches.tsv, stashes.tsv
 OUT=${LT_OUT:?}
-cd /Volumes/sourcecode/repos
+cd "{{REPOS_ROOT}}"
 now=$(date +%s)
 : > $OUT/main.tsv; : > $OUT/worktrees.tsv; : > $OUT/branches.tsv; : > $OUT/stashes.tsv
 while read r; do

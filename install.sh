@@ -7,10 +7,37 @@ set -euo pipefail
 cd "$(dirname "$0")"
 PI="$HOME/.pi/agent"
 TS=$(date +%Y%m%d-%H%M%S)
-DRY=${1:-}
+DRY=
+GITHUB_USER=
+REPOS_ROOT=
+while (( $# )); do
+  case $1 in
+    --dry-run) DRY=--dry-run; shift ;;
+    --user|--repos-root)
+      [[ $# -ge 2 && -n $2 && $2 != --* ]] || { echo "Missing value for $1" >&2; exit 1; }
+      if [[ $1 == --user ]]; then GITHUB_USER=$2; else REPOS_ROOT=$2; fi
+      shift 2 ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+SETTINGS=$(python3 setup-user.py config "$PI/user.json" "$GITHUB_USER" "$REPOS_ROOT")
+TMP=
+trap '[[ -z $TMP ]] || rm -rf "$TMP"' EXIT
 
 put() { # src dest
-  local src=$1 dest=$2
+  local src=$1 dest=$2 rendered
+  if grep -qE '\{\{(GITHUB_USER|REPOS_ROOT)\}\}' "$src"; then
+    if [[ $DRY == --dry-run ]]; then
+      if [[ -e $dest ]] && cmp -s <(python3 setup-user.py render "$src" "$SETTINGS") "$dest"; then return; fi
+      echo "install $dest"
+      return
+    fi
+    [[ -n $TMP ]] || TMP=$(mktemp -d)
+    rendered=$TMP/rendered
+    cp -p "$src" "$rendered"
+    python3 setup-user.py render "$src" "$SETTINGS" > "$rendered"
+    src=$rendered
+  fi
   if [[ -e $dest ]] && cmp -s "$src" "$dest"; then return; fi
   echo "install $dest"
   [[ $DRY == --dry-run ]] && return
@@ -21,6 +48,12 @@ put() { # src dest
 tree() { # srcdir destdir
   (cd "$1" && find . -type f) | while read -r f; do put "$1/$f" "$2/${f#./}"; done
 }
+
+if [[ $DRY != --dry-run ]]; then
+  TMP=$(mktemp -d)
+  printf '%s\n' "$SETTINGS" > "$TMP/user.json"
+  put "$TMP/user.json" "$PI/user.json"
+fi
 
 for d in agents extensions early-extensions lib workflows templates profiles loose-threads bin pi-phase lane-policy; do
   tree "agent/$d" "$PI/$d"

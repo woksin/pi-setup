@@ -17,7 +17,7 @@ import tempfile
 import time
 
 HOME = Path.home()
-DISCOVERY_BASE = Path('/Volumes/sourcecode/repos')
+DISCOVERY_BASE = Path('{{REPOS_ROOT}}')
 DISCOVERY_DEPTH = 6        # base/org/repo/.worktrees/name/.ai-work fits comfortably
 DISCOVERY_MAX_DIRS = 200000
 DISCOVERY_SECONDS = 60

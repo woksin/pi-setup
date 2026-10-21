@@ -3,7 +3,7 @@ L=os.path.expanduser("~/.local/share/ai-work-lifecycle/ai-work-lifecycle.py")
 rows=[]
 repos=[l.strip()[2:] for l in open(os.environ["LT_OUT"]+"/repos.txt")]
 for r in repos:
-    p="/Volumes/sourcecode/repos/"+r
+    p="{{REPOS_ROOT}}/"+r
     if not os.path.isdir(p+"/.ai-work"): continue
     o=subprocess.run(["python3",L,"--repo",p,"unfinished"],capture_output=True,text=True)
     try: d=json.loads(o.stdout)

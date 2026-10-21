@@ -9,7 +9,7 @@ def has(repo, oid):
 def prview(slug, n):
     rc, o = run("gh", "pr", "view", str(n), "--repo", slug, "--json", "number,state,headRefOid,headRefName,title,url")
     return json.loads(o) if rc == 0 else None
-OUT=os.environ["LT_OUT"]; BASE="/Volumes/sourcecode/repos"
+OUT=os.environ["LT_OUT"]; BASE="{{REPOS_ROOT}}"
 res=json.load(open(f"{OUT}/refs.json"))
 def proven(it): return any(p["state"]=="MERGED" and (p["rel"].startswith("tip==") or p["rel"].startswith("tip-anc") or "cherry-unique-vs-default:0" in p["rel"]) for p in it.get("pr_checks",[]))
 def work(it):

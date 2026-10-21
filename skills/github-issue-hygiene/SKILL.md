@@ -33,7 +33,7 @@ When a session starts working on an issue, it must be clear on the issue itself 
 **In pi, use the `issue_work` tool**: `claim` does steps 1–3 below in one call and records the session in the local registry behind `/issues`; `update` does step 4; `list` shows what is in flight for the end-of-work audit. Use the manual steps only when the tool is unavailable.
 
 1. Read the status block first (`issue-status.py show`). If it says `In progress` or `In review` from another session or branch, do not start; report it to the user.
-2. Assign it (in Cratis repos: `--add-assignee woksin`).
+2. Assign it (in Cratis repos: `--add-assignee {{GITHUB_USER}}`).
 3. Before writing code, update the status block to `**State:** In progress`, with the scope as understood and the branch name (add the draft PR URL once it exists).
 4. Keep the state true as the work moves: `In review` when the PR is opened, `Blocked` with the reason when waiting on someone, `Paused` with what remains when the session ends before the scope is done, `Done` when closing. Never leave an issue saying `In progress` when nobody is working on it.
 

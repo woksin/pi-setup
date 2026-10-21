@@ -3,7 +3,7 @@
 import json, os, re, subprocess
 from concurrent.futures import ThreadPoolExecutor
 OUT = os.environ["LT_OUT"]
-BASE = "/Volumes/sourcecode/repos"
+BASE = "{{REPOS_ROOT}}"
 res = json.load(open(f"{OUT}/refs.json"))
 
 def run(*a, cwd=None):

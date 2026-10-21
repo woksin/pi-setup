@@ -8,7 +8,7 @@
 #  - Hygiene every 15 min while healthy: remove exited/dead containers finished >20 min ago,
 #    prune unused networks older than 30 min, unused anonymous volumes, build cache above 8 GB.
 #    NEVER prunes images (pinned integration images must stay).
-# Authorised by woksin (2026-10-20): "the agents need to be able to do what it needs to do".
+# Authorised (2026-10-20): "the agents need to be able to do what it needs to do".
 set -u
 # DOCKER_GUARDIAN_TEST_PATH/_STATE/_LOG exist only for the dry-run harness (docker-guardian/test/run-scenarios.sh).
 export PATH=${DOCKER_GUARDIAN_TEST_PATH:+$DOCKER_GUARDIAN_TEST_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin

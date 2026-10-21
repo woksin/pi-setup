@@ -3,7 +3,7 @@
 import json, os, re, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 
-BASE = "/Volumes/sourcecode/repos"
+BASE = "{{REPOS_ROOT}}"
 OUT = os.environ["LT_OUT"]
 NOW = time.time()
 

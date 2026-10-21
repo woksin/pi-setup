@@ -18,7 +18,7 @@ sed -i '' -e 's#\${INBOX_DIR:-[^}]*}#${INBOX_DIR:-$HOME/.pi/agent/inbox}#' agent
 "${RS[@]}" --exclude=ACTIVE "$PI/profiles/" agent/profiles/
 # lane-policy: only the README is shared (policy.json is per-machine state)
 mkdir -p agent/lane-policy
-sed -e "s#\`/Volumes/sourcecode/repos/cratis/.ai-work/pi-lane-policy/\`#the author's local notes directory (not published)#" "$PI/lane-policy/README.md" > agent/lane-policy/README.md
+cp "$PI/lane-policy/README.md" agent/lane-policy/README.md
 # launchd templates: user name and home replaced by placeholders
 mkdir -p agent/launchd
 for n in docker-guardian pi-cleanup; do
@@ -43,6 +43,10 @@ done
 "${RS[@]}" "$HOME/.local/share/ai-work-lifecycle/" tools/ai-work-lifecycle/
 sed -e "s#/opt/homebrew/bin/python3#python3#" -e "s#$HOME#\$HOME#g" "$HOME/.local/bin/ai-work-lifecycle" > tools/bin/ai-work-lifecycle
 chmod +x tools/bin/ai-work-lifecycle
+
+# Reverse only the operator templates we copied, leaving links and fixtures alone.
+# Older live installs have no user.json; never create one while syncing.
+python3 setup-user.py normalize "$PI/user.json" woksin /Volumes/sourcecode/repos
 
 gitleaks dir . --no-banner --redact
 git status --short

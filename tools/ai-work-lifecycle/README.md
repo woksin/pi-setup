@@ -55,7 +55,7 @@ paths and own their worker lifecycle rather than overriding those boundaries.
 
 `local.ai-work-lifecycle` sweeps the roots in `~/.config/ai-work-lifecycle/roots.json`
 plus any EXISTING registry (`<git-root>/.ai-work/.lifecycle`, owned by you) found
-under `/Volumes/sourcecode/repos` (depth 6, build/package/task trees pruned); with
+under `{{REPOS_ROOT}}` (depth 6, build/package/task trees pruned); with
 `--apply` those are added to roots.json. It never creates registries or adopts
 unregistered folders. All roots are always processed. Blocked tasks are classed
 `expected` (not completed, owner/lease/handle still live), `stale` (task folder or

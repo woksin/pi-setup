@@ -22,7 +22,7 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
   --image-age-days N docker images older than N days and used by no container are
                      removed with `docker rmi <id>` (default 7)
   --roots PATH ...   directories searched for git checkouts (default:
-                     /Volumes/sourcecode/repos, skipped if not mounted)
+                     {{REPOS_ROOT}}, skipped if not mounted)
   --json             machine-readable output on stdout
   --scheduled        forces --only build,docker,caches,worktrees and --apply; appends a
                      summary to ~/.pi/agent/logs/pi-cleanup.log (kept under 1 MB). Used by
@@ -100,7 +100,7 @@ from datetime import datetime
 # ----------------------------------------------------------------------------
 # constants
 # ----------------------------------------------------------------------------
-DEFAULT_ROOTS = ["/Volumes/sourcecode/repos"]
+DEFAULT_ROOTS = ["{{REPOS_ROOT}}"]
 STEPS_ALL = ["build", "worktrees", "docker", "caches"]
 LOG_DIR = os.path.expanduser("~/.pi/agent/logs")
 LOG_FILE = os.path.join(LOG_DIR, "pi-cleanup.log")
