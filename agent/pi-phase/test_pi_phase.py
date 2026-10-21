@@ -6,6 +6,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+from datetime import datetime, timezone
 import time
 import unittest
 from types import SimpleNamespace
@@ -26,6 +28,13 @@ class PhaseTests(unittest.TestCase):
         self.root = Path(self.owned.name)
         self.state = self.root / "state"
         self.config = self.root / "config.json"
+        # Default hint probes must never reach the host's Docker daemon.
+        self.fake_bin = self.root / "fake-bin"
+        self.fake_bin.mkdir()
+        self.executable(self.fake_bin / "docker", "#!/bin/sh\nexit 1\n")
+        environment = patch.dict(os.environ, PATH=str(self.fake_bin) + os.pathsep + os.environ["PATH"])
+        environment.start()
+        self.addCleanup(environment.stop)
         self.children = []
         self.addCleanup(self.finish_children)
 
@@ -115,6 +124,224 @@ class PhaseTests(unittest.TestCase):
         if held:
             self.addCleanup(lambda: [os.close(fd) for _, fd in held])
         return held
+
+    def executable(self, path, content):
+        path.write_text(content)
+        path.chmod(0o700)
+        return path
+
+    def configure(self, **options):
+        self.config.write_text(json.dumps(dict(heavy_slots=2, integration_slots=1, **options)))
+
+    def fake_docker(self, created):
+        stamp = datetime.fromtimestamp(created, timezone.utc).strftime("%Y-%m-%d %H:%M:%S %z UTC")
+        self.executable(self.fake_bin / "docker", "#!/bin/sh\nprintf '%s\\n' 'container " + stamp + "'\n")
+
+    def test_performance_config_defaults_and_auto(self):
+        settings = pi_phase.config(self.config)
+        self.assertEqual(settings, (2, 1))
+        self.assertEqual(settings.options, dict(msbuild_max_cpu=0, container_test_detection="hint",
+                                                cold_worktree_hint=True))
+        for cores, slots, expected in ((12, 2, 6), (12, 4, 3), (1, 4, 2), (None, 2, 2)):
+            with self.subTest(cores=cores, slots=slots), patch.object(pi_phase.os, "cpu_count", return_value=cores):
+                self.assertEqual(pi_phase.msbuild_cap("auto", slots), expected)
+        self.assertEqual(pi_phase.msbuild_cap(7, 2), 7)
+        self.assertEqual(pi_phase.msbuild_cap(0, 2), 0)
+
+    def test_config_invalid_values_and_unknown_keys_fall_back(self):
+        for value in (-1, True, "bad", 2.5, None, [], {}):
+            with self.subTest(value=value):
+                self.config.write_text(json.dumps(dict(heavy_slots=0, integration_slots="1",
+                     msbuild_max_cpu=value, container_test_detection=value, cold_worktree_hint=value, unknown=4)))
+                with patch.object(pi_phase, "note") as note:
+                    settings = pi_phase.config(self.config)
+                self.assertEqual(settings, (2, 1))
+                self.assertEqual(settings.options["msbuild_max_cpu"], 0)
+                self.assertEqual(settings.options["container_test_detection"], "hint")
+                self.assertEqual(settings.options["cold_worktree_hint"], value if type(value) is bool else True)
+                self.assertTrue(note.called)
+        for text in ("[1]", "null", "{"):
+            self.config.write_text(text)
+            with patch.object(pi_phase, "note") as note:
+                self.assertEqual(pi_phase.config(self.config), (2, 1))
+                note.assert_called_once()
+        self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
+        self.assertEqual(pi_phase.config(self.config).options,
+                         dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False))
+
+    def test_dotnet_shim_insertion_and_passthrough(self):
+        # Real shell execution, including spaces, empty arguments and a shim PATH alias.
+        real = self.root / "real bin"
+        real.mkdir()
+        self.executable(real / "dotnet", "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
+        shim = self.root / "shim"
+        shim.mkdir()
+        alias = self.root / "alias"
+        alias.symlink_to(shim, target_is_directory=True)
+        original = str(alias) + os.pathsep + str(real) + os.pathsep + os.environ["PATH"]
+        with patch.dict(os.environ, PATH=original):
+            env = pi_phase.shim_environment(shim, 3)
+        for subcommand in ("build", "test", "publish", "pack", "msbuild", "restore"):
+            for prefix in ([], ["--diagnostics"]):
+                args = [*prefix, subcommand, "a b", "", "--no-build"]
+                result = subprocess.run([str(shim / "dotnet"), *args], env=env,
+                                        capture_output=True, text=True, timeout=3)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = [*prefix, subcommand, "-m:3", "a b", "", "--no-build"]
+                self.assertEqual(result.stdout.splitlines(), [f"<{arg}>" for arg in expected])
+        cases = [["test", flag] for flag in ("-m", "-M:2", "/m", "/M:4", "-maxcpucount",
+                 "-MaxCpuCount:8", "/MAXCPUCOUNT:2", "--maxcpucount=6")]
+        cases += [[], ["--info"], ["run", "build"], ["app.dll"], ["--version"], ["TEST", "x"]]
+        for args in cases:
+            with self.subTest(args=args):
+                result = subprocess.run([str(shim / "dotnet"), *args], env=env,
+                                        capture_output=True, text=True, timeout=3)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = [f"<{arg}>" for arg in args] if args else ["<>"]
+                self.assertEqual(result.stdout.splitlines(), expected)
+        nested = self.root / "nested-shim"
+        nested.mkdir()
+        with patch.dict(os.environ, env):
+            nested_env = pi_phase.shim_environment(nested, 2)
+        result = subprocess.run([str(nested / "dotnet"), "build"], env=nested_env,
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["<build>", "<-m:2>"])
+        env["PI_PHASE_ORIGINAL_PATH"] = str(alias)
+        result = subprocess.run([str(shim / "dotnet"), "build"], env=env,
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 127, result.stderr)
+
+    def test_shim_reaches_script_dotnet_and_is_phase_private(self):
+        self.configure(msbuild_max_cpu=4, container_test_detection="off")
+        self.executable(self.fake_bin / "dotnet", "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
+        code, out = self.done(self.run_phase(kind="build", command=["sh", "-c", "dotnet build 'a b'"]))
+        self.assertEqual(code, 0, out)
+        self.assertIn("msbuild cap -m:4 (msbuild_max_cpu)", out)
+        self.assertIn("<build>\n<-m:4>\n<a b>", out)
+        self.assertEqual(list(self.state.glob("dotnet-shim-*")), [])
+        for kind in ("test", "integration", "ci"):
+            extra = ("--repo", "repo", "--pr", "1", "--commit", "abc") if kind == "ci" else ()
+            code, out = self.done(self.run_phase(kind=kind, command=["dotnet", "test"], extra=extra))
+            self.assertEqual(code, 0, out)
+            self.assertEqual("msbuild cap" in out, kind != "ci")
+            self.assertEqual("<-m:4>" in out, kind != "ci")
+        self.configure(msbuild_max_cpu=0, container_test_detection="off")
+        code, out = self.done(self.run_phase(command=["dotnet", "test"]))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("msbuild cap", out)
+        self.assertNotIn("<-m:", out)
+
+    def test_container_hint_records_fingerprint_once_using_fake_docker(self):
+        self.configure(container_test_detection="hint", cold_worktree_hint=False)
+        self.fake_docker(time.time() + 2)
+        command = [sys.executable, "-c", "import time;time.sleep(.4)"]
+        code, out = self.done(self.run_phase(command=command))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("hint: this test phase started Testcontainers containers"), 1)
+        fingerprint = pi_phase.test_fingerprint(os.getcwd(), command)
+        self.assertEqual(json.loads((self.state / "container-tests.json").read_text()), {fingerprint: True})
+        alias = self.root / "cwd-alias"
+        alias.symlink_to(Path.cwd(), target_is_directory=True)
+        self.assertEqual(pi_phase.test_fingerprint(alias, command), fingerprint)
+        self.assertNotEqual(pi_phase.test_fingerprint(os.getcwd(), [*command, "different"]), fingerprint)
+
+    def test_container_detection_off_old_missing_failed_and_timeout(self):
+        self.state.mkdir()
+        self.fake_docker(time.time() - 60)
+        stopped = threading.Event()
+        # One probe, then stop without waiting 15 seconds.
+        with patch.object(stopped, "wait", return_value=True) as wait, patch.object(pi_phase, "note") as note:
+            pi_phase.container_test_poller(self.state, "old", time.time(), stopped)
+            wait.assert_called_once_with(15)
+            note.assert_not_called()
+        for error in (FileNotFoundError(), subprocess.CalledProcessError(1, "docker"),
+                      subprocess.TimeoutExpired("docker", 5)):
+            with patch.object(pi_phase.subprocess, "run", side_effect=error) as run, \
+                    patch.object(stopped, "wait", return_value=True), patch.object(pi_phase, "note") as note:
+                pi_phase.container_test_poller(self.state, "failed", time.time(), stopped)
+                self.assertEqual(run.call_args.kwargs["timeout"], 5)
+                note.assert_not_called()
+        self.configure(container_test_detection="off")
+        self.fake_docker(time.time() + 2)
+        code, out = self.done(self.run_phase())
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Testcontainers", out)
+        self.assertFalse((self.state / "container-tests.json").exists())
+
+    def test_recorded_test_promotes_and_claims_both_permits_atomically(self):
+        self.configure(container_test_detection="promote", cold_worktree_hint=False)
+        self.fake_docker(time.time() + 2)
+        command = [sys.executable, "-c", "import time;time.sleep(.4)"]
+        code, out = self.done(self.run_phase(command=command))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("also claiming", out)  # First discovery only hints.
+        self.assertTrue((self.state / "container-tests.json").exists())
+        blocker = pi_phase.lock_file(self.state / "integration-0.lock")
+        try:
+            job = self.run_phase(command=command)
+            self.wait_for(lambda: bool(list((self.state / "waiters").glob("*.json"))))
+            waiter = json.loads(next((self.state / "waiters").glob("*.json")).read_text())
+            self.assertEqual(waiter["kind"], "integration")
+            for index in range(2):
+                fd = pi_phase.lock_file(self.state / f"heavy-{index}.lock")
+                self.assertIsNotNone(fd)  # No heavy lease held while integration is blocked.
+                pi_phase.unlock(fd)
+        finally:
+            pi_phase.unlock(blocker)
+        self.wait_for(lambda: (self.state / "integration-0.json").exists())
+        owners = [json.loads(path.read_text()) for path in self.state.glob("heavy-*.json")]
+        integration = json.loads((self.state / "integration-0.json").read_text())
+        self.assertTrue(any(owner["token"] == integration["token"] for owner in owners))
+        code, out = self.done(job)
+        self.assertEqual(code, 0, out)
+        self.assertIn("also claiming an integration permit", out)
+
+    def test_cold_worktree_hint_bounded_depth_and_skips(self):
+        top = self.root / "worktree"
+        top.mkdir()
+        (top / ".git").write_text("gitdir: /unused")
+        child = top / "one" / "two"
+        child.mkdir(parents=True)
+        self.assertTrue(pi_phase.cold_worktree(child))
+        ignored = top / "node_modules" / "obj"
+        ignored.mkdir(parents=True)
+        (top / "external").symlink_to(ignored, target_is_directory=True)
+        self.assertTrue(pi_phase.cold_worktree(child))
+        deep = child / "three" / "obj"
+        deep.mkdir(parents=True)
+        self.assertTrue(pi_phase.cold_worktree(child))  # Depth four is not scanned.
+        (child / "obj").mkdir()
+        self.assertFalse(pi_phase.cold_worktree(child))
+        (child / "obj").rmdir()
+        self.configure(container_test_detection="off")
+        with patch.object(pi_phase, "cold_worktree", return_value=True), patch.object(pi_phase, "note") as note:
+            code = pi_phase.main(["run", "--kind", "build", "--label", "cold", "--", sys.executable, "-c", "pass"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, 0)
+        self.assertTrue(any("warm lane worktree" in str(call) for call in note.call_args_list))
+        (top / ".git").unlink()
+        (top / ".git").mkdir()
+        self.assertFalse(pi_phase.cold_worktree(child))
+        self.configure(cold_worktree_hint=False, container_test_detection="off")
+        with patch.object(pi_phase, "cold_worktree") as cold:
+            self.assertEqual(pi_phase.main(["run", "--kind", "test", "--label", "disabled", "--",
+                                           sys.executable, "-c", "pass"],
+                                          state=self.state, configuration=self.config), 0)
+            cold.assert_not_called()
+
+    def test_long_queue_hint_once_without_waiting_ten_minutes(self):
+        self.configure(container_test_detection="off")
+        args = SimpleNamespace(label="queue", timeout=1, queue_timeout=900, approved_long_timeout=True,
+            kind="build", priority="normal", repo=None, pr=None, commit=None,
+            command=[sys.executable, "-c", "pass"], vstest_hang_minutes=None, vstest_confirmed=False)
+        # Queue starts at zero, then ticks past 600 twice and finally times out.
+        with patch.object(pi_phase.time, "monotonic", side_effect=[0, 601, 601, 601, 601, 602, 602, 602, 901]), \
+                patch.object(pi_phase.time, "sleep"), patch.object(pi_phase, "claim", return_value=None), \
+                patch.object(pi_phase, "note") as note:
+            self.assertEqual(pi_phase.run(args, self.state, self.config), 75)
+        hints = [call.args[0] for call in note.call_args_list if call.args[0].startswith("long queue")]
+        self.assertEqual(hints, ["long queue (601s): run dev-doctor to look for contention"])
 
     def test_fifo_including_equal_timestamps_and_sequence(self):
         with patch.object(pi_phase.time, "time", return_value=100):

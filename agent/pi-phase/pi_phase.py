@@ -5,6 +5,7 @@ metadata guards against a dead supervisor whose descendant closed inherited FDs.
 """
 import argparse
 from collections import deque
+from datetime import datetime
 import errno
 import fcntl
 import hashlib
@@ -15,6 +16,8 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import random
 import time
 import uuid
@@ -39,16 +42,134 @@ def safe_label(value):
     return value
 
 
+class PhaseConfig(tuple):
+    """Keep the slot-pair API while carrying optional performance settings."""
+    def __new__(cls, heavy, integration, options):
+        result = super().__new__(cls, (heavy, integration))
+        result.options = options
+        return result
+
+
 def config(path):
-    if not path.exists():
-        return 2, 1
-    data = json.loads(path.read_text())
-    if set(data) != {"heavy_slots", "integration_slots"}:
-        raise ValueError("config.json needs exactly heavy_slots and integration_slots")
-    heavy, integration = data["heavy_slots"], data["integration_slots"]
-    if any(type(n) is not int or n < 1 or n > 32 for n in (heavy, integration)):
-        raise ValueError("slot limits must be integers from 1 to 32")
-    return heavy, integration
+    defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
+                    container_test_detection="hint", cold_worktree_hint=True)
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(data, dict):
+            raise ValueError("expected an object")
+    except (ValueError, OSError) as exc:
+        note(f"invalid config.json ({exc}); using defaults")
+        data = {}
+    for key in data.keys() - defaults.keys():
+        note(f"unknown config key {key}; ignored")
+    values = defaults.copy()
+    for key, default in defaults.items():
+        value = data.get(key, default)
+        if key in ("heavy_slots", "integration_slots"):
+            valid = type(value) is int and 1 <= value <= 32
+        elif key == "msbuild_max_cpu":
+            valid = value == "auto" or type(value) is int and value >= 0
+        elif key == "container_test_detection":
+            valid = value in ("off", "hint", "promote")
+        else:
+            valid = type(value) is bool
+        if valid:
+            values[key] = value
+        else:
+            note(f"invalid {key}; using default {default!r}")
+    heavy = values.pop("heavy_slots")
+    integration = values.pop("integration_slots")
+    return PhaseConfig(heavy, integration, values)
+
+
+def msbuild_cap(value, heavy):
+    return max(2, (os.cpu_count() or 1) // heavy) if value == "auto" else value
+
+
+def shim_environment(directory, cap):
+    shim = directory / "dotnet"
+    shim.write_bytes((ROOT / "dotnet-shim.sh").read_bytes())
+    shim.chmod(0o700)
+    env = os.environ.copy()
+    original_path = os.environ.get("PATH", os.defpath)
+    inherited_shim = env.get("PI_PHASE_SHIM_DIR")
+    if inherited_shim:
+        # Nested phases must not select their parent's shim as the real dotnet.
+        original_path = os.pathsep.join(part for part in original_path.split(os.pathsep)
+                                        if os.path.realpath(part or ".") != inherited_shim)
+    env.update(PI_PHASE_ORIGINAL_PATH=original_path,
+               PI_PHASE_SHIM_DIR=str(directory.resolve()), PI_PHASE_MSBUILD_MAX_CPU=str(cap))
+    env["PATH"] = str(directory) + os.pathsep + env["PI_PHASE_ORIGINAL_PATH"]
+    return env
+
+
+def test_fingerprint(cwd, command):
+    return hashlib.sha1("\0".join([os.path.realpath(cwd), *command]).encode()).hexdigest()
+
+
+def record_container_test(state, fingerprint):
+    # Separate from admission: a slow hint must never hold the coordinator.
+    with open(state / "container-tests.guard", "a+b") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        known = metadata(state / "container-tests.json")
+        known[fingerprint] = True
+        save(state / "container-tests.json", known)
+
+
+def container_test_poller(state, fingerprint, started, stopped):
+    """Read-only Docker probe in a daemon; neither join nor delay the phase."""
+    while not stopped.is_set():
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "label=org.testcontainers=true",
+                 "--format", "{{.ID}} {{.CreatedAt}}"],
+                capture_output=True, text=True, timeout=5, check=True)
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) < 4:
+                    continue
+                created = datetime.strptime(" ".join(fields[1:4]),
+                                            "%Y-%m-%d %H:%M:%S %z").timestamp()
+                if created > started and not stopped.is_set():
+                    note("hint: this test phase started Testcontainers containers; CI usually "
+                         "runs these as integration — use --kind integration or CI's filter")
+                    record_container_test(state, fingerprint)
+                    return
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass  # Detection is best effort, including missing/unavailable Docker.
+        if stopped.wait(15):
+            return
+
+
+def cold_worktree(cwd):
+    """At most 1000 entries, three levels, no symlink traversal or git subprocess."""
+    cwd = Path(cwd).resolve()
+    for top in (cwd, *cwd.parents):
+        if (top / ".git").is_file():
+            break
+        if (top / ".git").is_dir():
+            return False
+    else:
+        return False
+    pending = [(top, 0)]
+    budget = 1000
+    try:
+        while pending:
+            directory, depth = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    budget -= 1
+                    if budget < 0:
+                        return False  # Inconclusive, not necessarily cold.
+                    if entry.name in ("node_modules", ".git") or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if entry.name == "obj":
+                        return False
+                    if depth < 2:
+                        pending.append((Path(entry.path), depth + 1))
+    except OSError:
+        return False
+    return True
 
 
 def lock_file(path):
@@ -489,7 +610,9 @@ def run(args, state, configuration, output=None):
 
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     ci_key = (args.repo, args.pr, args.commit)
-    deadline = time.monotonic() + args.queue_timeout
+    queued = time.monotonic()
+    deadline = queued + args.queue_timeout
+    long_queue_hint = False
     next_heartbeat = 0
     cancelled = [None]
 
@@ -506,21 +629,34 @@ def run(args, state, configuration, output=None):
     safe = False
     registered = False
     waiter_fd = None
+    shim_dir = None
+    detector_stopped = threading.Event()
+    fingerprint = test_fingerprint(os.getcwd(), command)
+    admission_args = argparse.Namespace(**vars(args))
     try:
+        settings = config(configuration)
+        options = settings.options
+        if (args.kind == "test" and options["container_test_detection"] == "promote"
+                and metadata(state / "container-tests.json").get(fingerprint) is True):
+            admission_args.kind = "integration"
+            note("recorded container test: also claiming an integration permit (container_test_detection)")
         while True:
             if cancelled[0]:
                 note("cancelled while queued")
                 return 128 + cancelled[0]
+            if not long_queue_hint and time.monotonic() - queued > 600:
+                note(f"long queue ({int(time.monotonic() - queued)}s): run dev-doctor to look for contention")
+                long_queue_hint = True
             if time.monotonic() >= deadline:
                 note(f"queue timeout ({args.queue_timeout:g}s); command not started")
                 return 75
             if not registered:
-                registered, waiter_fd = register_waiter(state, args, token)
+                registered, waiter_fd = register_waiter(state, admission_args, token)
                 if not registered:
                     time.sleep(min(TICK, max(0, deadline - time.monotonic())))
                     continue
-            heavy, integration = config(configuration)
-            held = claim(state, slot_paths(state, args.kind, heavy, integration, ci_key),
+            heavy, integration = settings
+            held = claim(state, slot_paths(state, admission_args.kind, heavy, integration, ci_key),
                          deadline, lambda: bool(cancelled[0]),
                          token if waiter_fd is not None else None, (heavy, integration))
             if cancelled[0]:
@@ -544,15 +680,24 @@ def run(args, state, configuration, output=None):
                 note(f"queued kind={args.kind} label={args.label} remaining={max(0, int(deadline-now))}s")
                 next_heartbeat = now + HEARTBEAT
             time.sleep(min(QUEUE_TICK + random.uniform(0, 0.5), max(0, deadline-now)))
+            settings = config(configuration)
         if cancelled[0]:
             note("cancelled after admission; command not started")
             return 128 + cancelled[0]
+        child_env = None
+        cap = msbuild_cap(options["msbuild_max_cpu"], heavy)
+        if cap and args.kind in ("build", "test", "integration"):
+            shim_dir = tempfile.TemporaryDirectory(prefix="dotnet-shim-", dir=state)
+            child_env = shim_environment(Path(shim_dir.name), cap)
+            note(f"msbuild cap -m:{cap} (msbuild_max_cpu)")
+        if options["cold_worktree_hint"] and args.kind in ("build", "test") and cold_worktree(os.getcwd()):
+            note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
         read_gate, write_gate = os.pipe()
         try:
             launcher = [sys.executable, str(Path(__file__).resolve()), "_launch", str(read_gate), "--", *command]
             output_options = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
             proc = subprocess.Popen(launcher, pass_fds=[read_gate, *(fd for _, fd in held)],
-                                    start_new_session=True, **output_options)
+                                    start_new_session=True, env=child_env, **output_options)
             os.close(read_gate)
             read_gate = -1
             publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, cwd=os.getcwd(),
@@ -560,6 +705,7 @@ def run(args, state, configuration, output=None):
             if cancelled[0]:
                 note("cancelled before execution; command not started")
                 return 128 + cancelled[0]
+            detection_started = time.time()
             os.write(write_gate, b"1")
             started = time.monotonic()  # No execution budget consumed waiting for a permit.
         finally:
@@ -567,6 +713,10 @@ def run(args, state, configuration, output=None):
                 os.close(read_gate)
             os.close(write_gate)
         note(f"running kind={args.kind} label={args.label} pid={proc.pid} timeout={args.timeout:g}s")
+        if args.kind == "test" and options["container_test_detection"] != "off":
+            threading.Thread(target=container_test_poller,
+                             args=(state, fingerprint, detection_started, detector_stopped),
+                             daemon=True).start()
         next_heartbeat = started + HEARTBEAT
         while True:
             if cancelled[0]:
@@ -601,6 +751,7 @@ def run(args, state, configuration, output=None):
         note(f"finished kind={args.kind} label={args.label} exit={return_code}")
         return return_code
     finally:
+        detector_stopped.set()
         if waiter_fd is not None:
             deregister_waiter(state, token, waiter_fd)
         # A failed launch sees EOF at its gate. An unexpected exception during
@@ -614,6 +765,8 @@ def run(args, state, configuration, output=None):
             safe = not group_alive({"pgid": proc.pid})
         if held:
             release(state, held, token, safe or proc is None)
+        if shim_dir is not None:
+            shim_dir.cleanup()
         signal.signal(signal.SIGINT, old_int)
         signal.signal(signal.SIGTERM, old_term)
 

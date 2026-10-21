@@ -1,4 +1,7 @@
 {
   "heavy_slots": 2,
-  "integration_slots": 1
+  "integration_slots": 1,
+  "msbuild_max_cpu": 0,
+  "container_test_detection": "hint",
+  "cold_worktree_hint": true
 }
