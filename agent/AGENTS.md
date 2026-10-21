@@ -8,11 +8,13 @@
 - While iterating, verify with affected-project checks — not whole-repository builds after every file (the local gates under "Pushing and CI minutes" are the exception), and no application gates for a read-only review. Diagnose a failing gate, rerun after a relevant fix, then stop and report if it is unavailable, unrelated, or failing repeatedly without new evidence.
 - Prefer one implementer per checkout. Delegate only independent work with explicit file ownership; reviewers must not edit, generate files, or perform shutdown commits.
 - Keep a session on one repository and task. At a completed milestone, start a fresh session from a short handoff in `.ai-work/` (or `/compact`) rather than running one session all day — every call re-reads the whole context, so each turn gets more expensive as the session grows (usage history: most main-session cost is re-caching the whole conversation). Context limits are in "Orchestrator context". Never do it every turn, and never drop unresolved details to save tokens.
+- Every tool call re-reads the whole context, so take fewer, bigger steps: issue all independent reads, greps, listings and status checks in ONE message; one `edit` per file with several edits; `grep`/`rg` before a ranged `read` instead of reading whole files; `git diff --stat` before a full diff; never print whole logs (write them to a file, read the failing part).
 
 ## Execution budgets and verification discipline
 
 - For new heavy build/test/integration commands, use the explicit `~/.pi/agent/bin/pi-phase run --kind KIND --label '...' --timeout SECONDS --queue-timeout SECONDS -- COMMAND ARGUMENTS` wrapper (`KIND`: build, test or integration). Read `~/.pi/agent/pi-phase/README.md` for VSTest-only hang diagnostics, limits, cancellation and exit statuses. Check `pi-phase status` when needed. Do not wait on GitHub CI through `pi-phase --kind ci`; its 600-second cap cuts real CI runs short. Follow "Waiting on GitHub CI" below. This policy covers cooperating pi invocations, not existing jobs or raw bash by other users; do not treat it as a global scheduler. The outer tool timeout must cover queue + execution + cleanup; prefer `job_start` when exposed, otherwise one bounded foreground call.
-- The queue admits waiters by priority, then first come first served. Add `--priority low` for background or bulk work that can wait. Ask for `--priority high` only when the user is waiting on that exact result, for example a gate blocking a merge they asked for, and never for routine runs. High priority needs the user's approval: in a main session the command prompts the user; subagents are blocked and must ask the parent instead. Never run `pi-phase grant-priority` or write the grant file yourself.
+- The queue admits waiters by priority, then first come first served. Add `--priority low` for background or bulk work that can wait. Use `--priority high` only when a critical path waits on that exact result (a gate blocking a merge or release the user or orchestrator needs), never for routine runs. High priority is approved by the user or by an orchestrator session the user designated (`/phase-priority orchestrator on`): the orchestrator decides on its own, grants within the cap (10 uses or 120 minutes per grant) and logs each grant in its state file. Other main sessions get a user prompt; lanes and subagents ask their orchestrator or parent. Only an orchestrator runs `pi-phase grant-priority`; nobody writes the grant or orchestrator files by hand.
+- **Use queue waits; do not sit in them.** Before a heavy phase, run `pi-phase status` once. If the wait is likely long (several phases running or queued ahead, or a recent queue timeout), start the phase in the background (`job_start`, or a background subagent that owns the build) and use the wait for work that does not depend on its result: read or review code for the next step, write specs, draft the PR body and notes, check issue/PR comments, scope the next issue, or answer pending messages. Do not start a second heavy phase in the same worktree, and do not edit files the queued phase builds unless the result is then thrown away and rerun. Never shorten or skip a gate to avoid the queue. If no independent work exists, end the turn and let the completion notification wake you; in a coordinated multi-lane setup, tell the coordinator you have capacity so it can hand you a read-only or scoping task.
 
 - Keep the session responsive. Run one meaningful build/test phase per command; do not hide builds, multiple frameworks and repeated test runs inside a single long shell chain. Separate status/fetch from builds, Debug from Release, each test project, and frontend lint/compile/test/build. Preserve each phase's real exit code; `echo`, `grep` or a later successful command must not mask a failure.
 - Never use `build/test | grep | sort/head/tail` as gate evidence. Capture the producer's exit status before summarising its output, or use a runner that preserves it explicitly. `pipefail` alone is not enough with early-closing consumers such as `head`. A displayed `0 Error(s)` or zero matching error lines is not proof of success. Report the exact failed or timed-out phase; do not continue dependent phases after failure. Keep full diagnostics in task-scoped `.ai-work/` logs when needed, not opaque `/tmp` logs.
@@ -22,6 +24,7 @@
 - Run a passing check once per relevant code state and required configuration. No three-run loops or repeated frameworks for reassurance unless investigating a specific flaky failure or following an explicit required test matrix. State that reason first. Reuse successful results while their relevant inputs remain unchanged; delegation handoffs and review completion do not alone justify another full suite.
 - Long-running work must expose progress and cancellation. Prefer completion-notifying background tools when available. Use runner-native per-test/hang timeouts where supported, not just a huge outer shell timeout. A silent or overdue command is a diagnostic problem, not a reason to increase the timeout. Stop the task-owned process tree safely, inspect the bounded evidence, and do not repeat without a relevant change or new evidence.
 - During iteration use affected-project checks. Full gates belong at actual task completion and release checkpoints, not each prompt, edit, or subagent return. Batch fixes before rerunning the required gate. Do not expand a focused investigation into every integration lane mid-iteration; reserve necessary wider coverage for the release gate and explain its scope.
+- Before a second fix for a new failure, compare a cheap instrumented check on `origin/main` and the branch. A passing main may already be near a limit (timing, count, size) that test order hides; measure and diff the values.
 - Required CI coverage is not permission for unlimited local execution. If a required check exceeds the agreed budget, report it as incomplete and the work as not ready; run a narrower diagnostic or a longer run in the background, whichever answers the question best. Never silently skip it or claim a pass. These execution limits also apply to the gates below.
 
 ## Delegation briefs
@@ -36,16 +39,22 @@
 The `review` workflow gates only on **blocking** findings: critical or major issues a maintainer would block merge on (regression, data loss, security, spec violation, broken build or tests) that the other provider confirmed. Minor findings and nits come back as `advisory`.
 
 - While iterating, use `quick: true`. Before merge, run full mode once on the **whole change** (no `since`), and `deep: true` only where the routing rules say so. Quick rounds never replace that whole-change full review.
+- Every run passes `round` (1 for the first whole-change review). `deep: true` also needs `deepReason` (`security`, `algorithmic`, `concurrency` or `cross-cutting`) and a one-line `deepJustification`; the workflow validates arguments before starting any reviewer. To reuse a pass, supply the full `headSha` and `baseSha` and the earlier result unchanged as `cachedReview` (only for committed code, never a dirty tree).
 - Delta rounds: only after a whole-change review in the same mode, pass `since: <SHA reviewed last time>`, `prior: <that round's blocking and unverified findings, plus any you dismissed with the reason>` and `round: <n>`. Reviewers then check the fixes and the earlier list. The workflow rejects `since` without `prior` and follow-ups without an explicit `round`.
 - Fix advisory items only if cheap, in the same pass. Never start a review or fix round for advisory items alone.
 - Cap: 3 rounds per work item (the workflow refuses round 4 without `force`). If blocking findings keep appearing, stop iterating. Make one structural change that addresses the whole class of issue, or ask the user. Recurring edge cases in the same code mean the approach is wrong, not that another round is needed.
 - PR descriptions and release notes are checked by the deterministic hooks (`cratis-check-pr`), not by LLM review.
+- Minimal call: `{target, context, author, round:1, headSha:<full>, baseSha:<full>}`; delta: add `since` (full SHA), `prior` (one string), and `round:n`.
 
 ## Orchestrator context
 
+- When a watch, job or subagent wakes you: act in at most 2 tool calls (or note the follow-up), re-arm what is needed, end the turn. Fan-outs report through one join (a workflow or one summarising agent), not one wake per agent; builds and tests run inside the implementer, not as main-session jobs. Subagent final reports stay under ~1.5k characters with details in a file.
 - Do not fetch a subagent result twice. A completion notification is enough unless its preview is truncated and you need the rest; never `cat` subagent output files.
+- To pass a subagent answer to another agent, take the final text from `get_subagent_result` and write it to a task file under `.ai-work/`; never forward or read the raw task output file.
+- After `/reload`: background jobs and watches survive (same ids) but subagents do not. Run `/jobs`, read the pi-recover reload notice, re-arm only what is missing, and re-spawn a lost subagent only if its output file shows unfinished work. Do not `/reload` while subagents you need are running.
+- Lane inbox watches: use `~/.pi/agent/bin/inbox-watch <lane> [GROUP]` with one `job_watch` (`until=success`, interval 120); set INBOX_DIR for the project. It reports new/edited inbound files only; do not build `ls|grep` watches.
 - Keep raw output out of the main session. Cap your own commands (`| tail -n 40` only for display, never for gate evidence). Delegate digests of logs, diffs, CI failures and PR/issue state to `ops`.
-- At about 600k tokens of context, and no later than 800k, finish the current step, write `.ai-work/<task>/handoff.md` (state, decisions, open items, next step) and tell the user to start a fresh session from it.
+- The context budget is enforced by the `context-budget` extension (main sessions: notice at 300k, handoff at 400k, hard limit 600k; subagents about half). When it asks for a handoff, call `context_handoff` at the next safe point: verified facts (HEAD SHA, "review passed at <sha>", CI run ids, PR/issue states) separate from plans, decisions, the user's constraints verbatim, the next step and the files to read first. The extension then resets the context in place and the session continues on its own, with the same jobs, watches, subagents and issue claims. Do not stop, ask the user to start a new session, or argue with the block; only the user switches it off (`/guards off context`). Keep `.ai-work/<task>/STATE.md` current for long-running coordination (facts and evidence, decisions, unresolved questions, owners, merge/dependency order). Before handoff, reconcile it with live state; include a watch-action table (job/run ID, immutable target, completion action, cancellation), exact next commands, and verbatim user asks/constraints. List every needed state/brief/protocol file in `files_to_read`, not just STATE.md; preserve working detail within the handoff budget. After reset, re-verify mutable facts before acting; never treat a plan or an old watch result as current evidence.
 
 ## CodeScene Code Health
 
@@ -62,7 +71,7 @@ The `codescene` MCP server (`mcp__codescene`) and the CodeScene skills in `~/.ag
 <!-- pi-profile:routing:start (managed by ~/.pi/agent/bin/pi-profile; edit profiles/<name>/routing.md instead) -->
 ## Model routing
 
-Active profile: **balanced** (`~/.pi/agent/bin/pi-profile`). Default profile. Uses each provider where the evidence is strongest and keeps Claude/OpenAI usage balanced. Haiku 5.5 is used for repository exploration; Kimi K3 for web-source gathering.
+Active profile: **balanced** (`~/.pi/agent/bin/pi-profile`). Default profile. Uses each provider where the evidence is strongest. Claude is the constrained quota (Oct 3–17: Anthropic usage-limit hits every day, about 3,000 in total; OpenAI 39), so low-risk roles run on GPT and `provider-fallback` moves a session to GPT when Claude hits its limit. Further role moves wait for measured quality evidence. Haiku 5.5 is used for repository exploration; Kimi K3 for web-source gathering.
 
 Delegate by agent type; each type pins its own model and thinking level. Never pass a `model` override to `Agent`.
 
@@ -75,9 +84,9 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 ### Agent routing
 - `careful-implementer`: Claude Sonnet 5.5, medium
-- `cleanup-steward`: Claude Sonnet 5.5, medium
+- `cleanup-steward`: GPT-6.1 Sol, medium
 - `content-writer`: Claude Opus 5.5, medium
-- `cratis-cli`: Claude Sonnet 5.5, medium
+- `cratis-cli`: GPT-6.1 Sol, medium
 - `doc-writer`: Claude Sonnet 5.5, medium
 - `Explore`: Claude Haiku 5.5, low (lookups only; not for facts, edits or review)
 - `general-purpose`: Claude Sonnet 5.5, medium
@@ -85,7 +94,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `implementer`: GPT-6.1 Sol, high
 - `opus-implementer`: Claude Opus 5.5, medium
 - `ops`: Kimi K3 256K, low
-- `Plan`: Claude Opus 5.5, high
+- `Plan`: Claude Opus 5.5, medium
 - `prose-editor`: Claude Sonnet 5.5, low
 - `reviewer`: Claude Opus 5.5, medium
 - `scout`: Kimi K3 256K, high
@@ -99,8 +108,9 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `implementer` for clear, testable work; `careful-implementer` for behaviour-preserving changes; `opus-implementer` only when you can name the unresolved design question or hard-bug judgement.
 - `cleanup-steward` performs post-work inventory and only explicitly authorised, safety-checked cleanup.
 - Cross-provider review: `reviewer` reviews GPT-written work; `sol-reviewer` reviews Claude-written work. Follow "Review loops" in the global rules (blocking-only gate, delta rounds, cap of 3). Before merge run the `review` workflow (Opus + Sol) and always pass `author` (`gpt` when `implementer` wrote it, so Astra rather than Sol verifies Opus's findings); pass `deep: true` (Astra instead of Sol) only for security-sensitive, algorithmic/concurrency or large cross-cutting changes.
-- Keep OpenAI spend down: use `second-opinion` (Astra) only for named hard reasoning — math, algorithms, proofs, a stuck hard bug or a contested design — not as a routine reviewer. Never raise its effort above high.
-- Start a fresh parent session from a short `.ai-work/` handoff around ~600k tokens (hard ceiling 800k; see "Orchestrator context" in the global rules).
+- Claude is the constrained quota: prefer `implementer` over `opus-implementer` unless you can name the open design question, and do not raise Claude agents above medium without a named reason. `second-opinion` (Astra) stays for named hard reasoning, not routine review; never raise Astra above high.
+- GPT budget (the weekly GPT quota ran out on Oct 19 at the current burn rate): use `deep: true` at most once per work item, on the final whole-change review; use `quick: true` for earlier rounds and `cachedReview` when the commit is unchanged. Give small, well-specified edits to `careful-implementer` or `grunt` rather than `implementer`. Unattended overnight queues start no new `implementer` runs once the coordinator reports that the GPT week is low.
+- Context size is enforced by the `context-budget` extension (see "Orchestrator context" in the global rules): hand off with `context_handoff` when asked and keep working.
 - The main session plans, briefs and decides; it does not do the reading. Delegate to Kimi (pilot, re-evaluated with `~/.ai-work/pi-usage-eval/analyze.py`):
   - `ops` — git/gh/CI state, failing-job logs, PR/issue reads, long-log triage, reading and summarising code, drafting PR notes or handoffs. Use it whenever the answer would take more than about three git/gh/cat/grep calls or produce more than ~100 lines of output.
   - `Explore` — locating code and symbols; `scout` — multi-source web research.
@@ -127,6 +137,8 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - **Exactly one release-intent label** (`major`/`minor`/`patch`/`no-release`), set in `gh pr create --label <intent>`, in every repo including samples, docs and tooling repos. Change intent by swapping in one command (`gh pr edit <n> --remove-label minor --add-label patch`; use the REST labels API if `gh pr edit` fails). Dependabot PRs carry only `no-release` — the `major`/`minor`/`patch` Dependabot adds describe the dependency, not the product. Re-running a failed label/notes check replays the old event payload; push or edit the PR instead.
 - Before merging, confirm every check is green with `gh pr checks` — non-required checks count too; never merge on an assumption that a failure is unrelated without evidence.
 - Being requested as reviewer does not mean waiting for `woksin`: once a Cratis PR is ready, merging it yourself is the preferred behaviour and is authorized. First the required CI checks must pass and the final `review` workflow run on the merged-to-be diff must return `passed: true` (a failed, incomplete or unverified review is not a pass; fix findings and rerun); never bypass branch protection (`--admin`).
+- Never put a CI skip token (`[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`) in a PR title or commit message: the merge commit inherits the title and GitHub then runs nothing on main. After merging a change meant to trigger a push workflow, confirm a run exists for the merge commit.
+- Do not merge a PR that changes `.github/workflows/` while a release-labelled Publish run in the same repository has not yet created its tag: `GITHUB_TOKEN` cannot tag a commit whose workflows differ from the default branch (403 "Resource not accessible by integration"), and reruns fail the same way. Recover with the Publish `workflow_dispatch` from current main, not a rerun.
 - Merge with a merge commit: `gh pr merge <n> --merge`. Never `--squash` or `--rebase`, and never pick the method interactively. If the repository only allows squash or rebase, stop and ask.
 - Exception: never merge a PR that triggers a major release (e.g. a `major` label or breaking public API changes). Leave it for `woksin` and say why.
 
@@ -134,15 +146,18 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 In Cratis repositories (and any repository whose local rules opt in), shipping is the default end of a task — do not end a session asking "May I push and open the PRs?". When the ship bar is met, push, open the PR(s), wait for CI, run the final review, and merge, all without asking.
 
+- **Repo-owner mode (multi-session setups).** When the coordination rules in force (the L0 rules file, or `PI_ORCH_ID` with pi-orch) name a repo owner, only that owner pushes, opens PRs and merges in that repository, in batched candidates (several issues per PR, one release). Every other session or lane delivers its finished branch to the owner (branch, SHA, gate evidence, release-note bullets) and moves on to its next task instead of opening a PR. The rest of this section then applies to the owner's candidate PR, not to individual changes.
+
 - **Ship bar** — all must hold; otherwise stop and report what is missing instead of shipping:
   - You are confident the change solves the issue(s): the root cause is understood, the design was researched against the existing code and conventions, and open questions are resolved rather than guessed.
   - Specs/tests cover the new or changed behaviour where that makes sense (say why when it does not), and the Tier 2 local gate is green.
   - The final `review` workflow on the whole change returns `passed: true`.
   - It is not a major release (see the merge exception above) and nothing in it needs a product decision from the user.
   - A fresh check of the issues and the PR (see "Re-read the issue") shows no unanswered comments, requested changes, or objections. Repeat this check right before merging, not only before pushing.
+  - Fetch main before merging; if `git log <ci-sha>..origin/main -- <changed paths>` shows overlapping changes since the PR's CI, merge main and rerun CI first. In a serial merge chain, check main's CI before the next merge.
 - **Group to save releases and CI.** Before pushing, look at all finished branches/issues from the session (and closely related open work in the same repo). Combine related or small changes into one branch and one PR so they produce one release and one CI run; list each issue as its own release-note bullet with `(#<n>)`. Keep a separate PR only when the changes are unrelated in user-facing terms, need different release-intent labels that should not be combined, carry different risk (e.g. a risky change that should not block a safe fix), or one is a major change.
 - **Join an open PR rather than opening another.** Before creating a PR, run `gh pr list --repo <owner/repo> --author @me --state open`. If one of ours is open for related work, has no CI run in progress, and is not about to be merged by another live session (`issue_work list`), merge `origin/main` into its branch, add the new commits there, and extend its release note — instead of a second PR and release. Otherwise open a new one.
-- **Push few times.** Batch commits locally (squash fix-ups into meaningful commits before the first push), merge `origin/main` in, run the gates, then push once per PR. After CI or review feedback, fix everything and push once.
+- **Push few times.** Batch commits locally (fold fix-ups into the next meaningful commit; never amend, squash or rebase in repositories whose rules forbid rewriting history, such as Cratis), merge `origin/main` in, run the gates, then push once per PR. After CI or review feedback, fix everything and push once.
 - Merge each PR with a merge commit once its CI is green and the review passed, then close/reconcile the issues as in the issue rules. If CI fails for a reason you cannot fix with confidence, stop and report.
 - **CI that outlasts the session.** A green PR must never be left unmerged because the session ended. Once the final review has passed and the PR is pushed:
   - The session merges the PR itself (`gh pr merge <n> --merge`) as soon as CI is green and the ship bar holds; no approval needed. Do not use or enable GitHub's own auto-merge feature (`gh pr merge --auto`, repository auto-merge settings).
@@ -165,15 +180,37 @@ Every push to a branch with an open PR (draft or not) runs GitHub Actions, and m
 - Run the `review` workflow on the local diff before the push meant for merge, so review fixes do not cost extra CI runs.
 - **Before every push to a PR branch** in a repository that has it, run `node .cratis/ai/hooks/scripts/cratis-check-pr.mjs --body-file <body> --label <intent>` (or the repo's equivalent) and confirm the label set: release-label and release-note checks are a common avoidable CI failure.
 
+### Local Docker (woksin, 2026-10-20: Docker must keep working without a human)
+
+- `docker-guardian` (launchd, every 2 min; log `~/.pi/agent/logs/docker-guardian.log`) restarts Docker Desktop after ~6 min unresponsive (budget 1 per 20 min, 3 per 2 h), starts it when it is not running, and every 15 min removes exited containers older than 20 min, unused networks older than 30 min, unused anonymous volumes and build cache above 8 GB. It posts `ALL-docker-guardian-*` notices. Do not duplicate it; `touch ~/.pi/agent/docker-guardian/paused` stops its restarts (only on the user's request).
+- Any agent may restart Docker Desktop itself when it has been unresponsive for 10+ minutes and the guardian has not acted (`osascript -e 'quit app "Docker"'`, `pkill -f com.docker.backend` if it lingers, `open -a Docker`), announcing it to other sessions first. No approval needed.
+- Every phase that starts containers (Testcontainers specs, `docker build`, compose, local Stage/Chronicle) runs through `pi-phase --kind integration` so container load is serialised; never run Docker work in an unwrapped background script. Every Docker call in specs and scripts has a deadline.
+- Clean up what you start: stop and remove your containers and networks when a phase ends or is abandoned. Never `docker image prune -a` or `docker system prune -a` (pinned integration images must stay).
+
+### Cancelling unnecessary runs (woksin, 2026-10-20)
+
+Runners are a shared, saturated resource. Agents may cancel GitHub Actions runs that do not need to run, with these safeguards:
+
+- Identify the run exactly: `gh run view <id> --repo <owner/repo> --json workflowName,event,headBranch,headSha,status,createdAt`. Never cancel by name, branch or time window alone, and never in bulk without listing each id first.
+- Allowed reasons: superseded by a newer push to the same PR branch (same workflow, older head SHA); duplicate run for the same SHA and workflow; a run for a PR that was closed or merged; a run your own mistaken push started; an auto-update/bump or scheduled run that a newer one already covers.
+- Never cancel a check run for a merged PR's head SHA while a Publish for that SHA is queued or in progress: the Publish gate reads those checks.
+- Never cancel: a Publish/release/deploy run (or anything on `main` that tags, publishes or deploys), a run another live session is watching for a merge, or a required check on a PR about to merge — unless its owner agrees.
+- Exception: a GitHub Pages/documentation site build or deploy run may be cancelled when a newer run of the same workflow for the same site is already queued or running (it would publish newer content anyway). Keep the newest run; never cancel the only or latest one.
+- Cancel with `gh run cancel <id> --repo <owner/repo>`, then report in one line: id, workflow, branch/SHA, reason. Do not rerun anything to compensate.
+
 ### Waiting on GitHub CI
 
 CI runs take 10–60 minutes, and longer where self-hosted runners queue. Waiting must cost neither session time nor tokens:
 
 - After a push, start **one** background watch on an immutable target: `job_start` with `gh run watch <run-id> --exit-status` (or `gh pr checks <n> --repo <owner/repo> --watch --fail-fast --interval 60`), with `timeoutSeconds` sized for the repo's CI (up to 7200 for repos with runner queues), or `job_watch` re-running one check. Never re-check status by hand in between; the wait-guard blocks the same status query run a third time within 15 minutes.
+- Watch facts, not prose: never grep cumulative `messages/` or logs for release/PR markers. After dispatch, capture and verify the intended workflow run ID (`gh run list --workflow X --commit <full headSha> --json databaseId,headSha,event,status`); disambiguate concurrent dispatches, never filter by a time window. Watch that ID.
+- For releases, use `job_watch` on this exact check: `gh api repos/<o>/<r>/releases --paginate --jq '.[]|select(.draft|not).body' | grep -qF '(#<n>)'`; aggregated releases can target a later commit. For merge turns, require predecessor PRs to be `MERGED` (`gh pr view N --json state,mergedAt`) and no non-completed runs of the repo's publish workflow.
+- Rerun failed jobs only when already diagnosed as flaky or infrastructure: first wait for that run to finish in `job_start`, then run `gh run rerun <id> --failed`; a running run's “workflow file may be broken” response is not a final diagnosis. Otherwise read `log-failed` once, fix, and push once.
 - Tell the user in one line what is being waited on (`Waiting on CI run <id> for PR #<n>; I will continue when it finishes.`) so nobody needs to nudge the session.
-- While it runs, do independent work (the next issue, docs, review prep). If there is none and the session context is large (over ~600k tokens), hand off as described in "CI that outlasts the session" and end the session instead of idling: every wake-up re-reads the whole context.
+- While it runs, do independent work (the next issue, docs, review prep). If there is none, end the turn; when a large session goes idle, the context budget asks for a handoff while the cache is still warm, so the wake-up starts from a small context.
 - On a failure, read `gh run view <id> --log-failed` once, check whether other jobs in the run also failed, fix them all, run the local gate, and push once.
-- Do not push trivial follow-ups (typos, formatting, comment tweaks) on their own; fold them into the next meaningful push, or amend/squash locally before pushing.
+- Do not push trivial follow-ups (typos, formatting, comment tweaks) on their own; fold them into the next meaningful push, and never rewrite pushed history.
+- Do not push a merge of `origin/main` into a PR branch on its own: PR CI already tests the merge ref. Merge main and push only when the branch conflicts, when a required check needs the newer main (e.g. a fix that landed there), or together with real changes, and right before merging if the repo requires an up-to-date branch.
 - If a push is needed only as a remote backup mid-work, ask the user first.
 
 ## Output and evidence
@@ -205,4 +242,5 @@ Plans, handovers, session notes, continuation prompts, status boards, scratch an
 - A request to clean up is not authorization to skip checks. Never blanket-delete `.ai-work/`, `git clean -fdx`, or force-remove a worktree; preserve uncommitted and untracked work and unreferenced commits.
 - Before deleting build output or a worktree: `git ls-files` must show nothing tracked in it, the worktree must be clean **including its ignored files**, and no live process may hold the path. The procedure is in the ai-work-lifecycle skill.
 - Failure, exit, age, and dead PIDs never imply a task is complete.
-- Guards (`cratis`, `mcp`, `wait`) are the user's switch: `/guards off [name|all]` / `/guards on`, optionally `--persist`. When a guard blocks, report it and mention the switch; never disable or bypass a guard yourself (no editing `~/.pi/agent/guards.json`, no `PI_GUARDS_OFF`).
+- Guards (`cratis`, `mcp`, `wait`, `subagent-results`, `context`) are the user's switch: `/guards off [name|all]` / `/guards on`, optionally `--persist`. When a guard blocks, report it and mention the switch; never disable or bypass a guard yourself (no editing `~/.pi/agent/guards.json`, no `PI_GUARDS_OFF`).
+- Before typing into any terminal tab (including Terminal/osascript `do script`), verify immediately that the target TTY's foreground process group belongs to a live pi. Refuse a shell, exited pi, or unknown foreground process; never send agent prose blindly.

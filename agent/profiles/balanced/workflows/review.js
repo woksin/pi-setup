@@ -1,10 +1,12 @@
 /**
  * review.js — cross-provider review with adversarial verification.
+ * Enforces all argument/round/deep-mode rules before spending reviewer tokens,
+ * and reuses caller-carried full passing verdicts for identical committed scope.
  *
  * Full mode (default): Claude Opus 5.5 (`reviewer`) and GPT-6.1 Sol (`sol-reviewer`, high)
  * review independently; each one's findings are then checked by the OTHER provider,
  * which tries to refute them. Only findings that survive are reported as confirmed.
- * The Opus review runs at high effort (the reviewer agent defaults to medium);
+ * The Opus review runs at the reviewer agent's medium effort (Opus 5.5 medium >= xhigh, Oct 2026);
  * verification runs at each agent's default effort.
  *
  * Deep mode (`deep: true`): the GPT side uses GPT-6 Astra (`second-opinion`, high) instead of
@@ -33,9 +35,14 @@
  *                        `git diff <since>..HEAD` (the fixes) and whether `prior` findings are resolved.
  *   prior?:   string   — the previous round's blocking findings (and any you dismissed, with the reason),
  *                        so reviewers check those instead of hunting for new edge cases in unchanged code.
- *   round?:   number   — review round for this work item (1 = first). Rounds above 3 are refused unless
+ *   round:    number   — review round for this work item (1 = first). Rounds above 3 are refused unless
  *                        force: true — at that point make a structural fix or ask the user.
  *   force?:   boolean  — override the round cap.
+ *   deepReason?: "security" | "algorithmic" | "concurrency" | "cross-cutting"
+ *   deepJustification?: string — required one-line justification when deep is true.
+ *   headSha?: string — full HEAD SHA for cache reuse (sandbox has no git/fs access).
+ *   baseSha?: string — full base SHA; required to use caller-carried cachedReview.
+ *   cachedReview?: object — previous full result, unchanged; see INSTALL.md for cache limitations.
  * }
  *
  * Gate: only BLOCKING findings fail a review — critical/major issues a maintainer would block merge on
@@ -62,47 +69,77 @@ export const meta = {
   ],
 }
 
-// The SubagentWorkflow tool can deliver args as a JSON string rather than an object.
-const input = typeof args === "string" ? JSON.parse(args) : args
+// Validate everything before phase()/agent(), including stringified tool arguments.
+let input
+const problems = []
+try { input = typeof args === 'string' ? JSON.parse(args) : args }
+catch { problems.push('args must be valid JSON.') }
+if (!input || typeof input !== 'object' || Array.isArray(input)) {
+  problems.push('args must be an object.')
+  input = {}
+}
+const text = value => typeof value === 'string' && value.trim().length > 0
+const sha = value => typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value)
+if (!text(input.target)) problems.push('Missing or invalid args.target — say what to review (a diff range, paths, or a document).')
+if (input.context !== undefined && typeof input.context !== 'string') problems.push('context must be a string.')
+for (const key of ['quick', 'deep', 'force']) {
+  if (input[key] !== undefined && typeof input[key] !== 'boolean') problems.push(`${key} must be a boolean.`)
+}
+if (input.author !== undefined && !['claude', 'gpt'].includes(input.author)) problems.push('author must be "claude" or "gpt".')
+const quick = input.quick === true
+const deep = input.deep === true
+const author = input.author === 'gpt' ? 'gpt' : 'claude'
+if (quick && !['claude', 'gpt'].includes(input.author)) problems.push('Quick mode needs args.author: "claude" or "gpt" (who wrote the work).')
+if (quick && deep) problems.push('quick and deep cannot be combined — deep is a full review with GPT-6 Astra.')
+if (deep && !['security', 'algorithmic', 'concurrency', 'cross-cutting'].includes(input.deepReason)) {
+  problems.push('deep: true needs deepReason: security, algorithmic, concurrency, or cross-cutting.')
+}
+if (deep && (!text(input.deepJustification) || /[\r\n\u2028\u2029]/.test(input.deepJustification))) {
+  problems.push('deep: true needs a non-empty, one-line deepJustification.')
+}
+if (!deep && (input.deepReason !== undefined || input.deepJustification !== undefined)) problems.push('deepReason/deepJustification require deep: true.')
+for (const key of ['since', 'prior']) {
+  if (input[key] !== undefined && !text(input[key])) problems.push(`${key} must be a non-empty string.`)
+}
+const since = text(input.since) ? input.since.trim() : null
+const prior = text(input.prior) ? input.prior.trim() : null
+if (!(Number.isInteger(input.round) && input.round >= 1)) problems.push('round is required and must be a positive integer (1 for the first whole-change review).')
+const round = input.round
+if (since && !prior) problems.push('since needs prior: pass the previous round\'s blocking findings and any dismissed findings with the reason.')
+if ((since || prior) && round === 1) problems.push('Follow-up reviews (since/prior) require round 2 or later, after a whole-change review in the same mode.')
+if (round > 3 && input.force !== true) problems.push(`Round ${round} refused: the review cap is 3. Make a structural fix or ask the user; only then pass force: true.`)
+if (input.headSha !== undefined && !sha(input.headSha)) problems.push('headSha must be the full current HEAD SHA when supplied (workflow scripts cannot read git or files).')
+if (input.baseSha !== undefined && !sha(input.baseSha)) problems.push('baseSha must be the full base commit SHA, not a moving ref.')
+if (input.cachedReview !== undefined && (!input.cachedReview || typeof input.cachedReview !== 'object' || Array.isArray(input.cachedReview))) problems.push('cachedReview must be a previous review result object.')
+if (input.cachedReview !== undefined && input.baseSha === undefined) problems.push('cachedReview requires baseSha so a changed base cannot reuse a verdict.')
+if (problems.length) return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}`, problems }
 
-const target = input?.target
-if (!target) {
-  return { passed: false, error: 'Missing args.target — say what to review (a diff range, paths, or a document).' }
-}
-const context = input?.context ? `\n\nIntent / spec of the work:\n${input.context}` : ''
-const quick = input?.quick === true
-if (quick && input?.author !== 'claude' && input?.author !== 'gpt') {
-  return { passed: false, error: 'Quick mode needs args.author: "claude" or "gpt" (who wrote the work), so the review goes to the other provider.' }
-}
-const author = input?.author === 'gpt' ? 'gpt' : 'claude'
-const deep = input?.deep === true
-if (quick && deep) {
-  return { passed: false, error: 'quick and deep cannot be combined — deep is a full review with GPT-6 Astra.' }
-}
-
-const since = typeof input?.since === 'string' && input.since.trim() ? input.since.trim() : null
-const prior = typeof input?.prior === 'string' && input.prior.trim() ? input.prior.trim() : null
-if (input?.round !== undefined && !(Number.isInteger(input.round) && input.round >= 1)) {
-  return { passed: false, error: `round must be a positive integer, got ${JSON.stringify(input.round)}.` }
-}
-if ((since || prior) && input?.round === undefined) {
-  return { passed: false, error: 'Follow-up reviews (since/prior) must pass an explicit round (2 or 3).' }
-}
-if (since && !prior) {
-  return {
-    passed: false,
-    error: 'since needs prior: pass the previous round\'s blocking findings (and any dismissed, with the reason) ' +
-      'so unresolved issues in unchanged code are still checked.',
+const target = input.target
+const context = input.context ? `\n\nIntent / spec of the work:\n${input.context}` : ''
+// No fs/Node globals in the workflow realm. The caller carries the previous result unchanged;
+// never pretend that the script has checked the working tree or persisted a cross-session cache.
+// Compact FNV-1a/128 identity, not authentication. Do not echo the potentially huge
+// target/spec back in every notification just to transport a cache lookup key.
+const fingerprint = value => {
+  let hash = 144066263297769815596495629667062367629n
+  const mask = (1n << 128n) - 1n
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    for (const byte of [code & 255, code >>> 8]) hash = ((hash ^ BigInt(byte)) * 309485009821345068724781371n) & mask
   }
+  return hash.toString(16).padStart(32, '0')
 }
-const round = input?.round ?? 1
-if (round > 3 && input?.force !== true) {
-  return {
-    passed: false,
-    error: `Round ${round} refused: the review cap is 3 rounds per work item. Findings that keep coming back mean ` +
-      'the approach needs a structural fix (sweep the whole class of issue) or a decision from the user. ' +
-      'Pass force: true only after one of those.',
-  }
+const cacheKey = 'review-v1:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
+  mode: deep ? 'deep' : 'full', author, context: input.context ?? '',
+  deepReason: input.deepReason ?? null, deepJustification: input.deepJustification ?? null }))
+const cached = input.cachedReview
+if (!quick && !since && !prior && input.headSha && input.baseSha && cached?.reviewCacheKey === cacheKey &&
+    cached.passed === true && cached.complete === true && cached.mode === (deep ? 'deep' : 'full') &&
+    cached.blockingCount === 0 && cached.unverifiedCount === 0 &&
+    Array.isArray(cached.incomplete) && cached.incomplete.length === 0 &&
+    Array.isArray(cached.blocking) && cached.blocking.length === 0 &&
+    Array.isArray(cached.unverified) && cached.unverified.length === 0) {
+  return { ...cached, cached: true }
 }
 
 const FINDINGS = {
@@ -157,7 +194,7 @@ const VERDICTS = {
 }
 
 const REVIEWERS = {
-  claude: { agentType: 'reviewer', name: 'Opus 5.5', reviewEffort: 'high' },
+  claude: { agentType: 'reviewer', name: 'Opus 5.5' },
   gpt: deep
     ? { agentType: 'second-opinion', name: 'GPT-6 Astra' }
     : { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
@@ -233,7 +270,7 @@ const nextStep = passed =>
     ? 'Passed. Fix cheap advisory items in the same change if you like; do not start another review round for them.'
     : round >= 3
       ? 'Not passed at the round cap. Make a structural fix for the whole class of issue or ask the user; do not loop.'
-      : `Fix the blocking findings, commit, then rerun with since: <HEAD sha reviewed now>, prior: <blocking list>, round: ${round + 1}.`
+      : `Fix the blocking findings, commit, then rerun with headSha: <new full HEAD SHA>, since: ${input.headSha ?? '<HEAD SHA reviewed now>'}, prior: <blocking list>, round: ${round + 1}.`
 
 phase('Review')
 
@@ -331,7 +368,7 @@ const passed = complete && confirmed.length === 0 && unverified.length === 0
 log(`${confirmed.length} blocking, ${advisory.length} advisory, ${rejected.length} rejected, ${unverified.length} unverified — ${passed ? 'PASSED' : 'NOT PASSED'}`)
 if (!complete) log(`Incomplete: ${incomplete.join('; ')}`)
 
-return fit({
+const verdict = fit({
   mode: deep ? 'deep' : 'full',
   round,
   passed,
@@ -348,3 +385,6 @@ return fit({
   rejectedCount: rejected.length,
   next: nextStep(passed),
 })
+// Only complete, passing, whole-change full reviews are eligible for reuse.
+if (passed && !since && !prior && input.headSha && input.baseSha) verdict.reviewCacheKey = cacheKey
+return verdict

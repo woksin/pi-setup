@@ -6,7 +6,7 @@ color: cyan
 model: openai-codex/gpt-6.1-sol
 thinking: medium
 tools: read, grep, find, ls, ext:dist
-extensions: [dist, provider-fallback]
+extensions: [dist, provider-fallback, output-cap, observation-mask]
 # pi-web-access declares its entry as "./dist", so pi-subagents names it "dist" (not "pi-web-access").
 skills: false
 prompt_mode: append

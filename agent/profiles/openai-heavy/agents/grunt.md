@@ -5,7 +5,7 @@ description: Worker (GPT-6.1 Sol, low) for mechanical, well-specified work — r
 color: gray
 model: openai-codex/gpt-6.1-sol
 thinking: low
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, observation-mask]
 skills: false
 prompt_mode: append
 ---

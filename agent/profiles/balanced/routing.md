@@ -1,6 +1,6 @@
 ## Model routing
 
-Active profile: **balanced** (`~/.pi/agent/bin/pi-profile`). Default profile. Uses each provider where the evidence is strongest and keeps Claude/OpenAI usage balanced. Haiku 5.5 is used for repository exploration; Kimi K3 for web-source gathering.
+Active profile: **balanced** (`~/.pi/agent/bin/pi-profile`). Default profile. Uses each provider where the evidence is strongest. Claude is the constrained quota (Oct 3–17: Anthropic usage-limit hits every day, about 3,000 in total; OpenAI 39), so low-risk roles run on GPT and `provider-fallback` moves a session to GPT when Claude hits its limit. Further role moves wait for measured quality evidence. Haiku 5.5 is used for repository exploration; Kimi K3 for web-source gathering.
 
 Delegate by agent type; each type pins its own model and thinking level. Never pass a `model` override to `Agent`.
 
@@ -13,9 +13,9 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 ### Agent routing
 - `careful-implementer`: Claude Sonnet 5.5, medium
-- `cleanup-steward`: Claude Sonnet 5.5, medium
+- `cleanup-steward`: GPT-6.1 Sol, medium
 - `content-writer`: Claude Opus 5.5, medium
-- `cratis-cli`: Claude Sonnet 5.5, medium
+- `cratis-cli`: GPT-6.1 Sol, medium
 - `doc-writer`: Claude Sonnet 5.5, medium
 - `Explore`: Claude Haiku 5.5, low (lookups only; not for facts, edits or review)
 - `general-purpose`: Claude Sonnet 5.5, medium
@@ -23,7 +23,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `implementer`: GPT-6.1 Sol, high
 - `opus-implementer`: Claude Opus 5.5, medium
 - `ops`: Kimi K3 256K, low
-- `Plan`: Claude Opus 5.5, high
+- `Plan`: Claude Opus 5.5, medium
 - `prose-editor`: Claude Sonnet 5.5, low
 - `reviewer`: Claude Opus 5.5, medium
 - `scout`: Kimi K3 256K, high
@@ -37,8 +37,9 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `implementer` for clear, testable work; `careful-implementer` for behaviour-preserving changes; `opus-implementer` only when you can name the unresolved design question or hard-bug judgement.
 - `cleanup-steward` performs post-work inventory and only explicitly authorised, safety-checked cleanup.
 - Cross-provider review: `reviewer` reviews GPT-written work; `sol-reviewer` reviews Claude-written work. Follow "Review loops" in the global rules (blocking-only gate, delta rounds, cap of 3). Before merge run the `review` workflow (Opus + Sol) and always pass `author` (`gpt` when `implementer` wrote it, so Astra rather than Sol verifies Opus's findings); pass `deep: true` (Astra instead of Sol) only for security-sensitive, algorithmic/concurrency or large cross-cutting changes.
-- Keep OpenAI spend down: use `second-opinion` (Astra) only for named hard reasoning — math, algorithms, proofs, a stuck hard bug or a contested design — not as a routine reviewer. Never raise its effort above high.
-- Start a fresh parent session from a short `.ai-work/` handoff around ~600k tokens (hard ceiling 800k; see "Orchestrator context" in the global rules).
+- Claude is the constrained quota: prefer `implementer` over `opus-implementer` unless you can name the open design question, and do not raise Claude agents above medium without a named reason. `second-opinion` (Astra) stays for named hard reasoning, not routine review; never raise Astra above high.
+- GPT budget (the weekly GPT quota ran out on Oct 19 at the current burn rate): use `deep: true` at most once per work item, on the final whole-change review; use `quick: true` for earlier rounds and `cachedReview` when the commit is unchanged. Give small, well-specified edits to `careful-implementer` or `grunt` rather than `implementer`. Unattended overnight queues start no new `implementer` runs once the coordinator reports that the GPT week is low.
+- Context size is enforced by the `context-budget` extension (see "Orchestrator context" in the global rules): hand off with `context_handoff` when asked and keep working.
 - The main session plans, briefs and decides; it does not do the reading. Delegate to Kimi (pilot, re-evaluated with `~/.ai-work/pi-usage-eval/analyze.py`):
   - `ops` — git/gh/CI state, failing-job logs, PR/issue reads, long-log triage, reading and summarising code, drafting PR notes or handoffs. Use it whenever the answer would take more than about three git/gh/cat/grep calls or produce more than ~100 lines of output.
   - `Explore` — locating code and symbols; `scout` — multi-source web research.

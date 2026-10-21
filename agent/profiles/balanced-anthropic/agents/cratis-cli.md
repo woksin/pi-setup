@@ -6,7 +6,7 @@ color: yellow
 model: anthropic/claude-sonnet-5-5
 thinking: medium
 tools: read, bash, grep, find, ls, ext:pi-mcp-adapter
-extensions: [cratis-cli-guard, pi-mcp-adapter, provider-fallback]
+extensions: [cratis-cli-guard, pi-mcp-adapter, provider-fallback, output-cap, observation-mask]
 skills: true
 prompt_mode: append
 ---

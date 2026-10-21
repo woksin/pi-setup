@@ -1,7 +1,8 @@
 {
-  "enabled": false,
+  "enabled": true,
   "defaultLimitMinutes": 60,
   "maxFallbacksPerPrompt": 2,
+  "maxContextTokensForFallback": 150000,
   "restoreWhenExpired": true,
   "limitPatterns": {
     "anthropic": [
@@ -11,20 +12,50 @@
     "openai-codex": [
       "ChatGPT usage limit",
       "usage limit has been reached"
+    ],
+    "kimi-coding": [
+      "usage limit",
+      "quota"
     ]
   },
   "pairs": [
     [
       "anthropic/claude-opus-5-5",
-      "openai-codex/gpt-6-astra"
+      "openai-codex/gpt-6.1-sol"
     ],
     [
       "anthropic/claude-sonnet-5-5",
       "openai-codex/gpt-6.1-sol"
     ],
     [
-      "anthropic/claude-haiku-4-5",
+      "anthropic/claude-haiku-5-5",
       "openai-codex/gpt-6-luna"
+    ],
+    [
+      "kimi-coding/k3-256k",
+      "openai-codex/gpt-6.1-sol"
     ]
-  ]
+  ],
+  "unavailableMinutes": 10,
+  "unavailablePatterns": {
+    "kimi-coding": [
+      "overloaded",
+      "resource_not_found_error",
+      "timed out",
+      "timeout",
+      "OAuth refresh failed",
+      "^\\s*5\\d\\d\\b",
+      "^\\s*401\\b",
+      "unauthori[sz]ed",
+      "authentication",
+      "ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|fetch failed|socket hang up|network error"
+    ]
+  },
+  "chains": {
+    "kimi-coding/k3-256k": [
+      "openai-codex/gpt-6.1-sol",
+      "openai-codex/gpt-6-luna",
+      "anthropic/claude-haiku-5-5"
+    ]
+  }
 }

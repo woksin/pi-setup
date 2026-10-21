@@ -30,27 +30,19 @@
     "npm:@woksin/pi-jobs",
     "npm:@woksin/pi-recover",
     "npm:pi-browser-use",
-    "npm:donsetch"
+    "npm:donsetch",
+    "git:github.com/woksin/pi-orch"
   ],
   "hideThinkingBlock": true,
   "modelThinkingLevels": {
     "anthropic/claude-opus-5-5": "medium",
-    "openai-codex/gpt-6-sol": "medium",
-    "anthropic/claude-fable-5": "high",
-    "anthropic/claude-opus-4-5": "medium",
-    "anthropic/claude-sonnet-5": "high",
-    "openai-codex/gpt-5.6-sol": "high",
-    "openai-codex/gpt-5.6-terra": "high",
-    "openai-codex/gpt-5.6-luna": "high",
-    "openai-codex/gpt-5.5": "medium",
     "openai-codex/gpt-6-astra": "high",
     "openai-codex/gpt-6-luna": "low",
-    "anthropic/claude-haiku-4-5": "low",
     "anthropic/claude-sonnet-5-5": "medium",
     "openai-codex/gpt-6.1-sol": "high"
   },
   "collapseChangelog": true,
-  "cacheWarming": "idle",
+  "cacheWarming": "off",
   "showCacheMissNotices": true,
   "extensions": [
     "-builtin:mcp"

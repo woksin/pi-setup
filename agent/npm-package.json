@@ -3,12 +3,12 @@
   "private": true,
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.85.1",
-    "@gotgenes/pi-anthropic-auth": "^3.4.2",
+    "@gotgenes/pi-anthropic-auth": "^3.4.3",
     "@tintinweb/pi-subagents": "^0.22.0",
     "@vigolium/piolium": "^0.0.13",
-    "donsetch": "^4.8.1",
+    "donsetch": "^4.10.1",
     "pi-browser-use": "^0.12.13",
-    "pi-mcp-adapter": "^5.3.0",
-    "pi-web-access": "^0.40.0"
+    "pi-mcp-adapter": "^5.3.2",
+    "pi-web-access": "^0.42.0"
   }
 }

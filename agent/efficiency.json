@@ -1,0 +1,13 @@
+{
+  "outputCap": {
+    "enabled": true,
+    "maxChars": 12000,
+    "scope": "all"
+  },
+  "observationMask": {
+    "enabled": true,
+    "keep": 15,
+    "batchTokens": 30000,
+    "scope": "subagents"
+  }
+}

@@ -3,9 +3,9 @@ name: cleanup-steward
 display_name: Cleanup steward
 description: Post-work cleanup operator. Inventories task outputs, worktrees, branches, caches and processes, and reconciles the GitHub issues the work touched (status, closing completed or obsolete issues); performs only explicitly authorised, safety-checked cleanup and reports everything retained.
 color: yellow
-model: anthropic/claude-sonnet-5-5
+model: openai-codex/gpt-6.1-sol
 thinking: medium
-extensions: [provider-fallback, ai-work-lifecycle, issue-work]
+extensions: [provider-fallback, ai-work-lifecycle, issue-work, pi-context-budget, output-cap, observation-mask]
 skills: true
 prompt_mode: append
 ---

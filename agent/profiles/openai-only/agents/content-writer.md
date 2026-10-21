@@ -6,7 +6,7 @@ color: pink
 model: openai-codex/gpt-6-astra
 thinking: high
 tools: read, write, edit, grep, find, ls, ext:dist
-extensions: [dist, provider-fallback, cratis-hooks, cratis-path-guidance]
+extensions: [dist, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, observation-mask]
 # pi-web-access declares its entry as "./dist", so pi-subagents names it "dist" (not "pi-web-access").
 skills: true
 prompt_mode: append

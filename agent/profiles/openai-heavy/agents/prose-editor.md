@@ -6,7 +6,7 @@ color: teal
 model: openai-codex/gpt-6.1-sol
 thinking: medium
 tools: read, write, edit, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, observation-mask]
 skills: true
 prompt_mode: append
 ---

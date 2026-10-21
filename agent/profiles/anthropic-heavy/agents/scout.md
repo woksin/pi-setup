@@ -6,7 +6,7 @@ color: cyan
 model: anthropic/claude-sonnet-5-5
 thinking: medium
 tools: read, grep, find, ls, ext:dist
-extensions: [dist, provider-fallback]
+extensions: [dist, provider-fallback, output-cap, observation-mask]
 # pi-web-access declares its entry as "./dist", so pi-subagents names it "dist" (not "pi-web-access").
 skills: false
 prompt_mode: append
