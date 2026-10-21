@@ -141,7 +141,7 @@ class PhaseTests(unittest.TestCase):
         settings = pi_phase.config(self.config)
         self.assertEqual(settings, (2, 1))
         self.assertEqual(settings.options, dict(msbuild_max_cpu=0, container_test_detection="hint",
-                                                cold_worktree_hint=True))
+                                                cold_worktree_hint=True, memory_admission=False))
         for cores, slots, expected in ((12, 2, 6), (12, 4, 3), (1, 4, 2), (None, 2, 2)):
             with self.subTest(cores=cores, slots=slots), patch.object(pi_phase.os, "cpu_count", return_value=cores):
                 self.assertEqual(pi_phase.msbuild_cap("auto", slots), expected)
@@ -167,7 +167,7 @@ class PhaseTests(unittest.TestCase):
                 note.assert_called_once()
         self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
         self.assertEqual(pi_phase.config(self.config).options,
-                         dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False))
+                         dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False))
 
     def test_dotnet_shim_insertion_and_passthrough(self):
         # Real shell execution, including spaces, empty arguments and a shim PATH alias.
@@ -342,6 +342,149 @@ class PhaseTests(unittest.TestCase):
             self.assertEqual(pi_phase.run(args, self.state, self.config), 75)
         hints = [call.args[0] for call in note.call_args_list if call.args[0].startswith("long queue")]
         self.assertEqual(hints, ["long queue (601s): run dev-doctor to look for contention"])
+
+    def test_memory_admission_config_defaults_validation_and_overrides(self):
+        self.assertIs(pi_phase.config(self.config).options["memory_admission"], False)
+        for value, expected in ((True, dict(min_free_percent=30, min_swap_free_mb=500)),
+                ({}, dict(min_free_percent=30, min_swap_free_mb=500)),
+                (dict(min_free_percent=20), dict(min_free_percent=20, min_swap_free_mb=500)),
+                (dict(min_free_percent=0, min_swap_free_mb=0), dict(min_free_percent=0, min_swap_free_mb=0))):
+            with self.subTest(value=value):
+                self.configure(memory_admission=value)
+                self.assertEqual(pi_phase.config(self.config).options["memory_admission"], expected)
+        for value in (None, 1, "true", [], dict(min_free_percent=-1), dict(min_free_percent=101),
+                      dict(min_free_percent=True), dict(min_swap_free_mb="500"),
+                      dict(min_swap_free_mb=-1), dict(min_swap_free_mb=float("inf"))):
+            with self.subTest(value=value):
+                self.configure(memory_admission=value)
+                with patch.object(pi_phase, "note") as note:
+                    self.assertIs(pi_phase.config(self.config).options["memory_admission"], False)
+                note.assert_called_once_with("invalid memory_admission; using default False")
+        self.configure(memory_admission=dict(unknown=1))
+        with patch.object(pi_phase, "note") as note:
+            self.assertEqual(pi_phase.config(self.config).options["memory_admission"]["min_free_percent"], 30)
+            note.assert_called_once_with("unknown memory_admission key unknown; ignored")
+
+    def test_memory_parsers_for_macos_and_linux(self):
+        pressure = "System-wide memory free percentage: 25%\n"
+        for free, expected in (("512.00M", 512), ("1.50G", 1536), ("2048K", 2), ("0.5T", 524288)):
+            with self.subTest(free=free):
+                self.assertEqual(pi_phase.parse_macos_memory(pressure,
+                    f"total = 6144.00M  used = 4096.00M  free = {free} (encrypted)"), (25, expected))
+        meminfo = "MemTotal: 1000000 kB\nMemAvailable: 400000 kB\nSwapFree: 1024000 kB\nIgnored: 3 kB\n"
+        self.assertEqual(pi_phase.parse_linux_memory(meminfo), (40, 1000))
+        for text in ("", "MemTotal: 0 kB\nMemAvailable: 0 kB\nSwapFree: 0 kB",
+                     meminfo.replace("MemAvailable: 400000 kB", "MemAvailable: 400000 MB")):
+            with self.subTest(text=text), self.assertRaises((ValueError, KeyError)):
+                pi_phase.parse_linux_memory(text)
+        for pressure, swap in (("bad", "bad"), ("System-wide memory free percentage: 101%", "free = 0M")):
+            with self.assertRaises(ValueError):
+                pi_phase.parse_macos_memory(pressure, swap)
+
+    def test_host_memory_readers_are_bounded_and_select_platform(self):
+        outputs = [SimpleNamespace(stdout="System-wide memory free percentage: 31%"),
+                   SimpleNamespace(stdout="total = 2G used = 1G free = 1G")]
+        with patch.object(pi_phase.sys, "platform", "darwin"), \
+                patch.object(pi_phase.subprocess, "run", side_effect=outputs) as run:
+            self.assertEqual(pi_phase.read_host_memory(time.monotonic() + 3), (31, 1024))
+            self.assertEqual([call.args[0] for call in run.call_args_list],
+                             [["memory_pressure", "-Q"], ["sysctl", "-n", "vm.swapusage"]])
+            for call in run.call_args_list:
+                self.assertLessEqual(call.kwargs["timeout"], 1)
+                self.assertTrue(call.kwargs["check"])
+        text = "MemTotal: 1000 kB\nMemAvailable: 500 kB\nSwapFree: 1024 kB\n"
+        from unittest.mock import mock_open
+        with patch.object(pi_phase.sys, "platform", "linux"), patch("builtins.open", mock_open(read_data=text)) as stream:
+            self.assertEqual(pi_phase.read_host_memory(time.monotonic() + 1), (50, 1))
+            stream.assert_called_once_with("/proc/meminfo")
+            stream().read.assert_called_once_with(65536)
+
+    def test_memory_admission_cache_thresholds_and_fail_open(self):
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase.time, "monotonic", side_effect=[0, 4.99, 5, 10]), \
+                patch.object(pi_phase, "read_host_memory", side_effect=[(20, 1000), (30, 499), (30, 500)]) as read:
+            self.assertEqual(admission.reason(100), "memory free 20% < 30%")
+            self.assertEqual(admission.reason(100), "memory free 20% < 30%")
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual(admission.reason(100), "swap free 499 MB < 500 MB")
+            self.assertIsNone(admission.reason(100))
+            self.assertEqual(read.call_count, 3)
+        for error in (OSError("unavailable"), ValueError("bad output"), KeyError("MemAvailable"),
+                      subprocess.TimeoutExpired("memory_pressure", 1)):
+            with self.subTest(error=error):
+                admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+                with patch.object(pi_phase, "read_host_memory", side_effect=error), patch.object(pi_phase, "note") as note:
+                    self.assertIsNone(admission.reason(time.monotonic() + 1))
+                    self.assertIsNone(admission.reason(time.monotonic() + 1))
+                    note.assert_called_once()
+                    self.assertIn("admitting (fail-open)", note.call_args.args[0])
+
+    def memory_claim(self, kind="build", admission=None, cleanup=True):
+        self.state.mkdir(exist_ok=True)
+        held = pi_phase.claim(self.state, pi_phase.slot_paths(self.state, kind, 2, 1, ("repo", "1", "sha")),
+                              time.monotonic() + 2, lambda: False, admission=admission)
+        if held and cleanup:
+            self.addCleanup(lambda: [os.close(fd) for _, fd in held])
+        return held
+
+    def test_memory_guard_defers_without_holding_permits_and_prints_once(self):
+        self.state.mkdir()
+        running = pi_phase.lock_file(self.state / "heavy-0.lock")
+        self.addCleanup(os.close, running)
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        def sample(_deadline):
+            coordinator = pi_phase.lock_file(self.state / "coordinator.lock")
+            self.assertIsNotNone(coordinator)  # Never measure under the coordinator.
+            pi_phase.unlock(coordinator)
+            return 20, 1000
+        with patch.object(pi_phase, "read_host_memory", side_effect=sample), patch.object(pi_phase, "note") as note:
+            self.assertIsNone(self.memory_claim(admission=admission))
+            self.assertIsNone(self.memory_claim(kind="integration", admission=admission))
+            note.assert_called_once_with("waiting: memory free 20% < 30%")
+        for name in ("heavy-1.lock", "integration-0.lock"):
+            fd = pi_phase.lock_file(self.state / name)
+            self.assertIsNotNone(fd)
+            pi_phase.unlock(fd)
+        admission.checked = None
+        with patch.object(pi_phase, "read_host_memory", return_value=(50, 1000)):
+            self.assertTrue(self.memory_claim(admission=admission))
+
+    def test_memory_starvation_guard_accounts_for_ci_and_orphan_phases(self):
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase, "read_host_memory", return_value=(10, 0)):
+            held = self.memory_claim(admission=admission, cleanup=False)  # Idle host still starts one phase.
+        self.assertTrue(held)
+        for _, fd in held:
+            os.close(fd)
+        ci = pi_phase.lock_file(self.state / "ci-running.lock")
+        try:
+            with patch.object(pi_phase, "read_host_memory", return_value=(10, 0)):
+                self.assertIsNone(self.memory_claim(admission=admission))
+                # CI watchers never acquire heavy permits or invoke memory probes.
+                with patch.object(pi_phase, "read_host_memory") as read:
+                    held = self.memory_claim(kind="ci", admission=admission, cleanup=False)
+                    self.assertTrue(held)
+                    for _, fd in held:
+                        os.close(fd)
+                    read.assert_not_called()
+        finally:
+            pi_phase.unlock(ci)
+        orphan = self.state / "heavy-9.json"  # Includes slots outside a lowered ceiling.
+        orphan.write_text(json.dumps(dict(pgid=4242, token="orphan")))
+        (self.state / "heavy-9.lock").touch()
+        with patch.object(pi_phase, "live_groups", return_value={4242}):
+            self.assertIsNone(self.memory_claim(admission=admission))
+        with patch.object(pi_phase, "live_groups", return_value=set()):
+            self.assertTrue(self.memory_claim(admission=admission))
+
+    def test_memory_measurement_failure_admits_even_with_another_phase(self):
+        self.state.mkdir()
+        running = pi_phase.lock_file(self.state / "heavy-0.lock")
+        self.addCleanup(os.close, running)
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase, "read_host_memory", side_effect=OSError("failed")), patch.object(pi_phase, "note") as note:
+            self.assertTrue(self.memory_claim(admission=admission))
+            self.assertIn("fail-open", note.call_args.args[0])
 
     def test_fifo_including_equal_timestamps_and_sequence(self):
         with patch.object(pi_phase.time, "time", return_value=100):

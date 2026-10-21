@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import random
+import re
 import time
 import uuid
 
@@ -52,7 +53,7 @@ class PhaseConfig(tuple):
 
 def config(path):
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
-                    container_test_detection="hint", cold_worktree_hint=True)
+                    container_test_detection="hint", cold_worktree_hint=True, memory_admission=False)
     try:
         data = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(data, dict):
@@ -69,6 +70,9 @@ def config(path):
             valid = type(value) is int and 1 <= value <= 32
         elif key == "msbuild_max_cpu":
             valid = value == "auto" or type(value) is int and value >= 0
+        elif key == "memory_admission":
+            values[key] = memory_admission_config(value)
+            continue
         elif key == "container_test_detection":
             valid = value in ("off", "hint", "promote")
         else:
@@ -80,6 +84,116 @@ def config(path):
     heavy = values.pop("heavy_slots")
     integration = values.pop("integration_slots")
     return PhaseConfig(heavy, integration, values)
+
+
+def memory_admission_config(value):
+    defaults = dict(min_free_percent=30, min_swap_free_mb=500)
+    if value is False:
+        return False
+    if value is True:
+        return defaults
+    if isinstance(value, dict):
+        for key in value.keys() - defaults.keys():
+            note(f"unknown memory_admission key {key}; ignored")
+        settings = {key: value.get(key, default) for key, default in defaults.items()}
+        if (all(type(n) in (int, float) and 0 <= n <= sys.float_info.max for n in settings.values())
+                and settings["min_free_percent"] <= 100):
+            return settings
+    note("invalid memory_admission; using default False")
+    return False
+
+
+def parse_macos_memory(pressure, swap):
+    free = re.search(r"System-wide memory free percentage:\s*(\d+(?:\.\d+)?)%", pressure)
+    swap_free = re.search(r"\bfree\s*=\s*(\d+(?:\.\d+)?)([KMGT])\b", swap)
+    if not free or not swap_free:
+        raise ValueError("unrecognized macOS memory output")
+    percent = float(free[1])
+    megabytes = float(swap_free[1]) * {"K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 ** 2}[swap_free[2]]
+    if not 0 <= percent <= 100 or not math.isfinite(megabytes):
+        raise ValueError("invalid macOS memory values")
+    return percent, megabytes
+
+
+def parse_linux_memory(text):
+    values = {}
+    for line in text.splitlines():
+        fields = line.split()
+        if fields and fields[0] in ("MemAvailable:", "MemTotal:", "SwapFree:"):
+            if len(fields) != 3 or fields[2] != "kB":
+                raise ValueError("unrecognized /proc/meminfo units")
+            values[fields[0][:-1]] = int(fields[1])
+    total, available, swap = (values[key] for key in ("MemTotal", "MemAvailable", "SwapFree"))
+    if total <= 0 or not 0 <= available <= total or swap < 0:
+        raise ValueError("invalid /proc/meminfo values")
+    return available * 100 / total, swap / 1024
+
+
+def read_host_memory(deadline):
+    if sys.platform == "darwin":
+        outputs = []
+        for command in (["memory_pressure", "-Q"], ["sysctl", "-n", "vm.swapusage"]):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("memory probe queue deadline expired")
+            outputs.append(subprocess.run(command, capture_output=True, text=True, check=True,
+                                          timeout=min(1, remaining)).stdout)
+        return parse_macos_memory(*outputs)
+    if sys.platform.startswith("linux"):
+        with open("/proc/meminfo") as stream:
+            return parse_linux_memory(stream.read(65536))
+    raise ValueError("memory admission is unsupported on this platform")
+
+
+class MemoryAdmission:
+    """Per-phase, at-most-five-second cache; all probes run outside the coordinator."""
+    def __init__(self, thresholds):
+        self.thresholds = thresholds
+        self.checked = None
+        self.sample = None
+        self.noted = False
+
+    def reason(self, deadline):
+        now = time.monotonic()
+        if self.checked is None or now - self.checked >= 5:
+            self.checked = now
+            try:
+                self.sample = read_host_memory(deadline)
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+                self.sample = None
+                note(f"memory measurement failed ({exc}); admitting (fail-open)")
+        if self.sample is None:
+            return None
+        free, swap_free = self.sample
+        minimum = self.thresholds["min_free_percent"]
+        if free < minimum:
+            return f"memory free {free:g}% < {minimum:g}%"
+        minimum = self.thresholds["min_swap_free_mb"]
+        if swap_free < minimum:
+            return f"swap free {swap_free:g} MB < {minimum:g} MB"
+        return None
+
+    def waiting(self, reason):
+        if not self.noted:
+            note(f"waiting: {reason}")
+            self.noted = True
+
+
+def phases_running(state, available, prior, live):
+    """Caller holds the coordinator; do not mistake our tentative locks for owners."""
+    for path in state.glob("*.lock"):
+        if not path.name.startswith(("heavy-", "integration-", "ci-")) or path in available:
+            continue
+        fd = lock_file(path)
+        if fd is None:
+            return True
+        try:
+            entry = metadata(path.with_suffix(".json"))
+            if entry != prior.get(path) or entry.get("unreadable") or entry.get("pgid") in live:
+                return True
+        finally:
+            unlock(fd)
+    return False
 
 
 def msbuild_cap(value, heavy):
@@ -404,13 +518,19 @@ def ordered_candidate(state, available, token, cancelled):
     return []
 
 
-def claim(state, candidates, deadline, cancelled, waiter=None, limits=None):
+def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None):
     """One bounded admission scan; kernel locks and metadata identity are checked atomically."""
     paths = {path for candidate in candidates for path in candidate}
     if waiter is not None:
         paths.update(state / f"integration-{n}.lock" for n in range(limits[1]))
+    reason = admission.reason(deadline) if admission and any(
+        path.name.startswith("heavy-") for path in paths) else None
+    snapshot_paths = paths.copy()
+    if reason:
+        snapshot_paths.update(path for path in state.glob("*.lock")
+                              if path.name.startswith(("heavy-", "integration-", "ci-")))
     prior = {}
-    for path in paths:
+    for path in snapshot_paths:
         if cancelled() or time.monotonic() >= deadline:
             return None
         prior[path] = metadata(path.with_suffix(".json"))
@@ -423,6 +543,7 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None):
     if coordinator is None:
         return None  # A busy coordinator is retried by the outer queue loop.
     available = {}
+    memory_held = False
     try:
         for path in sorted(paths):
             if cancelled() or time.monotonic() >= deadline:
@@ -437,6 +558,9 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None):
                 unlock(fd)
                 continue
             available[path] = fd
+        if reason and phases_running(state, available, prior, live):
+            memory_held = True
+            return None
         if waiter is not None:
             candidate = ordered_candidate(state, available, waiter,
                                           lambda: cancelled() or time.monotonic() >= deadline)
@@ -450,6 +574,8 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None):
         for fd in available.values():
             unlock(fd)
         unlock(coordinator)
+        if memory_held:
+            admission.waiting(reason)
     return None
 
 
@@ -636,6 +762,7 @@ def run(args, state, configuration, output=None):
     try:
         settings = config(configuration)
         options = settings.options
+        admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
         if (args.kind == "test" and options["container_test_detection"] == "promote"
                 and metadata(state / "container-tests.json").get(fingerprint) is True):
             admission_args.kind = "integration"
@@ -658,7 +785,7 @@ def run(args, state, configuration, output=None):
             heavy, integration = settings
             held = claim(state, slot_paths(state, admission_args.kind, heavy, integration, ci_key),
                          deadline, lambda: bool(cancelled[0]),
-                         token if waiter_fd is not None else None, (heavy, integration))
+                         token if waiter_fd is not None else None, (heavy, integration), admission)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
                 return 128 + cancelled[0]

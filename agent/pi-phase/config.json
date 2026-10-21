@@ -3,5 +3,6 @@
   "integration_slots": 1,
   "msbuild_max_cpu": 0,
   "container_test_detection": "hint",
-  "cold_worktree_hint": true
+  "cold_worktree_hint": true,
+  "memory_admission": false
 }
