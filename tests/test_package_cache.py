@@ -1,6 +1,7 @@
 """Package-cache changes operate only on temporary trees and fake probes."""
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import runpy
@@ -116,10 +117,15 @@ class PackageCacheTests(unittest.TestCase):
             calls.append(cmd)
             if cmd[0] == 'ps':
                 return ps
+            if cmd[0] == 'du':
+                self.assertEqual(cmd, ['du', '-sk', str(self.source)])
+                self.assertEqual(timeout, 120)
+                return '1\t' + str(self.source) + '\n'
             count = len([c for c in calls if c[0] == 'rsync'])
             if count == fail_copy:
                 return None
-            self.assertLessEqual(timeout, 30)
+            self.assertEqual(timeout, 4 * 60 * 60)
+            self.assertIn('--progress', cmd)
             source, target = Path(cmd[-2]), Path(cmd[-1])
             shutil.copytree(source, target, dirs_exist_ok=True)
             return ''
@@ -152,7 +158,7 @@ class PackageCacheTests(unittest.TestCase):
                 ok, log = cache.move(self.root, runner, phase)
                 self.assertFalse(ok, log)
                 self.assertIn('plus 10 GiB', log)
-        with patch.dict(cache.move.__globals__, cache_size=lambda _: (_ for _ in ()).throw(OSError('scan bound'))):
+        with patch.dict(cache.move.__globals__, cache_size=lambda *_: (_ for _ in ()).throw(OSError('scan bound'))):
             self.assertFalse(cache.move(self.root, runner, phase)[0])
         old = self.source.with_name('packages.old')
         target = self.root / '.nuget-packages'
@@ -217,17 +223,124 @@ class PackageCacheTests(unittest.TestCase):
         self.assertTrue((self.source / 'payload').exists())
         self.assertFalse(self.source.with_name('packages.old').exists())
 
-    def test_size_scan_is_bounded(self):
-        with self.assertRaises(OSError):
-            cache.cache_size(self.source, max_entries=0)
-        with self.assertRaises(OSError):
-            cache.cache_size(self.source, timeout=-1)
+    def test_size_scan_uses_du_with_120_second_bound(self):
+        calls = []
+        def runner(cmd, timeout=10):
+            calls.append((cmd, timeout))
+            return '987654321\t' + str(self.source) + '\n'
+        self.assertEqual(cache.cache_size(self.source, runner), 987654321 * 1024)
+        self.assertEqual(calls, [(['du', '-sk', str(self.source)], 120)])
+        for output in (None, '', 'garbage', '-1\t/path', '1\t/path\nwarning'):
+            with self.subTest(output=output), self.assertRaises(OSError):
+                cache.cache_size(self.source, lambda *args, **kw: output)
+
+    def test_size_timeout_refuses_and_prints_manual_commands(self):
+        runner, phase, calls = self.mover()
+        def timeout_du(cmd, timeout=10):
+            if cmd[0] == 'du':
+                self.assertEqual(timeout, 120)
+                return None  # The runner maps TimeoutExpired to unknown.
+            return runner(cmd, timeout)
+        printed = []
+        ok, log = cache.move(self.root, timeout_du, phase, progress=printed.append)
+        self.assertFalse(ok, log)
+        self.assertIn('du -sk, 120 s', log)
+        self.assertIn('Manual commands', log)
+        self.assertIn('rsync -a', log)
+        self.assertIn('ln -s', log)
+        self.assertEqual(log, '\n'.join(printed))
+        self.assertFalse(any(cmd[0] == 'rsync' for cmd in calls))
+        self.assertFalse((self.root / '.nuget-packages').exists())
+
+    def test_marked_partial_target_resumes_and_progress_precedes_each_copy(self):
+        ok, log, _ = self.move(fail_copy=1)
+        self.assertFalse(ok, log)
+        target = self.root / '.nuget-packages'
+        self.assertTrue((target / cache.MOVE_MARKER).is_file())
+        (target / 'partial').write_text('earlier partial run')
+        runner, phase, _ = self.mover()
+        progress = []
+        def verify_progress(cmd, timeout=10):
+            if cmd[0] == 'rsync':
+                self.assertIn('up to 4 h', progress[-1])
+                self.assertIn('rsync', progress[-1])
+            return runner(cmd, timeout)
+        with patch.object(shutil, 'disk_usage', return_value=SimpleNamespace(free=100 * cache.GIB)):
+            ok, log = cache.move(self.root, verify_progress, phase, progress=progress.append)
+        self.assertTrue(ok, log)
+        self.assertEqual(log, '\n'.join(progress))
+        self.assertTrue(self.source.is_symlink())
+        self.assertEqual((target / 'partial').read_text(), 'earlier partial run')
+        self.assertEqual((target / 'payload').read_text(), 'cached package')
+
+    def test_wrong_or_symlinked_marker_cannot_authorize_a_target(self):
+        target = self.root / '.nuget-packages'
+        target.mkdir()
+        marker = target / cache.MOVE_MARKER
+        for contents in ('', '{}', '{', '{"version":1,"source":"/another-cache"}'):
+            marker.write_text(contents)
+            ok, log, calls = self.move()
+            self.assertFalse(ok, log)
+            self.assertIn('matching move marker', log)
+            self.assertFalse(any(cmd[0] == 'rsync' for cmd in calls))
+        marker.unlink()
+        marker.symlink_to(self.source / 'payload')
+        self.assertFalse(self.move()[0])
+
+    def test_cli_move_has_per_step_budgets_and_live_progress(self):
+        calls = []
+        def runner(cmd, timeout=10):
+            calls.append((cmd, timeout))
+            return ''
+        def fake_move(root, execute, phase_state, progress):
+            # Even after the 45 s diagnostics deadline, moves use their own bounds.
+            with patch.object(doctor.time, 'monotonic', return_value=10 ** 12):
+                execute(['du', '-sk', str(self.source)], timeout=120)
+                execute(['rsync', '-a', '--progress', 'source/', 'target/'], timeout=14400)
+            progress('step: transferring')
+            return True, 'action taken: moved'
+        with patch.object(doctor, 'package_cache_tools', return_value={'move': fake_move}), \
+                patch.object(doctor, 'CHECK_FUNCTIONS', {'package-cache-volume': lambda **_: []}), \
+                patch.object(doctor, 'load_samples', return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as progress:
+            self.assertEqual(doctor.main(['--move-nuget', '--repos-root', str(self.root)], runner=runner), 0)
+        self.assertEqual([timeout for _, timeout in calls], [120, 14400])
+        self.assertIn('step: transferring', progress.getvalue())
+
+    def test_cli_routes_real_transfers_to_streaming_runner_and_keeps_json_clean(self):
+        def fake_move(root, execute, phase_state, progress):
+            self.assertEqual(execute(['rsync', '--progress'], timeout=14400), '')
+            progress('step: live transfer')
+            return True, 'action taken: moved'
+        with patch.object(doctor, 'package_cache_tools', return_value={'move': fake_move}), \
+                patch.object(doctor, 'CHECK_FUNCTIONS', {'package-cache-volume': lambda **_: []}), \
+                patch.object(doctor, 'load_samples', return_value={}), \
+                patch.object(doctor, 'run', return_value='') as probe, \
+                patch.object(doctor, 'run_transfer', return_value='') as transfer, \
+                contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as progress:
+            self.assertEqual(doctor.main(['--move-nuget', '--json', '--repos-root', str(self.root)],
+                                         runner=doctor.run), 0)
+        transfer.assert_called_once_with(['rsync', '--progress'], timeout=14400)
+        probe.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())[0]['id'], 'package-cache-volume')
+        self.assertIn('step: live transfer', progress.getvalue())
+
+    def test_real_transfer_boundary_streams_without_capturing_output(self):
+        with patch.object(doctor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as execute:
+            self.assertEqual(doctor.run_transfer(['rsync', '--progress'], 14400), '')
+            self.assertEqual(execute.call_args.kwargs['timeout'], 14400)
+            self.assertNotIn('capture_output', execute.call_args.kwargs)
+            self.assertIs(execute.call_args.kwargs['stdout'], doctor.sys.stderr)
+            self.assertIs(execute.call_args.kwargs['stderr'], doctor.sys.stderr)
+        with patch.object(doctor.subprocess, 'run', side_effect=subprocess.TimeoutExpired('rsync', 14400)):
+            self.assertIsNone(doctor.run_transfer(['rsync'], 14400))
 
     def test_cli_only_explicit_apply_writes_rsp_and_move_is_never_implied(self):
         tools = {'check': cache.check}
         events = []
         tools['write_rsp'] = lambda root: (events.append('rsp') is None, 'action taken: rsp')
-        tools['move'] = lambda *args: (events.append('move') is None, 'action taken: move')
+        tools['move'] = lambda *args, **kwargs: (events.append('move') is None, 'action taken: move')
         with patch.object(doctor, 'package_cache_tools', return_value=tools), contextlib.redirect_stdout(io.StringIO()):
             for flags, expected in ((['--only', 'package-cache-volume'], []),
                                     (['--apply', '--only', 'package-cache-volume'], ['rsp']),

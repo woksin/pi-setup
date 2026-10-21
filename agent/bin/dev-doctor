@@ -22,11 +22,20 @@ GIB = 1024 ** 3
 
 
 def run(cmd, timeout=10):
-    """The only external-command boundary. Failure (including absence) is unknown."""
+    """Diagnostic command boundary. Failure (including absence) is unknown."""
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return result.stdout + result.stderr if result.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+
+
+def run_transfer(cmd, timeout):
+    """Stream explicit cache-transfer progress to stderr, with a per-step bound."""
+    try:
+        result = subprocess.run(cmd, stdout=sys.stderr, stderr=sys.stderr, timeout=timeout)
+        return '' if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
         return None
 
 
@@ -827,7 +836,7 @@ def main(argv=None, runner=run):
     if any(id not in CHECKS for id in selected):
         parser.error('--only must contain check IDs: ' + ','.join(CHECKS))
     # Total command budget keeps many unavailable/slow tools from accumulating 10s each.
-    deadline = time.monotonic() + (120 if args.move_nuget else 45)
+    deadline = time.monotonic() + 45
 
     def bounded(cmd, timeout=10):
         remaining = deadline - time.monotonic()
@@ -854,7 +863,14 @@ def main(argv=None, runner=run):
             findings.append(finding('package-cache-volume', 'info' if ok else 'warn', evidence,
                                     'Only the response file is changed by --apply.', 'Verify a build.'))
     if args.move_nuget:
-        ok, evidence = package_cache_tools()['move'](root, bounded, phase_state)
+        # Explicit moves have their own du/rsync bounds, not the diagnostic budget.
+        def move_runner(cmd, timeout=10):
+            execute = run_transfer if cmd[0] == 'rsync' and runner is run else runner
+            return execute(cmd, timeout=timeout)
+
+        ok, evidence = package_cache_tools()['move'](
+            root, move_runner, phase_state,
+            progress=lambda line: print(line, file=sys.stderr, flush=True))
         success = success and ok
         findings.append(finding('package-cache-volume', 'info' if ok else 'warn', evidence,
                                 'Explicit cache relocation; packages.old is retained.', 'Verify a build.'))

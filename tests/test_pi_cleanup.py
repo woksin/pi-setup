@@ -54,6 +54,7 @@ class BinSweepScenarios(CleanupConfigTests):
         self.root = self.home / 'repos/worktree'
         self.bin = self.root / 'Source/App/bin'
         self.bin.mkdir(parents=True)
+        (self.bin.parent / 'App.csproj').write_text('<Project />')
         self.output = self.bin / 'package.dll'
         self.output.write_bytes(b'package copy')
         os.utime(self.output, (time.time() - 7200,) * 2)
@@ -90,10 +91,69 @@ class BinSweepScenarios(CleanupConfigTests):
         self.assertFalse(self.bin.exists())
         self.assertEqual(self.obj.read_text(), 'incremental state')
 
+    def test_non_dotnet_bins_and_pruned_environments_are_kept(self):
+        kept = []
+        for name in ('.venv', 'venv', '.tox/python', 'vendor', 'target', '__pycache__', 'tools'):
+            path = self.root / name / 'bin'
+            path.mkdir(parents=True)
+            output = path / 'keep'
+            output.write_text('not .NET output')
+            os.utime(output, (time.time() - 7200,) * 2)
+            if name != 'tools':
+                # Even a misleading project file cannot undo directory pruning.
+                (path.parent / 'Keep.csproj').write_text('<Project />')
+            kept.append(output)
+        self.assertEqual(self.sweep()['action'], 'cleared')
+        self.assertFalse(self.bin.exists())
+        self.assertTrue(all(path.exists() for path in kept))
+
+    def test_dotnet_project_extensions_and_assets_sibling_qualify(self):
+        (self.bin.parent / 'App.csproj').unlink()
+        for extension in ('.fsproj', '.vbproj', 'assets'):
+            with self.subTest(extension=extension):
+                project = (self.obj.parent / 'project.assets.json' if extension == 'assets'
+                           else self.bin.parent / ('App' + extension))
+                project.write_text('{}')
+                self.assertEqual(self.sweep(False)['action'], 'planned')
+                project.unlink()
+        self.assertIn('no bin directories', self.sweep()['reason'])
+        self.assertTrue(self.output.exists())
+
     def test_busy_open_file_keeps_worktree(self):
         self.lsof = f'p12\ncMicrosoft.Build\nn{self.output}\n'
         self.assertIn('open files', self.sweep()['reason'])
         self.assertTrue(self.output.exists())
+
+    def test_any_process_with_open_bin_files_blocks_but_not_other_files(self):
+        for process in ('python', 'node', 'bash'):
+            self.lsof = f'p12\nc{process}\nn{self.output}\n'
+            self.assertIn('open files in bin', self.sweep()['reason'])
+            self.assertTrue(self.output.exists())
+        self.lsof = f'p12\ncdotnet\nn{self.obj}\n'
+        self.assertIn('build process', self.sweep()['reason'])
+        self.lsof = f'p12\ncpython\nn{self.obj}\n'
+        self.assertEqual(self.sweep(False)['action'], 'planned')
+
+    def test_apply_rechecks_arbitrary_open_bin_files(self):
+        calls = []
+        def probe(cmd, timeout=10):
+            if cmd[0] == 'lsof':
+                calls.append(cmd)
+                if len(calls) > 1:
+                    return f'p12\ncpython\nn{self.output}\n'
+            return self.probe(cmd, timeout)
+        row = cleanup.BIN_SWEEP['sweep']([self.root], probe, True)[0]
+        self.assertEqual(row['action'], 'skipped')
+        self.assertIn('opened files in bin', row['reason'])
+        self.assertTrue(self.output.exists())
+
+    def test_orphan_group_is_a_running_phase_even_with_idle_line(self):
+        self.phase = (f'pi-phase: unknown orphan pid=? cwd={self.root} elapsed=2s orphan-group\n'
+                      'pi-phase: no active phases\n')
+        self.assertIn('phase cwd', self.sweep()['reason'])
+        self.assertTrue(self.output.exists())
+        self.phase = 'pi-phase: unknown orphan pid=? cwd=? elapsed=2s orphan-group\n'
+        self.assertIn('cwd unknown', self.sweep()['reason'])
 
     def test_phase_cwd_keeps_worktree_including_spaces(self):
         self.phase = f'pi-phase: build fake pid=12 cwd={self.root}/directory with spaces elapsed=2s running\n'
