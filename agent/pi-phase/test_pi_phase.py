@@ -571,6 +571,127 @@ class PhaseTests(unittest.TestCase):
         (child / "global.json").write_text('{')
         invoke(["test", "project.csproj"], False)
 
+    def test_integration_burst_config_is_opt_in_and_validated(self):
+        self.configure(memory_admission=True)
+        self.assertNotIn("integration_burst", pi_phase.config(self.config).options["memory_admission"])
+        self.configure(memory_admission=dict(integration_burst={}))
+        expected = dict(slots=2, min_free_percent=50, max_load_per_core=1.5, max_docker_mem_percent=70)
+        self.assertEqual(pi_phase.config(self.config).options["memory_admission"]["integration_burst"], expected)
+        for value in (True, [], dict(slots=0), dict(slots=33), dict(slots=True), dict(min_free_percent=101),
+                      dict(max_load_per_core=-1), dict(max_docker_mem_percent=float("nan")),
+                      dict(max_docker_mem_percent=101)):
+            with self.subTest(value=value):
+                self.configure(memory_admission=dict(integration_burst=value))
+                with patch.object(pi_phase, "note") as note:
+                    options = pi_phase.config(self.config).options["memory_admission"]
+                    self.assertNotIn("integration_burst", options)
+                    self.assertEqual(options["min_free_percent"], 30)
+                    note.assert_called_once_with("invalid integration_burst; burst disabled")
+
+    def test_docker_burst_reader_sums_percentages_and_is_bounded(self):
+        with patch.object(pi_phase.subprocess, "run", return_value=SimpleNamespace(stdout="20.0%\n 30.5%\n")) as run:
+            self.assertEqual(pi_phase.read_docker_memory_percent(time.monotonic() + 10), 50.5)
+            self.assertEqual(run.call_args.args[0], ["docker", "stats", "--no-stream", "--format", "{{.MemPerc}}"])
+            self.assertLessEqual(run.call_args.kwargs["timeout"], 5)
+            self.assertTrue(run.call_args.kwargs["check"])
+        for text in ("bad", "NaN%", "-2%", "inf%"):
+            with self.subTest(text=text), patch.object(pi_phase.subprocess, "run", return_value=SimpleNamespace(stdout=text)):
+                with self.assertRaises(ValueError):
+                    pi_phase.read_docker_memory_percent(time.monotonic() + 10)
+
+    def integration_burst(self, sample=(60, 1000)):
+        return pi_phase.IntegrationBurst(SimpleNamespace(reading=lambda deadline: sample),
+            dict(slots=2, min_free_percent=50, max_load_per_core=1.5, max_docker_mem_percent=70))
+
+    def test_burst_requires_all_three_thresholds_and_uses_five_minute_load(self):
+        for free, load, docker, expected in ((50, 12, 69.9, 2), (49.9, 0, 0, 1),
+                                           (80, 12.1, 0, 1), (80, 0, 70, 1), (80, 0, 99, 1)):
+            with self.subTest(free=free, load=load, docker=docker), \
+                    patch.object(pi_phase.os, "getloadavg", return_value=(999, load, 999)), \
+                    patch.object(pi_phase.os, "cpu_count", return_value=8), \
+                    patch.object(pi_phase, "read_docker_memory_percent", return_value=docker):
+                self.assertEqual(self.integration_burst((free, None)).effective(1, 1000), expected)
+        with patch.object(pi_phase.os, "getloadavg", return_value=(0, 1.5, 0)), \
+                patch.object(pi_phase.os, "cpu_count", return_value=None), \
+                patch.object(pi_phase, "read_docker_memory_percent", return_value=0):
+            self.assertEqual(self.integration_burst().effective(1, 1000), 2)
+
+    def test_burst_fails_closed_and_caches_docker_for_thirty_seconds(self):
+        with patch.object(pi_phase.os, "getloadavg", return_value=(0, 0, 0)):
+            self.assertEqual(self.integration_burst(None).effective(1, 1000), 1)
+            for error in (OSError("missing Docker"), ValueError("bad stats"), subprocess.TimeoutExpired("docker", 5)):
+                burst = self.integration_burst()
+                with patch.object(pi_phase.time, "monotonic", side_effect=[0, 29.99, 30]), \
+                        patch.object(pi_phase, "read_docker_memory_percent", side_effect=[error, 20]) as read:
+                    self.assertEqual(burst.effective(1, 1000), 1)
+                    self.assertEqual(burst.effective(1, 1000), 1)
+                    self.assertEqual(read.call_count, 1)
+                    self.assertEqual(burst.effective(1, 1000), 2)
+                    self.assertEqual(read.call_count, 2)
+            burst = self.integration_burst()
+            with patch.object(pi_phase.time, "monotonic", side_effect=[0, 29.99, 30]), \
+                    patch.object(pi_phase, "read_docker_memory_percent", side_effect=[20, 80]) as read:
+                self.assertEqual(burst.effective(1, 1000), 2)
+                self.assertEqual(burst.effective(1, 1000), 2)
+                self.assertEqual(burst.effective(1, 1000), 1)
+                self.assertEqual(read.call_count, 2)
+        with patch.object(pi_phase.os, "getloadavg", side_effect=OSError("no load average")):
+            self.assertEqual(self.integration_burst().effective(1, 1000), 1)
+
+    def test_burst_reduction_counts_running_overflow_without_preemption(self):
+        self.state.mkdir()
+        owners = []
+        def acquire(ceiling, kind="integration"):
+            held = pi_phase.claim(self.state, pi_phase.slot_paths(self.state, kind, 2, ceiling, ()),
+                                  time.monotonic() + 2, lambda: False, integration_ceiling=ceiling)
+            if held:
+                owners.extend(held)
+            return held
+        def close(held):
+            for path, fd in held:
+                os.close(fd)
+                owners.remove((path, fd))
+        try:
+            first, second = acquire(2), acquire(2)
+            self.assertTrue(first)
+            self.assertTrue(second)
+            close(first)
+            self.assertIsNone(acquire(1))  # integration-0 is free, but overflow still consumes the ceiling.
+            self.assertIsNone(pi_phase.lock_file(self.state / "integration-1.lock"))
+            build = acquire(1, "build")  # Pressure reduction does not block ordinary heavy work.
+            self.assertTrue(build)
+            close(build)
+            close(second)
+            self.assertTrue(acquire(1))
+        finally:
+            close(owners[:])
+
+    def test_burst_reduction_counts_orphan_integration_leases(self):
+        self.state.mkdir()
+        (self.state / "integration-1.lock").touch()
+        pi_phase.save(self.state / "integration-1.json", dict(pgid=4242, kind="integration"))
+        candidates = pi_phase.slot_paths(self.state, "integration", 2, 1, ())
+        with patch.object(pi_phase, "live_groups", return_value={4242}):
+            self.assertIsNone(pi_phase.claim(self.state, candidates, time.monotonic() + 2, lambda: False,
+                                            integration_ceiling=1))
+        with patch.object(pi_phase, "live_groups", return_value=set()):
+            held = pi_phase.claim(self.state, candidates, time.monotonic() + 2, lambda: False, integration_ceiling=1)
+            self.assertTrue(held)
+            for _, fd in held:
+                os.close(fd)
+
+    def test_run_uses_burst_ceiling_and_existing_atomic_integration_admission(self):
+        self.configure(memory_admission=dict(integration_burst={}), container_test_detection="off")
+        with patch.object(pi_phase, "read_host_memory", return_value=(80, None)), \
+                patch.object(pi_phase.os, "getloadavg", return_value=(0, 0, 0)), \
+                patch.object(pi_phase, "read_docker_memory_percent", return_value=0), \
+                patch.object(pi_phase, "claim", wraps=pi_phase.claim) as claim:
+            self.assertEqual(pi_phase.main(["run", "--kind", "integration", "--label", "burst", "--",
+                                           sys.executable, "-c", "pass"],
+                                          state=self.state, configuration=self.config), 0)
+            self.assertEqual(claim.call_args.args[-1], 2)
+            self.assertEqual(claim.call_args.args[-3], (2, 2))
+
     def test_fifo_including_equal_timestamps_and_sequence(self):
         with patch.object(pi_phase.time, "time", return_value=100):
             first = self.waiter("first")
@@ -775,7 +896,7 @@ class PhaseTests(unittest.TestCase):
         job.send_signal(signal.SIGTERM)
         self.assertEqual(self.done(job)[0], 143)
         self.assertEqual(list((self.state / "waiters").glob("*.json")), [])
-        job, marker = self.patched_phase("pi_phase.config = lambda path: (_ for _ in ()).throw(ValueError('broken config'))")
+        job, marker = self.patched_phase("pi_phase.config = lambda path, **kwargs: (_ for _ in ()).throw(ValueError('broken config'))")
         code, out = self.done(job)
         self.assertEqual(code, 125, out)
         self.assertFalse(marker.exists())

@@ -100,14 +100,35 @@ def memory_admission_config(value, warn=None):
     if value is True:
         return defaults
     if isinstance(value, dict):
-        for key in value.keys() - defaults.keys():
+        for key in value.keys() - defaults.keys() - {"integration_burst"}:
             warn(f"unknown memory_admission key {key}; ignored")
         settings = {key: value.get(key, default) for key, default in defaults.items()}
         if (all(type(n) in (int, float) and 0 <= n <= sys.float_info.max for n in settings.values())
                 and settings["min_free_percent"] <= 100):
+            burst = integration_burst_config(value.get("integration_burst"), warn)
+            if burst:
+                settings["integration_burst"] = burst
             return settings
     warn("invalid memory_admission; using default False")
     return False
+
+
+def integration_burst_config(value, warn):
+    if value is None or value is False:
+        return None
+    defaults = dict(slots=2, min_free_percent=50, max_load_per_core=1.5,
+                    max_docker_mem_percent=70)
+    if isinstance(value, dict):
+        for key in value.keys() - defaults.keys():
+            warn(f"unknown integration_burst key {key}; ignored")
+        settings = {key: value.get(key, default) for key, default in defaults.items()}
+        if (type(settings["slots"]) is int and 1 <= settings["slots"] <= 32
+                and all(type(n) in (int, float) and 0 <= n <= sys.float_info.max
+                        for key, n in settings.items() if key != "slots")
+                and settings["min_free_percent"] <= 100 and settings["max_docker_mem_percent"] <= 100):
+            return settings
+    warn("invalid integration_burst; burst disabled")
+    return None
 
 
 def parse_macos_memory(pressure, swap):
@@ -194,21 +215,77 @@ class MemoryAdmission:
             self.noted = True
 
 
+def read_docker_memory_percent(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Docker memory probe queue deadline expired")
+    result = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{.MemPerc}}"],
+                            capture_output=True, text=True, check=True, timeout=min(5, remaining))
+    total = 0
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        if not line.strip().endswith("%"):
+            raise ValueError("unrecognized Docker memory percentage")
+        value = float(line.strip()[:-1])
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("invalid Docker memory percentage")
+        total += value
+    return total
+
+
+class IntegrationBurst:
+    def __init__(self, admission, settings):
+        self.admission = admission
+        self.settings = settings
+        self.docker_checked = None
+        self.docker_percent = None
+
+    def effective(self, configured, deadline):
+        try:
+            sample = self.admission.reading(deadline)
+            if sample is None or sample[0] < self.settings["min_free_percent"]:
+                return configured
+            load = os.getloadavg()[1]
+            if not math.isfinite(load) or load > (os.cpu_count() or 1) * self.settings["max_load_per_core"]:
+                return configured
+            now = time.monotonic()
+            if self.docker_checked is None or now - self.docker_checked >= 30:
+                self.docker_checked = now
+                self.docker_percent = None
+                self.docker_percent = read_docker_memory_percent(deadline)
+            if self.docker_percent is None or self.docker_percent >= self.settings["max_docker_mem_percent"]:
+                return configured
+            return self.settings["slots"]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return configured  # Burst is strictly fail-closed, unlike memory admission.
+
+
+def lease_running(path, prior, live):
+    """Caller holds the coordinator; account for both locked and orphan leases."""
+    fd = lock_file(path)
+    if fd is None:
+        return True
+    try:
+        entry = metadata(path.with_suffix(".json"))
+        return entry != prior.get(path) or entry.get("unreadable") or entry.get("pgid") in live
+    finally:
+        unlock(fd)
+
+
+def burst_available(state, available, prior, live, ceiling):
+    active = sum(bool(lease_running(path, prior, live)) for path in state.glob("integration-*.lock")
+                 if path not in available)
+    free = sorted(path for path in available if path.name.startswith("integration-"))
+    allowed = set(free[:max(0, ceiling - active)])
+    return {path: fd for path, fd in available.items()
+            if not path.name.startswith("integration-") or path in allowed}
+
+
 def phases_running(state, available, prior, live):
     """Caller holds the coordinator; do not mistake our tentative locks for owners."""
-    for path in state.glob("*.lock"):
-        if not path.name.startswith(("heavy-", "integration-", "ci-")) or path in available:
-            continue
-        fd = lock_file(path)
-        if fd is None:
-            return True
-        try:
-            entry = metadata(path.with_suffix(".json"))
-            if entry != prior.get(path) or entry.get("unreadable") or entry.get("pgid") in live:
-                return True
-        finally:
-            unlock(fd)
-    return False
+    return any(lease_running(path, prior, live) for path in state.glob("*.lock")
+               if path.name.startswith(("heavy-", "integration-", "ci-")) and path not in available)
 
 
 def msbuild_cap(value, heavy):
@@ -566,7 +643,8 @@ def ordered_candidate(state, available, token, cancelled):
     return []
 
 
-def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None):
+def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None,
+          integration_ceiling=None):
     """One bounded admission scan; kernel locks and metadata identity are checked atomically."""
     paths = {path for candidate in candidates for path in candidate}
     if waiter is not None:
@@ -577,6 +655,8 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
     if reason:
         snapshot_paths.update(path for path in state.glob("*.lock")
                               if path.name.startswith(("heavy-", "integration-", "ci-")))
+    if integration_ceiling is not None:
+        snapshot_paths.update(state.glob("integration-*.lock"))
     prior = {}
     for path in snapshot_paths:
         if cancelled() or time.monotonic() >= deadline:
@@ -609,11 +689,13 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
         if reason and phases_running(state, available, prior, live):
             memory_held = True
             return None
+        eligible = (burst_available(state, available, prior, live, integration_ceiling)
+                    if integration_ceiling is not None else available)
         if waiter is not None:
-            candidate = ordered_candidate(state, available, waiter,
+            candidate = ordered_candidate(state, eligible, waiter,
                                           lambda: cancelled() or time.monotonic() >= deadline)
         else:
-            candidate = next((c for c in candidates if all(p in available for p in c)), [])
+            candidate = next((c for c in candidates if all(p in eligible for p in c)), [])
         if candidate and not cancelled() and time.monotonic() < deadline:
             if waiter is not None:
                 (state / "waiters" / f"{waiter}.json").unlink(missing_ok=True)
@@ -812,6 +894,8 @@ def run(args, state, configuration, output=None):
         settings = config(configuration, notes=config_notes)
         options = settings.options
         admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
+        burst_settings = options["memory_admission"].get("integration_burst") if admission else None
+        burst = IntegrationBurst(admission, burst_settings) if burst_settings else None
         if (args.kind == "test" and options["container_test_detection"] == "promote"
                 and metadata(state / "container-tests.json").get(fingerprint) is True):
             admission_args.kind = "integration"
@@ -832,9 +916,12 @@ def run(args, state, configuration, output=None):
                     time.sleep(min(TICK, max(0, deadline - time.monotonic())))
                     continue
             heavy, integration = settings
+            if burst and args.kind != "ci":
+                integration = burst.effective(integration, deadline)
             held = claim(state, slot_paths(state, admission_args.kind, heavy, integration, ci_key),
                          deadline, lambda: bool(cancelled[0]),
-                         token if waiter_fd is not None else None, (heavy, integration), admission)
+                         token if waiter_fd is not None else None, (heavy, integration), admission,
+                         integration if burst and args.kind != "ci" else None)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
                 return 128 + cancelled[0]
