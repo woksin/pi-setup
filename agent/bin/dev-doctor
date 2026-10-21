@@ -2,6 +2,8 @@
 """Bounded, read-only development-machine diagnostics; stdlib only."""
 import argparse
 import datetime as dt
+import hashlib
+import math
 import json
 import os
 from pathlib import Path
@@ -9,10 +11,11 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 CHECKS = ('spotlight', 'docker-memory', 'docker-stale', 'oversubscription',
-          'msbuild-env', 'testcontainers-in-test', 'worktrees')
+          'msbuild-env', 'testcontainers-in-test', 'worktrees', 'browsers', 'pi-sessions', 'owned-containers')
 GIB = 1024 ** 3
 
 
@@ -110,7 +113,7 @@ def host_memory(runner):
         return None, None
 
 
-def check_docker_memory(runner, **_):
+def check_docker_memory(runner, samples=None, next_samples=None, **_):
     id = 'docker-memory'
     info = runner(['docker', 'info', '--format', '{{json .}}'])
     try:
@@ -122,9 +125,10 @@ def check_docker_memory(runner, **_):
     ram, swap = host_memory(runner)
     if ram is None or swap is None:
         return skipped(id, 'host RAM/swap unavailable')
+    sizing = docker_sizing(runner, samples or {}, next_samples if next_samples is not None else {}, ram, memory)
     if swap < GIB and (not desktop or memory < ram * .4):
-        return []
-    return [finding(id, 'high' if swap >= 4 * GIB else 'warn',
+        return sizing
+    return sizing + [finding(id, 'high' if swap >= 4 * GIB else 'warn',
                     f'Docker {"VM" if desktop else "engine"} memory {memory / GIB:.1f} GiB; '
                     f'host {ram / GIB:.1f} GiB; swap used {swap / GIB:.1f} GiB',
                     'Swap can cause high load with idle cores. VM allocation is not measured resident usage.',
@@ -316,31 +320,442 @@ def check_worktrees(runner, root, max_worktrees=40, budget=3, **_):
                     'Reuse one warm worktree per lane; run pi-cleanup to review (never delete worktrees blindly).')]
 
 
+def duration(value):
+    """ps elapsed/cumulative CPU time: [[days-]hours:]minutes:seconds."""
+    try:
+        days, rest = value.split('-', 1) if '-' in value else ('0', value)
+        parts = [float(part) for part in rest.split(':')]
+        if len(parts) not in (2, 3):
+            return None
+        return int(days) * 86400 + sum(part * 60 ** power
+                                       for power, part in enumerate(reversed(parts)))
+    except (ValueError, AttributeError):
+        return None
+
+
+def process_snapshot(runner):
+    output = runner(['ps', '-axo', 'pid=,ppid=,etime=,time=,pcpu=,rss=,tty=,command='])
+    if output is None:
+        return None
+    result = {}
+    for line in output.splitlines():
+        parts = line.split(None, 7)
+        if len(parts) != 8:
+            if line.strip():
+                return None
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+            elapsed, cpu = duration(parts[2]), duration(parts[3])
+            if elapsed is None or cpu is None:
+                return None
+            result[pid] = dict(pid=pid, ppid=ppid, elapsed=elapsed, cpu=cpu,
+                               pcpu=float(parts[4]), rss=int(parts[5]), tty=parts[6], command=parts[7])
+        except ValueError:
+            return None
+    return result
+
+
+def descendants(snapshot, root):
+    group = {root}
+    for _ in range(100):
+        children = {pid for pid, p in snapshot.items() if p['ppid'] in group}
+        expanded = group | children
+        if expanded == group:
+            break
+        group = expanded
+    return group
+
+
+def chrome(command):
+    if re.search(r'(?:^|\s)--type(?:=|\s)', command):
+        return False  # Renderers/helpers are grouped by ppid, never treated as roots.
+    try:
+        executable = Path(shlex.split(command)[0]).name.lower()
+    except (ValueError, IndexError):
+        return False
+    if executable in ('chrome', 'chromium', 'chromium-browser', 'headless_shell', 'google chrome'):
+        return True
+    # macOS ps does not quote application paths containing spaces.
+    return bool(re.match(r'^/(?:[^\s/]+/)*(?:Google Chrome(?: for Testing| Canary)?|Chromium)\.app/'
+                         r'Contents/MacOS/(?:Google Chrome(?: for Testing| Canary)?|Chromium)(?:\s|$)', command))
+
+
+def browser_roots(snapshot):
+    roots = []
+    for pid, p in snapshot.items():
+        if not chrome(p['command']):
+            continue
+        parent, seen, nested = p['ppid'], {pid}, False
+        while parent in snapshot and parent not in seen:
+            seen.add(parent)
+            if chrome(snapshot[parent]['command']):
+                nested = True
+                break
+            parent = snapshot[parent]['ppid']
+        if not nested:
+            roots.append(pid)
+    return roots
+
+
+def ephemeral_browser(command):
+    # Persistent agent/user profiles always win over an incidental --headless flag.
+    if str(Path.home() / '.pi') in command or '~/.pi' in command:
+        return False
+    match = re.search(r"--user-data-dir=(?:\"([^\"]+)\"|'([^']+)'|(\S+))", command)
+    profile = Path(next(value for value in match.groups() if value is not None)).expanduser().resolve() if match else None
+    if profile is not None and (profile == (Path.home() / '.pi').resolve()
+                                or (Path.home() / '.pi').resolve() in profile.parents):
+        return False
+    temporary = [Path(p).resolve() for p in
+                 ('/tmp', '/private/tmp', '/private/var/folders', '/var/folders',
+                  os.environ.get('TMPDIR') or '/tmp')]
+    temp_profile = (profile is not None and profile.name.startswith('puppeteer_dev_chrome_profile-')
+                    and any(parent in profile.parents for parent in temporary))
+    return temp_profile or bool(re.search(r'(?:^|\s)--headless(?:=\S+)?(?:\s|$)', command))
+
+
+def sample_state_dir():
+    # An override keeps diagnostics/test state out of the operator's live install.
+    return Path(os.environ.get('DEV_DOCTOR_STATE_DIR', str(Path.home() / '.pi/agent/dev-doctor')))
+
+
+def load_samples():
+    samples = read_json(sample_state_dir() / 'samples.json', {})
+    return samples if isinstance(samples, dict) else {}
+
+
+def save_samples(samples):
+    directory = sample_state_dir()
+    temporary = None
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.NamedTemporaryFile(mode='w', dir=directory, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(samples, stream)
+        os.replace(temporary, directory / 'samples.json')
+    except (OSError, ValueError):
+        return False
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return True
+
+
+def prior_process(samples, process, now):
+    previous = samples.get('processes', {})
+    previous = previous.get(str(process['pid'])) if isinstance(previous, dict) else None
+    if not isinstance(previous, dict):
+        return None
+    try:
+        span = now - previous['timestamp']
+        # Match start time (allow ps rounding), command and monotonic CPU to reject PID reuse.
+        if (span <= 0 or abs(process['elapsed'] - previous['elapsed'] - span) > 5
+                or previous['command_hash'] != hashlib.sha256(process['command'].encode()).hexdigest()
+                or process['cpu'] < previous['cpu']):
+            return None
+        return previous
+    except (KeyError, TypeError):
+        return None
+
+
+def remember_process(samples, next_samples, process, now):
+    previous = prior_process(samples, process, now)
+    # Keep the anchor for >=2h; overwriting every 15m would never observe idle spans.
+    anchor = previous if previous and now - previous['timestamp'] < 7200 else {
+        'timestamp': now, 'cpu': process['cpu'], 'elapsed': process['elapsed'], 'command_hash': hashlib.sha256(process['command'].encode()).hexdigest()}
+    entries = next_samples.setdefault('processes', {})
+    if len(entries) < 1024:
+        entries[str(process['pid'])] = anchor
+
+
+def check_browsers(runner, samples=None, next_samples=None, now=None, **_):
+    samples, next_samples = samples or {}, next_samples if next_samples is not None else {}
+    now = time.time() if now is None else now
+    snapshot = process_snapshot(runner)
+    if snapshot is None:
+        return skipped('browsers', 'ps unavailable')
+    result = []
+    auto_count = 0
+    groups = samples.get('browser_groups', {})
+    groups = groups if isinstance(groups, dict) else {}
+    for root in browser_roots(snapshot)[:256]:
+        process = snapshot[root]
+        group = descendants(snapshot, root)
+        hot = False
+        for pid in group:
+            p = snapshot[pid]
+            previous = prior_process(samples, p, now)
+            if previous and now - previous['timestamp'] >= 1800:
+                span = now - previous['timestamp']
+                hot |= (p['cpu'] - previous['cpu']) / span > .5
+            else:
+                hot |= p['elapsed'] >= 1800 and p['cpu'] / max(p['elapsed'], 1) > .5
+            remember_process(samples, next_samples, p, now)
+        prior_group = groups.get(str(root), [])
+        idle = False
+        if (process['elapsed'] >= 7200 and isinstance(prior_group, list)
+                and root in prior_group and set(prior_group).issubset(group)):
+            previous = [prior_process(samples, snapshot[pid], now) for pid in group]
+            if all(previous):
+                spans = [now - p['timestamp'] for p in previous]
+                idle = (min(spans) >= 7200 and max(spans) - min(spans) <= 5
+                        and sum(snapshot[pid]['cpu'] - old['cpu'] for pid, old in zip(group, previous))
+                        < min(spans) * .01)
+        next_samples.setdefault('browser_groups', {})[str(root)] = sorted(group)[:1024]
+        if not hot and not idle:
+            continue
+        safe = ephemeral_browser(process['command'])
+        auto = safe and auto_count < 5
+        auto_count += auto
+        result.append(finding('browsers', 'high' if hot else 'warn',
+                              f'Browser root {root}, age {process["elapsed"] / 3600:.1f}h, '
+                              f'{len(group)} processes; {"hot >50% sustained CPU" if hot else "idle <1% CPU for ≥2h"}; '
+                              f'current CPU {sum(snapshot[p]["pcpu"] for p in group):.1f}%',
+                              'Temporary headless browsers can retain CPU/RAM. Persistent/user Chrome is suggest-only.'
+                              + (' Five-kill fuse reached.' if safe and not auto else ''),
+                              f'kill -TERM {root}' if safe else f'Close browser root {root} manually (persistent/user profile).', auto))
+    return result
+
+
+def pi_process(command):
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(parts and (Path(parts[0]).name == 'pi' or
+                           (Path(parts[0]).name == 'node' and any('pi-coding-agent' in p for p in parts[1:]))))
+
+
+def check_pi_sessions(runner, samples=None, next_samples=None, now=None, **_):
+    samples, next_samples = samples or {}, next_samples if next_samples is not None else {}
+    now = time.time() if now is None else now
+    snapshot = process_snapshot(runner)
+    if snapshot is None:
+        return skipped('pi-sessions', 'ps unavailable')
+    samples = {'processes': samples.get('pi_processes', {})}
+    result = []
+    mcp = [p for p in snapshot.values() if 'chrome-devtools-mcp' in p['command']]
+    result.append(finding('pi-sessions', 'info', f'chrome-devtools-mcp: {len(mcp)} processes, '
+                          f'{sum(p["rss"] for p in mcp) / 1024:.1f} MiB RSS',
+                          'Idle sessions can retain helper processes.', 'Close unused pi sessions manually.'))
+    for pid, p in snapshot.items():
+        if not pi_process(p['command']):
+            continue
+        previous = prior_process(samples, p, now)
+        # Sessions use a separate >=4h anchor, not the browser's 2h rollover.
+        entries = next_samples.setdefault('pi_processes', {})
+        if len(entries) < 1024:
+            entries[str(pid)] = previous if previous and now - previous['timestamp'] < 14400 else {
+                'timestamp': now, 'cpu': p['cpu'], 'elapsed': p['elapsed'], 'command_hash': hashlib.sha256(p['command'].encode()).hexdigest()}
+        if (not previous or p['elapsed'] < 14400 or now - previous['timestamp'] < 14400
+                or p['cpu'] - previous['cpu'] >= (now - previous['timestamp']) * .001):
+            continue
+        helpers = [snapshot[child] for child in descendants(snapshot, pid) - {pid}]
+        names = ', '.join(f'{h["pid"]}:{h["command"][:70]} ({h["rss"] / 1024:.1f} MiB)' for h in helpers[:20])
+        result.append(finding('pi-sessions', 'warn', f'pi pid={pid}, TTY={p["tty"]}, '
+                              f'age={p["elapsed"] / 3600:.1f}h; idle CPU ≥4h; helpers: {names or "none"}',
+                              'CPU inactivity is a hint, not proof the session has no work.',
+                              f'Close pi session {pid} on {p["tty"]} manually; never auto-kill it.'))
+    return result
+
+
+def memory_bytes(text):
+    match = re.match(r'\s*([\d.]+)\s*([KMGT]?i?B)', text, re.I)
+    if not match:
+        return None
+    power = 'BKMGT'.index(match[2][0].upper()) if match[2].upper() != 'B' else 0
+    return float(match[1]) * (1024 if 'i' in match[2].lower() else 1000) ** power
+
+
+def docker_sizing(runner, samples, next_samples, ram, memory):
+    stats = runner(['docker', 'stats', '--no-stream', '--format', '{{json .}}'])
+    if stats is None:
+        return skipped('docker-memory', 'current Docker usage unavailable')
+    total = 0
+    for line in stats.splitlines():
+        try:
+            usage = memory_bytes(json.loads(line)['MemUsage'].split('/')[0])
+            if usage is None:
+                raise ValueError()
+            total += usage
+        except (ValueError, KeyError, TypeError):
+            return skipped('docker-memory', 'current Docker usage unreadable')
+    prior = samples.get('docker_peak_bytes', 0)
+    prior = prior if type(prior) in (float, int) and 0 <= prior < 1024 ** 5 else 0
+    peak = max(prior, total)
+    next_samples['docker_peak_bytes'] = peak
+    target = max(8, math.ceil(peak * 1.5 / GIB))
+    return [finding('docker-memory', 'info', f'Docker allocation {memory / GIB:.1f} GiB; '
+                    f'host {ram / GIB:.1f} GiB; containers now {total / GIB:.1f} GiB; '
+                    f'observed peak {peak / GIB:.1f} GiB',
+                    'Peak covers doctor samples only, not unobserved integration demand or VM overhead.',
+                    f'Docker Desktop → Settings → Resources → Memory: consider about {target} GiB '
+                    '(1.5× observed peak, floor 8 GiB); user only, verify host headroom and integration/OOM peak first.')]
+
+
+def owned_rules():
+    config = read_json(Path.home() / '.pi/agent/dev-doctor.json', {})
+    return config.get('owned_container_rules', []) if isinstance(config, dict) else []
+
+
+def valid_rule(rule):
+    if not isinstance(rule, dict):
+        return False
+    labels = rule.get('labels')
+    return (isinstance(labels, dict) and bool(labels)
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in labels.items())
+            and rule.get('owner_hash') == 'sha256-cwd-16'
+            and isinstance(rule.get('owner_label'), str) and bool(rule['owner_label'])
+            and isinstance(rule.get('owner_process_names'), list) and bool(rule['owner_process_names'])
+            and all(isinstance(n, str) and n for n in rule['owner_process_names'])
+            and type(rule.get('min_age_minutes')) in (int, float) and rule['min_age_minutes'] >= 30
+            and type(rule.get('max_removals')) is int and 1 <= rule['max_removals'] <= 10
+            and isinstance(rule.get('report_labels', {}), dict)
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in rule.get('report_labels', {}).items()))
+
+
+def local_docker(runner):
+    context = runner(['docker', 'context', 'show'])
+    if context is None or context.strip() not in ('desktop-linux', 'default'):
+        return False
+    if os.environ.get('DOCKER_HOST') and not os.environ['DOCKER_HOST'].startswith('unix://'):
+        return False
+    endpoint = runner(['docker', 'context', 'inspect', context.strip(), '--format', '{{json .Endpoints.docker.Host}}'])
+    try:
+        host = json.loads(endpoint)
+        return isinstance(host, str) and host.startswith('unix://')
+    except (TypeError, ValueError):
+        return False
+
+
+def live_owner_hashes(runner, snapshot, names):
+    selected = []
+    for process in snapshot.values():
+        try:
+            executable = Path(shlex.split(process['command'])[0]).name
+        except (ValueError, IndexError):
+            return None
+        if executable in names:
+            selected.append(process['pid'])
+    if len(selected) > 100:
+        return None
+    hashes = set()
+    for pid in selected:
+        output = runner(['lsof', '-a', '-d', 'cwd', '-p', str(pid), '-Fn'])
+        paths = [line[1:] for line in (output or '').splitlines() if line.startswith('n/')]
+        if len(paths) != 1 or paths[0].endswith(' (deleted)'):
+            return None  # A live/unreadable owner is not evidence of absence.
+        hashes.add(hashlib.sha256(paths[0].encode()).hexdigest()[:16])
+    return hashes
+
+
+def check_owned_containers(runner, **_):
+    id = 'owned-containers'
+    rules = owned_rules()
+    if not rules:
+        return [finding(id, 'info', 'Checked 0: no owned-container rules configured',
+                        'No ownership assumptions are built into the doctor.',
+                        'Review agent/dev-doctor.example.json and configure ~/.pi/agent/dev-doctor.json.')]
+    if not isinstance(rules, list) or any(not valid_rule(rule) for rule in rules):
+        return skipped(id, 'invalid owned_container_rules; no removals permitted')
+    if not local_docker(runner):
+        return skipped(id, 'Docker context is not a verified local default/desktop-linux Unix endpoint')
+    data = containers(runner)
+    snapshot = process_snapshot(runner)
+    if data is None or snapshot is None:
+        return skipped(id, 'Docker/process ownership probes unavailable')
+    result = []
+    permitted = 0
+    for rule in rules[:20]:
+        hashes = live_owner_hashes(runner, snapshot, rule['owner_process_names'])
+        checked = removed = 0
+        for c in data:
+            labels = c.get('Config', {}).get('Labels') or {}
+            match = lambda expected: all(labels.get(k) == v for k, v in expected.items())
+            report = rule.get('report_labels', {})
+            if report and match({**rule['labels'], **report}):
+                result.append(finding(id, 'info', f'{c.get("Name", c.get("Id"))}: report-only labels',
+                                      'Session-owned containers are never cleanup candidates.', 'Review the owning session; do not auto-remove.'))
+                continue
+            if not match(rule['labels']):
+                continue
+            checked += 1
+            cid = c.get('Id', '')
+            owner = labels.get(rule['owner_label'])
+            age = age_seconds(c.get('Created'))
+            evidence = (f'{rule.get("name", "rule")}: {c.get("Name", cid)} image={c.get("Config", {}).get("Image", "?")} '
+                        f'owner={owner or "missing"} age={age / 60:.0f}m')
+            if not owner or not re.fullmatch(r'[a-f0-9]{16}', owner):
+                result.append(finding(id, 'warn', evidence, 'Missing/invalid owner label; ownership is unknown.', 'Review labels manually; do not remove automatically.'))
+                continue
+            if age < rule['min_age_minutes'] * 60 or hashes is not None and owner in hashes:
+                continue
+            if hashes is None:
+                result.append(finding(id, 'info', evidence, 'An owner cwd probe failed; ownership is unknown.', 'Retry after lsof/process ownership is readable.'))
+                continue
+            if not re.fullmatch(r'[a-f0-9]{12,64}', cid):
+                continue
+            auto = removed < rule['max_removals'] and permitted < 10
+            result.append(finding(id, 'warn', evidence,
+                                  'Old matching container has no live owner cwd hash.' if auto else 'Removal fuse reached; stop and review the unexpected population.',
+                                  'docker rm -f ' + cid if auto else 'Review excess orphan candidates manually.', auto))
+            removed += auto
+            permitted += auto
+        result.append(finding(id, 'info', f'{rule.get("name", "rule")}: checked {checked} (sample ≤100 containers)',
+                              'Only explicitly labelled, aged containers with proven absent owners qualify.',
+                              'Review rule labels and ownership before enabling cleanup.'))
+    return result
+
+
 CHECK_FUNCTIONS = dict(zip(CHECKS, (check_spotlight, check_docker_memory, check_docker_stale,
                                   check_oversubscription, check_msbuild_env,
-                                  check_testcontainers_in_test, check_worktrees)))
+                                  check_testcontainers_in_test, check_worktrees, check_browsers,
+                                  check_pi_sessions, check_owned_containers)))
 
 
 def apply_findings(findings, runner):
     actions = [f for f in findings if f['auto']]
-    if not actions:
-        return
+    # Revalidate ownership/context immediately before acting, not just at discovery.
+    owned = {f['suggest'] for f in check_owned_containers(runner) if f['auto']} if any(
+        f['id'] == 'owned-containers' for f in actions) else set()
+    browsers = removed = 0
     for item in actions:
-        # Recheck immediately before each mutation. Unknown is never permission.
-        if phase_state(runner) != []:
-            item['evidence'] += '; apply refused: running phase or unknown pi-phase status'
-            continue
         cmd = shlex.split(item['suggest'])
-        if cmd[:2] != ['docker', 'rm'] or not cmd[2:] or not all(
-                re.fullmatch(r'[a-f0-9]{12,64}', cid) for cid in cmd[2:]):
-            continue
+        if item['id'] == 'browsers':
+            if browsers >= 5 or len(cmd) != 3 or cmd[:2] != ['kill', '-TERM'] or not cmd[2].isdigit():
+                continue
+            snapshot = process_snapshot(runner)
+            pid = int(cmd[2])
+            if (snapshot is None or pid not in browser_roots(snapshot)
+                    or snapshot[pid]['elapsed'] < 1800 or not ephemeral_browser(snapshot[pid]['command'])):
+                item['evidence'] += '; apply refused: browser identity changed/unknown'
+                continue
+            browsers += 1
+        else:
+            if phase_state(runner) != []:
+                item['evidence'] += '; apply refused: running phase or unknown pi-phase status'
+                continue
+            forced = item['id'] == 'owned-containers'
+            prefix = ['docker', 'rm', '-f'] if forced else ['docker', 'rm']
+            ids = cmd[len(prefix):]
+            if (cmd[:len(prefix)] != prefix or not ids
+                    or not all(re.fullmatch(r'[a-f0-9]{12,64}', cid) for cid in ids)):
+                continue
+            if forced:
+                if item['suggest'] not in owned or removed >= 10:
+                    item['evidence'] += '; apply refused: owner/context changed or removal fuse'
+                    continue
+                removed += 1
         result = runner(cmd)
-        item['evidence'] += '; ' + ('removed' if result is not None else 'removal failed/unknown')
+        item['evidence'] += '; ' + ('action taken: ' + shlex.join(cmd) if result is not None else 'action failed/unknown')
 
 
 def main(argv=None, runner=run):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--json', action='store_true')
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument('--json', action='store_true')
+    output.add_argument('--quiet', action='store_true', help='print only successful actions')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--repos-root')
     parser.add_argument('--only', help=','.join(CHECKS))
@@ -356,10 +771,26 @@ def main(argv=None, runner=run):
         return runner(cmd, timeout=min(timeout, remaining)) if remaining > 0 else None
 
     root = repos_root(args.repos_root)
-    findings = [f for id in selected for f in CHECK_FUNCTIONS[id](runner=bounded, root=root)]
+    samples = load_samples()
+    next_samples = {k: samples[k] for k in
+                    ('docker_peak_bytes', 'processes', 'browser_groups', 'pi_processes') if k in samples}
+    if 'browsers' in selected:
+        next_samples.update(processes={}, browser_groups={})
+    if 'pi-sessions' in selected:
+        next_samples['pi_processes'] = {}
+    now = time.time()
+    findings = [f for id in selected for f in CHECK_FUNCTIONS[id](
+        runner=bounded, root=root, samples=samples, next_samples=next_samples, now=now)]
     if args.apply:
         apply_findings(findings, bounded)
-    if args.json:
+    if any(id in selected for id in ('browsers', 'pi-sessions', 'docker-memory')):
+        if not save_samples(next_samples):
+            findings += skipped('browsers', 'sample state could not be saved; long-span rates unavailable')
+    if args.quiet:
+        for f in findings:
+            if '; action taken: ' in f['evidence']:
+                print(f"{f['id']}: {f['evidence']}")
+    elif args.json:
         print(json.dumps(findings, indent=2))
     else:
         for severity in ('high', 'warn', 'info'):

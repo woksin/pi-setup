@@ -54,6 +54,18 @@ if healthy; then
   fi
 fi
 if [ "${PLANNED:-0}" != 1 ] && healthy; then
+  # Independent timestamp: a missing/failed doctor never blocks guardian health/GC.
+  doctor="$(dirname "$0")/dev-doctor"
+  last_doctor=$(cat "$S/last-doctor" 2>/dev/null || echo 0)
+  case "$last_doctor" in ''|*[!0-9]*) last_doctor=0 ;; esac
+  doctor_now=$(date +%s)
+  if [ -x "$doctor" ] && [ $((doctor_now-last_doctor)) -ge 900 ]; then
+    echo "$doctor_now" > "$S/last-doctor"
+    actions=$(dl 55 "$doctor" --apply --only browsers,owned-containers,docker-stale --quiet 2>&1)
+    doctor_exit=$?
+    while IFS= read -r action; do [ -z "$action" ] || log "dev-doctor: $action"; done <<< "$actions"
+    [ "$doctor_exit" -eq 0 ] || log "dev-doctor: failed/timeout exit=$doctor_exit (guardian continues)"
+  fi
   last=$(cat "$S/last-gc" 2>/dev/null || echo 0)
   if [ $((now-last)) -ge 900 ]; then
     echo "$now" > "$S/last-gc"; n=0

@@ -68,9 +68,9 @@ class DoctorTests(unittest.TestCase):
         runner = Runner(**{'info --format {{json .}}': json.dumps(dict(MemTotal=20 * doctor.GIB,
                                                                         OperatingSystem='Docker Desktop'))})
         with patch.object(doctor, 'host_memory', return_value=(48 * doctor.GIB, 5 * doctor.GIB)):
-            self.assertEqual(doctor.check_docker_memory(runner)[0]['severity'], 'high')
+            self.assertTrue(any(f['severity'] == 'high' for f in doctor.check_docker_memory(runner)))
         with patch.object(doctor, 'host_memory', return_value=(64 * doctor.GIB, 0)):
-            self.assertEqual(doctor.check_docker_memory(runner), [])
+            self.assertTrue(all(f['severity'] == 'info' for f in doctor.check_docker_memory(runner)))
         self.assertIn('Skipped', doctor.check_docker_memory(Runner())[0]['evidence'])
         with patch.object(doctor, 'host_memory', return_value=(None, None)):
             self.assertIn('Skipped', doctor.check_docker_memory(runner)[0]['evidence'])
@@ -207,6 +207,280 @@ class DoctorTests(unittest.TestCase):
         with patch.object(doctor.time, 'monotonic', side_effect=[0, 46]), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(doctor.main(['--only', 'msbuild-env'], runner), 0)
         self.assertEqual(runner.calls, [])
+
+
+def psline(pid=100, ppid=1, elapsed='02:00:00', cpu='00:00:10', pcpu=0, rss=1024, tty='??', command='chrome --headless'):
+    return f'{pid} {ppid} {elapsed} {cpu} {pcpu} {rss} {tty} {command}'
+
+
+def anchor(process, timestamp):
+    return dict(timestamp=timestamp, elapsed=process['elapsed'], cpu=process['cpu'],
+                command_hash=doctor.hashlib.sha256(process['command'].encode()).hexdigest())
+
+
+def rule():
+    return dict(name='example', labels={'managed-by': 'test', 'kind': 'warm'},
+                report_labels={'kind': 'session'}, min_age_minutes=30,
+                owner_label='owner', owner_hash='sha256-cwd-16',
+                owner_process_names=['dotnet', 'testhost', 'Studio'], max_removals=10)
+
+
+def owned_container(kind='warm', minutes=40, owner='a' * 16, cid=CID):
+    c = container('running', labels={'managed-by': 'test', 'kind': kind, 'owner': owner})
+    c.update(Id=cid, Name='/warm-example', Created=(dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes)).isoformat())
+    c['Config']['Image'] = 'example:1'
+    return c
+
+
+def owned_runner(population, ps='', **responses):
+    # All fixtures use the same id listing to keep command matching deterministic.
+    return docker_runner(population, **{
+        'context show': 'desktop-linux',
+        'context inspect desktop-linux --format {{json .Endpoints.docker.Host}}': '"unix:///tmp/docker.sock"',
+        'ps': ps, 'pi-phase': 'pi-phase: no active phases', **responses})
+
+
+class AddendumTests(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        self.env = patch.dict(os.environ, {'DEV_DOCTOR_STATE_DIR': self.scratch.name, 'DOCKER_HOST': ''})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_browser_lifetime_hot_root_only_and_phase_independent(self):
+        snapshot = psline(cpu='01:01:00') + '\n' + psline(101, 100, command='chrome --type=renderer')
+        runner = Runner(ps=snapshot, **{'kill': '', 'pi-phase': 'pi-phase: test x pid=1 cwd=/tmp elapsed=1s running'})
+        findings = doctor.check_browsers(runner)
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0]['auto'])
+        doctor.apply_findings(findings, runner)
+        self.assertIn(['kill', '-TERM', '100'], runner.calls)
+        self.assertFalse(any(cmd[-1] == '101' for cmd in runner.calls))
+        self.assertFalse(any(Path(cmd[0]).name == 'pi-phase' for cmd in runner.calls))
+
+    def test_browser_recent_cpu_hot_not_current_spike(self):
+        runner = Runner(ps=psline(elapsed='03:00:00', cpu='00:40:00', pcpu=0))
+        current = doctor.process_snapshot(runner)[100]
+        prior = {**current, 'elapsed': 7200, 'cpu': 10}
+        samples = {'processes': {'100': anchor(prior, 1000)}}
+        self.assertTrue(doctor.check_browsers(runner, samples=samples, now=4600)[0]['auto'])
+        # High instantaneous CPU without a sustained average does not qualify.
+        self.assertEqual(doctor.check_browsers(Runner(ps=psline(cpu='00:00:01', pcpu=99))), [])
+        self.assertEqual(doctor.check_browsers(Runner(ps=psline(elapsed='29:59', cpu='20:00'))), [])
+
+    def test_browser_idle_requires_two_hour_valid_group_delta(self):
+        runner = Runner(ps=psline(elapsed='04:00:00', cpu='00:00:20'))
+        current = doctor.process_snapshot(runner)[100]
+        samples = {'processes': {'100': anchor({**current, 'elapsed': 7200, 'cpu': 10}, 1000)},
+                   'browser_groups': {'100': [100]}}
+        self.assertIn('idle', doctor.check_browsers(runner, samples=samples, now=8200)[0]['evidence'])
+        samples['processes']['100']['timestamp'] = 5000
+        self.assertEqual(doctor.check_browsers(runner, samples=samples, now=8200), [])
+        # PID reuse / different start time cannot establish idle or sample-hot status.
+        self.assertIsNone(doctor.prior_process(samples, current, 8200))
+
+    def test_browser_persistent_and_user_chrome_suggest_only(self):
+        for command in ('chrome', 'chrome --headless --user-data-dir=' + str(Path.home() / '.pi/browser-profile'),
+                        'chrome --headless --user-data-dir=~/.pi/custom'):
+            found = doctor.check_browsers(Runner(ps=psline(command=command, cpu='01:10:00')))
+            self.assertEqual(len(found), 1)
+            self.assertFalse(found[0]['auto'])
+        self.assertFalse(doctor.chrome('node /tmp/chrome.js --headless'))
+        self.assertTrue(doctor.chrome('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --headless'))
+        self.assertFalse(doctor.chrome('node chrome-devtools-mcp'))
+        for path in ('/tmp/', '/private/tmp/', '/private/var/folders/a/T/'):
+            self.assertTrue(doctor.ephemeral_browser('chrome --user-data-dir=' + path + 'puppeteer_dev_chrome_profile-123'))
+        self.assertFalse(doctor.ephemeral_browser('chrome --user-data-dir=/permanent/puppeteer_dev_chrome_profile-1'))
+
+    def test_browser_fuse_and_revalidation(self):
+        runner = Runner(ps='\n'.join(psline(pid=p, cpu='01:10:00') for p in range(100, 107)), kill='')
+        findings = doctor.check_browsers(runner)
+        self.assertEqual(sum(f['auto'] for f in findings), 5)
+        doctor.apply_findings(findings, runner)
+        self.assertEqual(sum(cmd[0] == 'kill' for cmd in runner.calls), 5)
+        changed = Runner(ps=psline(elapsed='00:01', command='chrome --headless'), kill='')
+        doctor.apply_findings(findings, changed)
+        self.assertFalse(any(cmd[0] == 'kill' for cmd in changed.calls))
+        self.assertIn('Skipped', doctor.check_browsers(Runner())[0]['evidence'])
+
+    def test_sample_anchors_persist_and_state_is_small(self):
+        runner = Runner(ps=psline())
+        current = doctor.process_snapshot(runner)[100]
+        prior = {**current, 'elapsed': 3600}
+        samples = {'processes': {'100': anchor(prior, 1000)}}
+        next_samples = {}
+        doctor.check_browsers(runner, samples=samples, next_samples=next_samples, now=4600)
+        self.assertEqual(next_samples['processes']['100']['timestamp'], 1000)
+        self.assertTrue(doctor.save_samples(next_samples))
+        self.assertEqual(doctor.load_samples(), next_samples)
+        self.assertNotIn('command', next_samples['processes']['100'])
+        self.assertEqual(doctor.duration('2-03:04:05'), 183845)
+        self.assertIsNone(doctor.process_snapshot(Runner(ps='bad snapshot')))
+
+    def test_idle_pi_session_helpers_and_mcp_rss_are_suggest_only(self):
+        snapshot = '\n'.join((psline(elapsed='08:00:00', command='node /opt/pi-coding-agent/dist/cli.js', tty='ttys002'),
+                              psline(101, 100, rss=2048, command='gitstatusd'),
+                              psline(102, 100, rss=4096, command='node chrome-devtools-mcp')))
+        runner = Runner(ps=snapshot)
+        current = doctor.process_snapshot(runner)[100]
+        samples = {'pi_processes': {'100': anchor({**current, 'elapsed': 14400, 'cpu': 9}, 1000)}}
+        found = doctor.check_pi_sessions(runner, samples=samples, now=15400)
+        self.assertEqual(len(found), 2)
+        self.assertIn('4.0 MiB', found[0]['evidence'])
+        self.assertIn('gitstatusd', found[1]['evidence'])
+        self.assertIn('TTY=ttys002', found[1]['evidence'])
+        self.assertTrue(all(not f['auto'] for f in found))
+        self.assertEqual(len(doctor.check_pi_sessions(runner)), 1)
+        self.assertFalse(doctor.pi_process('node unrelated.js'))
+        self.assertTrue(doctor.pi_process('/usr/local/bin/pi'))
+        self.assertIn('Skipped', doctor.check_pi_sessions(Runner())[0]['evidence'])
+
+    def test_docker_sizing_peak_floor_and_units(self):
+        runner = Runner(**{'stats --no-stream --format {{json .}}': '{"MemUsage":"2GiB / 14GiB"}\n{"MemUsage":"512MiB / 14GiB"}'})
+        next_samples = {}
+        found = doctor.docker_sizing(runner, {}, next_samples, 48 * doctor.GIB, 14 * doctor.GIB)
+        self.assertEqual(next_samples['docker_peak_bytes'], 2.5 * doctor.GIB)
+        self.assertIn('8 GiB', found[0]['suggest'])
+        found = doctor.docker_sizing(runner, {'docker_peak_bytes': 10 * doctor.GIB}, next_samples, 48 * doctor.GIB, 14 * doctor.GIB)
+        self.assertIn('15 GiB', found[0]['suggest'])
+        self.assertEqual(doctor.memory_bytes('1GB'), 1000 ** 3)
+        self.assertTrue(all(not f['auto'] for f in found))
+        self.assertIn('Skipped', doctor.docker_sizing(Runner(), {}, {}, 1, 1)[0]['evidence'])
+
+    def test_owned_rule_self_test_a_to_e(self):
+        owner = doctor.hashlib.sha256(b'/live/owner').hexdigest()[:16]
+        a = owned_container(cid='a' * 64)
+        b = owned_container(minutes=10, cid='b' * 64)
+        c = owned_container(owner=owner, cid='c' * 64)
+        d = owned_container(kind='session', cid='d' * 64)
+        e = owned_container(cid='e' * 64)
+        e['Config']['Labels'] = {}
+        runner = owned_runner([a, b, c, d, e], ps=psline(command='dotnet test'), lsof='p100\nn/live/owner', **{'rm -f ' + CID: CID})
+        with patch.object(doctor, 'owned_rules', return_value=[rule()]):
+            found = doctor.check_owned_containers(runner)
+            self.assertEqual([f['suggest'] for f in found if f['auto']], ['docker rm -f ' + CID])
+            self.assertTrue(any('report-only' in f['evidence'] for f in found))
+            doctor.apply_findings(found, runner)
+        self.assertIn(['docker', 'rm', '-f', CID], runner.calls)
+        self.assertEqual(sum(cmd[1:3] == ['rm', '-f'] for cmd in runner.calls), 1)
+
+    def test_owned_missing_owner_unreadable_cwd_context_and_phase_block(self):
+        for missing in ('', None):
+            runner = owned_runner([owned_container(owner=missing)])
+            with patch.object(doctor, 'owned_rules', return_value=[rule()]):
+                found = doctor.check_owned_containers(runner)
+            self.assertFalse(any(f['auto'] for f in found))
+            self.assertTrue(any('unknown' in f['why'] for f in found))
+        with patch.object(doctor, 'owned_rules', return_value=[rule()]):
+            runner = owned_runner([owned_container()], ps=psline(command='dotnet test'))
+            self.assertFalse(any(f['auto'] for f in doctor.check_owned_containers(runner)))
+            for context in ('remote', None):
+                runner = owned_runner([owned_container()], **{'context show': context})
+                self.assertIn('Skipped', doctor.check_owned_containers(runner)[0]['evidence'])
+            runner = owned_runner([owned_container()], **{'context inspect desktop-linux --format {{json .Endpoints.docker.Host}}': '"tcp://remote:2375"'})
+            self.assertFalse(any(f['auto'] for f in doctor.check_owned_containers(runner)))
+            for state in (None, 'pi-phase: integration x pid=1 cwd=/tmp elapsed=1s running',
+                          'pi-phase: build x pid=1 cwd=/tmp elapsed=1s running'):
+                runner = owned_runner([owned_container()], **{'pi-phase': state})
+                found = doctor.check_owned_containers(runner)
+                doctor.apply_findings(found, runner)
+                self.assertFalse(any(cmd[1:3] == ['rm', '-f'] for cmd in runner.calls))
+            with patch.dict(os.environ, {'DOCKER_HOST': 'tcp://remote:2375'}):
+                self.assertFalse(doctor.local_docker(owned_runner([])))
+
+    def test_owned_fuse_empty_and_invalid_rules(self):
+        population = [owned_container(cid=f'{n:064x}') for n in range(1, 12)]
+        with patch.object(doctor, 'owned_rules', return_value=[rule()]):
+            found = doctor.check_owned_containers(owned_runner(population))
+            self.assertEqual(sum(f['auto'] for f in found), 10)
+            self.assertTrue(any('fuse' in f['why'] for f in found))
+            self.assertIn('checked 0', doctor.check_owned_containers(owned_runner([]))[-1]['evidence'])
+        with patch.object(doctor, 'owned_rules', return_value=[{}]):
+            self.assertIn('invalid', doctor.check_owned_containers(Runner())[0]['evidence'])
+        with patch.object(doctor, 'owned_rules', return_value=[]):
+            self.assertIn('Checked 0', doctor.check_owned_containers(Runner())[0]['evidence'])
+
+    def test_profile_symlinks_and_unrelated_tmp_arguments_are_not_safe(self):
+        root = Path(self.scratch.name)
+        home = root / 'home'
+        persistent = home / '.pi/browser-profile'
+        persistent.mkdir(parents=True)
+        link = root / 'puppeteer_dev_chrome_profile-link'
+        link.symlink_to(persistent, target_is_directory=True)
+        with patch.object(Path, 'home', return_value=home):
+            self.assertFalse(doctor.ephemeral_browser(f'chrome --headless --user-data-dir={link}'))
+        self.assertFalse(doctor.ephemeral_browser('chrome --user-data-dir=/permanent/puppeteer_dev_chrome_profile-1 --other=/tmp/'))
+        self.assertFalse(doctor.chrome('/usr/bin/node /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --headless'))
+
+    def test_guardian_periodic_call_missing_and_failure(self):
+        root = Path(self.scratch.name)
+        binary = root / 'bin'
+        binary.mkdir()
+        guardian = binary / 'docker-guardian'
+        guardian.write_text((SCRIPT.parent / 'docker-guardian').read_text())
+        fake = root / 'fake'
+        fake.mkdir()
+        for tool in ('docker', 'pgrep'):
+            path = fake / tool
+            path.write_text('#!/bin/sh\nexit 0\n')
+            path.chmod(0o755)
+        stub = binary / 'dev-doctor'
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCTOR_CALLS"\nprintf "browsers: action taken: test\\n"\nexit "${DOCTOR_EXIT:-0}"\n')
+        stub.chmod(0o755)
+        state = root / 'state'
+        state.mkdir()
+        (state / 'last-gc').write_text(str(int(doctor.time.time())))
+        log = root / 'guardian.log'
+        calls = root / 'calls'
+        env = {**os.environ, 'HOME': str(root), 'DOCKER_GUARDIAN_TEST_PATH': str(fake),
+               'DOCKER_GUARDIAN_STATE': str(state), 'DOCKER_GUARDIAN_LOG': str(log),
+               'DOCTOR_CALLS': str(calls)}
+        def invoke():
+            result = subprocess.run(['/bin/bash', str(guardian)], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        invoke()
+        self.assertEqual(calls.read_text().splitlines(), ['--apply --only browsers,owned-containers,docker-stale --quiet'])
+        self.assertIn('action taken', log.read_text())
+        invoke()
+        self.assertEqual(len(calls.read_text().splitlines()), 1)
+        (state / 'last-doctor').write_text('0')
+        env['DOCTOR_EXIT'] = '7'
+        invoke()
+        self.assertIn('exit=7 (guardian continues)', log.read_text())
+        stub.rename(binary / 'unavailable-doctor')
+        (state / 'last-doctor').write_text('0')
+        invoke()
+        self.assertEqual(len(calls.read_text().splitlines()), 2)
+
+    def test_install_new_files_and_preserve_existing_rules(self):
+        home = Path(self.scratch.name) / 'install-home'
+        home.mkdir()
+        env = {**os.environ, 'HOME': str(home)}
+        for first in (True, False):
+            result = subprocess.run(['./install.sh', '--user', 'einari', '--repos-root', '/tmp/x'],
+                                    cwd=SCRIPT.parents[2], env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = home / '.pi/agent/dev-doctor.json'
+            if first:
+                self.assertIn('owned_container_rules', json.loads(config.read_text()))
+                config.write_text('{"owned_container_rules":[]}')
+            else:
+                self.assertEqual(config.read_text(), '{"owned_container_rules":[]}')
+        self.assertTrue(os.access(home / '.pi/agent/bin/dev-doctor', os.X_OK))
+        self.assertTrue((home / '.agents/skills/dev-machine-performance/SKILL.md').is_file())
+
+    def test_quiet_actions_only_and_sample_category_preservation(self):
+        runner = Runner(ps=psline(cpu='01:10:00'), kill='')
+        doctor.save_samples({'pi_processes': {'1': {'timestamp': 1}}})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            doctor.main(['--only', 'browsers', '--quiet'], runner)
+        self.assertEqual(out.getvalue(), '')
+        self.assertIn('1', doctor.load_samples()['pi_processes'])
+        with contextlib.redirect_stdout(out):
+            doctor.main(['--only', 'browsers', '--quiet', '--apply'], runner)
+        self.assertIn('action taken: kill -TERM 100', out.getvalue())
 
 
 if __name__ == '__main__':

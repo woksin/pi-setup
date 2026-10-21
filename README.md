@@ -45,14 +45,34 @@ Reinstalling restores shared files, so also remove unwanted components from your
 ## Machine performance
 
 Run `~/.pi/agent/bin/dev-doctor` for slow gates, long queues, swap or Docker OOM.
-It checks Spotlight, Docker memory and stale containers, build oversubscription,
-MSBuild environment, Testcontainers in test phases, and sampled worktree outputs.
+It checks Spotlight, Docker memory/observed peak and stale containers, build
+oversubscription, MSBuild environment, Testcontainers in test phases, sampled
+worktree outputs, browser hygiene, idle pi sessions/helpers, and labelled orphans.
 Use `--json`, `--only id,id`, or `--repos-root DIR` (otherwise it uses user.json's
 `reposRoot`, then `$HOME/repos` if present). Missing tools are reported as skipped.
-`--apply` only removes exited containers older than 20 minutes when pi-phase
-reports no running phase; unknown status blocks it. Everything else is advice:
-no sudo, settings changes, image/volume pruning, or file deletion is automated.
+`--apply` removes exited containers older than 20 minutes and explicitly configured
+label-rule orphans only when pi-phase reports no running phase; unknown blocks it.
+It can also SIGTERM temporary Puppeteer/headless browser **root** PIDs, even during
+phases: >50% CPU sustained ≥30 min or <1% group CPU over ≥2h (fuse 5).
+Persistent `~/.pi` profiles and user Chrome are never killed. Idle pi sessions
+(≥4h CPU inactivity) and their helper RSS are suggest-only. `--quiet` prints only
+successful actions; docker-guardian runs the narrow cleanup checks at most every
+15 minutes. No sudo, Docker settings, image/volume pruning, or checkout file deletion.
+
+CPU anchors and observed Docker peaks are kept in
+`~/.pi/agent/dev-doctor/samples.json` (`DEV_DOCTOR_STATE_DIR` overrides its directory).
+Docker sizing suggests about 1.5× observed peak, floor 8 GiB; samples miss unobserved
+peaks, so the user must verify integration demand and host headroom before resizing.
 See the `dev-machine-performance` skill for CI-parity lanes and warm-worktree habits.
+
+`agent/dev-doctor.example.json` is installed as `~/.pi/agent/dev-doctor.json` only
+when absent. Its generic `owned_container_rules` schema includes a Studio warm-stage
+example: exact labels, age ≥30 minutes, `sha256-cwd-16` owner label, process-name
+allowlist and removal fuse (≤10/pass). Review or replace it for your workloads;
+use `{"owned_container_rules":[]}` to disable. Cleanup requires a verified local
+`default`/`desktop-linux` Unix Docker endpoint and readable `lsof` cwd probes for
+all possible owner processes. Live matching owners, missing owner labels and
+report-only session labels are never removed; remote/unknown context is skipped.
 
 The pi-phase config flags `msbuild_max_cpu` (default off),
 `container_test_detection` (default hint-only), and `cold_worktree_hint`
@@ -85,7 +105,7 @@ Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your ver
 | `workflows/loose-threads-plan.js` | Turns a `loose-threads` inventory into a cleanup plan. |
 | `loose-threads/` | Weekly audit of leftover worktrees, branches, stashes and Docker volumes. |
 | `pi-phase/`, `bin/pi-phase` | Wrapper for build and test commands with time limits, logs and a shared queue ordered by priority (`low`, `normal`, `high`), then first come first served. |
-| `bin/dev-doctor` | Bounded, read-only machine performance checks; `--apply` only removes old exited containers when pi-phase is idle. |
+| `bin/dev-doctor`, `dev-doctor.example.json` | Bounded diagnostics and safe, fused cleanup for old exited/label-owned containers and temporary browsers. |
 | `bin/docker-guardian` | macOS: checks that Docker Desktop answers every 2 minutes, restarts it within a budget, removes dead containers and old build cache, never prunes images. Run it from the launchd template in `launchd/`. |
 | `bin/inbox-watch` | Polls a directory of files that parallel agent sessions use as messages; pair it with one `job_watch`. Set `INBOX_DIR`. |
 | `bin/gpt-meter` | Read-only spend meter for OpenAI usage from session logs. |

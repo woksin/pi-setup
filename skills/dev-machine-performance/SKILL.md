@@ -9,18 +9,35 @@ Run `~/.pi/agent/bin/dev-doctor` for long pi-phase queues, high load with idle
 cores, swap, slow gates, or Docker OOM. Use `--json` for structured findings,
 `--repos-root DIR` to override user.json, or `--only id,id` to narrow checks.
 It checks Spotlight, Docker memory/stale containers, build oversubscription,
-MSBuild environment, Testcontainers in test phases, and sampled worktree output.
+MSBuild environment, Testcontainers in test phases, sampled worktree output,
+browsers, idle pi sessions/helpers, and explicitly configured owned containers.
 Missing tools or failed probes mean unknown, not healthy.
 
 Present the evidence and exact suggested commands or UI paths to the user.
 Call out which need user confirmation or sudo. Never apply non-auto fixes yourself:
-no Spotlight changes, Docker settings, forced container removal, or pruning.
-`dev-doctor --apply` only removes exited containers older than 20 minutes, and
-only when `pi-phase status` positively reports no running phase. Unknown blocks
-application. It never removes images, volumes, running containers, or files.
-A zero-CPU container sample does not prove it is abandoned; confirm ownership.
+no Spotlight changes, Docker settings, pruning, or unconfigured forced removals.
+`--apply` removes exited containers older than 20 minutes and configured labelled
+orphans only when `pi-phase status` proves no phase is running. Unknown blocks it.
+Owned rules require a local Docker context, age ≥30 min, readable owner cwds,
+and no matching owner hash; missing labels/session labels are report-only (fuse 10).
+Browser SIGTERM is phase-independent: only temporary Puppeteer/headless roots,
+never persistent `~/.pi` profiles or user Chrome (fuse 5). Hot means >50% CPU over
+≥30 min; idle means <1% group CPU over ≥2h. Only the root is signalled.
+Pi sessions idle ≥4h and helper RSS are suggest-only: close them manually.
+Samples in `~/.pi/agent/dev-doctor/samples.json` track CPU and Docker usage peaks;
+Docker sizing suggests 1.5× observed peak, floor 8 GiB, not an automatic change.
+Guardian calls the narrow cleanup checks at most every 15 min; `--quiet` logs actions.
+It never removes images, volumes or checkout files. A zero-CPU container sample
+alone does not prove it is abandoned; confirm ownership.
 
 ## Habits before tuning
+
+- Mirror CI build flags: code generation it skips, and warnings-as-errors it enables.
+- Iterate on the single affected project, not the solution.
+- Run independent frontend checks in parallel, within memory/scheduler limits.
+- Do not force `RestoreNoCache` in gates.
+- Skip local coverage collection unless it is gated.
+- Measure A/B, one run each, before changing GC or runtime settings.
 
 - The local gate equals CI's lanes, filters and flags: no more, no less. An
   unfiltered solution test can start extra service stacks and inflate Tier 1.
