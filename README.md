@@ -72,6 +72,13 @@ Open build files, running phase cwds, writes within 60 min or tracked bin files
 keep the worktree; unknown probes fail closed. Each worktree logs a reason and
 bytes freed. Doctor's disk check samples a bounded reclaimable-bin estimate.
 
+`dev-doctor --only package-cache-volume` compares NuGet/pnpm/yarn caches with the
+source filesystem. `--apply --only package-cache-volume` only creates/appends an
+outside-checkout `Directory.Build.rsp` (backing up an existing file); rare in-place
+bin rewrites can modify hard-linked packages. `--move-nuget` separately opts into
+an idle-only, space-checked move to `<reposRoot>/.nuget-packages`; it retains
+`packages.old` until a verified build. Guardian never runs this check.
+
 CPU anchors and observed Docker peaks are kept in
 `~/.pi/agent/dev-doctor/samples.json` (`DEV_DOCTOR_STATE_DIR` overrides its directory).
 Docker sizing suggests about 1.5× observed peak, floor 8 GiB; samples miss unobserved

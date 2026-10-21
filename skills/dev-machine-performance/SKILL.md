@@ -35,7 +35,8 @@ Disk defaults in `dev-doctor.json`: `disk.build_floor_gib: 25`,
 keep building down to 25 GiB, then start no new heavy phase/worktree.
 `pi-cleanup --if-free-below config` reads the cleanup trigger. Disk is suggest-only.
 - Below `disk.bin_sweep_below_gib` (50), `pi-cleanup --only bins` plans idle-bin removal; `--apply` deletes bins, never obj. Doctor samples reclaimable bins.
-
+- `dev-doctor --only package-cache-volume` diagnoses NuGet/pnpm/yarn volume copies. Explicit `--apply --only package-cache-volume` writes only the outside-checkout rsp; `--move-nuget` is separate and retains packages.old.
+- Measure bin size before/after the cache/rsp change; L1 verifies a build. In-place bin rewrites can alter hard-linked packages; restore the rsp backup to revert.
 ## Habits before tuning
 - Mirror CI build flags: code generation it skips, and warnings-as-errors it enables.
 - Iterate on the single affected project, not the solution.
@@ -43,7 +44,6 @@ keep building down to 25 GiB, then start no new heavy phase/worktree.
 - Do not force `RestoreNoCache` in gates.
 - Skip local coverage collection unless it is gated.
 - Measure A/B, one run each, before changing GC or runtime settings.
-
 - The local gate equals CI's lanes, filters and flags: no more, no less. An
   unfiltered solution test can start extra service stacks and inflate Tier 1.
 - Container-backed specs run as `--kind integration`, using the integration permit.

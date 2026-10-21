@@ -17,7 +17,7 @@ import tempfile
 import time
 
 CHECKS = ('spotlight', 'docker-memory', 'docker-stale', 'oversubscription',
-          'msbuild-env', 'testcontainers-in-test', 'worktrees', 'browsers', 'pi-sessions', 'owned-containers', 'disk')
+          'msbuild-env', 'testcontainers-in-test', 'worktrees', 'browsers', 'pi-sessions', 'owned-containers', 'disk', 'package-cache-volume')
 GIB = 1024 ** 3
 
 
@@ -756,10 +756,20 @@ def check_owned_containers(runner, **_):
     return result
 
 
+def package_cache_tools():
+    return runpy.run_path(str(Path(__file__).resolve().with_name('package_cache.py')))
+
+
+def check_package_cache_volume(runner, root=None, **_):
+    return [finding('package-cache-volume', *row)
+            for row in package_cache_tools()['check'](runner, root)]
+
+
 CHECK_FUNCTIONS = dict(zip(CHECKS, (check_spotlight, check_docker_memory, check_docker_stale,
                                   check_oversubscription, check_msbuild_env,
                                   check_testcontainers_in_test, check_worktrees, check_browsers,
-                                  check_pi_sessions, check_owned_containers, check_disk)))
+                                  check_pi_sessions, check_owned_containers, check_disk,
+                                  check_package_cache_volume)))
 
 
 def apply_findings(findings, runner):
@@ -805,14 +815,19 @@ def main(argv=None, runner=run):
     output.add_argument('--json', action='store_true')
     output.add_argument('--quiet', action='store_true', help='print successful actions and fuse trips')
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--move-nuget', action='store_true',
+                        help='explicitly relocate NuGet cache; never implied by --apply')
     parser.add_argument('--repos-root')
     parser.add_argument('--only', help=','.join(CHECKS))
     args = parser.parse_args(argv)
-    selected = args.only.split(',') if args.only is not None else CHECKS
+    selected = args.only.split(',') if args.only is not None else (
+        ('package-cache-volume',) if args.move_nuget else CHECKS)
+    if args.move_nuget and list(selected) != ['package-cache-volume']:
+        parser.error('--move-nuget requires only package-cache-volume')
     if any(id not in CHECKS for id in selected):
         parser.error('--only must contain check IDs: ' + ','.join(CHECKS))
     # Total command budget keeps many unavailable/slow tools from accumulating 10s each.
-    deadline = time.monotonic() + 45
+    deadline = time.monotonic() + (120 if args.move_nuget else 45)
 
     def bounded(cmd, timeout=10):
         remaining = deadline - time.monotonic()
@@ -829,15 +844,28 @@ def main(argv=None, runner=run):
     now = time.time()
     findings = [f for id in selected for f in CHECK_FUNCTIONS[id](
         runner=bounded, root=root, samples=samples, next_samples=next_samples, now=now)]
+    success = True
     if args.apply:
         apply_findings(findings, bounded)
+        # Never opt into filesystem writes through default --apply or guardian.
+        if args.only == 'package-cache-volume':
+            ok, evidence = package_cache_tools()['write_rsp'](root)
+            success = success and ok
+            findings.append(finding('package-cache-volume', 'info' if ok else 'warn', evidence,
+                                    'Only the response file is changed by --apply.', 'Verify a build.'))
+    if args.move_nuget:
+        ok, evidence = package_cache_tools()['move'](root, bounded, phase_state)
+        success = success and ok
+        findings.append(finding('package-cache-volume', 'info' if ok else 'warn', evidence,
+                                'Explicit cache relocation; packages.old is retained.', 'Verify a build.'))
     if any(id in selected for id in ('browsers', 'pi-sessions', 'docker-memory')):
         if not save_samples(next_samples):
             findings += skipped('browsers', 'sample state could not be saved; long-span rates unavailable')
     if args.quiet:
         fuses = set()
         for f in findings:
-            if '; action taken: ' in f['evidence']:
+            if ('; action taken: ' in f['evidence'] or f['id'] == 'package-cache-volume'
+                    and any(text in f['evidence'] for text in ('action taken:', 'refused', 'failed'))):
                 print(f"{f['id']}: {f['evidence']}")
             if 'FUSE:' in f['why']:
                 message = 'FUSE:' + f['why'].split('FUSE:', 1)[1]
@@ -856,7 +884,7 @@ def main(argv=None, runner=run):
                           + (' [auto; --apply when idle]' if f['auto'] else ''))
         if not findings:
             print('No findings in selected checks.')
-    return 0
+    return 0 if success else 1
 
 
 if __name__ == '__main__':
