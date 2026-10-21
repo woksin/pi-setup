@@ -21,10 +21,16 @@ if [ -z "$real_dotnet" ]; then
 fi
 index=0
 subcommand=0
+subcommand_name=
+assemblies=no
 cap=yes
 for arg do
     index=$((index + 1))
     lower=$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')
+    case $lower in
+        -*) ;;
+        *.dll|*.exe) assemblies=yes ;;
+    esac
     case $lower in
         -m|-m:*|/m|/m:*|-maxcpucount*|/maxcpucount*|--maxcpucount*) cap=no ;;
     esac
@@ -33,6 +39,7 @@ for arg do
             -*) ;;
             *)
                 subcommand=-1
+                subcommand_name=$arg
                 case $arg in
                     build|test|publish|pack|msbuild|restore) subcommand=$index ;;
                 esac
@@ -40,6 +47,11 @@ for arg do
         esac
     fi
 done
+if [ "$cap" = yes ] && [ "$subcommand_name" = test ]; then
+    if [ "$assemblies" = yes ] || "$PI_PHASE_PYTHON" "$PI_PHASE_SHIM_DIR/test-runner.py"; then
+        cap=no
+    fi
+fi
 if [ "$cap" = yes ] && [ "$subcommand" -gt 0 ]; then
     # The for-list is expanded before set replaces the positional parameters.
     index=0

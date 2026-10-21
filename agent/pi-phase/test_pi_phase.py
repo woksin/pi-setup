@@ -486,6 +486,91 @@ class PhaseTests(unittest.TestCase):
             self.assertTrue(self.memory_claim(admission=admission))
             self.assertIn("fail-open", note.call_args.args[0])
 
+    def test_macos_without_swap_skips_swap_threshold_but_linux_does_not(self):
+        reading = pi_phase.parse_macos_memory("System-wide memory free percentage: 80%",
+                                              "total = 0.00M used = 0.00M free = 0.00M")
+        self.assertEqual(reading, (80, None))
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase, "read_host_memory", return_value=reading):
+            self.assertIsNone(admission.reason(time.monotonic() + 2))
+        admission.checked = None
+        with patch.object(pi_phase, "read_host_memory", return_value=(80, 0)):
+            self.assertEqual(admission.reason(time.monotonic() + 2), "swap free 0 MB < 500 MB")
+
+    def test_config_and_memory_failure_notes_are_deduplicated_for_a_phase(self):
+        self.config.write_text('{"heavy_slots": 0, "memory_admission": "bad"}')
+        notes = set()
+        with patch.object(pi_phase, "note") as note:
+            for _ in range(3):
+                pi_phase.config(self.config, notes=notes)
+            self.assertEqual(note.call_count, 2)
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase.time, "monotonic", side_effect=[0, 6, 12]), \
+                patch.object(pi_phase, "read_host_memory", side_effect=OSError("failed")) as read, \
+                patch.object(pi_phase, "note") as note:
+            for _ in range(3):
+                self.assertIsNone(admission.reason(100))
+            self.assertEqual(read.call_count, 3)
+            note.assert_called_once()
+
+    def test_missing_or_unreadable_shim_runs_uncapped(self):
+        self.configure(msbuild_max_cpu=4, container_test_detection="off")
+        for error in (FileNotFoundError("shim missing"), PermissionError("shim unreadable")):
+            with self.subTest(error=error), patch.object(pi_phase, "shim_environment", side_effect=error), \
+                    patch.object(pi_phase, "note") as note:
+                self.assertEqual(pi_phase.main(["run", "--kind", "build", "--label", "fallback", "--",
+                                               sys.executable, "-c", "pass"],
+                                              state=self.state, configuration=self.config), 0)
+                warnings = [call.args[0] for call in note.call_args_list if "running uncapped" in call.args[0]]
+                self.assertEqual(len(warnings), 1)
+        self.assertEqual(list(self.state.glob("dotnet-shim-*")), [])
+
+    def test_attribution_rejects_existing_and_short_lived_test_peers(self):
+        self.state.mkdir()
+        peer_lock = self.state / "heavy-1.lock"
+        peer = pi_phase.lock_file(peer_lock)
+        try:
+            pi_phase.save(peer_lock.with_suffix(".json"), dict(kind="integration", token="peer"))
+            self.assertIsNone(pi_phase.begin_test_attribution(self.state, "own"))
+        finally:
+            pi_phase.unlock(peer)
+            peer_lock.with_suffix(".json").unlink()
+        attribution = pi_phase.begin_test_attribution(self.state, "own")
+        self.assertEqual(attribution, "own")
+        # A peer begins and ends entirely between the owner's Docker polls.
+        pi_phase.begin_test_attribution(self.state, "short-peer")
+        self.fake_docker(time.time() + 2)
+        with patch.object(pi_phase, "note") as note:
+            pi_phase.container_test_poller(self.state, "fingerprint", time.time(), threading.Event(), attribution)
+            note.assert_called_once()
+        self.assertFalse((self.state / "container-tests.json").exists())
+        attribution = pi_phase.begin_test_attribution(self.state, "solo")
+        pi_phase.record_container_test(self.state, "solo-fingerprint", attribution)
+        self.assertEqual(pi_phase.metadata(self.state / "container-tests.json"), {"solo-fingerprint": True})
+
+    def test_test_shim_skips_assemblies_and_nearest_testing_platform_config(self):
+        self.executable(self.fake_bin / "dotnet", "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
+        shim = self.root / "safe-shim"
+        shim.mkdir()
+        env = pi_phase.shim_environment(shim, 3)
+        child = self.root / "nested"
+        child.mkdir()
+        def invoke(args, capped):
+            result = subprocess.run([str(shim / "dotnet"), *args], cwd=child, env=env,
+                                    capture_output=True, text=True, timeout=3)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual("<-m:3>" in result.stdout, capped, result.stdout)
+        for args, capped in ((["test", "assembly.dll"], False), (["test", "ASSEMBLY.EXE"], False),
+                             (["build", "assembly.dll"], True), (["test", "--flag.dll"], True),
+                             (["test", "project.csproj"], True)):
+            invoke(args, capped)
+        (self.root / "global.json").write_text('{"test":{"runner":"Microsoft.Testing.Platform"}}')
+        invoke(["test", "project.csproj"], False)
+        (child / "global.json").write_text('{"sdk":{"version":"10.0.100"}}')
+        invoke(["test", "project.csproj"], True)
+        (child / "global.json").write_text('{')
+        invoke(["test", "project.csproj"], False)
+
     def test_fifo_including_equal_timestamps_and_sequence(self):
         with patch.object(pi_phase.time, "time", return_value=100):
             first = self.waiter("first")

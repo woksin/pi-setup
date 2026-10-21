@@ -51,7 +51,13 @@ class PhaseConfig(tuple):
         return result
 
 
-def config(path):
+def config(path, *, notes=None):
+    def warn(message):
+        if notes is None or message not in notes:
+            note(message)
+            if notes is not None:
+                notes.add(message)
+
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False)
     try:
@@ -59,10 +65,10 @@ def config(path):
         if not isinstance(data, dict):
             raise ValueError("expected an object")
     except (ValueError, OSError) as exc:
-        note(f"invalid config.json ({exc}); using defaults")
+        warn(f"invalid config.json ({exc}); using defaults")
         data = {}
     for key in data.keys() - defaults.keys():
-        note(f"unknown config key {key}; ignored")
+        warn(f"unknown config key {key}; ignored")
     values = defaults.copy()
     for key, default in defaults.items():
         value = data.get(key, default)
@@ -71,7 +77,7 @@ def config(path):
         elif key == "msbuild_max_cpu":
             valid = value == "auto" or type(value) is int and value >= 0
         elif key == "memory_admission":
-            values[key] = memory_admission_config(value)
+            values[key] = memory_admission_config(value, warn)
             continue
         elif key == "container_test_detection":
             valid = value in ("off", "hint", "promote")
@@ -80,13 +86,14 @@ def config(path):
         if valid:
             values[key] = value
         else:
-            note(f"invalid {key}; using default {default!r}")
+            warn(f"invalid {key}; using default {default!r}")
     heavy = values.pop("heavy_slots")
     integration = values.pop("integration_slots")
     return PhaseConfig(heavy, integration, values)
 
 
-def memory_admission_config(value):
+def memory_admission_config(value, warn=None):
+    warn = warn or note
     defaults = dict(min_free_percent=30, min_swap_free_mb=500)
     if value is False:
         return False
@@ -94,12 +101,12 @@ def memory_admission_config(value):
         return defaults
     if isinstance(value, dict):
         for key in value.keys() - defaults.keys():
-            note(f"unknown memory_admission key {key}; ignored")
+            warn(f"unknown memory_admission key {key}; ignored")
         settings = {key: value.get(key, default) for key, default in defaults.items()}
         if (all(type(n) in (int, float) and 0 <= n <= sys.float_info.max for n in settings.values())
                 and settings["min_free_percent"] <= 100):
             return settings
-    note("invalid memory_admission; using default False")
+    warn("invalid memory_admission; using default False")
     return False
 
 
@@ -112,7 +119,8 @@ def parse_macos_memory(pressure, swap):
     megabytes = float(swap_free[1]) * {"K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 ** 2}[swap_free[2]]
     if not 0 <= percent <= 100 or not math.isfinite(megabytes):
         raise ValueError("invalid macOS memory values")
-    return percent, megabytes
+    total = re.search(r"\btotal\s*=\s*(\d+(?:\.\d+)?)[KMGT]\b", swap)
+    return percent, None if total and float(total[1]) == 0 else megabytes
 
 
 def parse_linux_memory(text):
@@ -152,8 +160,9 @@ class MemoryAdmission:
         self.checked = None
         self.sample = None
         self.noted = False
+        self.failure_noted = False
 
-    def reason(self, deadline):
+    def reading(self, deadline):
         now = time.monotonic()
         if self.checked is None or now - self.checked >= 5:
             self.checked = now
@@ -161,7 +170,13 @@ class MemoryAdmission:
                 self.sample = read_host_memory(deadline)
             except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
                 self.sample = None
-                note(f"memory measurement failed ({exc}); admitting (fail-open)")
+                if not self.failure_noted:
+                    note(f"memory measurement failed ({exc}); admitting (fail-open)")
+                    self.failure_noted = True
+        return self.sample
+
+    def reason(self, deadline):
+        self.reading(deadline)
         if self.sample is None:
             return None
         free, swap_free = self.sample
@@ -169,7 +184,7 @@ class MemoryAdmission:
         if free < minimum:
             return f"memory free {free:g}% < {minimum:g}%"
         minimum = self.thresholds["min_swap_free_mb"]
-        if swap_free < minimum:
+        if swap_free is not None and swap_free < minimum:
             return f"swap free {swap_free:g} MB < {minimum:g} MB"
         return None
 
@@ -204,6 +219,7 @@ def shim_environment(directory, cap):
     shim = directory / "dotnet"
     shim.write_bytes((ROOT / "dotnet-shim.sh").read_bytes())
     shim.chmod(0o700)
+    (directory / "test-runner.py").write_bytes((ROOT / "dotnet-test-runner.py").read_bytes())
     env = os.environ.copy()
     original_path = os.environ.get("PATH", os.defpath)
     inherited_shim = env.get("PI_PHASE_SHIM_DIR")
@@ -212,7 +228,8 @@ def shim_environment(directory, cap):
         original_path = os.pathsep.join(part for part in original_path.split(os.pathsep)
                                         if os.path.realpath(part or ".") != inherited_shim)
     env.update(PI_PHASE_ORIGINAL_PATH=original_path,
-               PI_PHASE_SHIM_DIR=str(directory.resolve()), PI_PHASE_MSBUILD_MAX_CPU=str(cap))
+               PI_PHASE_SHIM_DIR=str(directory.resolve()), PI_PHASE_MSBUILD_MAX_CPU=str(cap),
+               PI_PHASE_PYTHON=sys.executable)
     env["PATH"] = str(directory) + os.pathsep + env["PI_PHASE_ORIGINAL_PATH"]
     return env
 
@@ -221,7 +238,38 @@ def test_fingerprint(cwd, command):
     return hashlib.sha1("\0".join([os.path.realpath(cwd), *command]).encode()).hexdigest()
 
 
-def record_container_test(state, fingerprint):
+def begin_test_attribution(state, token):
+    """A generation change remembers even a peer that exits between Docker polls."""
+    paths = [p for p in state.glob("*.lock")
+             if p.name.startswith(("heavy-", "integration-", "ci-"))]
+    prior = {p: metadata(p.with_suffix(".json")) for p in paths}
+    competitors = [entry for entry in prior.values() if entry.get("token") != token
+                   and entry.get("kind") not in ("build", "ci")]
+    live = live_groups(0.5) if any(entry.get("pgid") for entry in competitors) else set()
+    solo = live is not None
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        for path in state.glob("*.lock"):
+            if not path.name.startswith(("heavy-", "integration-", "ci-")):
+                continue
+            entry = metadata(path.with_suffix(".json"))
+            if entry.get("token") == token or entry.get("kind") in ("build", "ci"):
+                continue
+            fd = lock_file(path)
+            busy = fd is None
+            if fd is not None:
+                unlock(fd)
+            if (busy or entry.get("unreadable") or entry != prior.get(path, {})
+                    or live is None or entry.get("pgid") in live):
+                solo = False
+        save(state / "test-generation.json", {"token": token})
+    return token if solo else None
+
+
+def record_container_test(state, fingerprint, attribution=None):
+    # A later peer invalidates attribution even after its lease has disappeared.
+    if attribution is None or metadata(state / "test-generation.json").get("token") != attribution:
+        return
     # Separate from admission: a slow hint must never hold the coordinator.
     with open(state / "container-tests.guard", "a+b") as guard:
         fcntl.flock(guard, fcntl.LOCK_EX)
@@ -230,7 +278,7 @@ def record_container_test(state, fingerprint):
         save(state / "container-tests.json", known)
 
 
-def container_test_poller(state, fingerprint, started, stopped):
+def container_test_poller(state, fingerprint, started, stopped, attribution=None):
     """Read-only Docker probe in a daemon; neither join nor delay the phase."""
     while not stopped.is_set():
         try:
@@ -247,7 +295,7 @@ def container_test_poller(state, fingerprint, started, stopped):
                 if created > started and not stopped.is_set():
                     note("hint: this test phase started Testcontainers containers; CI usually "
                          "runs these as integration — use --kind integration or CI's filter")
-                    record_container_test(state, fingerprint)
+                    record_container_test(state, fingerprint, attribution)
                     return
         except (OSError, ValueError, subprocess.SubprocessError):
             pass  # Detection is best effort, including missing/unavailable Docker.
@@ -760,7 +808,8 @@ def run(args, state, configuration, output=None):
     fingerprint = test_fingerprint(os.getcwd(), command)
     admission_args = argparse.Namespace(**vars(args))
     try:
-        settings = config(configuration)
+        config_notes = set()
+        settings = config(configuration, notes=config_notes)
         options = settings.options
         admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
         if (args.kind == "test" and options["container_test_detection"] == "promote"
@@ -807,16 +856,20 @@ def run(args, state, configuration, output=None):
                 note(f"queued kind={args.kind} label={args.label} remaining={max(0, int(deadline-now))}s")
                 next_heartbeat = now + HEARTBEAT
             time.sleep(min(QUEUE_TICK + random.uniform(0, 0.5), max(0, deadline-now)))
-            settings = config(configuration)
+            settings = config(configuration, notes=config_notes)
         if cancelled[0]:
             note("cancelled after admission; command not started")
             return 128 + cancelled[0]
         child_env = None
         cap = msbuild_cap(options["msbuild_max_cpu"], heavy)
         if cap and args.kind in ("build", "test", "integration"):
-            shim_dir = tempfile.TemporaryDirectory(prefix="dotnet-shim-", dir=state)
-            child_env = shim_environment(Path(shim_dir.name), cap)
-            note(f"msbuild cap -m:{cap} (msbuild_max_cpu)")
+            try:
+                shim_dir = tempfile.TemporaryDirectory(prefix="dotnet-shim-", dir=state)
+                child_env = shim_environment(Path(shim_dir.name), cap)
+            except OSError as exc:
+                note(f"msbuild shim unavailable ({exc}); running uncapped")
+            else:
+                note(f"msbuild cap -m:{cap} (msbuild_max_cpu)")
         if options["cold_worktree_hint"] and args.kind in ("build", "test") and cold_worktree(os.getcwd()):
             note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
         read_gate, write_gate = os.pipe()
@@ -832,6 +885,7 @@ def run(args, state, configuration, output=None):
             if cancelled[0]:
                 note("cancelled before execution; command not started")
                 return 128 + cancelled[0]
+            attribution = begin_test_attribution(state, token) if args.kind in ("test", "integration") else None
             detection_started = time.time()
             os.write(write_gate, b"1")
             started = time.monotonic()  # No execution budget consumed waiting for a permit.
@@ -842,7 +896,7 @@ def run(args, state, configuration, output=None):
         note(f"running kind={args.kind} label={args.label} pid={proc.pid} timeout={args.timeout:g}s")
         if args.kind == "test" and options["container_test_detection"] != "off":
             threading.Thread(target=container_test_poller,
-                             args=(state, fingerprint, detection_started, detector_stopped),
+                             args=(state, fingerprint, detection_started, detector_stopped, attribution),
                              daemon=True).start()
         next_heartbeat = started + HEARTBEAT
         while True:
