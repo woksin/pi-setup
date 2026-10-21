@@ -119,6 +119,27 @@ if name == 'recent':
     images[0] = image('a', ['example:1.0.0'], 1)
 if name == 'floating':
     images[0]['RepoTags'].append('example:latest')
+if name in ('variants-preserved', 'variants-superseded', 'prerelease', 'prerelease-variant', 'precision', 'major-alias', 'short-aliases'):
+    tags = {
+        'variants-preserved': ['20.11-alpine', '20.12', '20.13'],
+        'variants-superseded': ['20.11-alpine', '20.12-alpine', '20.13-alpine'],
+        'prerelease': ['1.2.3-rc1', '1.2.3-rc2', '1.2.3'],
+        'prerelease-variant': ['1.2.3-beta1-alpine', '1.2.3-rc1-alpine', '1.2.3-alpine'],
+        'precision': ['1.1', '1.2.1', '1.3.1'],
+        'major-alias': ['1', '2.0', '3.0'],
+        'short-aliases': ['1.1', '1.2', '1.3', '1.4.0'],
+    }[name]
+    images = [image(chr(97 + i), ['example:' + tag]) for i, tag in enumerate(tags)]
+if name in ('digest-pinned', 'digest-only-pinned'):
+    images[0]['RepoDigests'] = ['protected@sha256:' + 'f' * 64]
+    (root / 'state/pinned.txt').write_text('protected@sha256:*\n')
+    if name == 'digest-only-pinned':
+        images = images[:1]
+        images[0]['RepoTags'] = None
+if name == 'intermediate':
+    images = [image('a', None)]
+if name == 'disabled':
+    (root / 'state/no-image-prune').touch()
 (root / 'fixture.json').write_text(json.dumps(dict(name=name, images=images)))
 PY
   cat > "$T/bin/docker" <<'PY'
@@ -139,10 +160,21 @@ elif a[0] == 'context':
     else:
         print('"unix:///tmp/fake.sock"')
 elif a[0] == 'ps':
-    if '-aq' in a and '--filter' not in a and data['name'] == 'in-use':
+    if ('-aq' in a and '--filter' not in a
+            and (data['name'] == 'in-use' or data['name'] == 'image-before-doctor'
+                 and not (root / 'containers-removed').exists())):
         print('d' * 64)
 elif a[:2] == ['image', 'ls']:
-    print('\n'.join(i['Id'] for i in images))
+    with (root / 'events').open('a') as stream:
+        stream.write('image inventory\n')
+    if any(flag in a for flag in ('-a', '-aq', '--all')):
+        raise SystemExit('must not list intermediate layers')
+    if '--filter' in a:
+        if 'dangling=true' not in a:
+            raise SystemExit('wrong image filter')
+        sys.stdout.write(''.join(i['Id'] + '\n' for i in images if not i['RepoTags'] and data['name'] != 'intermediate'))
+    else:
+        print('\n'.join(i['Id'] for i in images))
 elif a[:2] == ['image', 'inspect']:
     refs = a[2:]
     print(json.dumps([i for i in images if i['Id'] in refs or any(t in refs for t in (i['RepoTags'] or []))]))
@@ -164,9 +196,31 @@ case "$IMAGE_TEST_NAME" in
 esac
 SH_PHASE
   chmod +x "$T/bin/docker" "$T/home/.pi/agent/bin/pi-phase"
-  env -u DOCKER_GUARDIAN_MESSAGES DOCKER_HOST= HOME="$T/home" IMAGE_TEST_ROOT="$T" IMAGE_TEST_NAME="$name" DOCKER_GUARDIAN_TEST_PATH="$T/bin" DOCKER_GUARDIAN_STATE="$T/state" DOCKER_GUARDIAN_LOG="$T/log" bash "$G" 2>"$T/stderr"
+  local guardian=$G
+  if [ "$name" = image-before-doctor ]; then
+    mkdir -p "$T/guardian"
+    cp "$G" "$T/guardian/docker-guardian"
+    guardian="$T/guardian/docker-guardian"
+    echo 0 > "$T/state/last-doctor"
+    cat > "$T/guardian/dev-doctor" <<'SH_DOCTOR'
+#!/bin/sh
+printf 'doctor\n' >> "$IMAGE_TEST_ROOT/events"
+touch "$IMAGE_TEST_ROOT/containers-removed"
+printf 'FUSE: browsers stopped after 5, investigate\n'
+SH_DOCTOR
+    chmod +x "$T/guardian/dev-doctor"
+  fi
+  env -u DOCKER_GUARDIAN_MESSAGES DOCKER_HOST= HOME="$T/home" IMAGE_TEST_ROOT="$T" IMAGE_TEST_NAME="$name" DOCKER_GUARDIAN_TEST_PATH="$T/bin" DOCKER_GUARDIAN_STATE="$T/state" DOCKER_GUARDIAN_LOG="$T/log" bash "$guardian" 2>"$T/stderr"
   local code=$? got
   got=$(cat "$T/actions")
+  case "$name" in
+    integration|unknown-phase|remote|disabled) ;;
+    *) if grep -q 'images: skipped' "$T/log"; then code=1; fi ;;
+  esac
+  if [ "$name" = image-before-doctor ]; then
+    [ "$(head -n 1 "$T/events")" = 'image inventory' ] && grep -q 'FUSE: browsers stopped after 5, investigate' "$T/log" || code=1
+  fi
+  if [ "$name" = disabled ] && [ -e "$T/events" ]; then code=1; fi
   if [ "$code" -eq 0 ] && [ "$got" = "$expect" ]; then
     echo "== PASS image $name"
   else
@@ -186,4 +240,16 @@ run_images floating ''
 run_images integration ''
 run_images unknown-phase ''
 run_images remote ''
+run_images variants-preserved ''
+run_images variants-superseded 'example:20.11-alpine'
+run_images prerelease 'example:1.2.3-rc1'
+run_images prerelease-variant 'example:1.2.3-beta1-alpine'
+run_images precision ''
+run_images major-alias ''
+run_images short-aliases ''
+run_images digest-pinned ''
+run_images digest-only-pinned ''
+run_images intermediate ''
+run_images image-before-doctor ''
+run_images disabled ''
 exit $fail

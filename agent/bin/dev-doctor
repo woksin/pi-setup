@@ -513,7 +513,7 @@ def check_browsers(runner, samples=None, next_samples=None, now=None, **_):
                               f'{len(group)} processes; {"hot >50% sustained CPU" if hot else "idle <1% CPU for ≥2h"}; '
                               f'current CPU {sum(snapshot[p]["pcpu"] for p in group):.1f}%',
                               'Temporary headless browsers can retain CPU/RAM. Persistent/user Chrome is suggest-only.'
-                              + (' Five-kill fuse reached.' if safe and not auto else ''),
+                              + (f' FUSE: browsers stopped after {auto_count}, investigate' if safe and not auto else ''),
                               f'kill -TERM {root}' if safe else f'Close browser root {root} manually (persistent/user profile).', auto))
     return result
 
@@ -646,7 +646,9 @@ def live_owner_hashes(runner, snapshot, names):
         paths = [line[1:] for line in (output or '').splitlines() if line.startswith('n/')]
         if len(paths) != 1 or paths[0].endswith(' (deleted)'):
             return None  # A live/unreadable owner is not evidence of absence.
-        hashes.add(hashlib.sha256(paths[0].encode()).hexdigest()[:16])
+        for cwd in {paths[0], os.path.realpath(paths[0])}:
+            for variant in (cwd, cwd + '/'):
+                hashes.add(hashlib.sha256(variant.encode()).hexdigest()[:16])
     return hashes
 
 
@@ -698,7 +700,7 @@ def check_owned_containers(runner, **_):
                 continue
             auto = removed < rule['max_removals'] and permitted < 10
             result.append(finding(id, 'warn', evidence,
-                                  'Old matching container has no live owner cwd hash.' if auto else 'Removal fuse reached; stop and review the unexpected population.',
+                                  'Old matching container has no live owner cwd hash.' if auto else f'FUSE: owned-containers stopped after {permitted if permitted >= 10 else removed}, investigate',
                                   'docker rm -f ' + cid if auto else 'Review excess orphan candidates manually.', auto))
             removed += auto
             permitted += auto
@@ -755,7 +757,7 @@ def main(argv=None, runner=run):
     parser = argparse.ArgumentParser(description=__doc__)
     output = parser.add_mutually_exclusive_group()
     output.add_argument('--json', action='store_true')
-    output.add_argument('--quiet', action='store_true', help='print only successful actions')
+    output.add_argument('--quiet', action='store_true', help='print successful actions and fuse trips')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--repos-root')
     parser.add_argument('--only', help=','.join(CHECKS))
@@ -787,9 +789,15 @@ def main(argv=None, runner=run):
         if not save_samples(next_samples):
             findings += skipped('browsers', 'sample state could not be saved; long-span rates unavailable')
     if args.quiet:
+        fuses = set()
         for f in findings:
             if '; action taken: ' in f['evidence']:
                 print(f"{f['id']}: {f['evidence']}")
+            if 'FUSE:' in f['why']:
+                message = 'FUSE:' + f['why'].split('FUSE:', 1)[1]
+                if message not in fuses:
+                    print(message)
+                    fuses.add(message)
     elif args.json:
         print(json.dumps(findings, indent=2))
     else:

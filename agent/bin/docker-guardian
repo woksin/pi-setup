@@ -89,11 +89,21 @@ def used_images():
     return set(images) if len(images) == len(ids) and all(valid_id(i) for i in images) else None
 
 def version(tag):
-    m = re.fullmatch(r'v?(\d+)\.(\d+)(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?', tag)
-    if not m:
+    # A suffix is a workload variant, except for explicitly known prerelease markers.
+    match = re.fullmatch(r'v?(\d+(?:\.\d+)*)([^0-9.].*)?', tag)
+    if not match:
         return None
-    pre = tuple((0, int(p)) if p.isdigit() else (1, p) for p in (m[4] or '').split('.'))
-    return int(m[1]), int(m[2]), int(m[3] or 0), not bool(m[4]), pre
+    numbers = tuple(int(part) for part in match[1].split('.'))
+    suffix = match[2] or ''
+    pre = re.match(r'^-(alpha|beta|preview|rc)(?:[.-]?(\d+))?(?=$|[-+])', suffix)
+    marker, serial = (0, 0)
+    if pre:
+        marker = ('alpha', 'beta', 'preview', 'rc').index(pre[1])
+        serial = int(pre[2] or 0)
+        suffix = suffix[pre.end():]
+    # Compare only equal precision inside each repository + variant group.
+    return suffix, len(numbers), (numbers, not bool(pre), marker, serial)
+
 
 def age(created):
     try:
@@ -105,6 +115,9 @@ def floating(tag):
     return tag == 'latest' or tag.endswith('-development') or tag.startswith('local-')
 
 def main():
+    if Path(sys.argv[1]).with_name('no-image-prune').is_file():
+        print('images: skipped (no-image-prune switch)')
+        return
     if not phases_safe():
         print('images: skipped (integration running or phase state unknown)')
         return
@@ -123,11 +136,13 @@ def main():
     except OSError:
         print('images: skipped (pin list unreadable)')
         return
-    output = run(['docker', 'image', 'ls', '-aq', '--no-trunc'])
-    if output is None:
+    output = run(['docker', 'image', 'ls', '-q', '--no-trunc'])
+    dangling = run(['docker', 'image', 'ls', '-q', '--no-trunc', '--filter', 'dangling=true'])
+    if output is None or dangling is None:
         print('images: skipped (image inventory unavailable)')
         return
-    ids = list(dict.fromkeys(output.splitlines()))
+    dangling_ids = set(dangling.splitlines())
+    ids = list(dict.fromkeys(output.splitlines() + dangling.splitlines()))
     if len(ids) > 300 or any(not valid_id(i) for i in ids):
         print('images: skipped (inventory invalid or exceeds 300-image budget)')
         return
@@ -143,7 +158,9 @@ def main():
     repositories = {}
     for image in images:
         tags = image.get('RepoTags') or []
-        if not isinstance(tags, list):
+        digests = image.get('RepoDigests') or []
+        if (not isinstance(tags, list) or not isinstance(digests, list)
+                or any(not isinstance(ref, str) for ref in [*tags, *digests])):
             print('images: skipped (malformed tag inventory)')
             return
         for ref in tags:
@@ -152,29 +169,41 @@ def main():
             repo, _, tag = ref.rpartition(':')
             value = version(tag)
             if repo and value is not None and not floating(tag):
-                repositories.setdefault(repo, {})[ref] = value
+                suffix, precision, rank = value
+                repositories.setdefault((repo, suffix, precision), {})[ref] = rank
     keep = {ref for tags in repositories.values()
             for ref in sorted(tags, key=lambda ref: (tags[ref], ref), reverse=True)[:2]}
+    def short_alias(repo, parsed):
+        suffix, precision, _ = parsed
+        return precision < 3 and any(r == repo and variant == suffix and width > precision
+                                     for r, variant, width in repositories)
+
     candidates = []
     for image in images:
         iid, tags = image['Id'], image.get('RepoTags') or []
         hours = age(image.get('Created')) / 3600
         if (iid in used or hours < 6
-                or any(fnmatch.fnmatchcase(ref, pin) for ref in [iid, *tags] for pin in pins)):
+                or any(fnmatch.fnmatchcase(ref, pin) for ref in [iid, *tags, *(image.get('RepoDigests') or [])] for pin in pins)):
             continue
         actual_tags = [ref for ref in tags if ref != '<none>:<none>']
         if not actual_tags:
-            if hours > 24:
+            if hours > 24 and iid in dangling_ids:
                 candidates.append((iid, iid))
             continue
         # A floating alias protects its whole image, not just that alias.
-        if any(floating(ref.rpartition(':')[2]) for ref in actual_tags):
+        if any(floating(ref.rpartition(':')[2])
+               or (version(ref.rpartition(':')[2]) is not None
+                   and short_alias(ref.rpartition(':')[0], version(ref.rpartition(':')[2])))
+               for ref in actual_tags):
             continue
         for ref in actual_tags:
             repo, _, tag = ref.rpartition(':')
             value = version(tag)
-            if value is not None and ref not in keep and any(v > value for v in repositories.get(repo, {}).values()):
-                candidates.append((ref, iid))
+            if value is not None:
+                suffix, precision, rank = value
+                peers = repositories.get((repo, suffix, precision), {})
+                if ref not in keep and any(v > rank for v in peers.values()):
+                    candidates.append((ref, iid))
     for ref, iid in candidates:
         if not phases_safe():
             print('images: stopped (integration/unknown phase state)')
@@ -219,6 +248,14 @@ if healthy; then
   fi
 fi
 if [ "${PLANNED:-0}" != 1 ] && healthy; then
+  # Snapshot image references before either doctor or guardian removes exited containers.
+  last=$(cat "$S/last-gc" 2>/dev/null || echo 0)
+  if [ $((now-last)) -ge 900 ]; then
+    image_actions=$(dl 55 prune_superseded_images 2>&1)
+    image_exit=$?
+    while IFS= read -r action; do [ -z "$action" ] || log "$action"; done <<< "$image_actions"
+    [ "$image_exit" -eq 0 ] || log "images: failed/timeout exit=$image_exit (guardian continues)"
+  fi
   # Independent timestamp: a missing/failed doctor never blocks guardian health/GC.
   doctor="$(dirname "$0")/dev-doctor"
   last_doctor=$(cat "$S/last-doctor" 2>/dev/null || echo 0)
@@ -231,13 +268,8 @@ if [ "${PLANNED:-0}" != 1 ] && healthy; then
     while IFS= read -r action; do [ -z "$action" ] || log "dev-doctor: $action"; done <<< "$actions"
     [ "$doctor_exit" -eq 0 ] || log "dev-doctor: failed/timeout exit=$doctor_exit (guardian continues)"
   fi
-  last=$(cat "$S/last-gc" 2>/dev/null || echo 0)
   if [ $((now-last)) -ge 900 ]; then
     echo "$now" > "$S/last-gc"; n=0
-    image_actions=$(dl 55 prune_superseded_images 2>&1)
-    image_exit=$?
-    while IFS= read -r action; do [ -z "$action" ] || log "$action"; done <<< "$image_actions"
-    [ "$image_exit" -eq 0 ] || log "images: failed/timeout exit=$image_exit (guardian continues)"
     for id in $(dl 30 docker ps -aq --filter status=exited --filter status=dead 2>/dev/null); do
       f=$(dl 10 docker inspect -f '{{.State.FinishedAt}}' "$id" 2>/dev/null) || continue
       t=$(date -j -u -f '%Y-%m-%dT%H:%M:%S' "${f%%.*}" +%s 2>/dev/null) || continue

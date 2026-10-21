@@ -26,7 +26,7 @@ never persistent `~/.pi` profiles or user Chrome (fuse 5). Hot means >50% CPU ov
 Pi sessions idle ≥4h and helper RSS are suggest-only: close them manually.
 Samples in `~/.pi/agent/dev-doctor/samples.json` track CPU and Docker usage peaks;
 Docker sizing suggests 1.5× observed peak, floor 8 GiB, not an automatic change.
-Guardian calls the narrow cleanup checks at most every 15 min; `--quiet` logs actions.
+Guardian calls the narrow cleanup checks at most every 15 min; `--quiet` logs actions and fuse trips.
 The doctor never removes images, volumes or checkout files. A zero-CPU container sample
 alone does not prove it is abandoned; confirm ownership.
 
@@ -64,7 +64,11 @@ save disk, not compile time. Treat sampled counts and correlations as hints,
 not proof of process/container ownership or a reason to delete worktrees.
 
 Guardian image hygiene is separate: every 15 min, with no integration running,
-remove only superseded semver tags (keep newest 2) or dangling images >24h.
+remove superseded tags (newest 2 per variant/precision group) or filtered dangling images >24h.
 Keep all container-used, pinned, <6h-old and floating-tag images. Review globs in
 `~/.pi/agent/docker-guardian/pinned.txt` (seeded once); `docker rmi` is never forced.
 Never `prune -a`. Shared layers mean about 1 GB saved from a 13.7 GB reclaimable report.
+Variant suffixes never compete; short aliases stay when longer versions exist.
+Pins also match RepoDigests; install activates image hygiene by seeding pinned.txt.
+An empty `~/.pi/agent/docker-guardian/no-image-prune` file disables only image cleanup.
+Images are checked before exited-container removal; later passes may reclaim them.

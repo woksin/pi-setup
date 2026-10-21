@@ -394,7 +394,7 @@ class AddendumTests(unittest.TestCase):
         with patch.object(doctor, 'owned_rules', return_value=[rule()]):
             found = doctor.check_owned_containers(owned_runner(population))
             self.assertEqual(sum(f['auto'] for f in found), 10)
-            self.assertTrue(any('fuse' in f['why'] for f in found))
+            self.assertTrue(any('FUSE:' in f['why'] for f in found))
             self.assertIn('checked 0', doctor.check_owned_containers(owned_runner([]))[-1]['evidence'])
         with patch.object(doctor, 'owned_rules', return_value=[{}]):
             self.assertIn('invalid', doctor.check_owned_containers(Runner())[0]['evidence'])
@@ -474,6 +474,37 @@ class AddendumTests(unittest.TestCase):
                 self.assertEqual(pins.read_text(), 'my-local-repo:*\n')
         self.assertTrue(os.access(home / '.pi/agent/bin/dev-doctor', os.X_OK))
         self.assertTrue((home / '.agents/skills/dev-machine-performance/SKILL.md').is_file())
+
+    def test_live_owner_accepts_cwd_slash_and_realpath_variants(self):
+        root = Path(self.scratch.name)
+        real = root / 'owner-real'
+        real.mkdir()
+        link = root / 'owner-link'
+        link.symlink_to(real, target_is_directory=True)
+        variants = {str(link), str(link) + '/', os.path.realpath(link), os.path.realpath(link) + '/'}
+        for cwd in variants:
+            with self.subTest(cwd=cwd):
+                owner = doctor.hashlib.sha256(cwd.encode()).hexdigest()[:16]
+                runner = owned_runner([owned_container(owner=owner)], ps=psline(command='dotnet test'),
+                                      lsof='p100\nn' + str(link))
+                with patch.object(doctor, 'owned_rules', return_value=[rule()]):
+                    findings = doctor.check_owned_containers(runner)
+                    self.assertFalse(any(f['auto'] for f in findings))
+                    doctor.apply_findings(findings, runner)
+                self.assertFalse(any(cmd[1:3] == ['rm', '-f'] for cmd in runner.calls))
+
+    def test_quiet_logs_browser_and_owned_container_fuses_once(self):
+        runner = Runner(ps='\n'.join(psline(pid=p, cpu='01:10:00') for p in range(100, 107)), kill='')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            doctor.main(['--only', 'browsers', '--quiet', '--apply'], runner)
+        self.assertEqual(out.getvalue().count('FUSE: browsers stopped after 5, investigate'), 1)
+        self.assertEqual(sum(cmd[0] == 'kill' for cmd in runner.calls), 5)
+        population = [owned_container(cid=f'{n:064x}') for n in range(1, 12)]
+        out = io.StringIO()
+        with patch.object(doctor, 'owned_rules', return_value=[rule()]), contextlib.redirect_stdout(out):
+            doctor.main(['--only', 'owned-containers', '--quiet'], owned_runner(population))
+        self.assertEqual(out.getvalue().strip(), 'FUSE: owned-containers stopped after 10, investigate')
 
     def test_quiet_actions_only_and_sample_category_preservation(self):
         runner = Runner(ps=psline(cpu='01:10:00'), kill='')

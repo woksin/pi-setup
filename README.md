@@ -55,9 +55,10 @@ label-rule orphans only when pi-phase reports no running phase; unknown blocks i
 It can also SIGTERM temporary Puppeteer/headless browser **root** PIDs, even during
 phases: >50% CPU sustained ≥30 min or <1% group CPU over ≥2h (fuse 5).
 Persistent `~/.pi` profiles and user Chrome are never killed. Idle pi sessions
-(≥4h CPU inactivity) and their helper RSS are suggest-only. `--quiet` prints only
-successful actions; docker-guardian runs the narrow cleanup checks at most every
-15 minutes. The doctor never uses sudo, changes Docker settings, prunes images/volumes or deletes checkout files.
+(≥4h CPU inactivity) and their helper RSS are suggest-only. `--quiet` prints
+successful actions and fuse trips; docker-guardian runs the narrow cleanup checks
+at most every 15 minutes. The doctor never uses sudo, changes Docker settings,
+prunes images/volumes or deletes checkout files.
 
 CPU anchors and observed Docker peaks are kept in
 `~/.pi/agent/dev-doctor/samples.json` (`DEV_DOCTOR_STATE_DIR` overrides its directory).
@@ -79,16 +80,30 @@ The pi-phase config flags `msbuild_max_cpu` (default off),
 (default on, hint-only) provide opt-in caps and advisory performance guidance.
 Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your version.
 
-Guardian image hygiene (15-minute pass, no running integration phase; unknown
-status blocks it) uses only `docker rmi` **without force**, never `prune -a`.
-It removes older semver-like tags only when a newer local tag exists, retaining
-the newest two per repository; dangling images qualify only after 24h. All images
-used by any container (even exited), created within 6h, floating tags (`latest`,
-`*-development`, `local-*`) and pinned globs are kept. Install seeds
-`~/.pi/agent/docker-guardian/pinned.txt` only when absent from
+Guardian image hygiene is **active once `~/.pi/agent/docker-guardian/pinned.txt`
+exists**: install seeds it only when absent from
 `agent/docker-guardian/pinned.example.txt` (Mongo, Keycloak, Vault, Playwright, Ryuk).
-Review/add pins before enabling cleanup. Shared layers mean modest actual savings:
-about 1 GB on a 13.7 GB "reclaimable" report, not the reported total.
+Review/add pins; globs match tags, image IDs and RepoDigests (`repo@sha256:…`),
+including digest-only images. Disable image cleanup with an empty
+`~/.pi/agent/docker-guardian/no-image-prune` file (`touch` it); remove that switch
+to re-enable. Other guardian/doctor hygiene continues while it is disabled.
+
+The 15-minute image pass requires no running integration phase (unknown blocks it)
+and uses only `docker rmi` **without force**, never `prune -a`. It compares numeric
+tags only within repository + suffix-variant + numeric-part-count groups, keeping
+the newest two in each. Only known rc/alpha/beta/preview markers with optional
+digits order below the matching release; e.g. `20.11-alpine` never competes with
+`20.12`. Short X/X.Y aliases stay when longer tags of the same variant exist.
+Dangling images must appear in `--filter dangling=true` and be older than 24h;
+intermediate layers are not cleanup candidates. Images created within 6h, floating
+tags (`latest`, `*-development`, `local-*`) and pinned images are kept.
+
+Image pruning runs **before** the doctor's and guardian's exited-container removals
+in the same pass. Images referenced by any container (even exited) in that pass's
+inventory are retained; references are rechecked before each removal. This is not
+permanent protection: a later pass can remove an image after its exited container
+has been deleted. Shared layers mean modest savings: about 1 GB on a 13.7 GB
+"reclaimable" report, not the reported total.
 
 ## What's in it
 
