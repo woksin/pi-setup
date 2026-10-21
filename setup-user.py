@@ -92,6 +92,8 @@ def main():
         paths = [Path(p) for p in TEMPLATES] + [loose / "README.md"]
         paths += list(loose.glob("*.py")) + list(loose.glob("*.sh"))
         paths += list(Path("agent/agents").glob("*.md"))
+        paths += list(Path("agent/profiles").glob("*/agents/*.md"))
+        paths += list(Path("agent/profiles").glob("*/routing.md"))
         for path in paths:
             if path.is_file():
                 text = path.read_text()

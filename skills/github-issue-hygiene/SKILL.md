@@ -16,6 +16,8 @@ An issue is read later by people who were not in the session. Every visible chan
 
 **Update the description** (the agent-managed status block) for the *current state*: scope as now understood, decisions, plan/checklist, linked PRs, what remains. Readers should be able to read only the description and know where things stand.
 
+When a `planner` plan exists, the status block links the plan file and summarises the chosen approach in 1–2 lines.
+
 **Post a comment** only for an *event worth a notification* that a reader later needs in the timeline:
 - a decision or scope change and its reason;
 - a blocker or question for a human;

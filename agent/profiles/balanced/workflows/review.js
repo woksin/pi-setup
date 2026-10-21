@@ -62,7 +62,7 @@
 export const meta = {
   name: 'review',
   description: 'Cross-provider code/work review (Opus 5.5 + GPT-6.1 Sol; GPT-6 Astra with deep: true); only blocking findings gate, verified by the other provider',
-  whenToUse: 'Reviewing a diff, a change set, a document or a plan before it is merged or published',
+  whenToUse: 'Reviewing a diff, change set, document or plan before it is merged or published; pass author, round and full SHAs.',
   phases: [
     { title: 'Review', detail: 'Opus 5.5 and GPT-6.1 Sol (Astra in deep mode) review independently' },
     { title: 'Verify', detail: 'each finding is challenged by the other provider' },
@@ -80,7 +80,7 @@ if (!input || typeof input !== 'object' || Array.isArray(input)) {
 }
 const text = value => typeof value === 'string' && value.trim().length > 0
 const sha = value => typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value)
-if (!text(input.target)) problems.push('Missing or invalid args.target — say what to review (a diff range, paths, or a document).')
+if (!text(input.target)) problems.push('Missing or invalid args.target (NOT repo/base/since) — say what to review (a diff range, paths, or a document).')
 if (input.context !== undefined && typeof input.context !== 'string') problems.push('context must be a string.')
 for (const key of ['quick', 'deep', 'force']) {
   if (input[key] !== undefined && typeof input[key] !== 'boolean') problems.push(`${key} must be a boolean.`)
@@ -99,7 +99,9 @@ if (deep && (!text(input.deepJustification) || /[\r\n\u2028\u2029]/.test(input.d
 }
 if (!deep && (input.deepReason !== undefined || input.deepJustification !== undefined)) problems.push('deepReason/deepJustification require deep: true.')
 for (const key of ['since', 'prior']) {
-  if (input[key] !== undefined && !text(input[key])) problems.push(`${key} must be a non-empty string.`)
+  if (input[key] !== undefined && !text(input[key])) problems.push(key === 'prior'
+    ? 'prior must be a single non-empty string (join findings with newlines), not an array.'
+    : 'since must be a non-empty string.')
 }
 const since = text(input.since) ? input.since.trim() : null
 const prior = text(input.prior) ? input.prior.trim() : null
@@ -112,7 +114,10 @@ if (input.headSha !== undefined && !sha(input.headSha)) problems.push('headSha m
 if (input.baseSha !== undefined && !sha(input.baseSha)) problems.push('baseSha must be the full base commit SHA, not a moving ref.')
 if (input.cachedReview !== undefined && (!input.cachedReview || typeof input.cachedReview !== 'object' || Array.isArray(input.cachedReview))) problems.push('cachedReview must be a previous review result object.')
 if (input.cachedReview !== undefined && input.baseSha === undefined) problems.push('cachedReview requires baseSha so a changed base cannot reuse a verdict.')
-if (problems.length) return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}`, problems }
+const reviewExample = '{"target":"git diff <baseSha>..<headSha> in <abs repo path>","context":"<intent, issue #>","author":"gpt","round":1,"headSha":"<full HEAD SHA>","baseSha":"<full base SHA>"}'
+const followUpExample = 'Round 2+: add "since":"<full SHA reviewed last>","prior":"<ONE string: blocking/unverified findings + dismissed findings with reasons>","round":2.'
+const shaHelp = 'Replace placeholders first: resolve SHAs with git rev-parse (40 hex for SHA-1, 64 for SHA-256), not short SHAs or moving refs; author is "claude" or "gpt".'
+if (problems.length) return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}\nCopy-paste example: ${reviewExample}\n${followUpExample}\n${shaHelp}`, problems }
 
 const target = input.target
 const context = input.context ? `\n\nIntent / spec of the work:\n${input.context}` : ''

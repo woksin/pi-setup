@@ -23,6 +23,7 @@ Delegate by agent type; each type pins its model and thinking level. Never pass 
 - `ops`: GPT-6.1 Sol, low
 - `opus-implementer`: GPT-6 Astra, high (legacy agent name retained for compatibility)
 - `Plan`: GPT-6 Astra, high
+- `planner`: GPT-6 Astra, high
 - `prose-editor`: GPT-6.1 Sol, medium
 - `reviewer`: GPT-6 Astra, high
 - `scout`: GPT-6.1 Sol, medium
@@ -37,6 +38,7 @@ Delegate by agent type; each type pins its model and thinking level. Never pass 
 ### Usage
 - Event modeling, event sourcing and Screenplay: follow the installed Cratis corpus skills and conventions. Prefer these pinned agents; corpus agents must inherit an OpenAI model or have an explicitly verified OpenAI route. `cratis prologue start`, Extractor runs, LLM interpretation and `render --force` still need explicit approval.
 - `implementer` for clear, testable work; `careful-implementer` for behaviour preservation; `opus-implementer` only for an unresolved design question or hard-bug judgement.
+- Plan, then implement: once a request is decided to become an issue/task, run `planner` (high) to write `<repo>/.ai-work/<task>/plan.md`; read it, resolve BLOCKING questions, then hand the plan to the cheaper implementer it recommends. Skip the planner for trivial or mechanical changes (a known one-file edit, renames, bumps). The planner is read-only apart from that one file.
 - `cleanup-steward` performs inventory and only explicitly authorised, safety-checked cleanup.
 - Delegate searches needing more than about three grep/find/read calls to `Explore`, log extraction to `grunt`, and multi-source research to `scout`.
 - Never poll. Use `job_start` or `job_watch` for long waits and end the turn; completion wakes the session. Never call `get_subagent_result` with `wait: true`.

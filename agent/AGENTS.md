@@ -39,6 +39,9 @@
 - Merge `origin/main` into the branch before launching an implementer and again before the final review, rather than respawning agents after conflicts.
 - One writer per branch or worktree at a time. Parallel agents are for independent branches or read-only questions.
 - To continue an interrupted agent, `resume` it rather than spawning a fresh one that re-reads everything.
+- For non-trivial issues, the brief comes from a `planner` run: `planner` writes `<repo>/.ai-work/<task>/plan.md` (a filled brief plus a step plan and decisions); the main session reviews it and passes it to the implementer as the brief.
+- Skip the planner when the change is trivial or mechanical; write the brief directly.
+- Re-plan instead of iterating when an implementer reports that the plan does not fit the code.
 
 ## Review loops
 
@@ -101,6 +104,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `opus-implementer`: Claude Opus 5.5, medium
 - `ops`: Kimi K3 256K, low
 - `Plan`: Claude Opus 5.5, medium
+- `planner`: Claude Opus 5.5, high
 - `prose-editor`: Claude Sonnet 5.5, low
 - `reviewer`: Claude Opus 5.5, medium
 - `scout`: Kimi K3 256K, high
@@ -112,6 +116,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 - Main session: Opus 5.5 medium by default (OpenAI-heavy: GPT-6.1 Sol high). Raise to high only for difficult design/debugging, then lower it.
 - `implementer` for clear, testable work; `careful-implementer` for behaviour-preserving changes; `opus-implementer` only when you can name the unresolved design question or hard-bug judgement.
+- Plan, then implement: once a request is decided to become an issue/task, run `planner` (high) to write `<repo>/.ai-work/<task>/plan.md`; read it, resolve BLOCKING questions, then hand the plan to the cheaper implementer it recommends. Skip the planner for trivial or mechanical changes (a known one-file edit, renames, bumps). The planner is read-only apart from that one file.
 - `cleanup-steward` performs post-work inventory and only explicitly authorised, safety-checked cleanup.
 - Cross-provider review: `reviewer` reviews GPT-written work; `sol-reviewer` reviews Claude-written work. Follow "Review loops" in the global rules (blocking-only gate, delta rounds, cap of 3). Before merge run the `review` workflow (Opus + Sol) and always pass `author` (`gpt` when `implementer` wrote it, so Astra rather than Sol verifies Opus's findings); pass `deep: true` (Astra instead of Sol) only for security-sensitive, algorithmic/concurrency or large cross-cutting changes.
 - Claude is the constrained quota: prefer `implementer` over `opus-implementer` unless you can name the open design question, and do not raise Claude agents above medium without a named reason. `second-opinion` (Astra) stays for named hard reasoning, not routine review; never raise Astra above high.

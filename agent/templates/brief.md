@@ -27,6 +27,9 @@ Copy to `<repo>/.ai-work/<task>/brief.md`, fill every section, and pass the agen
 - Every tool call re-reads your whole context: batch independent reads/greps in one message, `rg` before a ranged `read`, one `edit` per file, never print whole logs.
 - Budget: about 40 tool calls for this unit. If you will exceed it, write `handoff.md` and report; the parent resumes you rather than respawning.
 
+## Plan (optional; filled by `planner`)
+Ordered, small steps, each naming the file(s) and the change, and the specs/tests to add first.
+
 ## Verify with
 - Iterate with: `<narrow affected-project command>`.
 - Finish with the Done gate once. Use `pi-phase run ... --log <repo>/.ai-work/<task>/<phase>.log` instead of redirects, pipes or `; echo $?`.

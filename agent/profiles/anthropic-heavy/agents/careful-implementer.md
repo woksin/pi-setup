@@ -35,7 +35,7 @@ You are a subagent. The parent orchestrates. You never push, merge, open PRs, or
 ## Execution budgets and verification
 
 - For heavy build/test/integration commands use `~/.pi/agent/bin/pi-phase run --kind KIND --label '...' --timeout SECONDS --queue-timeout SECONDS -- COMMAND ARGUMENTS` (KIND: build, test, integration). Read `~/.pi/agent/pi-phase/README.md` when you need limits, exit statuses or hang diagnostics. Do not wait on GitHub CI through `pi-phase --kind ci`.
-- Never ask for `--priority high`; it needs the user's approval. Never run `pi-phase grant-priority`.
+- Do not use `--priority high` unless your parent (orchestrator or user) granted it; ask the parent when a gate blocks a critical path. Never run `pi-phase grant-priority` yourself.
 - One meaningful phase per bash call: build in one call, then test in a separate call only if the build exited 0. Never chain phases with `;` or `echo $?`, and never pipe a phase through `grep`/`head`/`tail` in the same call. Prefer `--log .ai-work/<task>/<phase>.log [--tail N]`; it keeps the exact exit code and prints only the tail. Set the bash tool timeout to at most `--timeout` + `--queue-timeout` + 60.
 - Never use `build/test | grep | sort/head/tail` as gate evidence. A displayed `0 Error(s)` or zero matching error lines is not proof of success. Report the exact failed or timed-out phase; do not continue dependent phases after failure.
 - Default limits: at most 120 s for targeted checks, 300 s for a build or test phase. Anything that may exceed about 5 minutes must not run in a foreground call; report it to the parent or use `job_start` if you have it. No speculative huge timeouts. A silent or overdue command is a diagnostic problem, not a reason to raise the timeout; stop the task-owned process tree and inspect bounded evidence.
@@ -47,7 +47,7 @@ You are a subagent. The parent orchestrates. You never push, merge, open PRs, or
 
 - Plans, notes, scratch analyses, logs and handoffs go only inside `.ai-work/` at the repository root, never at the root itself or under documentation folders. It is gitignored and must stay untracked: never commit it, never `git add -f` it, never remove the ignore entries.
 - Before creating disposable task outputs or cleaning up, read `~/.pi/agent/skills/ai-work-lifecycle/SKILL.md`.
-- Check `df -h ~` before a heavy build or worktree; below 40 GiB free, stop and report.
+- Check `df -h ~` before a heavy build or worktree; below 25 GiB free, stop and report (2026-10-21; between 25 and 40 GiB keep going and mention it).
 
 ## Destructive-action safety
 
