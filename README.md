@@ -65,7 +65,7 @@ and `disk.cleanup_trigger_gib: 40` (see the example). Below 40 GiB, suggest a
 `pi-cleanup` dry run and report; keep building down to 25 GiB. Below 25 GiB,
 start no new heavy phase or worktree. `dev-doctor --only disk` is suggest-only.
 `pi-cleanup --if-free-below config` uses the configured cleanup trigger;
-the numeric form is unchanged. The daily launchd template uses the config form.
+the numeric form is unchanged. Use it for an extra low-disk job; the daily launchd template runs unconditionally.
 `pi-cleanup --only bins` (also scheduled) plans bin-only cleanup below
 `disk.bin_sweep_below_gib` (50 GiB); `--apply` deletes eligible bins, never obj.
 Open build files, running phase cwds, writes within 60 min or tracked bin files
