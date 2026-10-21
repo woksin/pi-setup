@@ -42,6 +42,23 @@ Remove the parts you don't want:
 
 Reinstalling restores shared files, so also remove unwanted components from your setup checkout.
 
+## Machine performance
+
+Run `~/.pi/agent/bin/dev-doctor` for slow gates, long queues, swap or Docker OOM.
+It checks Spotlight, Docker memory and stale containers, build oversubscription,
+MSBuild environment, Testcontainers in test phases, and sampled worktree outputs.
+Use `--json`, `--only id,id`, or `--repos-root DIR` (otherwise it uses user.json's
+`reposRoot`, then `$HOME/repos` if present). Missing tools are reported as skipped.
+`--apply` only removes exited containers older than 20 minutes when pi-phase
+reports no running phase; unknown status blocks it. Everything else is advice:
+no sudo, settings changes, image/volume pruning, or file deletion is automated.
+See the `dev-machine-performance` skill for CI-parity lanes and warm-worktree habits.
+
+The pi-phase config flags `msbuild_max_cpu` (default off),
+`container_test_detection` (default hint-only), and `cold_worktree_hint`
+(default on, hint-only) provide opt-in caps and advisory performance guidance.
+Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your version.
+
 ## What's in it
 
 ### `agent/` → `~/.pi/agent/`
@@ -68,6 +85,7 @@ Reinstalling restores shared files, so also remove unwanted components from your
 | `workflows/loose-threads-plan.js` | Turns a `loose-threads` inventory into a cleanup plan. |
 | `loose-threads/` | Weekly audit of leftover worktrees, branches, stashes and Docker volumes. |
 | `pi-phase/`, `bin/pi-phase` | Wrapper for build and test commands with time limits, logs and a shared queue ordered by priority (`low`, `normal`, `high`), then first come first served. |
+| `bin/dev-doctor` | Bounded, read-only machine performance checks; `--apply` only removes old exited containers when pi-phase is idle. |
 | `bin/docker-guardian` | macOS: checks that Docker Desktop answers every 2 minutes, restarts it within a budget, removes dead containers and old build cache, never prunes images. Run it from the launchd template in `launchd/`. |
 | `bin/inbox-watch` | Polls a directory of files that parallel agent sessions use as messages; pair it with one `job_watch`. Set `INBOX_DIR`. |
 | `bin/gpt-meter` | Read-only spend meter for OpenAI usage from session logs. |
@@ -92,6 +110,7 @@ Reinstalling restores shared files, so also remove unwanted components from your
 ### `skills/` → `~/.agents/skills/`
 
 - `ai-work-lifecycle`: managing temporary AI task outputs without leaving large caches behind.
+- `dev-machine-performance`: diagnosing slow gates and queues, with safe machine advice and CI-parity lane habits.
 - `github-issue-hygiene`: keeping issues current and closing them when done (includes `issue-status.py`).
 
 ### `tools/` → `~/.local/`

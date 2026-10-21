@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""Bounded, read-only development-machine diagnostics; stdlib only."""
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+CHECKS = ('spotlight', 'docker-memory', 'docker-stale', 'oversubscription',
+          'msbuild-env', 'testcontainers-in-test', 'worktrees')
+GIB = 1024 ** 3
+
+
+def run(cmd, timeout=10):
+    """The only external-command boundary. Failure (including absence) is unknown."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return result.stdout + result.stderr if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+
+
+def finding(id, severity, evidence, why, suggest, auto=False):
+    return dict(id=id, severity=severity, evidence=evidence, why=why,
+                suggest=suggest, auto=auto)
+
+
+def skipped(id, note):
+    return [finding(id, 'info', 'Skipped: ' + note, 'State is unknown.',
+                    'Install/enable the missing tool or retry the check.')]
+
+
+def read_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def repos_root(explicit=None):
+    config = read_json(Path.home() / '.pi/agent/user.json', {})
+    saved = config.get('reposRoot') if isinstance(config, dict) else None
+    root = explicit or (saved if isinstance(saved, str) else None)
+    if root:
+        return Path(root).expanduser().resolve()
+    default = Path.home() / 'repos'
+    return default if default.is_dir() else None
+
+
+def phase_state(runner):
+    output = runner([str(Path.home() / '.pi/agent/bin/pi-phase'), 'status'])
+    if output is None:
+        return None
+    lines = output.splitlines()
+    active = [line.removeprefix('pi-phase: ') for line in lines
+              if re.search(r'elapsed=\d+s (running|orphan-group)$', line)]
+    if active:
+        return [line.split()[0] for line in active]
+    return [] if 'pi-phase: no active phases' in lines else None
+
+
+def processes(runner):
+    return runner(['ps', '-axo', 'pcpu=,comm=,args='])
+
+
+def check_spotlight(runner, root, **_):
+    id = 'spotlight'
+    if sys.platform != 'darwin':
+        return skipped(id, 'mdutil is macOS-only')
+    if root is None or not root.exists():
+        return skipped(id, 'repositories root unavailable')
+    # Resolve the actual mount point, not the repository directory.
+    volume = root
+    while not os.path.ismount(volume) and volume.parent != volume:
+        volume = volume.parent
+    status = runner(['mdutil', '-s', str(volume)])
+    if status is None:
+        return skipped(id, 'mdutil missing or unavailable')
+    if 'Indexing enabled' not in status:
+        return []
+    ps = processes(runner)
+    cpu = sum(float(line.split()[0]) for line in (ps or '').splitlines()
+              if re.search(r'\b(mds|mds_stores|mdworker\w*)\b', line)
+              and re.match(r'^\s*\d+(\.\d+)?\s', line))
+    return [finding(id, 'warn' if cpu >= 25 else 'info',
+                    f'Indexing enabled on {volume}; mds/mdworker CPU: {cpu:.1f}%' if ps is not None
+                    else f'Indexing enabled on {volume}; process CPU unknown',
+                    'Indexing can add I/O; low CPU means it is unlikely to be the main bottleneck.',
+                    'System Settings → Siri & Spotlight → Spotlight Privacy; or (user/sudo) '
+                    + shlex.join(['sudo', 'mdutil', '-i', 'off', str(volume)]))]
+
+
+def host_memory(runner):
+    if sys.platform == 'darwin':
+        ram = runner(['sysctl', '-n', 'hw.memsize'])
+        swap = runner(['sysctl', '-n', 'vm.swapusage'])
+        match = re.search(r'used\s*=\s*([\d.]+)([MG])', swap or '')
+        return (int(ram.strip()) if ram and ram.strip().isdigit() else None,
+                float(match[1]) * (1024 ** 2 if match[2] == 'M' else GIB) if match else None)
+    try:
+        text = Path('/proc/meminfo').read_text()
+        values = {k: int(v) * 1024 for k, v in re.findall(r'^(\w+):\s+(\d+) kB', text, re.M)}
+        return values.get('MemTotal'), values['SwapTotal'] - values['SwapFree']
+    except (OSError, KeyError):
+        return None, None
+
+
+def check_docker_memory(runner, **_):
+    id = 'docker-memory'
+    info = runner(['docker', 'info', '--format', '{{json .}}'])
+    try:
+        data = json.loads(info)
+        memory = int(data['MemTotal'])
+        desktop = 'docker desktop' in data.get('OperatingSystem', '').lower()
+    except (TypeError, ValueError, KeyError):
+        return skipped(id, 'docker missing, unavailable, or memory unreadable')
+    ram, swap = host_memory(runner)
+    if ram is None or swap is None:
+        return skipped(id, 'host RAM/swap unavailable')
+    if swap < GIB and (not desktop or memory < ram * .4):
+        return []
+    return [finding(id, 'high' if swap >= 4 * GIB else 'warn',
+                    f'Docker {"VM" if desktop else "engine"} memory {memory / GIB:.1f} GiB; '
+                    f'host {ram / GIB:.1f} GiB; swap used {swap / GIB:.1f} GiB',
+                    'Swap can cause high load with idle cores. VM allocation is not measured resident usage.',
+                    'Docker Desktop → Settings → Resources → Memory (user only; '
+                    'measure integration peak before reducing, or increase for Docker OOM). '
+                    'On native Linux, inspect container limits with docker stats --no-stream.')]
+
+
+def containers(runner):
+    ids = runner(['docker', 'ps', '-aq', '--no-trunc'])
+    if ids is None:
+        return None
+    ids = [id for id in ids.splitlines() if re.fullmatch(r'[a-f0-9]{12,64}', id)]
+    if not ids:
+        return []
+    output = runner(['docker', 'inspect', *ids[:100]])
+    try:
+        data = json.loads(output)
+        return data if isinstance(data, list) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def age_seconds(timestamp):
+    try:
+        parsed = dt.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        return (dt.datetime.now(dt.timezone.utc) - parsed).total_seconds()
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
+def testcontainer(container):
+    labels = container.get('Config', {}).get('Labels') or {}
+    return any(key.startswith('org.testcontainers') for key in labels)
+
+
+def check_docker_stale(runner, **_):
+    id = 'docker-stale'
+    data = containers(runner)
+    if data is None:
+        return skipped(id, 'docker missing or unavailable')
+    result = []
+    old = [c['Id'] for c in data if re.fullmatch(r'[a-f0-9]{12,64}', c.get('Id', ''))
+           and c.get('State', {}).get('Status') == 'exited'
+           and age_seconds(c['State'].get('FinishedAt')) > 1200]
+    if old:
+        result.append(finding(id, 'warn', f'{len(old)} exited containers older than 20 min (sample ≤100)',
+                              'Exited containers retain disk state; removal does not remove images or volumes.',
+                              shlex.join(['docker', 'rm', *old]), True))
+    running = [c for c in data if c.get('State', {}).get('Running')
+               and age_seconds(c['State'].get('StartedAt')) > 6 * 3600]
+    if running:
+        phases = phase_state(runner)
+        stats = runner(['docker', 'stats', '--no-stream', '--format', '{{.ID}} {{.CPUPerc}}'])
+        idle = {parts[0] for line in (stats or '').splitlines()
+                if len(parts := line.split()) == 2 and parts[1] in ('0.00%', '0.0%', '0%')}
+        for c in running:
+            cid = c.get('Id', '')
+            if not re.fullmatch(r'[a-f0-9]{12,64}', cid):
+                continue
+            if testcontainer(c) and phases != []:
+                continue
+            if any(cid.startswith(short) for short in idle):
+                result.append(finding(id, 'warn', f'{cid[:12]} running >6h, CPU 0% in one sample',
+                                      'A zero-CPU sample does not prove orphanhood. Confirm no user/phase needs it.',
+                                      shlex.join(['docker', 'rm', '-f', cid]) + ' (user confirmation only)'))
+    usage = runner(['docker', 'system', 'df', '--format', '{{json .}}'])
+    for line in (usage or '').splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        reclaim = str(row.get('Reclaimable', ''))
+        if row.get('Type') in ('Images', 'Build Cache') and re.match(r'[1-9]|0\.[0-9]*[1-9]', reclaim):
+            command = 'docker image prune' if row['Type'] == 'Images' else 'docker builder prune'
+            result.append(finding(id, 'info', f'{row["Type"]}: {reclaim} reclaimable',
+                                  'Disk reclamation is not a CPU fix; review ownership before pruning.', command))
+    return result
+
+
+def check_oversubscription(runner, **_):
+    id = 'oversubscription'
+    ps = processes(runner)
+    if ps is None:
+        return skipped(id, 'ps unavailable')
+    count = sum(bool(re.search(r'\b(dotnet|msbuild|vitest|tsc)\b', line, re.I))
+                for line in ps.splitlines())
+    cores = os.cpu_count() or 1
+    config = read_json(Path.home() / '.pi/agent/pi-phase/config.json', {})
+    slots = config.get('heavy_slots', 2) if isinstance(config, dict) else 2
+    slots = slots if type(slots) is int and slots > 0 else 2
+    if count <= cores and (not count or slots <= 1):
+        return []
+    return [finding(id, 'warn', f'{count} build/tool processes across host (inside/outside pi-phase); '
+                    f'{cores} cores; {slots} heavy slots × {cores} default MSBuild nodes',
+                    'Configured potential is not actual parallelism; overlapping nodes and Docker can oversubscribe.',
+                    f'Set msbuild_max_cpu in ~/.pi/agent/pi-phase/config.json; '
+                    f'or pass -m:{max(2, cores // slots)} to dotnet build/test; '
+                    'reduce heavy_slots only when idle.')]
+
+
+def check_msbuild_env(runner, **_):
+    ps = processes(runner)
+    if ps is None:
+        return skipped('msbuild-env', 'ps unavailable')
+    disabled = os.environ.get('MSBUILDDISABLENODEREUSE') == '1'
+    compiler = sum('VBCSCompiler' in line for line in ps.splitlines())
+    return [finding('msbuild-env', 'info',
+                    f'MSBUILDDISABLENODEREUSE={os.environ.get("MSBUILDDISABLENODEREUSE", "unset")}; '
+                    f'{compiler} VBCSCompiler processes',
+                    'Keep node reuse disabled when memory is tight; this does not disable the warm Roslyn server.',
+                    ('Keep MSBUILDDISABLENODEREUSE=1. ' if disabled else 'For memory pressure: export MSBUILDDISABLENODEREUSE=1; ')
+                    + 'pass -m:N explicitly, not in Directory.Build.rsp (dotnet CLI overrides it).')]
+
+
+def check_testcontainers_in_test(runner, **_):
+    id = 'testcontainers-in-test'
+    phases = phase_state(runner)
+    if phases is None:
+        return skipped(id, 'pi-phase status unavailable/unknown')
+    if not phases or set(phases) != {'test'}:
+        return []
+    data = containers(runner)
+    if data is None:
+        return skipped(id, 'docker missing or unavailable')
+    count = sum(bool(c.get('State', {}).get('Running') and testcontainer(c)) for c in data)
+    if not count:
+        return []
+    return [finding(id, 'warn', f'{count} Testcontainers containers running; only kind=test phases active',
+                    'Correlation does not prove ownership; container-backed specs need the integration permit.',
+                    'Run container-backed specs with pi-phase run --kind integration; '
+                    'use exactly CI\'s lanes and filters for the local gate.')]
+
+
+def check_worktrees(runner, root, max_worktrees=40, budget=3, **_):
+    id = 'worktrees'
+    if root is None or not root.is_dir():
+        return skipped(id, 'repositories root unavailable; pass --repos-root DIR')
+    start = time.monotonic()
+    deadline = start + budget
+    discovery_deadline = start + budget / 2
+    warm = size = visited = files = 0
+    roots = []
+    # Discover first so a large warm tree cannot hide all its siblings.
+    # Skip generated outputs and prioritize the conventional worktree directory.
+    for directory, dirs, names in os.walk(root):
+        visited += 1
+        if time.monotonic() >= discovery_deadline or visited > 10000 or len(roots) >= max_worktrees:
+            break
+        if '.git' in names:
+            roots.append(Path(directory))
+            dirs[:] = []
+        else:
+            dirs[:] = sorted((d for d in dirs if d not in
+                              ('.git', '.ai-work', 'bin', 'obj', 'node_modules')),
+                             key=lambda d: (d != '.worktrees', d))
+    for worktree in roots:
+        is_warm = False
+        for directory, dirs, names in os.walk(worktree):
+            visited += 1
+            if time.monotonic() >= deadline or visited > 10000 or files >= 20000:
+                break
+            path = Path(directory)
+            dirs[:] = [d for d in dirs if d not in ('.git', '.ai-work')]
+            parts = path.relative_to(worktree).parts
+            is_warm = is_warm or any(part in ('bin', 'obj') for part in parts)
+            if any(part in ('bin', 'obj', 'node_modules') for part in parts):
+                for name in names:
+                    if files >= 20000 or time.monotonic() >= deadline:
+                        break
+                    files += 1
+                    try:
+                        entry = path / name
+                        if not entry.is_symlink():
+                            size += entry.stat().st_size
+                    except OSError:
+                        pass
+        warm += is_warm
+    count = len(roots)
+    if not count:
+        return [finding(id, 'info', 'Sampled: no linked worktrees found within the bounded walk',
+                        'Discovery and output sizes are partial, not a full disk inventory.',
+                        'Reuse one warm worktree per lane; use pi-cleanup to review leftovers.')]
+    return [finding(id, 'warn' if count > 10 else 'info',
+                    f'Sampled: {count} worktrees, {warm} warm (bin/obj), {count - warm} cold/unknown; '
+                    f'{size / GIB:.2f} GiB bin/obj/node_modules; ≤{max_worktrees} worktrees, '
+                    f'≤20000 files, ≤{budget:g}s',
+                    'A bounded sample can miss outputs/worktrees; cold restore costs are not always the main bottleneck.',
+                    'Reuse one warm worktree per lane; run pi-cleanup to review (never delete worktrees blindly).')]
+
+
+CHECK_FUNCTIONS = dict(zip(CHECKS, (check_spotlight, check_docker_memory, check_docker_stale,
+                                  check_oversubscription, check_msbuild_env,
+                                  check_testcontainers_in_test, check_worktrees)))
+
+
+def apply_findings(findings, runner):
+    actions = [f for f in findings if f['auto']]
+    if not actions:
+        return
+    for item in actions:
+        # Recheck immediately before each mutation. Unknown is never permission.
+        if phase_state(runner) != []:
+            item['evidence'] += '; apply refused: running phase or unknown pi-phase status'
+            continue
+        cmd = shlex.split(item['suggest'])
+        if cmd[:2] != ['docker', 'rm'] or not cmd[2:] or not all(
+                re.fullmatch(r'[a-f0-9]{12,64}', cid) for cid in cmd[2:]):
+            continue
+        result = runner(cmd)
+        item['evidence'] += '; ' + ('removed' if result is not None else 'removal failed/unknown')
+
+
+def main(argv=None, runner=run):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--json', action='store_true')
+    parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--repos-root')
+    parser.add_argument('--only', help=','.join(CHECKS))
+    args = parser.parse_args(argv)
+    selected = args.only.split(',') if args.only is not None else CHECKS
+    if any(id not in CHECKS for id in selected):
+        parser.error('--only must contain check IDs: ' + ','.join(CHECKS))
+    # Total command budget keeps many unavailable/slow tools from accumulating 10s each.
+    deadline = time.monotonic() + 45
+
+    def bounded(cmd, timeout=10):
+        remaining = deadline - time.monotonic()
+        return runner(cmd, timeout=min(timeout, remaining)) if remaining > 0 else None
+
+    root = repos_root(args.repos_root)
+    findings = [f for id in selected for f in CHECK_FUNCTIONS[id](runner=bounded, root=root)]
+    if args.apply:
+        apply_findings(findings, bounded)
+    if args.json:
+        print(json.dumps(findings, indent=2))
+    else:
+        for severity in ('high', 'warn', 'info'):
+            group = [f for f in findings if f['severity'] == severity]
+            if group:
+                print(severity.upper())
+                for f in group:
+                    print(f"  {f['id']}: {f['evidence']}\n    {f['why']}\n    → {f['suggest']}"
+                          + (' [auto; --apply when idle]' if f['auto'] else ''))
+        if not findings:
+            print('No findings in selected checks.')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
