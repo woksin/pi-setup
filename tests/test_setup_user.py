@@ -81,11 +81,19 @@ class SettingsTests(unittest.TestCase):
             live = setup_user.render(text, {"githubUser": user, "reposRoot": root})
             if relative == Path("agent/AGENTS.md"):
                 live = live.replace("(2026-10-20", f"({user}, 2026-10-20")
+                live = live.replace("(2026-10-21", f"({user}, 2026-10-21")
             elif relative == Path("agent/bin/docker-guardian"):
                 live = live.replace("Authorised (", f"Authorised by {user} (")
             dest = scratch / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(live)
+        relative = Path("agent/agents/provenance.md")
+        expected = "(2026-10-21)\n(2026-10-21: note)\n(2026-10-21; between 25 and 40 GiB keep going and mention it)\n{{GITHUB_USER}} {{REPOS_ROOT}}"
+        originals[relative] = expected
+        agent = scratch / relative
+        agent.parent.mkdir(parents=True, exist_ok=True)
+        agent.write_text(setup_user.render(expected, {"githubUser": user, "reposRoot": root}).replace(
+            "(2026-10-21", f"({user}, 2026-10-21"))
         excluded = scratch / "agent/loose-threads/__pycache__/fixture.pyc"
         excluded.parent.mkdir()
         excluded.write_bytes(b"\xff\xfe")
@@ -101,6 +109,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(unrelated.read_text(), f"{user} {root}")
         for relative, text in originals.items():
             self.assertEqual((scratch / relative).read_text(), text, str(relative))
+
+    def test_neutral_provenance_all_date_delimiters(self):
+        for user in ("woksin", "einari", "some-user"):
+            for suffix in (")", ": note)", "; between 25 and 40 GiB keep going and mention it)"):
+                with self.subTest(user=user, suffix=suffix):
+                    self.assertEqual(setup_user.normalize(f"({user}, 2026-10-21{suffix}", user, "/tmp/repos"),
+                                     f"(2026-10-21{suffix}")
 
     def test_literal_render_and_standalone_reverse_mapping(self):
         settings = {"githubUser": "einari", "reposRoot": "/tmp/a & b/repos"}

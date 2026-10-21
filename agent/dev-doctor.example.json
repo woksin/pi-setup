@@ -1,0 +1,25 @@
+{
+  "disk": {
+    "build_floor_gib": 25,
+    "cleanup_trigger_gib": 40,
+    "bin_sweep_below_gib": 50
+  },
+  "owned_container_rules": [
+    {
+      "name": "studio-warm-stage",
+      "labels": {
+        "app.kubernetes.io/managed-by": "cratis-studio",
+        "cratis.studio/stage": "true",
+        "cratis.studio/stage-kind": "warm"
+      },
+      "report_labels": {
+        "cratis.studio/stage-kind": "session"
+      },
+      "min_age_minutes": 30,
+      "owner_label": "cratis.studio/stage-owner",
+      "owner_hash": "sha256-cwd-16",
+      "owner_process_names": ["dotnet", "testhost", "Studio"],
+      "max_removals": 10
+    }
+  ]
+}

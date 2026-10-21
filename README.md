@@ -42,6 +42,88 @@ Remove the parts you don't want:
 
 Reinstalling restores shared files, so also remove unwanted components from your setup checkout.
 
+## Machine performance
+
+Run `~/.pi/agent/bin/dev-doctor` for slow gates, long queues, swap or Docker OOM.
+It checks Spotlight, Docker memory/observed peak and stale containers, build
+oversubscription, MSBuild environment, Testcontainers in test phases, sampled
+worktree outputs, home/repos disk floors, browser hygiene, idle pi sessions/helpers, and labelled orphans.
+Use `--json`, `--only id,id`, or `--repos-root DIR` (otherwise it uses user.json's
+`reposRoot`, then `$HOME/repos` if present). Missing tools are reported as skipped.
+`--apply` removes exited containers older than 20 minutes and explicitly configured
+label-rule orphans only when pi-phase reports no running phase; unknown blocks it.
+It can also SIGTERM temporary Puppeteer/headless browser **root** PIDs, even during
+phases: >50% CPU sustained ≥30 min or <1% group CPU over ≥2h (fuse 5).
+Persistent `~/.pi` profiles and user Chrome are never killed. Idle pi sessions
+(≥4h CPU inactivity) and their helper RSS are suggest-only. `--quiet` prints
+successful actions and fuse trips; docker-guardian runs the narrow cleanup checks
+at most every 15 minutes. The doctor never uses sudo, changes Docker settings,
+prunes images/volumes or deletes checkout files.
+
+Disk defaults in `~/.pi/agent/dev-doctor.json` are `disk.build_floor_gib: 25`
+and `disk.cleanup_trigger_gib: 40` (see the example). Below 40 GiB, suggest a
+`pi-cleanup` dry run and report; keep building down to 25 GiB. Below 25 GiB,
+start no new heavy phase or worktree. `dev-doctor --only disk` is suggest-only.
+`pi-cleanup --if-free-below config` uses the configured cleanup trigger;
+the numeric form is unchanged. The daily launchd template uses the config form.
+`pi-cleanup --only bins` (also scheduled) plans bin-only cleanup below
+`disk.bin_sweep_below_gib` (50 GiB); `--apply` deletes eligible bins, never obj.
+Open build files, running phase cwds, writes within 60 min or tracked bin files
+keep the worktree; unknown probes fail closed. Each worktree logs a reason and
+bytes freed. Doctor's disk check samples a bounded reclaimable-bin estimate.
+
+`dev-doctor --only package-cache-volume` compares NuGet/pnpm/yarn caches with the
+source filesystem. `--apply --only package-cache-volume` only creates/appends an
+outside-checkout `Directory.Build.rsp` (backing up an existing file); rare in-place
+bin rewrites can modify hard-linked packages. `--move-nuget` separately opts into
+an idle-only, space-checked move to `<reposRoot>/.nuget-packages`; it retains
+`packages.old` until a verified build. Guardian never runs this check.
+
+CPU anchors and observed Docker peaks are kept in
+`~/.pi/agent/dev-doctor/samples.json` (`DEV_DOCTOR_STATE_DIR` overrides its directory).
+Docker sizing suggests about 1.5× observed peak, floor 8 GiB; samples miss unobserved
+peaks, so the user must verify integration demand and host headroom before resizing.
+See the `dev-machine-performance` skill for CI-parity lanes and warm-worktree habits.
+
+`agent/dev-doctor.example.json` is installed as `~/.pi/agent/dev-doctor.json` only
+when absent. Its generic `owned_container_rules` schema includes a Studio warm-stage
+example: exact labels, age ≥30 minutes, `sha256-cwd-16` owner label, process-name
+allowlist and removal fuse (≤10/pass). Review or replace it for your workloads;
+use `{"owned_container_rules":[]}` to disable. Cleanup requires a verified local
+`default`/`desktop-linux` Unix Docker endpoint and readable `lsof` cwd probes for
+all possible owner processes. Live matching owners, missing owner labels and
+report-only session labels are never removed; remote/unknown context is skipped.
+
+The pi-phase config flags `msbuild_max_cpu` (default off),
+`container_test_detection` (default hint-only), and `cold_worktree_hint`
+(default on, hint-only) provide opt-in caps and advisory performance guidance.
+Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your version.
+
+Guardian image hygiene is **active once `~/.pi/agent/docker-guardian/pinned.txt`
+exists**: install seeds it only when absent from
+`agent/docker-guardian/pinned.example.txt` (Mongo, Keycloak, Vault, Playwright, Ryuk).
+Review/add pins; globs match tags, image IDs and RepoDigests (`repo@sha256:…`),
+including digest-only images. Disable image cleanup with an empty
+`~/.pi/agent/docker-guardian/no-image-prune` file (`touch` it); remove that switch
+to re-enable. Other guardian/doctor hygiene continues while it is disabled.
+
+The 15-minute image pass requires no running integration phase (unknown blocks it)
+and uses only `docker rmi` **without force**, never `prune -a`. It compares numeric
+tags only within repository + suffix-variant + numeric-part-count groups, keeping
+the newest two in each. Only known rc/alpha/beta/preview markers with optional
+digits order below the matching release; e.g. `20.11-alpine` never competes with
+`20.12`. Short X/X.Y aliases stay when longer tags of the same variant exist.
+Dangling images must appear in `--filter dangling=true` and be older than 24h;
+intermediate layers are not cleanup candidates. Images created within 6h, floating
+tags (`latest`, `*-development`, `local-*`) and pinned images are kept.
+
+Image pruning runs **before** the doctor's and guardian's exited-container removals
+in the same pass. Images referenced by any container (even exited) in that pass's
+inventory are retained; references are rechecked before each removal. This is not
+permanent protection: a later pass can remove an image after its exited container
+has been deleted. Shared layers mean modest savings: about 1 GB on a 13.7 GB
+"reclaimable" report, not the reported total.
+
 ## What's in it
 
 ### `agent/` → `~/.pi/agent/`
@@ -68,7 +150,8 @@ Reinstalling restores shared files, so also remove unwanted components from your
 | `workflows/loose-threads-plan.js` | Turns a `loose-threads` inventory into a cleanup plan. |
 | `loose-threads/` | Weekly audit of leftover worktrees, branches, stashes and Docker volumes. |
 | `pi-phase/`, `bin/pi-phase` | Wrapper for build and test commands with time limits, logs and a shared queue ordered by priority (`low`, `normal`, `high`), then first come first served. |
-| `bin/docker-guardian` | macOS: checks that Docker Desktop answers every 2 minutes, restarts it within a budget, removes dead containers and old build cache, never prunes images. Run it from the launchd template in `launchd/`. |
+| `bin/dev-doctor`, `dev-doctor.example.json` | Bounded diagnostics and safe, fused cleanup for old exited/label-owned containers and temporary browsers. |
+| `bin/docker-guardian` | macOS: checks that Docker Desktop answers every 2 minutes, restarts it within a budget, removes dead containers and old build cache, only removes superseded semver tags/dangling old images under the narrow rule below. Run it from the launchd template in `launchd/`. |
 | `bin/inbox-watch` | Polls a directory of files that parallel agent sessions use as messages; pair it with one `job_watch`. Set `INBOX_DIR`. |
 | `bin/gpt-meter` | Read-only spend meter for OpenAI usage from session logs. |
 | `launchd/` | Templates for the `docker-guardian` and `pi-cleanup` schedules (placeholders instead of my user name). |
@@ -92,6 +175,7 @@ Reinstalling restores shared files, so also remove unwanted components from your
 ### `skills/` → `~/.agents/skills/`
 
 - `ai-work-lifecycle`: managing temporary AI task outputs without leaving large caches behind.
+- `dev-machine-performance`: diagnosing slow gates and queues, with safe machine advice and CI-parity lane habits.
 - `github-issue-hygiene`: keeping issues current and closing them when done (includes `issue-status.py`).
 
 ### `tools/` → `~/.local/`

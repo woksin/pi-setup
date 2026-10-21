@@ -64,6 +64,8 @@ put agent/AGENTS.subagent.md "$PI/AGENTS.subagent.md"
 for f in settings.json models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json; do
   [[ -e $PI/$f ]] || put "agent/$f" "$PI/$f"
 done
+[[ -e $PI/docker-guardian/pinned.txt ]] || put agent/docker-guardian/pinned.example.txt "$PI/docker-guardian/pinned.txt"
+[[ -e $PI/dev-doctor.json ]] || put agent/dev-doctor.example.json "$PI/dev-doctor.json"
 [[ -e $PI/npm/package.json ]] || put agent/npm-package.json "$PI/npm/package.json"
 for s in skills/*/; do tree "$s" "$HOME/.agents/$s"; done
 [[ $DRY == --dry-run ]] || mkdir -p "$PI/skills"

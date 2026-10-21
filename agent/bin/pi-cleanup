@@ -3,12 +3,12 @@
 
 Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-days N]
                   [--image-age-days N]
-                  [--nuget-age-days N] [--session-age-days N] [--if-free-below GIB]
+                  [--nuget-age-days N] [--session-age-days N] [--if-free-below GIB|config]
                   [--roots PATH ...] [--json] [--scheduled]
 
   (default)          dry run: print the plan, change nothing (see note on fetch below)
   --apply            execute the plan
-  --only STEPS       comma list of build,worktrees,docker,caches (default: all four)
+  --only STEPS       comma list of build,worktrees,docker,caches,bins (default: all five)
   --idle-days N      a repo/worktree modified within N days is ACTIVE (default 3; when
                      --scheduled and not given, only the build step uses 0.25)
   --worktree-min-idle-days N  minimum idle age for worktree removal (default 1; may be 0).
@@ -17,18 +17,18 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
                      removed by the caches step (default 14)
   --session-age-days N pi session .jsonl files not modified for N days are gzipped in
                      place by the caches step (default 30)
-  --if-free-below GIB exit 0 with "free space OK" (doing nothing) when the home volume
+  --if-free-below GIB|config exit 0 with "free space OK" (doing nothing) when the home volume
                      and every root have at least GIB GiB free
   --image-age-days N docker images older than N days and used by no container are
                      removed with `docker rmi <id>` (default 7)
   --roots PATH ...   directories searched for git checkouts (default:
                      {{REPOS_ROOT}}, skipped if not mounted)
   --json             machine-readable output on stdout
-  --scheduled        forces --only build,docker,caches,worktrees and --apply; appends a
+  --scheduled        forces --only build,docker,caches,worktrees,bins and --apply; appends a
                      summary to ~/.pi/agent/logs/pi-cleanup.log (kept under 1 MB). Used by
                      the launchd jobs com.example.pi-cleanup (daily 03:00) and
                      com.example.pi-cleanup-lowdisk (every 30 min, with
-                     --if-free-below 40). If another --apply run holds the lock, a
+                     --if-free-below config). If another --apply run holds the lock, a
                      scheduled run logs one line and exits 0.
 
 Exit codes: 0 ok, 1 error, 2 partial (some deletions failed).
@@ -85,7 +85,9 @@ import gzip
 import json
 import math
 import os
+from pathlib import Path
 import re
+import runpy
 import hashlib
 import shutil
 import stat as statmod
@@ -101,7 +103,8 @@ from datetime import datetime
 # constants
 # ----------------------------------------------------------------------------
 DEFAULT_ROOTS = ["{{REPOS_ROOT}}"]
-STEPS_ALL = ["build", "worktrees", "docker", "caches"]
+STEPS_ALL = ["build", "worktrees", "docker", "caches", "bins"]
+BIN_SWEEP = runpy.run_path(str(Path(__file__).resolve().with_name("bin_sweep.py")))
 LOG_DIR = os.path.expanduser("~/.pi/agent/logs")
 LOG_FILE = os.path.join(LOG_DIR, "pi-cleanup.log")
 LOCK_FILE = os.path.join(LOG_DIR, "pi-cleanup.lock")
@@ -1504,6 +1507,10 @@ def build_summary_lines(rep):
                     L.append(f"  {p['label']}: {p.get('result')}")
     if "caches" in rep["steps"]:
         L += caches_summary_lines(rep["steps"]["caches"], rep["apply"])
+    if "bins" in rep["steps"]:
+        for row in rep["steps"]["bins"]["rows"]:
+            L.append(f"bins: {row['path']}: {row['action']} ({row['reason']}); "
+                     f"eligible {human(row['bytes'])}, freed {human(row['bytes_freed'])}")
     for f in rep["df"]:
         line = f"df {f['mount']}: free {human(f['before'])}"
         if rep["apply"] and f.get("after") is not None:
@@ -1597,6 +1604,22 @@ def nonneg_float(v):
     return x
 
 
+def cleanup_trigger_gib():
+    try:
+        with open(os.path.expanduser('~/.pi/agent/dev-doctor.json')) as f:
+            config = json.load(f)
+        value = config['disk']['cleanup_trigger_gib']
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 40
+        return nonneg_float(value)
+    except (OSError, ValueError, TypeError, KeyError, argparse.ArgumentTypeError):
+        return 40
+
+
+def free_below_arg(value):
+    return cleanup_trigger_gib() if value == 'config' else nonneg_float(value)
+
+
 def parse_args(argv):
     ap = argparse.ArgumentParser(prog="pi-cleanup", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1609,7 +1632,7 @@ def parse_args(argv):
     ap.add_argument("--worktree-min-idle-days", type=nonneg_float, default=1)
     ap.add_argument("--nuget-age-days", type=nonneg_float, default=14)
     ap.add_argument("--session-age-days", type=nonneg_float, default=30)
-    ap.add_argument("--if-free-below", type=nonneg_float, default=None, metavar="GIB")
+    ap.add_argument("--if-free-below", type=free_below_arg, default=None, metavar="GIB|config")
     ap.add_argument("--image-age-days", type=nonneg_float, default=7)
     ap.add_argument("--roots", nargs="+", default=None, metavar="PATH")
     ap.add_argument("--json", action="store_true")
@@ -1625,7 +1648,7 @@ def parse_args(argv):
     else:
         a.build_idle_days = a.idle_days
     if a.scheduled:
-        steps, a.apply = ["build", "docker", "caches", "worktrees"], True
+        steps, a.apply = ["build", "docker", "caches", "worktrees", "bins"], True
     a.steps = [s for s in STEPS_ALL if s in steps]
     return a
 
@@ -1639,7 +1662,7 @@ def main(argv=None):
            "steps": {}, "suggestions": {}, "df": [], "notes": notes, "errors": errors,
            "discovered": None, "runtime_s": 0, "exit": 0}
     if args.scheduled:
-        notes.append("--scheduled: forced --only build,docker,caches,worktrees and --apply")
+        notes.append("--scheduled: forced --only build,docker,caches,worktrees,bins and --apply")
 
     if args.if_free_below is not None:
         need = args.if_free_below * 1024 ** 3
@@ -1659,7 +1682,13 @@ def main(argv=None):
             probes.append({"path": pth, "free": free})
             if free < need:
                 low.append(f"{pth}: {human(free)}")
-        if not low and not failed:
+        bins_due = ("bins" in args.steps and any(p.get("free", float("inf")) <
+                    BIN_SWEEP['threshold']() * 1024 ** 3 for p in probes))
+        if not low and not failed and bins_due:
+            args.steps = ["bins"]
+            rep["steps_selected"] = args.steps
+            notes.append("general cleanup threshold met; running only the bin sweep")
+        if not low and not failed and not bins_due:
             if args.json:
                 print(json.dumps({"free_space_ok": True, "threshold_gib": args.if_free_below, "probes": probes}, indent=1))
             else:
@@ -1701,7 +1730,7 @@ def main(argv=None):
             else:
                 notes.append(f"root not available, skipped: {r}")
         rep["roots"] = roots
-        if args.roots and not roots and ("build" in args.steps or "worktrees" in args.steps):
+        if args.roots and not roots and any(s in args.steps for s in ("build", "worktrees", "bins")):
             errors.append("none of the given --roots exist")
             raise RuntimeError("no roots")
 
@@ -1725,6 +1754,16 @@ def main(argv=None):
             progress(f"{len(checkouts)} checkouts")
             if ctx.docker_up:
                 ctx.mounts = PathSet(docker_mounts_all())
+
+        if "bins" in args.steps:
+            if not need_fs:
+                checkouts = discover(roots, notes)
+            def bin_probe(cmd, timeout=10):
+                rc, out, _ = run(cmd, timeout=timeout)
+                return out if rc == 0 else None
+            rows = BIN_SWEEP['sweep']([c.path for c in checkouts if c.exists], bin_probe, args.apply)
+            rep["steps"]["bins"] = {"rows": rows}
+            failures += sum(r['action'] == 'failed' for r in rows)
 
         # suggestion gathering that can overlap with planning
         nuget = os.path.expanduser("~/.nuget/packages")
