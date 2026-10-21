@@ -19,7 +19,7 @@ git clone https://github.com/woksin/pi-setup && cd pi-setup
 
 Optional, macOS only: `agent/launchd/*.plist` are templates for the `docker-guardian` and `pi-cleanup` schedules. They are not installed by `install.sh`. Replace `__HOME__` with your home directory, create `~/.pi/agent/logs` (they write stderr there), copy them to `~/Library/LaunchAgents/`, then `launchctl load` them.
 
-`settings.json` lists the packages I load. Local checkouts are mapped to their public sources (`npm:@woksin/pi-jobs`, `npm:@woksin/pi-recover`, `git:github.com/woksin/pi-context-budget`, `git:github.com/woksin/pi-orch`). Remove the ones you don't want.
+`settings.json` lists the packages I load. Local checkouts are mapped to their npm packages (`npm:@woksin/pi-jobs`, `npm:@woksin/pi-recover`, `npm:@woksin/pi-context-budget`, `npm:@woksin/pi-orch`). Remove the ones you don't want.
 
 Some of it is tied to my workflow: `AGENTS.md` contains rules for [Cratis](https://github.com/Cratis) repositories and my GitHub user (`woksin`), and `pi-cleanup`, `loose-threads` and `ai-work-lifecycle` assume repositories live under `/Volumes/sourcecode/repos`. Change those before you use them. `cratis-cli-guard`, the `cratis-cli` agent and the MCP approval patterns in `mcp-adapter.json` are Cratis-specific too.
 
@@ -88,8 +88,8 @@ Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subage
 
 ### Experimental and git-only packages
 
-- [woksin/pi-orch](https://github.com/woksin/pi-orch) (experimental, listed in `settings.json` as `git:github.com/woksin/pi-orch`): repo-owner orchestration with a durable order bus, batched candidate PRs and a shared GitHub poller. Expect rough edges; remove it from `packages` if you don't want it.
-- [woksin/pi-context-budget](https://github.com/woksin/pi-context-budget) (listed as `git:github.com/woksin/pi-context-budget`; not on npm yet): structured context handoffs and bounded long sessions. Observe mode by default; the default config is `context-budget.json`. Fresh-process fallback needs its `pi-session` wrapper on PATH (see that repo's INSTALL.md).
+- [woksin/pi-orch](https://github.com/woksin/pi-orch) (experimental; npm: [`@woksin/pi-orch`](https://www.npmjs.com/package/@woksin/pi-orch)): repo-owner orchestration with a durable order bus, batched candidate PRs and a shared GitHub poller. Expect rough edges; remove it from `packages` if you don't want it.
+- [woksin/pi-context-budget](https://github.com/woksin/pi-context-budget) (npm: [`@woksin/pi-context-budget`](https://www.npmjs.com/package/@woksin/pi-context-budget)): structured context handoffs and bounded long sessions. Observe mode by default; the default config is `context-budget.json`. Fresh-process fallback needs its `pi-session` wrapper on PATH (see that repo's INSTALL.md).
 
 ## What is deliberately not included
 
@@ -101,4 +101,4 @@ Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subage
 
 ## Keeping it up to date
 
-`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings, points local checkouts of pi-jobs and pi-recover at their npm packages, points pi-context-budget and pi-orch at their GitHub repos (deduplicated), replaces my user name in the launchd templates, and runs `gitleaks`. Review the diff before committing.
+`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings, points local checkouts of pi-jobs, pi-recover, pi-context-budget and pi-orch at their npm packages (deduplicated), replaces my user name in the launchd templates, and runs `gitleaks`. Review the diff before committing.

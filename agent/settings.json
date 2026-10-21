@@ -31,8 +31,8 @@
     "npm:@woksin/pi-recover",
     "npm:pi-browser-use",
     "npm:donsetch",
-    "git:github.com/woksin/pi-context-budget",
-    "git:github.com/woksin/pi-orch"
+    "npm:@woksin/pi-context-budget",
+    "npm:@woksin/pi-orch"
   ],
   "hideThinkingBlock": true,
   "modelThinkingLevels": {

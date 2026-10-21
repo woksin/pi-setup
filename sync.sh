@@ -28,13 +28,12 @@ done
 for f in AGENTS.md AGENTS.subagent.md models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json; do
   cp "$PI/$f" "agent/$f"
 done
-# local packages -> public sources (npm where published, otherwise the public git repo); deduplicated, order kept
+# local packages -> their public npm packages; deduplicated, order kept
 jq 'del(.deviceId, .lastChangelogVersion)
-  | .packages |= (map(if test("^\\./local-packages/pi-(jobs|recover)$") then "npm:@woksin/" + ltrimstr("./local-packages/")
-                      elif test("context-budget") then "git:github.com/woksin/pi-context-budget"
-                      elif test("^\\./local-packages/pi-orch$") then "git:github.com/woksin/pi-orch"
+  | .packages |= (map(if test("^\\./local-packages/pi-(jobs|recover|orch)$") then "npm:@woksin/" + ltrimstr("./local-packages/")
+                      elif test("context-budget") then "npm:@woksin/pi-context-budget"
                       else . end)
-                  | . + ["git:github.com/woksin/pi-orch"]
+                  | . + ["npm:@woksin/pi-orch"]
                   | reduce .[] as $p ([]; if any(.[]; . == $p) then . else . + [$p] end))' "$PI/settings.json" > agent/settings.json
 jq '{name, private, dependencies}' "$PI/npm/package.json" > agent/npm-package.json
 
