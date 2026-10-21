@@ -149,10 +149,29 @@ export function grantPriorityRequests(command: string): string[][] {
 }
 
 /** Raw grant-file access is never approved through agent tools, including mentions in bash data. */
+const PROTECTED_FILES = ["priority-grant.json", "priority-orchestrators.json"];
 export function referencesGrantFile(toolName: string, input: { command?: unknown; path?: unknown }): boolean {
-	if (toolName === "bash") return String(input.command ?? "").includes("priority-grant.json");
+	if (toolName === "bash") return PROTECTED_FILES.some(file => String(input.command ?? "").includes(file));
 	return (toolName === "write" || toolName === "edit") &&
-		typeof input.path === "string" && input.path.endsWith("priority-grant.json");
+		typeof input.path === "string" && PROTECTED_FILES.some(file => (input.path as string).endsWith(file));
+}
+
+/** Pids of pi processes the user designated as orchestrators (they may grant high priority without a prompt). */
+export function readOrchestrators(path: string, alive: (pid: number) => boolean): number[] {
+	try {
+		const value = JSON.parse(readFileSync(path, "utf8")) as { pids?: unknown };
+		return Array.isArray(value.pids) ? value.pids.filter((pid): pid is number => Number.isInteger(pid) && alive(pid)) : [];
+	} catch { return []; }
+}
+
+/** Orchestrator self-grants stay bounded: at most 10 uses or 120 minutes per grant. */
+export function withinOrchestratorCap(args: string[]): boolean {
+	const text = args.join(" ");
+	const minutes = /--minutes[= ](\d+)/.exec(text);
+	if (minutes) return Number(minutes[1]) >= 1 && Number(minutes[1]) <= 120;
+	const uses = /--uses[= ](\d+)/.exec(text);
+	if (uses) return Number(uses[1]) >= 1 && Number(uses[1]) <= 10;
+	return true;
 }
 
 export function priorityCommandArgs(input: string): string[] {

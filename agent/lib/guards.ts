@@ -1,4 +1,7 @@
 /**
+ * guards — shared opt-out switches for deterministic extension enforcement.
+ * Includes subagent-results so duplicate-result prevention has the same user
+ * control as the existing guards; merely registering a name changes no settings.
  * session > persisted file > env > on. A corrupt file makes every guard on, and the env is ignored.
  * Explicit session overrides still apply; a missing file permits PI_GUARDS_OFF opt-outs.
  */
@@ -7,7 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-export const GUARD_NAMES = ["cratis", "mcp", "wait"] as const;
+export const GUARD_NAMES = ["cratis", "mcp", "wait", "subagent-results", "context", "lane-policy"] as const;
 export type GuardName = (typeof GUARD_NAMES)[number];
 type Values = Partial<Record<GuardName, boolean>>;
 export interface GuardStatus {
@@ -26,7 +29,7 @@ function namesOf(names: string | readonly string[]): GuardName[] {
 	const supplied = typeof names === "string" ? names.split(",").map(name => name.trim()) : names;
 	for (const name of supplied) {
 		if (name !== "all" && !GUARD_NAMES.includes(name as GuardName)) {
-			throw new Error(`Unknown guard '${name}'. Expected cratis, mcp, wait or all.`);
+			throw new Error(`Unknown guard '${name}'. Expected ${GUARD_NAMES.join(", ")} or all.`);
 		}
 	}
 	return supplied.includes("all") ? [...GUARD_NAMES] : [...new Set(supplied)] as GuardName[];

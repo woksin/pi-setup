@@ -164,7 +164,7 @@ test("denial, dismissal and headless requests block without creating grants", as
 	}
 	const headless = fake(false);
 	assert.deepEqual(await headless.fire(), { block: true,
-		reason: "high priority needs user approval; ask the parent session/user, who can run /phase-priority allow" });
+		reason: "high priority needs approval from the orchestrator (L0) or the user; ask your parent session/orchestrator, which can grant it" });
 	assert.equal(headless.selections.length, 0);
 	assert.equal(calls.length, 0);
 });
@@ -184,7 +184,7 @@ test("direct grant creation prompts even with an existing grant and only Allow p
 		});
 		const headless = fake(false);
 		assert.deepEqual(await headless.fire(command), { block: true,
-			reason: "high priority needs user approval; ask the parent session/user, who can run /phase-priority allow" });
+			reason: "high priority needs approval from the orchestrator (L0) or the user; ask your parent session/orchestrator, which can grant it" });
 		assert.equal(headless.selections.length, 0);
 	}
 	assert.equal(calls.length, 0, "the allowed tool call, not the extension, executes an explicit grant");
@@ -267,4 +267,19 @@ test("slash command maps status, allow, allow-once and revoke to CLI and notifie
 	failure = new Error("failed");
 	await app.command("revoke");
 	assert.deepEqual(app.notices.at(-1), { message: "command failed", type: "error" });
+});
+
+test("orchestrator registry keeps only live integer pids and is a protected file", async () => {
+	const { readOrchestrators, withinOrchestratorCap } = await import("./phase-priority.ts");
+	const path = "/test-home/.pi/agent/pi-phase/state/priority-orchestrators.json";
+	contents = JSON.stringify({ pids: [11, 22, "x", 3.5] });
+	assert.deepEqual(readOrchestrators(path, pid => pid === 22), [22]);
+	contents = undefined;
+	assert.deepEqual(readOrchestrators(path, () => true), []);
+	assert.equal(referencesGrantFile("bash", { command: `cat ${path}` }), true);
+	assert.equal(referencesGrantFile("write", { path }), true);
+	assert.equal(withinOrchestratorCap(["--uses", "4"]), true);
+	assert.equal(withinOrchestratorCap(["--uses", "11"]), false);
+	assert.equal(withinOrchestratorCap(["--minutes=120"]), true);
+	assert.equal(withinOrchestratorCap(["--minutes", "480"]), false);
 });

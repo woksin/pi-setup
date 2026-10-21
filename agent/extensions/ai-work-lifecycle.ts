@@ -1,3 +1,8 @@
+/**
+ * ai-work-lifecycle — keeps disposable workspace handling explicit and safety-checked.
+ * Static guidance uses a structured prompt section on every run so notifications
+ * do not rewrite the cached system prefix; dynamic task notices stay in the UI.
+ */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { lstat } from "node:fs/promises";
@@ -26,7 +31,11 @@ async function workRoot(ctx: ExtensionContext): Promise<string | undefined> {
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on("before_agent_start", (event) => ({ systemPrompt: `${event.systemPrompt}\n\n${guidance}` }));
+  // Identical structured guidance for user/custom runs; no forced prompt rewrite.
+  // Dynamic unfinished-task state stays in the existing session_start UI notification.
+  pi.on("before_agent_start", (event) => {
+    event.systemPromptOptions.sections["ai_work_lifecycle_guidance"] = guidance;
+  });
   pi.on("session_start", async (event, ctx) => {
     if (!ctx.hasUI) return;
     const root = await workRoot(ctx);

@@ -1,3 +1,6 @@
+/** Guard compatibility regressions: every registered name shares status,
+ * persistence and command behaviour; extension safety checks must stay intact.
+ */
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import fs, { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync, existsSync } from "node:fs";
@@ -93,6 +96,9 @@ function fake(hasUI = true) {
 }
 
 function entry(name: string) { return guardStatus().find(status => status.name === name)!; }
+function stored(off = false, overrides: Record<string, boolean> = {}) {
+	return { off: Object.fromEntries(GUARD_NAMES.map(name => [name, overrides[name] ?? off])) };
+}
 function bash(command: string, timeout?: number) {
 	return { toolName: "bash", input: { command, ...(timeout !== undefined ? { timeout } : {}) } };
 }
@@ -122,11 +128,9 @@ test("missing file defaults to on, warns once and never creates a file", () => {
 
 test("missing file honors deliberate env opt-outs, below session overrides", () => {
 	process.env.PI_GUARDS_OFF = "cratis,mcp";
-	assert.deepEqual(guardStatus(), [
-		{ name: "cratis", off: true, source: "env" },
-		{ name: "mcp", off: true, source: "env" },
-		{ name: "wait", off: false, source: "default" },
-	]);
+	assert.deepEqual(guardStatus(), GUARD_NAMES.map(name => ({
+		name, off: ["cratis", "mcp"].includes(name), source: ["cratis", "mcp"].includes(name) ? "env" : "default",
+	})));
 	setGuards("mcp", false);
 	assert.deepEqual(entry("mcp"), { name: "mcp", off: false, source: "session" });
 	assert.equal(existsSync(file), false);
@@ -154,7 +158,7 @@ test("all expands in env and session, and on reverses off", () => {
 });
 
 test("unknown guard throws a clear error before changing any state", () => {
-	assert.throws(() => setGuards(["cratis", "unknown"], true), /Unknown guard 'unknown'.*cratis, mcp, wait or all/);
+	assert.throws(() => setGuards(["cratis", "unknown"], true), new RegExp(`Unknown guard 'unknown'.*${GUARD_NAMES.join(", ")} or all`));
 	assert.throws(() => setGuards(["all", "unknown"], true), /Unknown guard/);
 	assert.throws(() => isGuardOff("unknown" as any), /Unknown guard/);
 	assert.ok(guardStatus().every(status => !status.off));
@@ -194,7 +198,7 @@ test("persist round-trip merges settings, replaces selected session values and r
 	assert.deepEqual(entry("mcp"), { name: "mcp", off: false, source: "persisted" });
 	assert.equal(entry("cratis").source, "session");
 	setGuards("cratis", false, { persist: true });
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { off: { cratis: false, mcp: false, wait: false } });
+	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
 	assert.equal(entry("cratis").source, "persisted");
 	const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
 		import { guardStatus } from ${JSON.stringify(new URL("./guards.ts", import.meta.url).href)};
@@ -215,7 +219,7 @@ test("repairing a corrupt file persists all guards on without re-enabling env op
 	const app = fake();
 	guardsExtension(app.pi);
 	await app.commands.get("guards").handler("on wait --persist", app.ctx);
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { off: { cratis: false, mcp: false, wait: false } });
+	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
 	assert.ok(guardStatus().every(status => !status.off && status.source === "persisted"));
 	assert.equal(existsSync(`${file}.lock`), false);
 });
@@ -233,7 +237,7 @@ test("repairing an unreadable file also persists fail-safe values instead of env
 	setGuards("wait", false, { persist: true });
 	reader.mock.restore();
 	syncBuiltinESMExports();
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { off: { cratis: false, mcp: false, wait: false } });
+	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
 	assert.equal(existsSync(`${file}.lock`), false);
 });
 
@@ -242,7 +246,7 @@ test("persistent named updates retain only persisted values and fill omissions w
 	writeFileSync(file, JSON.stringify({ off: { cratis: true } }));
 	setGuards("cratis", false); // process-only override must not change the stored cratis value
 	setGuards("wait", true, { persist: true });
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { off: { cratis: true, mcp: false, wait: true } });
+	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored(false, { cratis: true, wait: true }));
 	assert.equal(entry("cratis").source, "session");
 	assert.equal(isGuardOff("mcp"), false);
 	assert.equal(statSync(file).mode & 0o777, 0o600);
@@ -253,7 +257,7 @@ test("first persisted write fills every guard with on rather than inheriting env
 	process.env.PI_GUARDS_OFF = "all";
 	assert.ok(guardStatus().every(status => status.off));
 	setGuards("wait", false, { persist: true });
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { off: { cratis: false, mcp: false, wait: false } });
+	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
 	assert.ok(guardStatus().every(status => !status.off));
 });
 
@@ -296,7 +300,7 @@ test("concurrent child-process named updates all survive", { timeout: 10000 }, a
 		for (const { child } of children) child.send("go");
 		const results = await Promise.all(children.map(child => child.finished));
 		for (const result of results) assert.equal(result.code, 0, result.stderr);
-		assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { off: { cratis: true, mcp: true, wait: true } });
+		assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored(true));
 		assert.equal(statSync(file).mode & 0o777, 0o600);
 		assert.equal(existsSync(`${file}.lock`), false);
 	} finally {
@@ -310,7 +314,7 @@ test("an abandoned stale persistence lock is recovered", () => {
 	const old = new Date(Date.now() - 10000);
 	utimesSync(`${file}.lock`, old, old);
 	setGuards("mcp", true, { persist: true });
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { off: { cratis: false, mcp: true, wait: false } });
+	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored(false, { mcp: true }));
 	assert.equal(existsSync(`${file}.lock`), false);
 });
 
@@ -531,10 +535,10 @@ test("/guards status, default all, named lists, persist parsing and footer set/c
 	await app.fire("session_start");
 	assert.deepEqual(app.statuses.at(-1), { key: "guards", text: undefined });
 	await command.handler("", app.ctx);
-	assert.equal(app.notices.at(-1)?.text, "cratis: on (default)\nmcp: on (default)\nwait: on (default)");
+	assert.equal(app.notices.at(-1)?.text, GUARD_NAMES.map(name => `${name}: on (default)`).join("\n"));
 	await command.handler("off", app.ctx);
 	assert.ok(guardStatus().every(status => status.off && status.source === "session"));
-	assert.equal(app.statuses.at(-1)?.text, "guards off: cratis,mcp,wait");
+	assert.equal(app.statuses.at(-1)?.text, `guards off: ${GUARD_NAMES.join(",")}`);
 	assert.equal(existsSync(file), false);
 	await command.handler("on all", app.ctx);
 	assert.equal(app.statuses.at(-1)?.text, undefined);
@@ -560,12 +564,47 @@ test("/guards rejects invalid arguments without changing state", async () => {
 	assert.equal(existsSync(file), false);
 });
 
+test("subagent-results shares the named switch and persistence contract", () => {
+	assert.equal(isGuardOff("subagent-results"), false);
+	setGuards("subagent-results", true);
+	assert.deepEqual(entry("subagent-results"), { name: "subagent-results", off: true, source: "session" });
+	setGuards("subagent-results", false, { persist: true });
+	assert.deepEqual(entry("subagent-results"), { name: "subagent-results", off: false, source: "persisted" });
+	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
+});
+
+test("lane-policy has named env/persisted/session precedence and operator persistence", async () => {
+	process.env.PI_GUARDS_OFF = "lane-policy";
+	assert.deepEqual(entry("lane-policy"), { name: "lane-policy", off: true, source: "env" });
+	writeFileSync(file, JSON.stringify({ off: { "lane-policy": false } }));
+	assert.deepEqual(entry("lane-policy"), { name: "lane-policy", off: false, source: "persisted" });
+	setGuards("lane-policy", true);
+	assert.deepEqual(entry("lane-policy"), { name: "lane-policy", off: true, source: "session" });
+	const app = fake(); guardsExtension(app.pi);
+	await app.commands.get("guards").handler("on lane-policy --persist", app.ctx);
+	assert.deepEqual(entry("lane-policy"), { name: "lane-policy", off: false, source: "persisted" });
+	assert.equal(JSON.parse(readFileSync(file, "utf8")).off["lane-policy"], false);
+	const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+		import { guardStatus } from ${JSON.stringify(new URL("./guards.ts", import.meta.url).href)};
+		console.log(JSON.stringify(guardStatus().find(x => x.name === "lane-policy")));
+	`], { env: process.env, encoding: "utf8" });
+	assert.equal(child.status, 0, child.stderr);
+	assert.deepEqual(JSON.parse(child.stdout), { name: "lane-policy", off: false, source: "persisted" });
+	setGuards("lane-policy", true);
+	writeFileSync(file, "{bad");
+	assert.equal(isGuardOff("lane-policy"), true, "explicit session override still wins over corrupt persisted settings");
+	delete (globalThis as any)[key];
+	assert.equal(isGuardOff("lane-policy"), false, "corrupt persisted settings override environment opt-out");
+});
+
 test("/guards completions replace the full argument prefix", () => {
 	const app = fake();
 	guardsExtension(app.pi);
 	const complete = app.commands.get("guards").getArgumentCompletions;
 	assert.deepEqual(complete("o").map((item: any) => item.value), ["off", "on"]);
 	assert.deepEqual(complete("off cr").map((item: any) => item.value), ["off cratis"]);
+	assert.deepEqual(complete("off sub").map((item: any) => item.value), ["off subagent-results"]);
+	assert.deepEqual(complete("off lane").map((item: any) => item.value), ["off lane-policy"]);
 	assert.deepEqual(complete("on wait --p").map((item: any) => item.value), ["on wait --persist"]);
 	assert.equal(complete("off nonexistent"), null);
 });

@@ -1,17 +1,20 @@
 /**
- * /guards — show agent guard status; /guards off|on [cratis|mcp|wait|all] [--persist].
+ * /guards — show agent guard status; /guards off|on [named-guard|all] [--persist].
  * Without --persist changes last for this process (including in-process subagents).
  * session > persisted file > env > on. A corrupt file makes every guard on, and the env is ignored.
  * Explicit session overrides still apply; with no file, PI_GUARDS_OFF=cratis,mcp or all applies.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { GUARD_NAMES, guardStatus, isGuardOff, setGuards } from "../lib/guards.ts";
+import { mcpReason } from "../lib/lane-policy.ts";
 
 interface ApprovalRequest {
 	prefixedToolName: string;
-	claim(handler: () => "allow_once"): boolean;
+	serverName?: string;
+	args?: unknown;
+	claim(handler: () => "allow_once" | "deny"): boolean;
 }
-const USAGE = "Usage: /guards [off|on [cratis|mcp|wait|all] [--persist]]";
+const USAGE = `Usage: /guards [off|on [${GUARD_NAMES.join("|")}|all] [--persist]]`;
 
 export default function (pi: ExtensionAPI) {
 	let currentContext: ExtensionContext | undefined;
@@ -28,7 +31,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("guards", {
-		description: "Show or switch agent approval guards: off|on [cratis|mcp|wait|all] [--persist]",
+		description: `Show or switch agent approval guards: off|on [${GUARD_NAMES.join("|")}|all] [--persist]`,
 		getArgumentCompletions: prefix => {
 			const match = /^(.*\s)?(\S*)$/.exec(prefix);
 			if (!match) return null;
@@ -65,8 +68,11 @@ export default function (pi: ExtensionAPI) {
 
 	// claim() is accepted only during synchronous emission, not after an await.
 	pi.events.on("pi-mcp-adapter:tool-approval-request", data => {
-		if (!isGuardOff("mcp")) return;
 		const request = data as ApprovalRequest;
+		const actor = currentContext?.cwd && currentContext.sessionManager ? { cwd: currentContext.cwd, session: currentContext.sessionManager.getSessionId() } : undefined;
+		const reason = mcpReason(actor, request.prefixedToolName, request.serverName, JSON.stringify(request.args));
+		if (reason) { request.claim(() => "deny"); return; }
+		if (!isGuardOff("mcp")) return;
 		request.claim(() => {
 			if (currentContext?.hasUI) {
 				currentContext.ui.notify(`mcp guard off: allowed '${request.prefixedToolName}'`, "info");

@@ -1,9 +1,14 @@
+/**
+ * issue-work — tracks GitHub issue ownership without competing main sessions.
+ * UI-session guidance is a static structured section for user and notification
+ * runs alike; headless sessions get no guidance. Dynamic status stays in tools/the UI.
+ */
 // issue-work: track which GitHub issues main pi sessions are working on.
 // Registry, leases and cache live in ~/.pi/agent/issue-work/. Logic is in ../lib/issue-work.ts.
 //
 // Subagent sessions (pi-subagents runs them in-process via bindExtensions without a UI
-// context) have ctx.hasUI === false. Only sessions with a UI are tracked: no lease, no
-// guidance, no passive detection, and the tool refuses claim/update there. Print-mode
+// context) have ctx.hasUI === false. Only sessions with a UI are tracked: no lease,
+// no passive detection, and the tool refuses claim/update there. Print-mode
 // (`pi -p`) sessions also have no UI and are treated the same way. The read-only
 // check action is available in all sessions and records activity under their session id.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -69,7 +74,13 @@ export default function issueWork(pi: ExtensionAPI, options: IssueWorkOptions = 
 		} catch { /* status is cosmetic */ }
 	}
 
-	pi.on("before_agent_start", (ev, ctx) => (ctx.hasUI ? { systemPrompt: `${ev.systemPrompt}\n\n${guidance}` } : undefined));
+	// UI availability is session-stable; notification/custom runs use the same gate.
+	// Do not force a whole-prompt replacement: Pi can then retain its cached transcript prefix.
+	pi.on("before_agent_start", (ev, ctx) => {
+		if (!ctx.hasUI) return;
+		ev.systemPromptOptions.sections["issue_work_guidance"] =
+			"Claim/update are main-session-only; subagents report state to their parent and may use read-only check. " + guidance;
+	});
 
 	pi.on("session_start", async (_ev, ctx) => {
 		if (!ctx.hasUI) return;

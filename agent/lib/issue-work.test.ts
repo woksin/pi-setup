@@ -1,3 +1,6 @@
+/** Issue ownership/activity regressions, including UI-only structured guidance.
+ * Fake GitHub calls and isolated local locks keep this suite offline and non-destructive.
+ */
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -990,7 +993,10 @@ test("extension registers tool, command and handlers; subagent sessions are not 
 	// Main session.
 	await handlers.get("session_start")![0]({ reason: "startup" }, ctx(true, "main"));
 	assert.deepEqual(readdirSync(join(dir, "sessions")), [`main-${process.pid}.json`]);
-	assert.match(handlers.get("before_agent_start")![0]({ systemPrompt: "x" }, ctx(true, "main")).systemPrompt, /issue_work/);
+	const prompt = { systemPrompt: "x", systemPromptOptions: { sections: {} as Record<string, string> } };
+	assert.equal(handlers.get("before_agent_start")![0](prompt, ctx(true, "main")), undefined);
+	assert.match(prompt.systemPromptOptions.sections.issue_work_guidance, /issue_work/);
+	assert.equal(prompt.systemPrompt, "x");
 	issueState = "CLOSED";
 	await handlers.get("tool_result")![0]({ toolName: "bash", isError: false, input: { command: "gh issue close 3" } }, ctx(true, "main"));
 	await handlers.get("tool_result")![0]({ toolName: "bash", isError: true, input: { command: "gh issue close 4" } }, ctx(true, "main"));
@@ -1023,7 +1029,9 @@ test("extension check works without UI, defaults repo, requires issue and remain
 	assert.equal(existsSync(join(dir, "sessions")), false);
 	assert.equal(githubWrites().length, 0);
 	await assert.rejects(tool.execute("id", { action: "check" }, undefined, undefined, ctx), /positive integer/);
-	const guidance = handlers.get("before_agent_start")({ systemPrompt: "x" }, { ...ctx, hasUI: true }).systemPrompt;
+	const prompt = { systemPrompt: "x", systemPromptOptions: { sections: {} as Record<string, string> } };
+	assert.equal(handlers.get("before_agent_start")(prompt, { ...ctx, hasUI: true }), undefined);
+	const guidance = prompt.systemPromptOptions.sections.issue_work_guidance;
 	assert.match(guidance, /automatically check/);
 	assert.match(guidance, /re-claim and update state=done/);
 	assert.match(guidance, /Call issue_work check before choosing a design, pushing, merging, and after a long wait/);

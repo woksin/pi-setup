@@ -13,7 +13,11 @@
  *
  * Loop safety: no switch to a provider that is itself marked limited (so X -> Y -> X cannot
  * happen until X's mark expires), at most `maxFallbacksPerPrompt` switches per prompt, and
- * non-limit errors (overloaded, network, refusals) are left entirely to pi.
+ * non-limit errors (overloaded, network, refusals) are left entirely to pi — unless they match the
+ * provider's `unavailablePatterns`, which are handled like a limit with a short `unavailableMinutes` mark.
+ *
+ * `chains` ("provider/model" -> ordered fallbacks) take precedence over `pairs`: the first chain entry
+ * whose provider is not marked limited is used, so a chain can step past a limited provider.
  *
  * Pre-emptive switching: on session start and before every prompt, if the current model's
  * provider is marked limited and unexpired, the session switches to the equivalent first, so
@@ -34,12 +38,23 @@ interface FallbackConfig {
 	/** Used when neither the error text nor the response headers carry a reset time. */
 	defaultLimitMinutes?: number;
 	maxFallbacksPerPrompt?: number;
+	/** Main (UI) sessions whose context exceeds this many tokens are not switched to the fallback (default 150000; 0 disables). */
+	maxContextTokensForFallback?: number;
 	/** Switch back to the original model once its provider's limit mark has expired. */
 	restoreWhenExpired?: boolean;
 	/** provider id -> regex sources (case-insensitive) that identify a usage/rate-limit error. */
 	limitPatterns?: Record<string, string[]>;
 	/** Bidirectional equivalences, each as ["provider/model", "provider/model"]. */
 	pairs?: [string, string][];
+	/**
+	 * Ordered fallbacks per model ("provider/model" -> ["provider/model", ...]), used before `pairs`. The first
+	 * entry whose provider is not marked limited wins; keyed by the model this extension originally moved away from.
+	 */
+	chains?: Record<string, string[]>;
+	/** provider id -> regex sources (case-insensitive) for "provider unavailable" errors (auth, overload, 5xx, timeouts) that also fall back. */
+	unavailablePatterns?: Record<string, string[]>;
+	/** How long an "unavailable" mark lasts (default 10). */
+	unavailableMinutes?: number;
 }
 
 interface LimitEntry {
@@ -101,8 +116,11 @@ function limitedUntil(provider: string): number | undefined {
 	return readState()[provider]?.until;
 }
 
-function isLimitError(config: FallbackConfig, provider: string, errorMessage: string): boolean {
-	const patterns = config.limitPatterns?.[provider];
+function isLimited(provider: string): boolean {
+	return limitedUntil(provider) !== undefined;
+}
+
+function matchesAny(patterns: string[] | undefined, errorMessage: string): boolean {
 	if (!patterns?.length) return false;
 	return patterns.some((source) => {
 		try {
@@ -113,12 +131,44 @@ function isLimitError(config: FallbackConfig, provider: string, errorMessage: st
 	});
 }
 
-function equivalentOf(config: FallbackConfig, ref: string): string | undefined {
+function isLimitError(config: FallbackConfig, provider: string, errorMessage: string): boolean {
+	return matchesAny(config.limitPatterns?.[provider], errorMessage);
+}
+
+/** "limit" (usage/rate limit), "unavailable" (configured outage patterns), or undefined (left to pi). */
+export function classifyError(config: FallbackConfig, provider: string, errorMessage: string): "limit" | "unavailable" | undefined {
+	if (isLimitError(config, provider, errorMessage)) return "limit";
+	if (matchesAny(config.unavailablePatterns?.[provider], errorMessage)) return "unavailable";
+	return undefined;
+}
+
+export function equivalentOf(config: FallbackConfig, ref: string): string | undefined {
 	for (const [a, b] of config.pairs ?? []) {
 		if (a === ref) return b;
 		if (b === ref) return a;
 	}
 	return undefined;
+}
+
+/**
+ * Where to go from `current`. A chain (keyed by `origin`, the model this extension moved away from, else `current`)
+ * yields its first entry that is not `current` and whose provider is not limited; otherwise the pair equivalent of
+ * `current`, if its provider is not limited. `blocked` lists configured candidates skipped because they are limited.
+ */
+export function selectFallback(
+	config: FallbackConfig,
+	current: string,
+	origin: string | undefined,
+	isLimited: (provider: string) => boolean,
+): { target?: string; blocked: string[]; chain: boolean } {
+	const chain = (origin && config.chains?.[origin]) || config.chains?.[current];
+	const candidates = chain?.length ? chain.filter((ref) => ref !== current) : [equivalentOf(config, current)].filter((ref): ref is string => !!ref);
+	const blocked: string[] = [];
+	for (const ref of candidates) {
+		if (!isLimited(splitRef(ref).provider)) return { target: ref, blocked, chain: !!chain?.length };
+		blocked.push(ref);
+	}
+	return { blocked, chain: !!chain?.length };
 }
 
 function splitRef(ref: string): { provider: string; id: string } {
@@ -161,6 +211,23 @@ function formatUntil(until: number): string {
 	return minutes >= 120 ? `~${Math.round(minutes / 60)} h` : `~${minutes} min`;
 }
 
+export const DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK = 150_000;
+
+/**
+ * Policy: do not move a large-context MAIN session onto the fallback provider (it re-reads the whole context
+ * at the fallback's cost). Unknown context (null/undefined tokens) or a headless session (subagent) is allowed.
+ */
+export function fallbackContextVeto(
+	config: { maxContextTokensForFallback?: number },
+	isMainSession: boolean,
+	tokens: number | null | undefined,
+): string | undefined {
+	const max = config.maxContextTokensForFallback ?? DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK;
+	if (!isMainSession || !(max > 0) || typeof tokens !== "number" || tokens <= max) return undefined;
+	const k = (n: number) => `${Math.round(n / 1000)}k`;
+	return `fallback skipped: context ${k(tokens)} > ${k(max)}; compact or hand off first`;
+}
+
 function refOf(model: { provider: string; id: string } | undefined): string | undefined {
 	return model ? `${model.provider}/${model.id}` : undefined;
 }
@@ -199,6 +266,23 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	let unknownContextLogged = false;
+
+	/** Veto text when this session's context is too large to move to the fallback; undefined = allowed. */
+	function contextVeto(ctx: ExtensionContext, config: FallbackConfig): string | undefined {
+		let tokens: number | null | undefined;
+		try {
+			tokens = ctx.getContextUsage()?.tokens;
+		} catch {
+			tokens = undefined;
+		}
+		if (tokens == null && ctx.hasUI && !unknownContextLogged) {
+			unknownContextLogged = true;
+			console.error("provider-fallback: context size unknown; allowing fallback (logged once).");
+		}
+		return fallbackContextVeto(config, ctx.hasUI, tokens);
+	}
+
 	/** Pre-emptive switch away from a marked provider, or back once the mark has expired. */
 	async function preempt(ctx: ExtensionContext): Promise<void> {
 		const config = loadConfig();
@@ -220,9 +304,13 @@ export default function (pi: ExtensionAPI) {
 		const currentProvider = splitRef(current).provider;
 		const until = limitedUntil(currentProvider);
 		if (until === undefined) return;
-		const target = equivalentOf(config, current);
-		if (!target) return;
-		if (limitedUntil(splitRef(target).provider) !== undefined) return; // both limited: nothing to gain
+		const { target } = selectFallback(config, current, originalRef, isLimited);
+		if (!target) return; // no equivalent, or every candidate limited: nothing to gain
+		const veto = contextVeto(ctx, config);
+		if (veto) {
+			notify(ctx, `provider-fallback: ${currentProvider} is limited (${formatUntil(until)} left); ${veto}.`, "warning");
+			return;
+		}
 		const failure = await switchTo(ctx, target);
 		if (failure) {
 			notify(ctx, `provider-fallback: ${currentProvider} is limited but switching to ${target} failed: ${failure}`, "warning");
@@ -261,7 +349,9 @@ export default function (pi: ExtensionAPI) {
 		const message = event.message;
 		if (message.role !== "assistant" || message.stopReason !== "error" || !message.errorMessage) return;
 		const config = loadConfig();
-		if (!config || !isLimitError(config, message.provider, message.errorMessage)) return;
+		const kind = config && classifyError(config, message.provider, message.errorMessage);
+		if (!config || !kind) return;
+		const what = kind === "limit" ? "hit a usage/rate limit" : "is unavailable";
 
 		const now = Date.now();
 		const headers =
@@ -271,7 +361,9 @@ export default function (pi: ExtensionAPI) {
 		lastLimitHeaders = undefined;
 		const until = Math.max(
 			now + MIN_LIMIT_MS,
-			resetFromText(message.errorMessage, now) ?? headers ?? now + (config.defaultLimitMinutes ?? 60) * 60_000,
+			kind === "unavailable"
+				? now + (config.unavailableMinutes ?? 10) * 60_000
+				: (resetFromText(message.errorMessage, now) ?? headers ?? now + (config.defaultLimitMinutes ?? 60) * 60_000),
 		);
 		const from = `${message.provider}/${message.model}`;
 		markLimited(message.provider, { until, since: now, model: from, reason: message.errorMessage.slice(0, 200) });
@@ -286,11 +378,19 @@ export default function (pi: ExtensionAPI) {
 			};
 		};
 
-		const target = equivalentOf(config, from);
-		if (!target) return note(`provider-fallback: ${from} hit a usage/rate limit and has no configured equivalent.`, "error");
-		const targetProvider = splitRef(target).provider;
-		const targetUntil = limitedUntil(targetProvider);
-		if (targetUntil !== undefined) {
+		const selection = selectFallback(config, from, originalRef, isLimited);
+		const target = selection.target;
+		if (!target && !selection.blocked.length) return note(`provider-fallback: ${from} ${what} and has no configured equivalent.`, "error");
+		if (!target && selection.chain) {
+			const list = selection.blocked.map((ref) => `${ref} (${formatUntil(limitedUntil(splitRef(ref).provider) ?? now)})`).join(", ");
+			return note(
+				`provider-fallback: ${from} ${what} (${formatUntil(until)}) and every fallback is limited — ${list}. Not switching; stop and wait or change plans.`,
+				"error",
+			);
+		}
+		if (!target) {
+			const targetProvider = splitRef(selection.blocked[0]).provider;
+			const targetUntil = limitedUntil(targetProvider) ?? now;
 			return note(
 				`provider-fallback: both providers are limited — ${message.provider} (${formatUntil(until)}) and ${targetProvider} (${formatUntil(targetUntil)}). Not switching; stop and wait or change plans.`,
 				"error",
@@ -299,13 +399,15 @@ export default function (pi: ExtensionAPI) {
 		if (fallbacksThisPrompt >= (config.maxFallbacksPerPrompt ?? 2)) {
 			return note(`provider-fallback: ${from} hit a limit, but the per-prompt fallback cap was reached. Not switching.`, "error");
 		}
+		const veto = contextVeto(ctx, config);
+		if (veto) return note(`provider-fallback: ${from} ${what} (${formatUntil(until)}); ${veto}. Not switching.`, "error");
 		const failure = await switchTo(ctx, target);
 		if (failure) return note(`provider-fallback: ${from} hit a limit; switching to ${target} failed: ${failure}`, "error");
 
 		fallbacksThisPrompt++;
 		pendingContinue = true;
 		originalRef ??= from;
-		const text = `provider-fallback: ${from} hit a usage/rate limit (${formatUntil(until)}); continuing on ${target}.`;
+		const text = `provider-fallback: ${from} ${what} (${formatUntil(until)}); continuing on ${target}.`;
 		notify(ctx, text, "warning");
 		return {
 			entries: [

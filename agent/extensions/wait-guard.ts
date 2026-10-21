@@ -7,6 +7,8 @@
  * every foreground `bash` call this extension:
  *   - caps the timeout: a missing timeout becomes 600 s; more than 600 s is blocked outright
  *     (no prompt) with guidance to shorten it or run the work in the background;
+ *   - blocks sleep combined with an actual CI/status query, even without a loop,
+ *     so short sleep-and-check chains cannot waste repeated model turns;
  *   - blocks polling loops: a loop that sleeps and checks CI/PR status, or any loop that
  *     sleeps ≥ 30 s per iteration;
  *   - blocks long plain waits: ≥ 60 s of `sleep` outside a loop;
@@ -61,7 +63,7 @@ export function piPhaseBudget(command: string): number | undefined {
  * text are data, not commands. Approximate, not a full shell parser: it only has to find real
  * `gh`/`git` invocations without matching text that merely mentions them.
  */
-export function simpleCommands(command: string): string[][] {
+export function simpleCommands(command: string, includeSubstitutions = false): string[][] {
 	const out: string[][] = [];
 	let words: string[] = [];
 	let word = "";
@@ -85,6 +87,16 @@ export function simpleCommands(command: string): string[][] {
 		}
 		for (let i = 0; i < line.length; i++) {
 			const c = line[i];
+			if (includeSubstitutions && quote !== "'") {
+				const substitution = shellSubstitution(line, i);
+				if (substitution) {
+					out.push(...expandedCommands(substitution.body, 1, true));
+					word += line.slice(i, substitution.end + 1);
+					inWord = true;
+					i = substitution.end;
+					continue;
+				}
+			}
 			if (quote) {
 				if (c === quote) quote = null;
 				else if (c === "\\" && quote === '"' && i + 1 < line.length && "$`\"\\".includes(line[i + 1])) word += line[++i];
@@ -107,6 +119,9 @@ export function simpleCommands(command: string): string[][] {
 					word += c;
 					inWord = true;
 				}
+			} else if (includeSubstitutions && (c === "<" || c === ">")) {
+				endWord();
+				words.push(c);
 			} else if (c === ";" || c === "&" || c === "|" || c === "(" || c === ")") endCommand();
 			else if (c === " " || c === "\t") endWord();
 			else if (c === "#" && !inWord) break;
@@ -142,22 +157,22 @@ function programIndex(words: string[]): number {
 const SHELLS = new Set(["sh", "bash", "zsh", "dash"]);
 
 /** Simple commands, expanding `bash -c '<script>'` payloads into their own simple commands. */
-function expandedCommands(command: string, depth = 0): string[][] {
+export function expandedCommands(command: string, depth = 0, includeSubstitutions = false): string[][] {
 	const out: string[][] = [];
-	for (const words of simpleCommands(command)) {
+	for (const words of simpleCommands(command, includeSubstitutions && depth < 3)) {
 		out.push(words);
 		const i = programIndex(words);
 		const prog = words[i]?.split("/").pop() ?? "";
 		if (depth < 3 && SHELLS.has(prog)) {
 			const c = words.findIndex((w, k) => k > i && /^-[a-z]*c[a-z]*$/.test(w));
-			if (c > 0 && words[c + 1] !== undefined) out.push(...expandedCommands(words[c + 1], depth + 1));
+			if (c > 0 && words[c + 1] !== undefined) out.push(...expandedCommands(words[c + 1], depth + 1, includeSubstitutions));
 		}
 	}
 	return out;
 }
 
 /** Arguments after the program name, if this simple command runs `program`. */
-function argsOf(words: string[], program: string): string[] | undefined {
+export function argsOf(words: string[], program: string): string[] | undefined {
 	const i = programIndex(words);
 	const w = words[i];
 	return w === program || w?.endsWith(`/${program}`) ? words.slice(i + 1) : undefined;
@@ -214,6 +229,65 @@ export class PollTracker {
 	}
 }
 
+/** Locate literal $(...) or backtick shell payloads; called only outside single quotes/data. */
+function shellSubstitution(text: string, start: number): { body: string; end: number } | undefined {
+	const backtick = text[start] === "`";
+	if (!backtick && (text[start] !== "$" || text[start + 1] !== "(" || text[start + 2] === "(")) return undefined;
+	const bodyStart = start + (backtick ? 1 : 2);
+	let depth = 1;
+	let quote = "";
+	for (let i = bodyStart; i < text.length; i++) {
+		const c = text[i];
+		if (c === "\\") { i++; continue; }
+		if (backtick && c === "`") return { body: text.slice(bodyStart, i), end: i };
+		if (c === quote) quote = "";
+		else if (!quote && (c === "'" || c === '"')) quote = c;
+		else if (!quote && c === "(") depth++;
+		else if (!quote && c === ")" && --depth === 0) return { body: text.slice(bodyStart, i), end: i };
+	}
+	return undefined;
+}
+
+/** Opt in only the new guards; legacy poll/watch parsing keeps its existing behaviour. */
+export function executableCommands(command: string): string[][] {
+	return expandedCommands(command, 0, true);
+}
+
+/** Strip gh's value-taking global flags wherever Cobra accepts them in the command path. */
+function withoutGhGlobals(args: string[]): string[] {
+	const valueFlags = new Set(["-R", "--repo", "--hostname"]);
+	const out: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (valueFlags.has(arg)) { i++; continue; }
+		if (/^--(?:repo|hostname)=|^-R.+/.test(arg)) continue;
+		out.push(arg);
+	}
+	return out;
+}
+
+/** Sleep plus a real status query, regardless of shell separator/order or sleep duration. */
+export function sleepStatusQuery(command: string): boolean {
+	const commands = executableCommands(command).map(words =>
+		words.filter((word, i) => i !== 0 || !["while", "until", "if", "{"].includes(word)));
+	const sleeps = commands.some(words => argsOf(words, "sleep") !== undefined);
+	if (!sleeps) return false;
+	return commands.some(words => {
+		const invocation = argsOf(words, "gh");
+		const gh = invocation ? withoutGhGlobals(invocation) : undefined;
+		if (gh) {
+			if (gh[0] === "run" && ["list", "view"].includes(gh[1])) return true;
+			if (gh[0] === "pr" && ["checks", "view"].includes(gh[1]) && !gh.includes("--watch")) return true;
+			if (gh[0] === "api" && gh.some(arg => /(?:^|\/)actions\/runs(?:[/?#]|$)/.test(arg))) return true;
+		}
+		const git = argsOf(words, "git");
+		if (!git) return false;
+		let i = 0;
+		while (i < git.length && git[i].startsWith("-")) i += ["-C", "-c", "--git-dir", "--work-tree"].includes(git[i]) ? 2 : 1;
+		return git[i] === "ls-remote";
+	});
+}
+
 export interface Verdict {
 	block?: string;
 	needsApproval?: string;
@@ -228,6 +302,9 @@ export function assess(command: string, timeout: number | undefined, hasJobStart
 		: "Run one `gh pr checks <n> --repo <owner/repo> --watch --fail-fast --interval 60` (or `gh run watch <id> --exit-status`) " +
 		  `with timeout ≤ ${MAX_TIMEOUT_SECONDS}; if it is still pending, report the status and stop instead of polling again.`;
 
+	if (sleepStatusQuery(command)) return {
+		block: "wait-guard: sleep combined with a CI/status query blocked — never poll. " + waitHelp,
+	};
 	const loop = LOOP.exec(command);
 	if (loop) {
 		const sleeps = sleepSeconds(loop[0]);
