@@ -18,7 +18,7 @@ spec.loader.exec_module(setup_user)
 
 class SettingsTests(unittest.TestCase):
     def setUp(self):
-        self.scratch = tempfile.TemporaryDirectory(prefix="pisetup-einari.")
+        self.scratch = tempfile.TemporaryDirectory(prefix="pisetup-einari.", dir="/tmp")
         self.addCleanup(self.scratch.cleanup)
         self.path = Path(self.scratch.name) / "user.json"
 
@@ -117,10 +117,10 @@ class SettingsTests(unittest.TestCase):
 
 class InstallTests(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory(prefix="pisetup-einari.")
+        self.directory = tempfile.TemporaryDirectory(prefix="pisetup-einari.", dir="/tmp")
         self.addCleanup(self.directory.cleanup)
         self.home = Path(self.directory.name)
-        self.temp = tempfile.TemporaryDirectory(prefix="pisetup-einari.")
+        self.temp = tempfile.TemporaryDirectory(prefix="pisetup-einari.", dir="/tmp")
         self.addCleanup(self.temp.cleanup)
         self.env = dict(os.environ, HOME=str(self.home), TMPDIR=self.temp.name, PYTHONDONTWRITEBYTECODE="1")
 
