@@ -34,9 +34,9 @@ Disk defaults in `dev-doctor.json`: `disk.build_floor_gib: 25`,
 `disk.cleanup_trigger_gib: 40`. Below 40 GiB suggest `pi-cleanup` (dry run);
 keep building down to 25 GiB, then start no new heavy phase/worktree.
 `pi-cleanup --if-free-below config` reads the cleanup trigger. Disk is suggest-only.
+- Below `disk.bin_sweep_below_gib` (50), `pi-cleanup --only bins` plans idle-bin removal; `--apply` deletes bins, never obj. Doctor samples reclaimable bins.
 
 ## Habits before tuning
-
 - Mirror CI build flags: code generation it skips, and warnings-as-errors it enables.
 - Iterate on the single affected project, not the solution.
 - Run independent frontend checks in parallel, within memory/scheduler limits.

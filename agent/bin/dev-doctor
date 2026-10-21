@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shlex
 import shutil
 import subprocess
@@ -75,6 +76,18 @@ def check_disk(runner, root=None, **_):
                               f'{path}: {free:.1f} GiB free; build floor {floor:g}, cleanup trigger {trigger:g} GiB',
                               why, '~/.pi/agent/bin/pi-cleanup' if severity != 'info'
                               else 'Check df -h ~ before the next heavy phase.'))
+    if root is not None:
+        sweep = runpy.run_path(str(Path(__file__).resolve().with_name('bin_sweep.py')))
+        deadline = time.monotonic() + 3
+        roots = sweep['sample_roots'](root, deadline)
+        rows = sweep['sweep'](roots, runner, budget=max(0, deadline - time.monotonic()))
+        size = sum(r['bytes'] for r in rows if r['action'] == 'planned')
+        reasons = ', '.join(sorted({r['reason'] for r in rows if r['action'] == 'skipped'}))
+        result.append(finding('disk', 'warn' if size else 'info',
+                              f'Sampled reclaimable bins: {size / GIB:.2f} GiB in {len(rows)} checkouts; '
+                              f'skips: {reasons or "none"}',
+                              'Bounded estimate; only idle, untracked bins qualify. obj is kept.',
+                              '~/.pi/agent/bin/pi-cleanup --only bins --apply'))
     return result
 
 

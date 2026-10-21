@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import subprocess
+import time
 import unittest
 from unittest.mock import patch
 
@@ -44,6 +46,128 @@ class CleanupConfigTests(unittest.TestCase):
             with self.subTest(config=config):
                 self.config.write_text(config)
                 self.assertEqual(cleanup.cleanup_trigger_gib(), 40)
+
+
+class BinSweepScenarios(CleanupConfigTests):
+    def setUp(self):
+        super().setUp()
+        self.root = self.home / 'repos/worktree'
+        self.bin = self.root / 'Source/App/bin'
+        self.bin.mkdir(parents=True)
+        self.output = self.bin / 'package.dll'
+        self.output.write_bytes(b'package copy')
+        os.utime(self.output, (time.time() - 7200,) * 2)
+        self.obj = self.root / 'Source/App/obj/state'
+        self.obj.parent.mkdir()
+        self.obj.write_text('incremental state')
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True, capture_output=True)
+        self.lsof = ''
+        self.phase = 'pi-phase: no active phases\n'
+        self.free = patch.object(cleanup.shutil, 'disk_usage')
+        self.usage = self.free.start()
+        self.usage.return_value.free = 30 * 1024 ** 3
+        self.addCleanup(self.free.stop)
+
+    def probe(self, cmd, timeout=10):
+        if cmd[0] == 'lsof':
+            return self.lsof
+        if cmd[-1] == 'status':
+            return self.phase
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return result.stdout if result.returncode == 0 else None
+
+    def sweep(self, apply=True):
+        return cleanup.BIN_SWEEP['sweep']([self.root], self.probe, apply)[0]
+
+    def test_dry_run_then_apply_keeps_obj(self):
+        row = self.sweep(False)
+        self.assertEqual(row['action'], 'planned')
+        self.assertEqual(row['bytes'], len(b'package copy'))
+        self.assertTrue(self.output.exists())
+        row = self.sweep()
+        self.assertEqual(row['action'], 'cleared')
+        self.assertEqual(row['bytes_freed'], len(b'package copy'))
+        self.assertFalse(self.bin.exists())
+        self.assertEqual(self.obj.read_text(), 'incremental state')
+
+    def test_busy_open_file_keeps_worktree(self):
+        self.lsof = f'p12\ncMicrosoft.Build\nn{self.output}\n'
+        self.assertIn('open files', self.sweep()['reason'])
+        self.assertTrue(self.output.exists())
+
+    def test_phase_cwd_keeps_worktree_including_spaces(self):
+        self.phase = f'pi-phase: build fake pid=12 cwd={self.root}/directory with spaces elapsed=2s running\n'
+        self.assertIn('phase cwd', self.sweep()['reason'])
+        self.assertTrue(self.output.exists())
+
+    def test_recent_write_keeps_all_bins(self):
+        os.utime(self.output, None)
+        self.assertIn('60 min', self.sweep()['reason'])
+        self.assertTrue(self.output.exists())
+
+    def test_tracked_file_keeps_worktree(self):
+        subprocess.run(['git', '-C', str(self.root), 'add', str(self.output)], check=True, capture_output=True)
+        self.assertIn('tracked files', self.sweep()['reason'])
+        self.assertTrue(self.output.exists())
+
+    def test_probe_failures_keep_everything(self):
+        for lsof, phase in ((None, self.phase), ('', None), ('', 'unknown'), ('n/path\n', self.phase)):
+            with self.subTest(lsof=lsof, phase=phase):
+                self.lsof, self.phase = lsof, phase
+                self.assertEqual(self.sweep()['action'], 'skipped')
+                self.assertTrue(self.output.exists())
+
+    def test_apply_rechecks_guards_after_scan(self):
+        calls = []
+        def probe(cmd, timeout=10):
+            if cmd[-1] == 'status':
+                calls.append(cmd)
+                if len(calls) > 1:
+                    return f'pi-phase: build new pid=1 cwd={self.root} elapsed=1s running'
+            return self.probe(cmd, timeout)
+        row = cleanup.BIN_SWEEP['sweep']([self.root], probe, True)[0]
+        self.assertEqual(row['action'], 'skipped')
+        self.assertTrue(self.output.exists())
+
+    def test_above_threshold_and_config_override(self):
+        self.usage.return_value.free = 50 * 1024 ** 3
+        self.assertIn('free ≥ 50', self.sweep()['reason'])
+        self.config.write_text(json.dumps({'disk': {'bin_sweep_below_gib': 60}}))
+        self.assertEqual(self.sweep()['action'], 'cleared')
+
+    def test_symlinked_bin_and_pruned_directories_untouched(self):
+        for name in ('node_modules/pkg/bin', '.git/cache/bin', 'obj/nested/bin'):
+            path = self.root / name
+            path.mkdir(parents=True)
+            (path / 'keep').write_text('keep')
+        outside = self.home / 'outside'
+        outside.mkdir()
+        (outside / 'keep').write_text('keep')
+        (self.root / 'Other').mkdir()
+        (self.root / 'Other/bin').symlink_to(outside, target_is_directory=True)
+        self.assertEqual(self.sweep()['action'], 'cleared')
+        self.assertTrue((outside / 'keep').exists())
+        for name in ('node_modules/pkg/bin', '.git/cache/bin', 'obj/nested/bin'):
+            self.assertTrue((self.root / name / 'keep').exists())
+
+    def test_cli_dispatch_and_scheduled_selection(self):
+        self.assertIn('bins', cleanup.parse_args(['--scheduled']).steps)
+        with patch.object(cleanup, 'discover', return_value=[cleanup.Checkout(str(self.root), 'linked', None, None)]), \
+             patch.object(cleanup, 'run', side_effect=lambda cmd, **kw: (0, self.probe(cmd, **kw), '')), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cleanup.main(['--only', 'bins', '--roots', str(self.home / 'repos'), '--json']), 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report['steps']['bins']['rows'][0]['action'], 'planned')
+        self.assertTrue(self.output.exists())
+
+    def test_doctor_sample_estimate_is_suggest_only(self):
+        from test_dev_doctor import doctor
+        found = doctor.check_disk(self.probe, root=self.home / 'repos')
+        estimate = found[-1]
+        self.assertIn('Sampled reclaimable bins:', estimate['evidence'])
+        self.assertEqual(estimate['suggest'], '~/.pi/agent/bin/pi-cleanup --only bins --apply')
+        self.assertFalse(estimate['auto'])
+        self.assertTrue(self.output.exists())
 
 
 if __name__ == '__main__':

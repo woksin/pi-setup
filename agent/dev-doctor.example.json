@@ -1,7 +1,8 @@
 {
   "disk": {
     "build_floor_gib": 25,
-    "cleanup_trigger_gib": 40
+    "cleanup_trigger_gib": 40,
+    "bin_sweep_below_gib": 50
   },
   "owned_container_rules": [
     {

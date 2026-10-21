@@ -66,6 +66,11 @@ and `disk.cleanup_trigger_gib: 40` (see the example). Below 40 GiB, suggest a
 start no new heavy phase or worktree. `dev-doctor --only disk` is suggest-only.
 `pi-cleanup --if-free-below config` uses the configured cleanup trigger;
 the numeric form is unchanged. The daily launchd template uses the config form.
+`pi-cleanup --only bins` (also scheduled) plans bin-only cleanup below
+`disk.bin_sweep_below_gib` (50 GiB); `--apply` deletes eligible bins, never obj.
+Open build files, running phase cwds, writes within 60 min or tracked bin files
+keep the worktree; unknown probes fail closed. Each worktree logs a reason and
+bytes freed. Doctor's disk check samples a bounded reclaimable-bin estimate.
 
 CPU anchors and observed Docker peaks are kept in
 `~/.pi/agent/dev-doctor/samples.json` (`DEV_DOCTOR_STATE_DIR` overrides its directory).

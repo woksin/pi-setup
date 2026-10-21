@@ -49,7 +49,7 @@ class DoctorTests(unittest.TestCase):
                 with self.subTest(free=free), patch.object(doctor.shutil, 'disk_usage') as usage:
                     usage.return_value.free = free * doctor.GIB
                     found = doctor.check_disk(Runner(), root=Path('/repos'))
-                    self.assertEqual([f['severity'] for f in found], [severity, severity])
+                    self.assertEqual([f['severity'] for f in found[:2]], [severity, severity])
                     self.assertTrue(all(not f['auto'] for f in found))
                     self.assertEqual(usage.call_count, 2)
                     if severity == 'high':
