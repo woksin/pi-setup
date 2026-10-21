@@ -1,1 +1,4 @@
-{"heavy_slots": 4, "integration_slots": 1}
+{
+  "heavy_slots": 2,
+  "integration_slots": 1
+}

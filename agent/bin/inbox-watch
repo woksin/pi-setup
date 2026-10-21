@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Usage: inbox-watch LANE [GROUP]
+# Use with one job_watch: until=success, interval=120. Exit 0: filenames printed;
+# 1: no inbound changes; 2: usage/I/O error. L0 also receives *-to-L0 messages.
+# INBOX_DIR overrides the default directory (including for isolated tests).
+# Marker advances to scan START only after output, so concurrent edits stay new.
+set -eu
+if (( $# < 1 || $# > 2 )); then
+    printf 'Usage: inbox-watch LANE [GROUP]\n' >&2
+    exit 2
+fi
+lane=$1
+group=${2:-}
+for name in "$lane" ${group:+"$group"}; do
+    if [[ ! $name =~ ^[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*$ ]]; then
+        printf 'inbox-watch: invalid lane/group: %s\n' "$name" >&2
+        exit 2
+    fi
+done
+dir=${INBOX_DIR:-$HOME/.pi/agent/inbox}
+if ! cd "$dir" 2>/dev/null; then
+    printf 'inbox-watch: invalid INBOX_DIR: %s\n' "$dir" >&2
+    exit 2
+fi
+mark="${lane}-inbox.marker"
+start=$(mktemp "${TMPDIR:-/tmp}/inbox-${lane}.XXXXXX") || { printf 'inbox-watch: cannot create temp file\n' >&2; exit 2; }
+listing="${start}.list"
+trap 'rm -f -- "$start" "$listing"' EXIT
+if [[ ! -e $mark ]]; then
+    touch -r "$start" "$mark" || { printf 'inbox-watch: cannot create marker\n' >&2; exit 2; }
+    exit 1
+fi
+args=(. -maxdepth 1 -type f -name '*.md')
+if [[ -e $mark ]]; then
+    args+=(-newer "$mark")
+fi
+find "${args[@]}" -print > "$listing" || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
+# Canonical inbound match: lane token, ALL- broadcast, or optional GROUP-.
+inbound="(^|-)${lane}([-.]|$)|^ALL-"
+if [[ -n $group ]]; then
+    inbound+="|^${group}-"
+fi
+found=0
+while IFS= read -r path; do
+    name=${path#./}
+    [[ $name =~ $inbound ]] || continue
+    case "$name" in
+        "$lane"-to-*|*-from-*) continue ;;
+    esac
+    if [[ $lane != L0 && $name =~ (^|-)to-L0([-.]|$) ]]; then
+        continue
+    fi
+    printf '%s\n' "$name"
+    found=1
+done < "$listing"
+if (( found )); then
+    touch -r "$start" "$mark" || { printf 'inbox-watch: cannot update marker\n' >&2; exit 2; }
+    exit 0
+fi
+exit 1

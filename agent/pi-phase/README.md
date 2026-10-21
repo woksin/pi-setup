@@ -36,65 +36,14 @@ Change this single config for *all cooperating sessions*, not a per-invocation o
 
 Admission uses one deadline-bounded process-list snapshot per scan outside the shared coordinator; a failed/slow probe conservatively defers admission rather than taking an orphaned permit. Cancellation is checked after admission and before the launcher receives its execution gate, so an already-cancelled command does not start. Execution defaults to **300s** for build/test/integration and **120s** for CI, with a **separate 120s queue budget** (queue time does not consume execution time). Choose ~120s for known short targeted checks; 300s for a build/test phase; longer than 600s for either budget requires the `--approved-long-timeout` declaration, which the agent adds itself when it has a concrete runtime basis (run such phases in the background, not as a foreground bash call) (e.g. `--timeout 900 --approved-long-timeout`). Do not use speculative long limits. No stdout-silence killer or automatic retries. Exit 124 means phase timeout; 130/143 mean SIGINT/SIGTERM cancellation; 75 means queue timeout or duplicate CI watcher (neither is a test/CI failure); 125 means wrapper/config/cleanup failure; 126/127 mean command could not be executed; otherwise the exact producer exit (a producer itself can return one of these codes). Timeouts/CI cancellation are **incomplete/unknown**, never a pass or evidence of a remote CI failure. For long-running diagnostics prefer native runner hang support when compatible, not a generic silence timeout.
 
-## Queue ordering and user-approved priority
+On queue-timeout exit 75, the command did not start: it is not a failed code/test attempt. Continue code work and retry the phase in the background with a larger queue budget, up to 600s; above 600s needs a concrete runtime basis and `--approved-long-timeout`. Stop after three consecutive queue timeouts on the same phase once code work is complete and report `gate not run: queue saturated`. The timeout message does not include counts or rank: run `pi-phase status` once at that checkpoint for running/queued entries and waiter ranks. For a duplicate CI watcher (also 75), reuse the existing watch instead of retrying.
 
-`run --priority low|normal|high` defaults to `normal`. Build, test and integration waiters are ranked by **high before normal before low**, then enqueue time and a monotonically increasing FIFO sequence for ties. Admission reserves currently free permits virtually for earlier, satisfiable waiters. An integration waiter blocked on its integration permit takes no heavy permit and does not block a later build/test. Priority never preempts a running phase; sustained higher-priority work can delay lower priorities. CI watchers retain their separate duplicate-watcher check and do not join this queue; they reject any priority other than `normal` (exit 125) without touching a grant.
+## EPERM after producer success
 
-Waiters hold exclusive kernel locks on `state/waiters/<token>.json`; a PID alone is never proof of liveness. Unlocked stale files are removed under the shared coordinator. Waiter files are removed on admission, queue timeout, cancellation or an exception. `pi-phase status` additionally shows queued priority, kind, label, waited seconds and rank, plus any active high-priority grant's remaining uses, seconds until expiry and local expiry date/time. It never lists command arguments. Older runner versions can coexist safely using the same permit locks, but ignore queue ordering during rollout.
+`Passed!` followed by `Operation not permitted` and exit 125 is a wrapper/cleanup failure, not a passing gate. Keep the full producer log and wrapper diagnostics; inspect `pi-phase status` and the recorded process group once for remaining descendants. Do not delete state, suppress cleanup errors, or infer the producer's exit code from its output. If no owned processes remain, request owner approval for a bounded direct rerun of the exact producer command under `job_start` with a full log and its actual exit code; report that fallback separately from the wrapper failure. Do not bypass the heavy-command wrapper policy without that approval. Do not rerun while descendants remain or ownership is unknown.
 
-Low and normal priority require no approval. High priority requires a user grant shared across cooperating sessions in `state/priority-grant.json`. Each high-priority invocation consumes one use atomically **before queueing**, even if it later times out or is cancelled. Missing, expired or exhausted approval exits **125** without registering a waiter. A time-limited grant allows unlimited high-priority invocations until expiry. Revocation affects future invocations, not already-approved waiters or running phases.
+The executable `bin/pi-phase` is only a Python launcher; cleanup lives in `pi-phase/pi_phase.py`. It already handles missing groups and ignores EPERM only when no live group members remain. A reported EPERM alone does not establish that cleanup was safe, so do not swallow all permission errors. Changes to that implementation require separate scope and descendant-cleanup tests.
 
-The user can grant or revoke approval directly:
+## Waiting in the queue
 
-```sh
-~/.pi/agent/bin/pi-phase grant-priority             # one use, expires after 60 minutes
-~/.pi/agent/bin/pi-phase grant-priority --uses 3    # 1–20 uses, expires after 60 minutes
-~/.pi/agent/bin/pi-phase grant-priority --minutes 30 # unlimited uses for 1–480 minutes
-~/.pi/agent/bin/pi-phase revoke-priority
-```
-
-The `phase-priority` pi extension prompts when an agent's bash call requests `--priority high` (also `--priority=high`) without a valid grant, showing kind and label: **Allow once / Allow for 30 minutes / Deny**. Denial means rerun without high priority. Headless subagents cannot approve themselves: ask the parent session/user, who can run `/phase-priority allow`. Agent bash calls to `pi-phase grant-priority` (including Python runner paths) require a separate **Allow / Deny** user confirmation even when a grant exists; headless calls are blocked. Bash text referencing `priority-grant.json` and `write`/`edit` calls targeting that file are blocked outright: grants are created only via user approval (`/phase-priority`). Revocation stays allowed. The extension's approved grant writer runs directly rather than through an agent tool call. Approval is cooperative, not a security boundary against arbitrary local shell access. The Python runner remains authoritative if another session consumes a grant between the extension's check and admission.
-
-User commands in pi:
-
-- `/phase-priority` or `/phase-priority status`: show phases, queue and grant.
-- `/phase-priority allow [minutes]`: allow high priority for 30 minutes by default (1–480).
-- `/phase-priority allow-once`: one use, expiring after 60 minutes.
-- `/phase-priority revoke`: remove approval.
-
-Example after user approval:
-
-```sh
-~/.pi/agent/bin/pi-phase run --kind build --label 'urgent Release build' \
-  --priority high --timeout 300 --queue-timeout 120 -- dotnet build My.sln -c Release
-```
-
-## VSTest opt-in (not MTP)
-
-Only after verifying the project uses **VSTest** (not Microsoft.Testing.Platform), opt in on a `dotnet test` command:
-
-```sh
-~/.pi/agent/bin/pi-phase run --kind test --label 'VSTest unit tests' \
-  --timeout 300 --vstest-confirmed --vstest-hang-minutes 2 \
-  -- dotnet test Tests.csproj -c Release --no-build
-```
-
-The opt-in visibly adds `--blame-hang --blame-hang-timeout 2m --blame-hang-dump-type none --results-directory <repo>/.ai-work/pi-phase/<unique>` to **that** command. It does not run against MTP automatically and does not create large dumps by default. Run from inside the correct Git repository, keep needed small diagnostic files in its ignored `.ai-work/`, and follow the ai-work-lifecycle instructions for any disposable output cleanup. Only the user can assert VSTest compatibility; the flag is not a reliable automatic project detector. If unsupported, omit the preset and use the project's native timeout/reporting options explicitly. This directory may contain test logs after the phase, not durable docs.
-
-## Bounded CI observation
-
-> **Do not use this to wait for GitHub CI to finish.** Real CI runs take 10–60+ minutes and exceed the 600 s cap; use `job_start` (`gh run watch <run-id> --exit-status`) or `job_watch` as described under "Waiting on GitHub CI" in `~/.pi/agent/AGENTS.md`. `--kind ci` is only for a short, bounded check of a run that is already nearly finished.
-
-Use an explicit identity for **repo + PR + commit** (a SHA-256 digest, not the raw key or arguments, is used in lock filenames). A concurrent observer with the same key prints `already watching` and exits 75 **without starting another watcher**. For example, after obtaining the intended PR/commit without guessing them:
-
-```sh
-~/.pi/agent/bin/pi-phase run --kind ci --label 'PR 42 checks' \
-  --repo org/repo --pr 42 --commit abc123 --timeout 120 --queue-timeout 120 \
-  -- gh pr checks 42 --repo org/repo --watch
-```
-
-`gh pr checks --watch` is the foreground producer, bounded by the phase timer; cancellation stops only this local watcher. A timeout means checks may still be pending; inspect once later at a deliberate checkpoint instead of spinning another watcher. An actual nonzero `gh` exit needs interpretation from its raw output. **Do not claim CI passed/failed merely because the watcher timed out or a duplicate was skipped.** Repo/PR/commit and labels are not verified against the command: use the correct immutable identity. Labels and cwd are printed/stored; keep secrets out of labels and paths. Arguments (including secrets) are never written into metadata, but child process command lines can still be visible to local OS process viewers.
-
-## Local checks
-
-`python3 -B -m unittest discover -s ~/.pi/agent/pi-phase -p 'test_*.py' -v` uses small synthetic subprocess jobs and isolated, test-owned `.ai-work/pi-phase-test-*` directories. `python3 -B -m py_compile` may create bytecode unless `PYTHONPYCACHEPREFIX` is set; use a task-owned `.ai-work/` path. There is no CI workflow or whole-solution gate in this local, non-Git pi configuration folder; the unittest suite plus CLI smoke/syntax checks are its local gate. This tool is POSIX-only: Python 3 with `fcntl.flock`, `waitid(WNOWAIT)`, and process groups is required.
+A queued phase is time to use, not to sit in. Run `pi-phase status` once before a heavy phase; when several phases are running or ahead of you, start the phase in the background (`job_start` or a background subagent) and do independent work meanwhile: read code for the next step, write specs, draft PR notes, check issue and PR comments, scope the next issue. Do not start a second heavy phase in the same worktree, do not edit files the queued phase builds (or rerun it afterwards), and never shorten or skip a gate to avoid the queue. With nothing independent to do, end the turn and let the completion notification wake you.

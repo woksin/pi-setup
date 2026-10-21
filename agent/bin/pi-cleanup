@@ -26,8 +26,8 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
   --json             machine-readable output on stdout
   --scheduled        forces --only build,docker,caches,worktrees and --apply; appends a
                      summary to ~/.pi/agent/logs/pi-cleanup.log (kept under 1 MB). Used by
-                     the launchd jobs com.sindrewilting.pi-cleanup (daily 03:00) and
-                     com.sindrewilting.pi-cleanup-lowdisk (every 30 min, with
+                     the launchd jobs com.example.pi-cleanup (daily 03:00) and
+                     com.example.pi-cleanup-lowdisk (every 30 min, with
                      --if-free-below 40). If another --apply run holds the lock, a
                      scheduled run logs one line and exits 0.
 

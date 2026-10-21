@@ -15,6 +15,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import random
 import time
 import uuid
 
@@ -23,6 +24,9 @@ STATE = ROOT / "state"
 CONFIG = ROOT / "config.json"
 HEARTBEAT = 5.0
 TICK = 0.2
+# Queued waiters re-scan less often: each scan runs `ps -A`, and dozens of waiters at TICK
+# saturated the CPU with system time (2026-10-19: 45 waiters, 47% sys).
+QUEUE_TICK = 2.0
 
 
 def note(message):
@@ -539,7 +543,7 @@ def run(args, state, configuration, output=None):
             if now >= next_heartbeat:
                 note(f"queued kind={args.kind} label={args.label} remaining={max(0, int(deadline-now))}s")
                 next_heartbeat = now + HEARTBEAT
-            time.sleep(min(TICK, max(0, deadline-now)))
+            time.sleep(min(QUEUE_TICK + random.uniform(0, 0.5), max(0, deadline-now)))
         if cancelled[0]:
             note("cancelled after admission; command not started")
             return 128 + cancelled[0]

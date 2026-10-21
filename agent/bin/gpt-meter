@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""gpt-meter: read-only GPT (openai*) spend meter from pi session logs."""
+import argparse, glob, json, os, sys, time
+from collections import defaultdict
+from datetime import datetime, timedelta
+from multiprocessing import Pool
+
+ROOT = os.path.expanduser('~/.pi/agent/sessions')
+DAILY_BUDGET = 600.0  # list $/day == 100% of weekly pace
+
+
+def scan(args):
+    path, cut = args
+    cwd, rows = None, []
+    try:
+        for line in open(path, errors='ignore'):
+            if '"type":"session"' in line[:40] and cwd is None:
+                try: cwd = json.loads(line).get('cwd')
+                except Exception: pass
+                continue
+            if '"usage"' not in line or '"role":"assistant"' not in line:
+                continue
+            try: d = json.loads(line)
+            except Exception: continue
+            m = d.get('message') or {}
+            u = m.get('usage')
+            if m.get('role') != 'assistant' or not u or not str(m.get('provider', '')).startswith('openai'):
+                continue
+            ts = datetime.fromisoformat(d['timestamp'].replace('Z', '+00:00')).timestamp()
+            if ts < cut: continue
+            rows.append((ts, u.get('totalTokens', 0), (u.get('cost') or {}).get('total', 0) or 0))
+    except Exception:
+        pass
+    return cwd or '?', rows
+
+
+def last_saturday():
+    n = datetime.now()
+    d = n.replace(hour=0, minute=0, second=0, microsecond=0)
+    return d - timedelta(days=(d.weekday() - 5) % 7)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=(
+        'Read-only GPT (provider openai*) spend meter from ~/.pi/agent/sessions. '
+        'Dollars are pi\'s recorded list cost per message (usage.cost.total). '
+        'Policy: ~$600/day list = 100%% of weekly pace; soft daily cap $450; ~$150/week/lane.'))
+    ap.add_argument('--check', action='store_true', help='one-line summary; exit 1 if today $ > cap, else 0')
+    ap.add_argument('--cap', type=float, default=450.0, help='soft daily cap in $ (default 450)')
+    ap.add_argument('--week-start', help='local ISO e.g. 2026-10-24T00:00. Default: most recent Saturday 00:00 local. '
+                    'NOTE: the real OpenAI weekly reset is ~Oct 24 (~22:00 per earlier notes); set this flag accordingly.')
+    a = ap.parse_args()
+    now = datetime.now()
+    mid = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    ws = datetime.fromisoformat(a.week_start) if a.week_start else last_saturday()
+    t_today, t_24, t_week = mid.timestamp(), time.time() - 86400, ws.timestamp()
+    cut = min(t_today, t_24, t_week)
+    files = [f for f in glob.glob(ROOT + '/*/*.jsonl') if os.path.getmtime(f) >= cut]
+    win = {'today': [0, 0.0], '24h': [0, 0.0], 'week': [0, 0.0]}
+    lanes = defaultdict(float)
+    with Pool(6) as p:
+        for cwd, rows in p.imap_unordered(scan, [(f, cut) for f in files], 8):
+            lane = os.path.basename(cwd.rstrip('/')) or cwd
+            for ts, tok, c in rows:
+                for k, t0 in (('today', t_today), ('24h', t_24), ('week', t_week)):
+                    if ts >= t0:
+                        win[k][0] += tok; win[k][1] += c
+                if ts >= t_week: lanes[lane] += c
+    today = win['today'][1]
+    status = 'OVER' if today > a.cap else 'WARN' if today > 0.8 * a.cap else 'OK'
+    if a.check:
+        print(f'gpt-meter {status}: today ${today:.0f} / cap ${a.cap:.0f} ({today/DAILY_BUDGET*100:.0f}% of daily pace); '
+              f'24h ${win["24h"][1]:.0f}; week ${win["week"][1]:.0f}')
+        sys.exit(1 if today > a.cap else 0)
+    print(f'GPT spend (list $, openai*)   week start {ws:%Y-%m-%d %H:%M}')
+    for k, lbl in (('today', 'today'), ('24h', 'last 24h'), ('week', 'since week start')):
+        print(f'  {lbl:<17} {win[k][0]/1e6:9.1f} Mtok  ${win[k][1]:8.0f}')
+    print('Top lanes since week start:')
+    for l, c in sorted(lanes.items(), key=lambda x: -x[1])[:8]:
+        print(f'  {l[:34]:<34} ${c:7.0f}{"  >$150" if c > 150 else ""}')
+    print(f'Status: {status} (today ${today:.0f} vs soft cap ${a.cap:.0f}; WARN >80%)')
+
+
+if __name__ == '__main__':
+    main()

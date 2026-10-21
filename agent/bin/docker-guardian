@@ -1,0 +1,120 @@
+#!/bin/bash
+# docker-guardian — keeps local Docker Desktop usable for agents without a human.
+# Runs every 2 minutes from launchd (com.example.docker-guardian).
+#  - Health: `docker info` with a 20 s deadline. 3 consecutive failures (~6 min) => restart
+#    Docker Desktop (quit, kill lingering backend, open), announce to lanes, verify.
+#    Budget: at most 1 restart per 20 min and 3 per 2 h; beyond that it alerts instead.
+#  - Not running at all => start it.
+#  - Hygiene every 15 min while healthy: remove exited/dead containers finished >20 min ago,
+#    prune unused networks older than 30 min, unused anonymous volumes, build cache above 8 GB.
+#    NEVER prunes images (pinned integration images must stay).
+# Authorised by woksin (2026-10-20): "the agents need to be able to do what it needs to do".
+set -u
+# DOCKER_GUARDIAN_TEST_PATH/_STATE/_LOG exist only for the dry-run harness (docker-guardian/test/run-scenarios.sh).
+export PATH=${DOCKER_GUARDIAN_TEST_PATH:+$DOCKER_GUARDIAN_TEST_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+S=${DOCKER_GUARDIAN_STATE:-$HOME/.pi/agent/docker-guardian}; mkdir -p "$S"
+LOG=${DOCKER_GUARDIAN_LOG:-$HOME/.pi/agent/logs/docker-guardian.log}; mkdir -p "$(dirname "$LOG")"
+MSG=${DOCKER_GUARDIAN_MESSAGES:-}
+now=$(date +%s); ts=$(date '+%Y-%m-%d %H:%M:%S')
+log(){ echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
+announce(){ # $1 file-suffix, $2 text
+  [ -n "$MSG" ] && [ -d "$MSG" ] && printf '%s\n' "$2" > "$MSG/ALL-docker-guardian-$(date +%H%M)-$1.md"
+  osascript -e "display notification \"$2\" with title \"docker-guardian\"" >/dev/null 2>&1 || true
+}
+# run with deadline: dl SECONDS cmd...
+# Wall-clock deadline (an iteration counter stretched to minutes under load average 120+).
+dl(){ local t=$1; shift; "$@" & local p=$!; local end=$((SECONDS+t))
+  while kill -0 $p 2>/dev/null; do [ $SECONDS -ge $end ] && { kill $p 2>/dev/null; sleep 1; kill -9 $p 2>/dev/null; return 124; }; sleep 0.2; done
+  wait $p; }
+# `docker info` alone is not enough: on 2026-10-20 17:30 info answered while `docker ps`/`images` hung
+# for >10 min (containerd/engine wedged), so health also requires a container listing.
+# INFO_OK records whether the engine API answered, so the load deferral can tell a slow listing from an outage.
+healthy(){ INFO_OK=0; dl 20 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || return 1; INFO_OK=1; dl 25 docker ps -q >/dev/null 2>&1; }
+load1(){ sysctl -n vm.loadavg | awk '{print int($2)}'; }
+
+# single instance (a restart can take ~4 min, longer than the launchd interval)
+if ! mkdir "$S/lock.d" 2>/dev/null; then
+  op=$(cat "$S/lock.d/pid" 2>/dev/null); if [ -n "$op" ] && kill -0 "$op" 2>/dev/null; then exit 0; fi
+  rm -rf "$S/lock.d"; mkdir "$S/lock.d" 2>/dev/null || exit 0
+fi
+echo $$ > "$S/lock.d/pid"; trap 'rm -rf "$S/lock.d"' EXIT
+
+if ! pgrep -qf '/Applications/Docker.app/Contents/MacOS/Docker' && ! pgrep -qf 'com.docker.backend'; then
+  [ -f "$S/paused" ] && exit 0      # `touch ~/.pi/agent/docker-guardian/paused` to stop auto-start/restarts
+  log "docker not running -> starting"; open -a Docker; echo "$now" > "$S/last-start"; exit 0
+fi
+
+if healthy; then
+  echo 0 > "$S/fails"
+  # Planned restart (e.g. to apply new VM CPU/memory settings): only when no container is running.
+  # A timed-out listing must not count as "no containers" (2026-10-20: a hung `docker ps` triggered this).
+  if [ -f "$S/pending-restart" ] && running=$(dl 15 docker ps -q 2>/dev/null) && [ -z "$running" ]; then
+    rm -f "$S/pending-restart"; echo 3 > "$S/fails"; log "planned restart (no running containers)"
+    PLANNED=1
+  fi
+fi
+if [ "${PLANNED:-0}" != 1 ] && healthy; then
+  last=$(cat "$S/last-gc" 2>/dev/null || echo 0)
+  if [ $((now-last)) -ge 900 ]; then
+    echo "$now" > "$S/last-gc"; n=0
+    for id in $(dl 30 docker ps -aq --filter status=exited --filter status=dead 2>/dev/null); do
+      f=$(dl 10 docker inspect -f '{{.State.FinishedAt}}' "$id" 2>/dev/null) || continue
+      t=$(date -j -u -f '%Y-%m-%dT%H:%M:%S' "${f%%.*}" +%s 2>/dev/null) || continue
+      [ $((now-t)) -gt 1200 ] && dl 20 docker rm "$id" >/dev/null 2>&1 && n=$((n+1))
+    done
+    nets_before=$(dl 15 docker network ls -q 2>/dev/null | wc -l | tr -d ' ')
+    dl 60 docker network prune -f --filter until=30m >/dev/null 2>&1
+    dl 120 docker volume prune -f >/dev/null 2>&1
+    dl 300 docker builder prune -f --keep-storage 8GB >/dev/null 2>&1
+    nets=$(dl 15 docker network ls -q 2>/dev/null | wc -l | tr -d ' ')
+    log "gc: removed $n containers; networks $nets_before -> $nets"
+  fi
+  exit 0
+fi
+
+[ -f "$S/paused" ] && { log "unhealthy but paused"; exit 0; }
+if [ "${PLANNED:-0}" = 1 ]; then fails=3; else
+fails=$(( $(cat "$S/fails" 2>/dev/null || echo 0) + 1 )); echo $fails > "$S/fails"
+log "unhealthy x$fails"; fi
+[ $fails -lt 3 ] && exit 0
+# Load deferral (L0, 2026-10-20 22:05): at 21:58 a restart at host load ~90 killed a running integration
+# phase although the engine API still answered. When `docker info` answers, `docker ps` does not and load1 > 48,
+# defer the restart up to 10 min, re-checking every 60 s; restart when load drops and it still fails, when the
+# engine API stops answering, or when the deferral runs out. Old behaviour: touch "$S/load-defer-off".
+DEFER_LOAD=${DOCKER_GUARDIAN_DEFER_LOAD:-48}; DEFER_STEPS=${DOCKER_GUARDIAN_DEFER_STEPS:-10}
+if [ "${PLANNED:-0}" != 1 ] && [ ! -f "$S/load-defer-off" ] && [ "${INFO_OK:-0}" = 1 ] && [ "$(load1)" -gt "$DEFER_LOAD" ]; then
+  log "unhealthy x$fails under load $(load1) with docker info answering: deferring restart up to $DEFER_STEPS min"
+  announce defer "docker-guardian ($(date +%H:%M)): docker ps is not answering while host load is $(load1); restart deferred up to $DEFER_STEPS min. Shed host load (builds/specs) if you can; Docker phases may be slow."
+  reason="still unhealthy after the $DEFER_STEPS min load deferral"
+  for i in $(seq 1 "$DEFER_STEPS"); do
+    sleep 60
+    if healthy; then echo 0 > "$S/fails"; log "recovered during load deferral after ${i} min (load $(load1))"; exit 0; fi
+    l=$(load1)
+    [ "$INFO_OK" = 1 ] || { reason="docker info stopped answering during the deferral"; break; }
+    [ "$l" -gt "$DEFER_LOAD" ] || { reason="load dropped to $l and docker is still unhealthy"; break; }
+  done
+  log "$reason: restarting"
+fi
+# restart budget
+touch "$S/restarts"
+recent=$(awk -v n=$now '$1>n-7200' "$S/restarts" | wc -l | tr -d ' ')
+lastr=$(tail -1 "$S/restarts" 2>/dev/null || echo 0); lastr=${lastr:-0}
+if [ $((now-lastr)) -lt 1200 ] || [ "$recent" -ge 3 ]; then
+  if [ ! -f "$S/alerted" ] || [ $((now-$(cat "$S/alerted"))) -gt 3600 ]; then
+    echo $now > "$S/alerted"; log "restart budget exhausted ($recent in 2h) -> alert"
+    announce budget "docker-guardian: Docker unresponsive again but restart budget is used ($recent restarts in 2 h). L0: find the load source (pi-phase status, docker stats) before more Docker phases."
+  fi
+  exit 0
+fi
+echo $now >> "$S/restarts"; echo 0 > "$S/fails"
+log "restarting Docker Desktop"
+why="was unresponsive for ~6 min"; [ "${PLANNED:-0}" = 1 ] && why="is idle and has a planned settings change (more VM memory)"
+announce restart "docker-guardian ($(date +%H:%M)): Docker Desktop $why and is being restarted automatically. Docker phases running now will fail; rerun them once ALL-docker-guardian-*-ok appears. Non-Docker work is unaffected."
+dl 60 osascript -e 'quit app "Docker"' >/dev/null 2>&1
+for i in $(seq 1 30); do pgrep -qf 'com.docker.backend' || break; sleep 2; done
+pkill -f 'com.docker.backend' 2>/dev/null; pkill -f '/Applications/Docker.app/Contents/MacOS/Docker' 2>/dev/null; sleep 3
+pkill -9 -f 'com.docker.backend' 2>/dev/null; pkill -9 -f 'com.docker.virtualization' 2>/dev/null; pkill -9 -f 'com.docker.krun' 2>/dev/null; sleep 2
+open -a Docker
+for i in $(seq 1 36); do sleep 5; healthy && { log "docker up after $((i*5))s"; announce ok "docker-guardian ($(date +%H:%M)): Docker is back (up after $((i*5)) s). Docker phases may resume."; exit 0; }; done
+log "docker not healthy 180s after restart"; announce failed "docker-guardian: Docker did not come back within 3 min of a restart. Will retry within budget; L0 please check."
+exit 0
