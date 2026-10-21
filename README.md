@@ -15,9 +15,9 @@ git clone https://github.com/woksin/pi-setup && cd pi-setup
 
 `settings.json`, `models.json` and the other JSON configs are only written when they don't exist yet. `efficiency.json` and `context-budget.json` follow the same rule. Restart pi afterwards.
 
-Optional, macOS only: `agent/launchd/*.plist` are templates for the `docker-guardian` and `pi-cleanup` schedules. They are not installed by `install.sh`. Replace `__HOME__` with your home directory, copy them to `~/Library/LaunchAgents/`, then `launchctl load` them.
+Optional, macOS only: `agent/launchd/*.plist` are templates for the `docker-guardian` and `pi-cleanup` schedules. They are not installed by `install.sh`. Replace `__HOME__` with your home directory, create `~/.pi/agent/logs` (they write stderr there), copy them to `~/Library/LaunchAgents/`, then `launchctl load` them.
 
-`settings.json` lists the packages I load. Local checkouts are mapped to their public sources (`npm:@woksin/pi-jobs`, `npm:@woksin/pi-recover`, `git:github.com/woksin/pi-orch`). Remove the ones you don't want.
+`settings.json` lists the packages I load. Local checkouts are mapped to their public sources (`npm:@woksin/pi-jobs`, `npm:@woksin/pi-recover`, `git:github.com/woksin/pi-context-budget`, `git:github.com/woksin/pi-orch`). Remove the ones you don't want.
 
 Some of it is tied to my workflow: `AGENTS.md` contains rules for [Cratis](https://github.com/Cratis) repositories and my GitHub user (`woksin`), and `pi-cleanup`, `loose-threads` and `ai-work-lifecycle` assume repositories live under `/Volumes/sourcecode/repos`. Change those before you use them. `cratis-cli-guard`, the `cratis-cli` agent and the MCP approval patterns in `mcp-adapter.json` are Cratis-specific too.
 
@@ -84,10 +84,10 @@ The `ai-work-lifecycle` CLI that the skill and extension use.
 
 Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subagents`, `pi-mcp-adapter`, `pi-web-access`, `pi-browser-use`, `@gotgenes/pi-anthropic-auth`, `donsetch`. The CodeScene Code Health skills (`explaining-code-health`, `guiding-refactoring-with-code-health`, `making-the-business-case-for-code-health`, `prioritizing-technical-debt`, `risk-based-testing-with-code-health`, `routing-work-with-code-ownership`, `safeguarding-ai-generated-code`) are not vendored here. Copy them from the `skills/` folder of [codescene-oss/codescene-mcp-server](https://github.com/codescene-oss/codescene-mcp-server/tree/main/skills) (Apache 2.0). The CodeScene section of `AGENTS.md` assumes the `codescene` MCP server in `mcp-adapter.json`. The the `pi-extensions` skill from [Dwsy/pi-extensions-skill](https://github.com/Dwsy/pi-extensions-skill).
 
-### Experimental and unpublished
+### Experimental and git-only packages
 
 - [woksin/pi-orch](https://github.com/woksin/pi-orch) (experimental, listed in `settings.json` as `git:github.com/woksin/pi-orch`): repo-owner orchestration with a durable order bus, batched candidate PRs and a shared GitHub poller. Expect rough edges; remove it from `packages` if you don't want it.
-- `context-budget`: structured context handoffs and bounded long sessions. It is a local package that isn't published yet, so it is not in `settings.json`. Only its default config (`context-budget.json`) is here.
+- [woksin/pi-context-budget](https://github.com/woksin/pi-context-budget) (listed as `git:github.com/woksin/pi-context-budget`; not on npm yet): structured context handoffs and bounded long sessions. Observe mode by default; the default config is `context-budget.json`. Fresh-process fallback needs its `pi-session` wrapper on PATH (see that repo's INSTALL.md).
 
 ## What is deliberately not included
 
@@ -99,4 +99,4 @@ Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subage
 
 ## Keeping it up to date
 
-`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings, points local checkouts of pi-jobs and pi-recover at their npm packages, adds pi-orch, drops the unpublished context-budget path, replaces my user name in the launchd templates, and runs `gitleaks`. Review the diff before committing.
+`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings, points local checkouts of pi-jobs and pi-recover at their npm packages, points pi-context-budget and pi-orch at their GitHub repos (deduplicated), replaces my user name in the launchd templates, and runs `gitleaks`. Review the diff before committing.

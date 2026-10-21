@@ -31,6 +31,7 @@
     "npm:@woksin/pi-recover",
     "npm:pi-browser-use",
     "npm:donsetch",
+    "git:github.com/woksin/pi-context-budget",
     "git:github.com/woksin/pi-orch"
   ],
   "hideThinkingBlock": true,
