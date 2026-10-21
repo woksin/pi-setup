@@ -9,13 +9,14 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 
 CHECKS = ('spotlight', 'docker-memory', 'docker-stale', 'oversubscription',
-          'msbuild-env', 'testcontainers-in-test', 'worktrees', 'browsers', 'pi-sessions', 'owned-containers')
+          'msbuild-env', 'testcontainers-in-test', 'worktrees', 'browsers', 'pi-sessions', 'owned-containers', 'disk')
 GIB = 1024 ** 3
 
 
@@ -43,6 +44,38 @@ def read_json(path, default):
         return json.loads(path.read_text())
     except (OSError, ValueError):
         return default
+
+
+def disk_settings():
+    config = read_json(Path.home() / '.pi/agent/dev-doctor.json', {})
+    disk = config.get('disk', {}) if isinstance(config, dict) else {}
+    defaults = {'build_floor_gib': 25, 'cleanup_trigger_gib': 40}
+    for key, default in defaults.items():
+        value = disk.get(key, default) if isinstance(disk, dict) else default
+        defaults[key] = (value if isinstance(value, (int, float)) and not isinstance(value, bool)
+                         and math.isfinite(value) and value >= 0 else default)
+    return defaults
+
+
+def check_disk(runner, root=None, **_):
+    settings = disk_settings()
+    floor, trigger = settings['build_floor_gib'], settings['cleanup_trigger_gib']
+    result = []
+    for path in dict.fromkeys([Path.home()] + ([Path(root)] if root else [])):
+        try:
+            free = shutil.disk_usage(path).free / GIB
+        except OSError:
+            result += skipped('disk', f'free space unavailable for {path}')
+            continue
+        severity = 'high' if free < floor else 'warn' if free < trigger else 'info'
+        why = ('Below build floor: start no new heavy phases or worktrees.' if free < floor
+               else 'Below cleanup trigger; keep building down to the build floor.' if free < trigger
+               else 'Free space meets both disk floors.')
+        result.append(finding('disk', severity,
+                              f'{path}: {free:.1f} GiB free; build floor {floor:g}, cleanup trigger {trigger:g} GiB',
+                              why, '~/.pi/agent/bin/pi-cleanup' if severity != 'info'
+                              else 'Check df -h ~ before the next heavy phase.'))
+    return result
 
 
 def repos_root(explicit=None):
@@ -713,7 +746,7 @@ def check_owned_containers(runner, **_):
 CHECK_FUNCTIONS = dict(zip(CHECKS, (check_spotlight, check_docker_memory, check_docker_stale,
                                   check_oversubscription, check_msbuild_env,
                                   check_testcontainers_in_test, check_worktrees, check_browsers,
-                                  check_pi_sessions, check_owned_containers)))
+                                  check_pi_sessions, check_owned_containers, check_disk)))
 
 
 def apply_findings(findings, runner):

@@ -10,7 +10,7 @@ cores, swap, slow gates, or Docker OOM. Use `--json` for structured findings,
 `--repos-root DIR` to override user.json, or `--only id,id` to narrow checks.
 It checks Spotlight, Docker memory/stale containers, build oversubscription,
 MSBuild environment, Testcontainers in test phases, sampled worktree output,
-browsers, idle pi sessions/helpers, and explicitly configured owned containers.
+disk floors, browsers, idle pi sessions/helpers, and configured owned containers.
 Missing tools or failed probes mean unknown, not healthy.
 
 Present the evidence and exact suggested commands or UI paths to the user.
@@ -29,6 +29,11 @@ Docker sizing suggests 1.5× observed peak, floor 8 GiB, not an automatic change
 Guardian calls the narrow cleanup checks at most every 15 min; `--quiet` logs actions and fuse trips.
 The doctor never removes images, volumes or checkout files. A zero-CPU container sample
 alone does not prove it is abandoned; confirm ownership.
+
+Disk defaults in `dev-doctor.json`: `disk.build_floor_gib: 25`,
+`disk.cleanup_trigger_gib: 40`. Below 40 GiB suggest `pi-cleanup` (dry run);
+keep building down to 25 GiB, then start no new heavy phase/worktree.
+`pi-cleanup --if-free-below config` reads the cleanup trigger. Disk is suggest-only.
 
 ## Habits before tuning
 

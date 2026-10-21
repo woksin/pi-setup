@@ -16,7 +16,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'agent/bin/dev-doctor'
 loader = importlib.machinery.SourceFileLoader('dev_doctor', str(SCRIPT))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 doctor = importlib.util.module_from_spec(spec)
-loader.exec_module(doctor)
+exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), doctor.__dict__)
 CID = 'a' * 64
 
 
@@ -43,6 +43,32 @@ def docker_runner(containers, **responses):
 
 
 class DoctorTests(unittest.TestCase):
+    def test_disk_floors_boundaries_and_probe_failure(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(doctor.Path, 'home', return_value=Path(tmp)):
+            for free, severity in ((40, 'info'), (39.9, 'warn'), (25, 'warn'), (24.9, 'high')):
+                with self.subTest(free=free), patch.object(doctor.shutil, 'disk_usage') as usage:
+                    usage.return_value.free = free * doctor.GIB
+                    found = doctor.check_disk(Runner(), root=Path('/repos'))
+                    self.assertEqual([f['severity'] for f in found], [severity, severity])
+                    self.assertTrue(all(not f['auto'] for f in found))
+                    self.assertEqual(usage.call_count, 2)
+                    if severity == 'high':
+                        self.assertIn('start no new heavy phases', found[0]['why'])
+                    if severity == 'warn':
+                        self.assertEqual(found[0]['suggest'], '~/.pi/agent/bin/pi-cleanup')
+            with patch.object(doctor.shutil, 'disk_usage', side_effect=OSError):
+                self.assertIn('Skipped', doctor.check_disk(Runner())[0]['evidence'])
+
+    def test_disk_config_defaults_and_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(doctor.Path, 'home', return_value=Path(tmp)):
+            config = Path(tmp) / '.pi/agent/dev-doctor.json'
+            config.parent.mkdir(parents=True)
+            config.write_text(json.dumps({'disk': {'build_floor_gib': 20, 'cleanup_trigger_gib': 50}}))
+            self.assertEqual(doctor.disk_settings(), {'build_floor_gib': 20, 'cleanup_trigger_gib': 50})
+            for contents in ('[]', '{', '{"disk":null}', '{"disk":{"build_floor_gib":true,"cleanup_trigger_gib":-1}}'):
+                config.write_text(contents)
+                self.assertEqual(doctor.disk_settings(), {'build_floor_gib': 25, 'cleanup_trigger_gib': 40})
+
     def test_runner_success_and_all_failures(self):
         with patch.object(doctor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'out', 'err')):
             self.assertEqual(doctor.run(['tool']), 'outerr')

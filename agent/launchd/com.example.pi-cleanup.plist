@@ -7,6 +7,8 @@
   <array>
     <string>__HOME__/.pi/agent/bin/pi-cleanup</string>
     <string>--scheduled</string>
+    <string>--if-free-below</string>
+    <string>config</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>

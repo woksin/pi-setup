@@ -47,7 +47,7 @@ Reinstalling restores shared files, so also remove unwanted components from your
 Run `~/.pi/agent/bin/dev-doctor` for slow gates, long queues, swap or Docker OOM.
 It checks Spotlight, Docker memory/observed peak and stale containers, build
 oversubscription, MSBuild environment, Testcontainers in test phases, sampled
-worktree outputs, browser hygiene, idle pi sessions/helpers, and labelled orphans.
+worktree outputs, home/repos disk floors, browser hygiene, idle pi sessions/helpers, and labelled orphans.
 Use `--json`, `--only id,id`, or `--repos-root DIR` (otherwise it uses user.json's
 `reposRoot`, then `$HOME/repos` if present). Missing tools are reported as skipped.
 `--apply` removes exited containers older than 20 minutes and explicitly configured
@@ -59,6 +59,13 @@ Persistent `~/.pi` profiles and user Chrome are never killed. Idle pi sessions
 successful actions and fuse trips; docker-guardian runs the narrow cleanup checks
 at most every 15 minutes. The doctor never uses sudo, changes Docker settings,
 prunes images/volumes or deletes checkout files.
+
+Disk defaults in `~/.pi/agent/dev-doctor.json` are `disk.build_floor_gib: 25`
+and `disk.cleanup_trigger_gib: 40` (see the example). Below 40 GiB, suggest a
+`pi-cleanup` dry run and report; keep building down to 25 GiB. Below 25 GiB,
+start no new heavy phase or worktree. `dev-doctor --only disk` is suggest-only.
+`pi-cleanup --if-free-below config` uses the configured cleanup trigger;
+the numeric form is unchanged. The daily launchd template uses the config form.
 
 CPU anchors and observed Docker peaks are kept in
 `~/.pi/agent/dev-doctor/samples.json` (`DEV_DOCTOR_STATE_DIR` overrides its directory).

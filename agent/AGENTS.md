@@ -236,7 +236,7 @@ Plans, handovers, session notes, continuation prompts, status boards, scratch an
 
 ## Disk hygiene — clean up what you create
 
-- Check `df -h ~` before creating a worktree or a heavy build; below 40 GiB free, run `~/.pi/agent/bin/pi-cleanup` (dry run) and report rather than adding more.
+- Check `df -h ~` before creating a worktree or a heavy build. Below 40 GiB free, run `~/.pi/agent/bin/pi-cleanup` (dry run) and report, but keep building down to 25 GiB free (2026-10-21). Below 25 GiB start no new worktree or heavy phase and report.
 - One worktree per issue or PR: reuse it for review rounds, rebases and merge tests instead of creating `-r2`, `-review`, `-base`, `-merge` or `wt/<n>` copies. Create worktrees under `<parent>/.worktrees/`, never inside `.ai-work/`.
 - Temporary worktrees (review, baseline, triage or merge-test copies) are removed before the session ends, using the checks below.
 - When a task you registered with `ai-work-lifecycle` is genuinely done, run `finish TASK --apply`; use `state TASK paused` for unfinished work instead of leaving it active.

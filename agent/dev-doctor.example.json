@@ -1,4 +1,8 @@
 {
+  "disk": {
+    "build_floor_gib": 25,
+    "cleanup_trigger_gib": 40
+  },
   "owned_container_rules": [
     {
       "name": "studio-warm-stage",

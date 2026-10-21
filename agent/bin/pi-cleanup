@@ -3,7 +3,7 @@
 
 Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-days N]
                   [--image-age-days N]
-                  [--nuget-age-days N] [--session-age-days N] [--if-free-below GIB]
+                  [--nuget-age-days N] [--session-age-days N] [--if-free-below GIB|config]
                   [--roots PATH ...] [--json] [--scheduled]
 
   (default)          dry run: print the plan, change nothing (see note on fetch below)
@@ -17,7 +17,7 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
                      removed by the caches step (default 14)
   --session-age-days N pi session .jsonl files not modified for N days are gzipped in
                      place by the caches step (default 30)
-  --if-free-below GIB exit 0 with "free space OK" (doing nothing) when the home volume
+  --if-free-below GIB|config exit 0 with "free space OK" (doing nothing) when the home volume
                      and every root have at least GIB GiB free
   --image-age-days N docker images older than N days and used by no container are
                      removed with `docker rmi <id>` (default 7)
@@ -28,7 +28,7 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
                      summary to ~/.pi/agent/logs/pi-cleanup.log (kept under 1 MB). Used by
                      the launchd jobs com.example.pi-cleanup (daily 03:00) and
                      com.example.pi-cleanup-lowdisk (every 30 min, with
-                     --if-free-below 40). If another --apply run holds the lock, a
+                     --if-free-below config). If another --apply run holds the lock, a
                      scheduled run logs one line and exits 0.
 
 Exit codes: 0 ok, 1 error, 2 partial (some deletions failed).
@@ -1597,6 +1597,22 @@ def nonneg_float(v):
     return x
 
 
+def cleanup_trigger_gib():
+    try:
+        with open(os.path.expanduser('~/.pi/agent/dev-doctor.json')) as f:
+            config = json.load(f)
+        value = config['disk']['cleanup_trigger_gib']
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 40
+        return nonneg_float(value)
+    except (OSError, ValueError, TypeError, KeyError, argparse.ArgumentTypeError):
+        return 40
+
+
+def free_below_arg(value):
+    return cleanup_trigger_gib() if value == 'config' else nonneg_float(value)
+
+
 def parse_args(argv):
     ap = argparse.ArgumentParser(prog="pi-cleanup", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1609,7 +1625,7 @@ def parse_args(argv):
     ap.add_argument("--worktree-min-idle-days", type=nonneg_float, default=1)
     ap.add_argument("--nuget-age-days", type=nonneg_float, default=14)
     ap.add_argument("--session-age-days", type=nonneg_float, default=30)
-    ap.add_argument("--if-free-below", type=nonneg_float, default=None, metavar="GIB")
+    ap.add_argument("--if-free-below", type=free_below_arg, default=None, metavar="GIB|config")
     ap.add_argument("--image-age-days", type=nonneg_float, default=7)
     ap.add_argument("--roots", nargs="+", default=None, metavar="PATH")
     ap.add_argument("--json", action="store_true")
