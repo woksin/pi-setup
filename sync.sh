@@ -4,18 +4,35 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 PI="$HOME/.pi/agent"
-RS=(rsync -a --delete --exclude=__pycache__ --exclude=node_modules --exclude=.DS_Store)
+RS=(rsync -a --delete --exclude=__pycache__ --exclude=node_modules --exclude=.DS_Store --exclude='*.bak*')
 
 mkdir -p agent skills tools/bin
-for d in agents extensions early-extensions lib workflows templates profiles loose-threads; do
+for d in agents extensions early-extensions lib workflows templates loose-threads; do
   "${RS[@]}" "$PI/$d/" "agent/$d/"
 done
-"${RS[@]}" --exclude=fd "$PI/bin/" agent/bin/
+"${RS[@]}" --exclude=fd --exclude=rg "$PI/bin/" agent/bin/
 "${RS[@]}" --exclude=state "$PI/pi-phase/" agent/pi-phase/
-for f in AGENTS.md models.json subagents.json provider-fallback.json mcp-adapter.json; do
+# publishing sanitisers: per-user label in docker-guardian, author-specific inbox path and notes path
+sed -i '' -e "s#com\\.$(id -un)\\.#com.example.#g" agent/bin/docker-guardian agent/bin/pi-cleanup
+sed -i '' -e 's#\${INBOX_DIR:-[^}]*}#${INBOX_DIR:-$HOME/.pi/agent/inbox}#' agent/bin/inbox-watch
+"${RS[@]}" --exclude=ACTIVE "$PI/profiles/" agent/profiles/
+# lane-policy: only the README is shared (policy.json is per-machine state)
+mkdir -p agent/lane-policy
+sed -e "s#\`/Volumes/sourcecode/repos/cratis/.ai-work/pi-lane-policy/\`#the author's local notes directory (not published)#" "$PI/lane-policy/README.md" > agent/lane-policy/README.md
+# launchd templates: user name and home replaced by placeholders
+mkdir -p agent/launchd
+for n in docker-guardian pi-cleanup; do
+  sed -e "s#$HOME#__HOME__#g" -e "s#com\.[A-Za-z0-9]*\.$n#com.example.$n#" \
+    -e '/DOCKER_GUARDIAN_MESSAGES/d' "$HOME/Library/LaunchAgents/com.$(id -un).$n.plist" > "agent/launchd/com.example.$n.plist"
+done
+for f in AGENTS.md AGENTS.subagent.md models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json; do
   cp "$PI/$f" "agent/$f"
 done
-jq 'del(.deviceId, .lastChangelogVersion) | .packages |= map(if test("^\\./local-packages/pi-(jobs|recover)$") then "npm:@woksin/" + ltrimstr("./local-packages/") else . end)' "$PI/settings.json" > agent/settings.json
+# local packages -> public sources; context-budget (unpublished local path) is dropped
+jq 'del(.deviceId, .lastChangelogVersion)
+  | .packages |= (map(if test("^\\./local-packages/pi-(jobs|recover)$") then "npm:@woksin/" + ltrimstr("./local-packages/")
+                      elif test("context-budget") then empty else . end)
+                  | if index("git:github.com/woksin/pi-orch") then . else . + ["git:github.com/woksin/pi-orch"] end)' "$PI/settings.json" > agent/settings.json
 jq '{name, private, dependencies}' "$PI/npm/package.json" > agent/npm-package.json
 
 for s in ai-work-lifecycle github-issue-hygiene; do

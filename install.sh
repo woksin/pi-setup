@@ -2,6 +2,7 @@
 # Copy this setup into ~/.pi/agent (and ~/.agents/skills, ~/.local).
 # Existing files that differ are backed up to <file>.bak-<timestamp> first.
 # settings.json, models.json and the other JSON configs are only written when absent.
+# agent/launchd/*.plist are templates and are not installed; see README.
 set -euo pipefail
 cd "$(dirname "$0")"
 PI="$HOME/.pi/agent"
@@ -21,11 +22,12 @@ tree() { # srcdir destdir
   (cd "$1" && find . -type f) | while read -r f; do put "$1/$f" "$2/${f#./}"; done
 }
 
-for d in agents extensions early-extensions lib workflows templates profiles loose-threads bin pi-phase; do
+for d in agents extensions early-extensions lib workflows templates profiles loose-threads bin pi-phase lane-policy; do
   tree "agent/$d" "$PI/$d"
 done
 put agent/AGENTS.md "$PI/AGENTS.md"
-for f in settings.json models.json subagents.json provider-fallback.json mcp-adapter.json; do
+put agent/AGENTS.subagent.md "$PI/AGENTS.subagent.md"
+for f in settings.json models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json; do
   [[ -e $PI/$f ]] || put "agent/$f" "$PI/$f"
 done
 [[ -e $PI/npm/package.json ]] || put agent/npm-package.json "$PI/npm/package.json"
