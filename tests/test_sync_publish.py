@@ -104,17 +104,48 @@ class SyncPublishTests(unittest.TestCase):
         (self.pi / "lib/creds.bin").write_bytes(b"x")
         self.run_command("./sync.sh", cwd=self.scratch, success=False)
 
-    def test_secret_mask_scanner_runs_when_installed_and_is_skipped_otherwise(self):
-        # install.sh now provides lib/secret-mask.ts in the fake live install; "not installed" means absent there
+    def fake_scanner(self, body):
+        (self.pi / "lib/secret-mask.ts").write_text(body)
+
+    def test_missing_scanner_fails_and_checkout_unchanged(self):
         (self.pi / "lib/secret-mask.ts").unlink()
-        skipped = self.run_command("./sync.sh", cwd=self.scratch)
-        self.assertIn("secret-mask scanner not installed; skipped", skipped.stdout + skipped.stderr)
-        (self.pi / "lib/secret-mask.ts").write_text(
+        self.assert_sync_refused("secret-mask scanner missing")
+
+    def test_scanner_findings_fail(self):
+        self.fake_scanner(
             "export function scan(text: string, allow: string[] = []) {\n"
             "  const hit = text.includes('FAKE_TOKEN_VALUE');\n"
             "  return { text, kinds: hit ? ['fake'] : [], count: hit ? 1 : 0, skipped: false };\n}\n")
         (self.pi / "agents/flagged.md").write_text("FAKE_TOKEN_VALUE\n")
         self.assert_sync_refused("agent/agents/flagged.md")
+
+    def test_skipped_scan_fails_naming_the_file_without_content(self):
+        big = '{"name":"DATABASE_PASSWORD","value":"sensitive-literal"}\n' + " " * (2 * 1024 * 1024 + 10)
+        (self.pi / "workflows").mkdir(exist_ok=True)
+        (self.pi / "workflows/big.json").write_text(big)
+        before = snapshot(self.scratch)
+        result = self.run_command("./sync.sh", cwd=self.scratch, success=False)
+        output = result.stdout + result.stderr
+        self.assertIn("agent/workflows/big.json: secret-mask scan skipped", output)
+        self.assertNotIn("sensitive-literal", output)
+        self.assertEqual(snapshot(self.scratch), before)
+
+    def test_credential_key_with_container_value_fails(self):
+        for value in (["ordinary-password"], {"nested": {"v": "ordinary-password"}}):
+            with self.subTest(value=value):
+                (self.pi / "models.json").write_text(json.dumps({"providers": {"x": {"apiKey": value}}}))
+                result = self.run_command("./sync.sh", cwd=self.scratch, success=False)
+                self.assertIn("agent/models.json: secret-like field", result.stdout + result.stderr)
+                self.assertNotIn("ordinary-password", result.stdout + result.stderr)
+        (self.pi / "models.json").write_text(json.dumps({"providers": {"x": {"apiKey": ["env:A", "$B"]}}}))
+        self.run_command("./sync.sh", cwd=self.scratch)
+
+    def test_scanner_stderr_is_never_echoed(self):
+        self.fake_scanner("console.error('SENTINEL_SECRET_ECHO');\nthrow new Error('SENTINEL_SECRET_ECHO');\n"
+                          "export function scan() { return { text: '', kinds: [], count: 0, skipped: false }; }\n")
+        result = self.run_command("./sync.sh", cwd=self.scratch, success=False)
+        self.assertIn("secret-mask scanner failed", result.stdout + result.stderr)
+        self.assertNotIn("SENTINEL_SECRET_ECHO", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
