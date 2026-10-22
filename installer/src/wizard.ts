@@ -109,3 +109,39 @@ export async function confirmApply(p: Prompter, summary: string[]): Promise<bool
   const answer = await p.confirm({ message: "Apply?", initial: true });
   return !p.isCancel(answer) && answer === true;
 }
+
+const TAKE = "take";
+
+/**
+ * Ask, per user-changed file, what to do. Returns the paths to overwrite (with a backup);
+ * every other conflict stays kept. CANCEL when the user backs out.
+ */
+export async function resolveConflicts<C extends { path: string; newPath: string }>(
+  p: Prompter, conflicts: C[], showDiff: (c: C) => Promise<string>,
+): Promise<Set<string> | typeof CANCEL> {
+  const takes = new Set<string>();
+  let keepRest = false;
+  for (const conflict of conflicts) {
+    if (keepRest) break;
+    let withDiff = true;
+    for (;;) {
+      const options: { value: "keep" | "take" | "diff" | "keep-all"; label: string }[] = [
+        { value: "keep", label: `Keep mine (new version goes to ${conflict.newPath})` },
+        { value: TAKE, label: "Take the new version (yours is backed up)" },
+        ...(withDiff ? [{ value: "diff" as const, label: "Show the diff" }] : []),
+        { value: "keep-all", label: "Keep mine for all remaining" },
+      ];
+      const answer = await p.select({ message: `${conflict.path} changed since install`, options, initial: "keep" });
+      if (p.isCancel(answer)) return CANCEL;
+      if (answer === "diff") {
+        p.note(await showDiff(conflict), conflict.path);
+        withDiff = false;
+        continue;
+      }
+      if (answer === TAKE) takes.add(conflict.path);
+      if (answer === "keep-all") keepRest = true;
+      break;
+    }
+  }
+  return takes;
+}

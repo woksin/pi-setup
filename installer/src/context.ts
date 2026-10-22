@@ -58,6 +58,7 @@ export function realContext(repoDir: string): Ctx {
     home: homedir(),
     cwd: process.cwd(),
     repoDir,
+    nodePath: process.execPath,
     now: () => new Date(),
     run: realRun,
     which: realWhich(process.env),

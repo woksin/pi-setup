@@ -5,7 +5,7 @@ import { listFiles } from "./fsx.ts";
 import { spliceRouting } from "./profiles.ts";
 import type { Overlay } from "./profiles.ts";
 import { SetupError } from "./types.ts";
-import type { Action, Settings } from "./types.ts";
+import type { Action, JsonOp, Settings } from "./types.ts";
 
 const TREES = ["agents", "extensions", "early-extensions", "lib", "workflows", "templates", "profiles", "loose-threads", "bin", "pi-phase", "lane-policy"];
 const ONLY_IF_ABSENT = ["settings.json", "models.json", "subagents.json", "provider-fallback.json", "mcp-adapter.json", "efficiency.json", "context-budget.json"];
@@ -38,7 +38,10 @@ function sameBytes(dest: string, content: Buffer): boolean {
 }
 
 function put(actions: Action[], dest: string, desired: Desired): void {
-  if (sameBytes(dest, desired.content)) return;
+  if (sameBytes(dest, desired.content)) {
+    actions.push({ op: "adopt", path: dest });
+    return;
+  }
   actions.push({ op: "install", path: dest, existed: existsSync(dest), ...desired });
 }
 
@@ -60,8 +63,13 @@ function userJsonAction(actions: Action[], piDir: string, settings: Settings): v
   const existing = readSettings(path);
   const merged = mergeUserJson(existing, settings);
   if (existsSync(path) && deepEqual(existing, merged)) return;
+  const jsonOps: JsonOp[] = [];
+  for (const key of ["githubUser", "reposRoot"]) {
+    if (key in existing && deepEqual(existing[key], merged[key])) continue;
+    jsonOps.push({ op: "set", key, before: key in existing ? { present: true, value: existing[key] } : { present: false }, after: merged[key] });
+  }
   actions.push({
-    op: "install", path, existed: existsSync(path), mode: 0o644,
+    op: "install", path, existed: existsSync(path), mode: 0o644, merge: "user-json", jsonOps,
     content: Buffer.from(`${JSON.stringify(merged, null, 2)}\n`),
   });
 }
@@ -86,13 +94,14 @@ function registerAction(actions: Action[], piDir: string): void {
   const packages = Array.isArray(data.packages) ? (data.packages as unknown[]) : [];
   if (packages.includes(PACKAGE)) return;
   const updated = { ...data, packages: [...packages, PACKAGE] };
+  const jsonOps: JsonOp[] = [{ op: "array-add", key: "packages", value: PACKAGE, keyCreated: !Array.isArray(data.packages) }];
   const mode = pending && pending.op === "install" ? pending.mode : statSync(path).mode & 0o7777;
   const next = Buffer.from(`${JSON.stringify(updated, null, 2)}\n`);
   if (pending && pending.op === "install") {
     pending.content = next;
-    actions.push({ op: "register", path, content: next, mode, existed: false });
+    actions.push({ op: "register", path, content: next, mode, existed: false, jsonOps });
   } else {
-    actions.push({ op: "register", path, content: next, mode, existed: true });
+    actions.push({ op: "register", path, content: next, mode, existed: true, jsonOps });
   }
 }
 

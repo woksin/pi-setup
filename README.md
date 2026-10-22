@@ -9,12 +9,22 @@ Auth, sessions, caches and machine identity are never included.
 ```sh
 git clone https://github.com/woksin/pi-setup && cd pi-setup
 ./install.sh --dry-run   # show what would change
-./install.sh             # differing files are backed up to <file>.bak-<timestamp>
+./install.sh             # overwritten files are backed up to ~/.pi/agent/.pi-setup/backups/<timestamp>/
 ```
 
 Install needs Node.js 22.19 or newer (pi needs it too) and Python 3. `install.sh` is a thin shim around the committed bundle `installer/dist/pi-setup.mjs`; it detects your setup first and asks only what it could not find out. In a terminal it runs a short wizard; with `--yes`, `CI` set or no terminal it never prompts. It detects your GitHub login (saved, then `gh`), your repositories root (saved, then the best match among the usual places such as `~/repos` and the parent of this checkout, then `$HOME/repos`), which providers you are logged in to, and picks a profile from `agent/profiles/<name>/profile.json` (an already active profile is kept on re-runs; `--profile <name>` switches). It then runs `npm install --legacy-peer-deps` in `~/.pi/agent/npm` itself, only when the packages changed.
 
-Flags, in any order: `--user <login>`, `--repos-root <dir>`, `--profile <name|auto>`, `--yes` (never prompt), `--skip-npm`, `--dry-run` (writes nothing), `--plan` (print detection, profile and actions, write nothing) and `--json` (one JSON object on stdout). The operator settings are saved in `~/.pi/agent/user.json` (`githubUser` and `reposRoot`; other keys are kept) and reused on later installs unless flags override them. Without a login from any source, install fails and asks for `--user`. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. A re-run that has nothing to change prints no `install` lines and creates no backups.
+Flags, in any order: `--user <login>`, `--repos-root <dir>`, `--profile <name|auto>`, `--yes` (never prompt), `--skip-npm`, `--dry-run` (writes nothing), `--plan` (print detection, profile and actions, write nothing) and `--json` (one JSON object on stdout). The operator settings are saved in `~/.pi/agent/user.json` (`githubUser` and `reposRoot`; other keys are kept) and reused on later installs unless flags override them. Without a login from any source, install fails and asks for `--user`. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. A re-run that has nothing to change prints `Everything up to date`, no `install` lines, and creates no backups.
+
+### Update, uninstall and backups
+
+Each install records what it wrote in `~/.pi/agent/.pi-setup/manifest.json` (HOME-relative paths and hashes; no checkout path or remote). Re-runs use it: a file you have not changed is updated silently (the old bytes go to `~/.pi/agent/.pi-setup/backups/<timestamp>/`); a file you changed is kept, and in a terminal install asks whether to keep yours, take the new one or show the diff, otherwise it writes the new version next to it as `<file>.pi-setup-new`. An install made before the manifest existed is adopted on its next run. `settings.json` and `user.json` are merged key by key, so uninstall can revert just those keys.
+
+- `./install.sh update [--dry-run] [--ref <tag>]` checks out the latest `v*` release tag of this checkout (detached; `git switch main` goes back) and runs that release's installer. It refuses a checkout with local changes.
+- `./install.sh uninstall [--dry-run] [--yes]` removes what the manifest lists, restores files that install had replaced, and leaves files you changed (it lists them). It never touches `auth.json`, `sessions/`, `accounts/`, `jobs/`, caches or anything that is not in the manifest.
+- `./install.sh backups [list | prune --keep N]` lists the run folders or prunes them; installs keep the last 10. Backups that uninstall restores from are pinned and never pruned.
+
+`~/.pi/agent/.pi-setup/` holds the uninstall data (the manifest and the pinned backups). Do not delete it by hand; use `pi-setup uninstall` or `pi-setup backups prune`. pi rewrites `settings.json` at runtime, so a `settings.json` created by install counts as "changed by you" on uninstall and is left; one that existed before is reverted key by key. npm packages (`~/.pi/agent/npm/node_modules`) and pi's runtime state are not in the manifest, so uninstall leaves `~/.pi/agent` in place when they exist.
 
 `--legacy-peer-deps` is needed: the packages declare conflicting peer ranges for `@earendil-works/pi-*` (for example `@vigolium/piolium` wants `^0.74`, `@tintinweb/pi-subagents` wants `>=1.1.0`), so a plain `npm install` fails with ERESOLVE.
 

@@ -61,6 +61,7 @@ describe("install (e2e)", () => {
     assert.ok(!newCalls.some((l) => l.startsWith("npm install")), newCalls.join("\n"));
     assert.deepEqual(profileCalls(box), []);
     assert.match(again.stdout, /npm packages up to date/);
+    assert.match(again.stdout, /Everything up to date/);
   });
 
   test("(d) --dry-run writes nothing and runs neither npm nor pi-profile", () => {
@@ -111,10 +112,10 @@ describe("install (e2e)", () => {
     assert.deepEqual(Object.keys(JSON.parse(text)), ["orchRepoRoot", "githubUser", "reposRoot"]);
     assert.equal(JSON.parse(text).orchRepoRoot, "/keep");
     assert.equal(JSON.parse(text).githubUser, "einari");
-    const backups = findBackups(piPath(box)).filter((p) => p.includes("user.json"));
-    assert.equal(backups.length, 1);
-    assert.ok(backups[0].includes("user.json.bak-"));
-    assert.equal(JSON.parse(readFileSync(backups[0], "utf8")).githubUser, "old");
+    assert.deepEqual(findBackups(piPath(box)), []);
+    const runs = readdirSync(piPath(box, ".pi-setup/backups"));
+    assert.equal(runs.length, 1);
+    assert.equal(JSON.parse(readFileSync(piPath(box, ".pi-setup/backups", runs[0], "user.json"), "utf8")).githubUser, "old");
     assert.deepEqual(readdirSync(piPath(box)).filter((n) => n.includes(".tmp-")), []);
     const again = install(box, []);
     assert.deepEqual(installLines(again.stdout), []);

@@ -197,10 +197,11 @@ class InstallTests(unittest.TestCase):
         (pi / "settings.json").write_text('{"keep": true}\n')
         self.install("--user", "another-user", "--repos-root", "/tmp/other repos")
         self.assertIn("--add-assignee another-user", (pi / "AGENTS.md").read_text())
-        self.assertEqual(next(pi.glob("AGENTS.md.bak-*")).read_bytes(), original)
+        self.assertEqual(next(pi.glob(".pi-setup/backups/*/AGENTS.md")).read_bytes(), original)
         self.assertEqual(json.loads((pi / "settings.json").read_text()),
                          {"keep": True, "packages": ["./local-packages/pi-questions"]})
-        self.assertEqual(json.loads(next(pi.glob("user.json.bak-*")).read_text())["githubUser"], "einari")
+        self.assertEqual(json.loads(next(pi.glob(".pi-setup/backups/*/user.json")).read_text())["githubUser"], "einari")
+        self.assertFalse(any(pi.rglob("*.bak-*")))
 
     def test_sync_round_trip_in_scratch_copy(self):
         self.clean_install()

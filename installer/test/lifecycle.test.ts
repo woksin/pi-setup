@@ -1,0 +1,211 @@
+import { strict as assert } from "node:assert";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
+import { after, describe, test } from "node:test";
+import { REPO, backupDirs, findBackups, install, installLines, piPath, sandbox, snapshot } from "./helpers/home.ts";
+import type { Sandbox } from "./helpers/home.ts";
+
+const boxes: Sandbox[] = [];
+function fresh(): Sandbox {
+  const box = sandbox();
+  boxes.push(box);
+  return box;
+}
+after(() => {
+  for (const box of boxes) rmSync(box.root, { recursive: true, force: true });
+});
+
+const ARGS = (box: Sandbox, user = "einari") => ["--yes", "--skip-npm", "--user", user, "--repos-root", join(box.root, "repos")];
+const RERUN = ["--skip-npm"];
+const manifestOf = (box: Sandbox) => JSON.parse(readFileSync(piPath(box, ".pi-setup/manifest.json"), "utf8"));
+const rel = (box: Sandbox, abs: string) => abs.slice(box.home.length + 1);
+const EDIT = (box: Sandbox) => piPath(box, "extensions", "guards.ts");
+const mutate = (path: string) => appendFileSync(path, "\n// edited by the user\n");
+
+describe("manifest and re-runs (lifecycle e2e)", () => {
+  test("L1 a clean install writes a manifest that matches the disk and names no checkout or remote", () => {
+    const box = fresh();
+    const run = install(box, ARGS(box));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    const text = readFileSync(piPath(box, ".pi-setup/manifest.json"), "utf8");
+    const m = JSON.parse(text);
+    const paths = installLines(run.stdout).map((l) => l.slice("install ".length));
+    assert.ok(paths.length > 50);
+    for (const path of paths) {
+      const r = rel(box, path);
+      const sha = m.files[r]?.sha256 ?? m.json[r]?.sha256After;
+      assert.ok(sha, `no entry for ${r}`);
+      assert.equal(sha, createHash("sha256").update(readFileSync(path)).digest("hex"), r);
+    }
+    assert.ok(!text.includes(REPO), "manifest names the checkout");
+    assert.ok(!text.includes("woksin"), "manifest names the remote");
+  });
+
+  test("L2 a re-run is a no-op: nothing written, manifest bytes unchanged", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const before = snapshot(box.home, true);
+    const manifest = readFileSync(piPath(box, ".pi-setup/manifest.json"));
+    const again = install(box, RERUN);
+    assert.equal(again.status, 0, again.stdout + again.stderr);
+    assert.match(again.stdout, /Everything up to date/);
+    assert.deepEqual(installLines(again.stdout), []);
+    assert.deepEqual(snapshot(box.home, true), before);
+    assert.ok(readFileSync(piPath(box, ".pi-setup/manifest.json")).equals(manifest));
+  });
+
+  test("L3 a file you changed is kept, the repo version goes to .pi-setup-new, and a third run writes nothing", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const path = EDIT(box);
+    const original = readFileSync(path);
+    mutate(path);
+    const mine = readFileSync(path);
+    const run = install(box, RERUN);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.ok(readFileSync(path).equals(mine));
+    assert.ok(readFileSync(`${path}.pi-setup-new`).equals(original));
+    assert.ok(run.stdout.split("\n").some((l) => l.startsWith(`keep ${path}`)), run.stdout);
+    assert.ok(!installLines(run.stdout).some((l) => l.includes(path)));
+    const before = snapshot(box.home, true);
+    const third = install(box, RERUN);
+    assert.match(third.stdout, /Everything up to date\. 1 file\(s\) you changed were kept/);
+    assert.deepEqual(snapshot(box.home, true), before);
+  });
+
+  test("L4 a changed rendering updates untouched files with a backup and keeps edited ones", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const agents = readFileSync(piPath(box, "AGENTS.md"));
+    const skill = join(box.home, ".agents/skills/github-issue-hygiene/SKILL.md");
+    mutate(skill);
+    const mine = readFileSync(skill);
+    const run = install(box, ARGS(box, "another-user"));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(readFileSync(piPath(box, "AGENTS.md"), "utf8"), /--add-assignee another-user/);
+    const dirs = backupDirs(box);
+    assert.equal(dirs.length, 1);
+    assert.ok(readFileSync(piPath(box, ".pi-setup/backups", dirs[0], "AGENTS.md")).equals(agents));
+    assert.ok(readFileSync(skill).equals(mine));
+    assert.match(readFileSync(`${skill}.pi-setup-new`, "utf8"), /--add-assignee another-user/);
+    assert.deepEqual(findBackups(box.home), []);
+  });
+
+  test("L6 a legacy install without a manifest is adopted; only the changed file is replaced, and uninstall restores it", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    rmSync(piPath(box, ".pi-setup/manifest.json"));
+    const path = EDIT(box);
+    mutate(path);
+    const mine = readFileSync(path);
+    const run = install(box, RERUN);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.deepEqual(installLines(run.stdout), [`install ${path}`]);
+    const m = manifestOf(box);
+    assert.equal(m.files[rel(box, path)].origin, "replaced");
+    assert.ok(readFileSync(piPath(box, ".pi-setup/backups", m.files[rel(box, path)].backup)).equals(mine));
+    const user = readFileSync(piPath(box, "user.json"));
+    const out = install(box, ["uninstall", "--yes"]);
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.ok(readFileSync(path).equals(mine), "the user's pre-install file is back");
+    assert.ok(!existsSync(piPath(box, "AGENTS.md")));
+    assert.ok(readFileSync(piPath(box, "user.json")).equals(user), "user.json untouched");
+    assert.ok(!existsSync(piPath(box, ".pi-setup")));
+  });
+
+  test("L7 a tampered manifest makes uninstall refuse and change nothing", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const good = readFileSync(piPath(box, ".pi-setup/manifest.json"), "utf8");
+    for (const bad of ["../x", "/etc/hosts", ".pi/agent/auth.json", ".pi/agent/sessions/s.jsonl", ".pi/agent/.pi-setup/manifest.json"]) {
+      const m = JSON.parse(good);
+      m.files[bad] = { sha256: "0".repeat(64), mode: 420, source: { release: null, commit: null }, origin: "new" };
+      writeFileSync(piPath(box, ".pi-setup/manifest.json"), JSON.stringify(m));
+      const before = snapshot(box.home, true);
+      const run = install(box, ["uninstall", "--yes"]);
+      assert.equal(run.status, 1, bad);
+      assert.match(run.stderr, /manifest path rejected/, bad);
+      assert.deepEqual(snapshot(box.home, true), before, bad);
+    }
+  });
+
+  test("L8 uninstall with no manifest says nothing is tracked and writes nothing", () => {
+    const box = fresh();
+    const run = install(box, ["uninstall", "--yes"]);
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /nothing is tracked/);
+    assert.deepEqual(snapshot(box.home), {});
+  });
+
+  test("L9 the dry runs and a dry prune write nothing", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    assert.equal(install(box, ARGS(box, "another-user")).status, 0);
+    assert.equal(backupDirs(box).length, 1);
+    const before = snapshot(box.home, true);
+    for (const args of [[...ARGS(box), "--dry-run"], ["uninstall", "--dry-run"], ["backups", "prune", "--keep", "0", "--dry-run"], ["backups", "list"]]) {
+      const run = install(box, args);
+      assert.equal(run.status, 0, `${args.join(" ")}: ${run.stdout}${run.stderr}`);
+      assert.deepEqual(snapshot(box.home, true), before, args.join(" "));
+    }
+    assert.match(install(box, ["backups", "prune", "--keep", "0", "--dry-run"]).stdout, /would remove/);
+    assert.equal(install(box, ["backups", "prune", "--keep", "0"]).status, 0);
+    assert.deepEqual(backupDirs(box), []);
+  });
+
+  test("backups: argument errors exit 1 and write nothing", () => {
+    const box = fresh();
+    for (const args of [["backups", "prune", "--keep", "-1"], ["backups", "prune", "--keep", "x"], ["uninstall", "--profile", "x"], ["update", "--ref", "-x"]]) {
+      const run = install(box, args);
+      assert.equal(run.status, 1, args.join(" "));
+      assert.deepEqual(snapshot(box.home), {});
+    }
+  });
+});
+
+describe("uninstall (lifecycle e2e)", () => {
+  test("L5 install, edit, re-run, dry-run, refuse without --yes, uninstall --yes: only your edit is left", () => {
+    const box = fresh();
+    mkdirSync(piPath(box, "sessions"), { recursive: true });
+    mkdirSync(join(box.home, ".agents/skills/other"), { recursive: true });
+    mkdirSync(join(box.home, ".local/bin"), { recursive: true });
+    writeFileSync(piPath(box, "AGENTS.md"), "my own agents file\n");
+    chmodSync(piPath(box, "AGENTS.md"), 0o600);
+    writeFileSync(piPath(box, "user.json"), '{"githubUser":"old","reposRoot":"/old","orchRepoRoot":"/keep"}');
+    writeFileSync(piPath(box, "settings.json"), '{"keep":true}');
+    writeFileSync(piPath(box, "auth.json"), "SENTINEL-NOT-A-SECRET");
+    writeFileSync(piPath(box, "sessions/s.jsonl"), "{}\n");
+    writeFileSync(join(box.home, ".agents/skills/other/SKILL.md"), "other\n");
+    writeFileSync(join(box.home, ".local/bin/existing"), "#!/bin/sh\n");
+    const s0 = snapshot(box.home);
+
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const path = EDIT(box);
+    mutate(path);
+    const mine = snapshot(box.home)[rel(box, path)];
+    const kept = install(box, RERUN);
+    assert.ok(existsSync(`${path}.pi-setup-new`), kept.stdout);
+    const quiet = install(box, RERUN);
+    assert.match(quiet.stdout, /Everything up to date/);
+
+    const before = snapshot(box.home, true);
+    assert.equal(install(box, ["uninstall", "--dry-run"]).status, 0);
+    assert.deepEqual(snapshot(box.home, true), before);
+    const refused = install(box, ["uninstall"]);
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /--yes/);
+    assert.deepEqual(snapshot(box.home, true), before);
+
+    const run = install(box, ["uninstall", "--yes"]);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.ok(run.stdout.includes(path), "output lists the modified file");
+    const expected = { ...s0 };
+    const dir = dirname(rel(box, path));
+    for (const parts = dir.split("/"); parts.length; parts.pop()) expected[parts.join("/")] = "d";
+    expected[rel(box, path)] = mine;
+    assert.deepEqual(snapshot(box.home), expected);
+    assert.ok(!existsSync(piPath(box, ".pi-setup")));
+    assert.equal(readFileSync(piPath(box, "auth.json"), "utf8"), "SENTINEL-NOT-A-SECRET");
+  });
+});
