@@ -10,7 +10,7 @@ import childProcess, { spawn, spawnSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { GUARD_NAMES, guardStatus, isGuardOff, setGuards } from "./guards.ts";
 import guardsExtension from "../extensions/guards.ts";
-import cratisExtension from "../extensions/cratis-cli-guard.ts";
+import cratisExtension, { classifyCratisInvocations, productionTarget } from "../extensions/cratis-cli-guard.ts";
 import waitExtension, { assess, PollTracker } from "../extensions/wait-guard.ts";
 
 const key = Symbol.for("pi.guards");
@@ -20,6 +20,9 @@ let previousFile: string | undefined;
 let previousEnv: string | undefined;
 let previousState: unknown;
 let warnings: string[];
+const ORCH_ENV = ["PI_ORCH_ID", "PI_ORCH_MODE_FILE", "PI_ORCH_REPO_ROOT", "PI_ORCH_MESSAGES_DIR", "PI_GUARD_DECISIONS_LOG"];
+let previousOrch: Record<string, string | undefined>;
+let context = "Test context: chronicle://user:<password>@localhost\n";
 
 beforeEach(() => {
 	previousFile = process.env.PI_GUARDS_FILE;
@@ -31,14 +34,28 @@ beforeEach(() => {
 	delete process.env.PI_GUARDS_OFF;
 	delete (globalThis as any)[key];
 	warnings = [];
+	// Guard tests run outside orchestration unless a test opts in with PI_ORCH_ID.
+	previousOrch = Object.fromEntries(ORCH_ENV.map(name => [name, process.env[name]]));
+	delete process.env.PI_ORCH_ID;
+	process.env.PI_ORCH_MODE_FILE = join(directory, "orchestration-mode");
+	process.env.PI_ORCH_REPO_ROOT = join(directory, "repos");
+	process.env.PI_ORCH_MESSAGES_DIR = join(directory, "messages");
+	process.env.PI_GUARD_DECISIONS_LOG = join(directory, "guard-decisions.jsonl");
+	context = "Test context: chronicle://user:<password>@localhost\n";
 	mock.method(console, "warn", (message: string) => { warnings.push(message); });
 	mock.method(childProcess, "execFile", (_command: string, _args: string[], _options: unknown, callback: Function) => {
-		callback(null, "Test context: chronicle://user:<password>@localhost\n");
+		if (context === "") callback(new Error("no context"), "");
+		else callback(null, context);
 	});
 	syncBuiltinESMExports();
 });
 
 afterEach(() => {
+	mock.timers.reset();
+	for (const [name, value] of Object.entries(previousOrch)) {
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+	}
 	mock.restoreAll();
 	syncBuiltinESMExports();
 	if (previousFile === undefined) delete process.env.PI_GUARDS_FILE;
@@ -56,14 +73,17 @@ function fake(hasUI = true) {
 	const handlers = new Map<string, Function[]>();
 	const listeners = new Map<string, Function[]>();
 	const notices: { text: string; type: string }[] = [];
-	const selections: { title: string; options: string[] }[] = [];
+	const selections: { title: string; options: string[]; opts?: any }[] = [];
 	const statuses: { key: string; text: string | undefined }[] = [];
 	let choice: string | undefined = "Yes, run it";
 	const ctx: any = {
 		hasUI,
 		ui: {
 			notify: (text: string, type: string) => notices.push({ text, type }),
-			select: async (title: string, options: string[]) => { selections.push({ title, options }); return choice; },
+			select: async (title: string, options: string[], opts?: any) => {
+				selections.push({ title, options, opts });
+				return choice === HANG ? new Promise<string | undefined>(() => {}) : choice;
+			},
 			setStatus: (key: string, text: string | undefined) => statuses.push({ key, text }),
 		},
 	};
@@ -93,6 +113,12 @@ function fake(hasUI = true) {
 			return undefined;
 		},
 	};
+}
+
+const HANG = "\u0000hang";
+function decisions() {
+	try { return readFileSync(process.env.PI_GUARD_DECISIONS_LOG!, "utf8").trim().split("\n").map(line => JSON.parse(line)); }
+	catch { return []; }
 }
 
 function entry(name: string) { return guardStatus().find(status => status.name === name)!; }
@@ -403,6 +429,95 @@ test("cratis off allows risky calls without prompting, including headless, and d
 		await app.fire("tool_call", bash("printf 'cratis chronicle replay'"));
 		assert.equal(app.notices.length, hasUI ? 2 : 0);
 	}
+});
+
+test("cratis classifier ignores heredoc bodies and quoted prose but still finds real command lines", () => {
+	// Regression for the L0 stall: prose in a message file was classified as a cratis call.
+	for (const command of [
+		"cat > .ai-work/x/messages/m.md <<'EOF'\n...run cratis chronicle observers replay...\nEOF",
+		"mkdir -p .ai-work/x/messages && cat > .ai-work/x/messages/m.md <<'EOF'\ncratis chronicle observers replay x\nEOF\necho done >> STATE.md",
+		"cat > a.md <<'EOF'\ncratis chronicle observers replay x\nEOF\nmv a.md b.md && cat b.md",
+		"echo 'cratis chronicle observers replay' > .ai-work/m.md && printf '%s' \"cratis chronicle replay\"",
+		"git commit -m 'cratis chronicle observers replay'",
+	]) assert.deepEqual(classifyCratisInvocations(command), [], command);
+	for (const command of [
+		"cratis chronicle observers replay x",
+		"cd repo && cratis chronicle observers replay x",
+		"cat > a.md <<'EOF'\nx\nEOF\ncratis chronicle observers replay x",
+		"cat > m.sh <<'EOF'\ncratis chronicle observers replay x\nEOF\nbash m.sh",
+		"cat > m.sh <<'EOF'\ncratis chronicle observers replay x\nEOF\nchmod +x m.sh; ./m.sh",
+		"PATH=/tmp:$PATH; cat > m.md <<'EOF'\ncratis chronicle observers replay x\nEOF",
+		"tee m.md <<'EOF' | bash\ncratis chronicle observers replay x\nEOF",
+		"cat <<'EOF' | sh\ncratis chronicle observers replay x\nEOF",
+		"cat > m.md <<EOF\n$(cratis chronicle observers replay x)\nEOF\necho hi",
+		"bash -c 'cratis chronicle observers replay x'",
+	]) assert.equal(classifyCratisInvocations(command).filter(i => !i.readOnly).length > 0, true, command);
+});
+
+test("cratis heredoc message with prose never prompts, in any session", async () => {
+	const app = fake();
+	cratisExtension(app.pi);
+	assert.equal(await app.fire("tool_call", bash("cat > .ai-work/x/messages/m.md <<'EOF'\n...run cratis chronicle observers replay...\nEOF")), undefined);
+	assert.equal(app.selections.length, 0);
+});
+
+test("cratis prompt outside orchestration has a 60 s limit and a timeout denies with an actionable reason", async () => {
+	mock.timers.enable({ apis: ["setTimeout", "Date"] });
+	const app = fake();
+	cratisExtension(app.pi);
+	app.choose(HANG);
+	const pending = app.fire("tool_call", bash("cratis chronicle replay observer"));
+	for (let i = 0; i < 5 && !app.selections.length; i++) await new Promise(resolve => setImmediate(resolve));
+	assert.equal(app.selections[0].opts.timeout, 60000);
+	mock.timers.tick(60000);
+	const result = await pending;
+	assert.equal(result?.block, true);
+	assert.match(result.reason, /no answer to the confirmation within 60 s[\s\S]*Report the exact command/);
+	assert.deepEqual(decisions().map(d => [d.guard, d.decision]), [["cratis", "timeout:deny"]]);
+	assert.equal(existsSync(process.env.PI_ORCH_MESSAGES_DIR!), false);
+});
+
+test("cratis in orchestration never prompts: allows and logs, denies production targets immediately", async () => {
+	process.env.PI_ORCH_ID = "L0";
+	for (const hasUI of [true, false]) {
+		const app = fake(hasUI);
+		cratisExtension(app.pi);
+		app.choose(HANG);
+		assert.equal(await app.fire("tool_call", bash("cratis chronicle observers replay x")), undefined);
+		assert.equal(await app.fire("tool_call", bash("cratis prologue start")), undefined);
+		for (const command of ["cratis chronicle observers replay x --server chronicle://prod-db:35000", "CHRONICLE_CONNECTION_STRING=chronicle://production:35000 cratis chronicle jobs stop 1"]) {
+			const result = await app.fire("tool_call", bash(command));
+			assert.equal(result?.block, true, command);
+			assert.match(result.reason, /denied in orchestration because the command names a production target/);
+		}
+		context = "Context: production\nServer: chronicle://cluster:35000\n";
+		assert.match((await app.fire("tool_call", bash("cratis chronicle observers replay x")))?.reason, /active cratis context is a production context/);
+		context = "";
+		assert.match((await app.fire("tool_call", bash("cratis chronicle observers replay x")))?.reason, /could not be read/);
+		context = "Test context: chronicle://user:<password>@localhost\n";
+		assert.equal(await app.fire("tool_call", bash("cratis chronicle jobs list")), undefined);
+		assert.equal(app.selections.length, 0);
+	}
+	assert.deepEqual(decisions().map(d => d.decision), ["allow", "allow", "deny", "deny", "deny", "deny", "allow", "allow", "deny", "deny", "deny", "deny"]);
+	assert.equal(productionTarget("cratis chronicle replay --server chronicle://localhost:35000", "dev"), undefined);
+	assert.match(productionTarget("x", "dev", { CHRONICLE_CONNECTION_STRING: "chronicle://prod:1" })!, /CHRONICLE_CONNECTION_STRING/);
+	assert.equal(productionTarget("cratis chronicle replay products", "dev"), undefined);
+});
+
+test("wait in orchestration allows over-limit timeouts (logged) but keeps immediate polling denials", async () => {
+	const outside = fake();
+	waitExtension(outside.pi);
+	assert.equal((await outside.fire("tool_call", bash("printf ok", 601)))?.block, true);
+	process.env.PI_ORCH_ID = "L0";
+	const app = fake();
+	waitExtension(app.pi);
+	const event = bash("printf ok", 601);
+	assert.equal(await app.fire("tool_call", event), undefined);
+	assert.equal((event.input as any).timeout, 601);
+	const poll = bash("while true; do gh pr checks 1; sleep 30; done");
+	assert.deepEqual(await app.fire("tool_call", poll), { block: true, reason: assess(poll.input.command, undefined, true).block });
+	assert.equal(app.selections.length, 0);
+	assert.deepEqual(decisions().map(d => [d.guard, d.decision]), [["wait", "allow"]]);
 });
 
 test("wait on keeps original block messages and default timeout", async () => {

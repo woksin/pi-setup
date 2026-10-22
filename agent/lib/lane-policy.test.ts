@@ -442,3 +442,31 @@ test("guards.json model write/edit/shell protection applies before enrollment an
 	assert.ok((await f.fire("tool_call", { toolName: "write", input: { path: guard, content: "{}" } }))?.block);
 	denied(`rm '${guard}'`);
 });
+
+test("reading policy/guard config and writing .ai-work messages that mention it are never policy-write", async () => {
+	const guard = join(home, ".pi/agent/guards.json");
+	mkdirSync(join(home, ".pi/agent"), { recursive: true }); writeFileSync(guard, "{}");
+	for (const state of ["unenrolled", "enrolled"]) {
+		if (state === "enrolled") store();
+		for (const path of [guard, policyPath(), "~/.pi/agent/guards.json"]) {
+			allowed(`cat '${path}' 2>/dev/null | jq .`);
+			allowed(`jq .off '${path}' 2>&1`);
+			allowed(`grep -n lane '${path}' >&2`);
+			allowed(`cat '${path}' > .ai-work/notes/copy.json`);
+			allowed(`echo "do not edit ${path}" > .ai-work/einari-issues/messages/L0-to-L3.md`);
+			allowed(`mkdir -p .ai-work/x/messages && cat > .ai-work/x/messages/m.md <<'EOF'\nThe policy file ${path} and ~/.pi/agent/lane-policy/policy.json stay untouched.\nEOF\necho done >> .ai-work/x/STATE.md`);
+			allowed(`tee -a .ai-work/x/messages/m.md <<'EOF'\nsee ${path}\nEOF`);
+			denied(`printf '{}' > '${path}'`);
+			denied(`cat > '${path}' <<'EOF'\n{}\nEOF`);
+			denied(`echo '{}' | tee '${path}'`);
+			denied(`mv '${path}' .ai-work/moved.json`);
+			denied(`cat '${path}' > .ai-work/../x.json`);
+			denied(`cat <<'EOF' | bash\nprintf '{}' > ${path}\nEOF`);
+			denied(`python3 - <<'EOF'\nopen('${path}', 'w')\nEOF`);
+		}
+	}
+	const f = fake(); laneExtension(f.pi);
+	assert.equal(await f.fire("tool_call", { toolName: "bash", input: { command: `cat > .ai-work/m/messages/x.md <<'EOF'\n${guard}\nEOF` } }), undefined);
+	assert.ok((await f.fire("tool_call", { toolName: "bash", input: { command: `cat > '${guard}' <<'EOF'\n{}\nEOF` } }))?.block);
+	assert.equal(readFileSync(guard, "utf8"), "{}");
+});

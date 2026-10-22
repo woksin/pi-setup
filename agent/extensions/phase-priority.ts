@@ -3,9 +3,11 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { guardSelect, isOrchestrated, orchLog } from "../lib/orchestration.ts";
 import { grantPriorityRequests, highPriorityRequests, priorityCommandArgs, readGrant, readOrchestrators, referencesGrantFile, withinOrchestratorCap } from "../lib/phase-priority.ts";
 
 const APPROVAL_NEEDED = "high priority needs approval from the orchestrator (L0) or the user; ask your parent session/orchestrator, which can grant it";
+const GRANT_DENIED = "High queue priority grant denied; use /phase-priority for user approval.";
 const STATE_DIR = join(homedir(), ".pi", "agent", "pi-phase", "state");
 const ORCHESTRATORS = join(STATE_DIR, "priority-orchestrators.json");
 
@@ -50,11 +52,15 @@ export default function (pi: ExtensionAPI) {
 				block: true, reason: "orchestrator grants are capped at 10 uses or 120 minutes",
 			};
 			if (!ctx.hasUI) return { block: true, reason: APPROVAL_NEEDED };
-			const choice = await ctx.ui.select(
+			if (isOrchestrated(process.env, ctx.cwd)) {
+				orchLog("phase-priority", "deny", `grant: ${command.replace(/\s+/g, " ").slice(0, 300)}`);
+				return { block: true, reason: GRANT_DENIED };
+			}
+			const { choice, timedOut } = await guardSelect(ctx.ui, "phase-priority",
 				`Agent wants to grant high queue priority: ${grants.map(args => args.join(" ")).join("; ")}`,
-				["Allow", "Deny"]);
+				["Allow", "Deny"], "deny", { cwd: ctx.cwd });
 			return choice === "Allow" ? undefined : {
-				block: true, reason: "High queue priority grant denied; use /phase-priority for user approval.",
+				block: true, reason: timedOut ? `No answer within 60 s. ${GRANT_DENIED}` : GRANT_DENIED,
 			};
 		}
 		const requests = highPriorityRequests(command);
@@ -68,10 +74,15 @@ export default function (pi: ExtensionAPI) {
 			reason: APPROVAL_NEEDED,
 		};
 		const { kind, label } = requests[0];
-		const choice = await ctx.ui.select(`Agent asks for high queue priority: ${kind} '${label}'`,
-			["Allow once", "Allow for 30 minutes", "Deny"]);
+		if (isOrchestrated(process.env, ctx.cwd)) {
+			// Orchestration: never prompt; without a valid grant, deny at once with the actionable reason.
+			orchLog("phase-priority", "deny", `${kind} '${label}'`);
+			return { block: true, reason: `${APPROVAL_NEEDED} (/phase-priority); otherwise rerun without --priority high.` };
+		}
+		const { choice, timedOut } = await guardSelect(ctx.ui, "phase-priority", `Agent asks for high queue priority: ${kind} '${label}'`,
+			["Allow once", "Allow for 30 minutes", "Deny"], "deny", { cwd: ctx.cwd });
 		if (choice !== "Allow once" && choice !== "Allow for 30 minutes") return {
-			block: true, reason: "High queue priority denied; rerun without --priority high.",
+			block: true, reason: timedOut ? "No answer within 60 s; high queue priority denied; rerun without --priority high." : "High queue priority denied; rerun without --priority high.",
 		};
 		try {
 			await phaseCommand(choice === "Allow once" ? ["grant-priority", "--uses", "1"] : ["grant-priority", "--minutes", "30"]);

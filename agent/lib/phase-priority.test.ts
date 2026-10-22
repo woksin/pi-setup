@@ -14,7 +14,17 @@ let contents: string | undefined;
 let failure: Error | undefined;
 let calls: { path: string; args: string[] }[];
 
+const ORCH_ENV = ["PI_ORCH_ID", "PI_ORCH_MODE_FILE", "PI_ORCH_REPO_ROOT", "PI_ORCH_MESSAGES_DIR", "PI_GUARD_DECISIONS_LOG"];
+let previousOrch: Record<string, string | undefined>;
+const HANG = "\u0000hang";
+
 beforeEach(() => {
+	previousOrch = Object.fromEntries(ORCH_ENV.map(name => [name, process.env[name]]));
+	delete process.env.PI_ORCH_ID;
+	process.env.PI_ORCH_MODE_FILE = "/nonexistent/pi-orch-test/orchestration-mode";
+	process.env.PI_ORCH_REPO_ROOT = "/nonexistent/pi-orch-test/repos";
+	process.env.PI_ORCH_MESSAGES_DIR = "/nonexistent/pi-orch-test/messages";
+	process.env.PI_GUARD_DECISIONS_LOG = "/nonexistent/pi-orch-test/guard-decisions.jsonl";
 	contents = undefined;
 	failure = undefined;
 	calls = [];
@@ -29,7 +39,15 @@ beforeEach(() => {
 	});
 	syncBuiltinESMExports();
 });
-afterEach(() => { mock.restoreAll(); syncBuiltinESMExports(); });
+afterEach(() => {
+	mock.timers.reset();
+	for (const [name, value] of Object.entries(previousOrch)) {
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+	}
+	mock.restoreAll();
+	syncBuiltinESMExports();
+});
 
 test("detects high priority with both flag forms, options in either order and quoted label", () => {
 	assert.deepEqual(highPriorityRequests(run), [request]);
@@ -124,10 +142,15 @@ function fake(hasUI = true) {
 	const handlers = new Map<string, Function>();
 	const commands = new Map<string, any>();
 	const selections: { title: string; options: string[] }[] = [];
+	const timeouts: (number | undefined)[] = [];
 	const notices: { message: string; type: string }[] = [];
 	let choice: string | undefined = "Deny";
 	const ctx: any = { hasUI, ui: {
-		select: async (title: string, options: string[]) => { selections.push({ title, options }); return choice; },
+		select: async (title: string, options: string[], opts?: { timeout?: number }) => {
+			selections.push({ title, options });
+			timeouts.push(opts?.timeout);
+			return choice === HANG ? new Promise<string | undefined>(() => {}) : choice;
+		},
 		notify: (message: string, type: string) => notices.push({ message, type }),
 	} };
 	const pi: any = {
@@ -135,7 +158,7 @@ function fake(hasUI = true) {
 		registerCommand: (name: string, command: any) => commands.set(name, command),
 	};
 	extension(pi);
-	return { ctx, selections, notices, choose: (value: string | undefined) => { choice = value; },
+	return { ctx, selections, timeouts, notices, choose: (value: string | undefined) => { choice = value; },
 		fire: (command = run, toolName = "bash") => handlers.get("tool_call")!({ toolName, input: { command } }, ctx),
 		tool: (toolName: string, input: unknown) => handlers.get("tool_call")!({ toolName, input }, ctx),
 		command: (args: string) => commands.get("phase-priority").handler(args, ctx),
@@ -282,4 +305,38 @@ test("orchestrator registry keeps only live integer pids and is a protected file
 	assert.equal(withinOrchestratorCap(["--uses", "11"]), false);
 	assert.equal(withinOrchestratorCap(["--minutes=120"]), true);
 	assert.equal(withinOrchestratorCap(["--minutes", "480"]), false);
+});
+
+test("prompts are bounded to 60 s and a timeout denies without creating a grant", async () => {
+	mock.timers.enable({ apis: ["setTimeout", "Date"] });
+	for (const command of [run, "pi-phase grant-priority --minutes 30"]) {
+		const app = fake();
+		app.choose(HANG);
+		const pending = app.fire(command);
+		for (let i = 0; i < 5 && !app.selections.length; i++) await new Promise(resolve => setImmediate(resolve));
+		assert.deepEqual(app.timeouts, [60000]);
+		mock.timers.tick(60000);
+		const result = await pending;
+		assert.equal(result?.block, true);
+		assert.match(result.reason, /No answer within 60 s/);
+	}
+	assert.equal(calls.length, 0);
+});
+
+test("orchestration never prompts: denies at once with the actionable reason unless a grant exists", async () => {
+	process.env.PI_ORCH_ID = "L0";
+	for (const hasUI of [true, false]) {
+		const app = fake(hasUI);
+		const request = await app.fire();
+		assert.equal(request?.block, true);
+		assert.match(request.reason, /needs approval from the orchestrator \(L0\) or the user/);
+		const direct = await app.fire("pi-phase grant-priority --minutes 30");
+		assert.equal(direct?.block, true);
+		assert.equal(app.selections.length, 0);
+	}
+	contents = JSON.stringify({ ...grant, expires: Date.now() / 1000 + 60 });
+	const granted = fake();
+	assert.equal(await granted.fire(), undefined);
+	assert.equal(granted.selections.length, 0);
+	assert.equal(calls.length, 0);
 });

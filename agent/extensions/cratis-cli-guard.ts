@@ -22,6 +22,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { isGuardOff } from "../lib/guards.ts";
+import { guardSelect, isOrchestrated, orchLog } from "../lib/orchestration.ts";
 
 // `cratis chronicle <path>` commands that only read state (cratis llm-context, CLI 3.13–3.15).
 const CHRONICLE_READ_ONLY = new Set<string>([
@@ -64,8 +65,11 @@ export interface CratisInvocation {
 	readOnly: boolean;
 }
 
-/** Recognize only a small literal file-writing grammar; all other headers keep the legacy scan. */
-function literalFileWriter(header: string): boolean {
+/**
+ * Recognize only a small literal file-writing grammar; all other headers keep the legacy scan.
+ * Returns the written file names (cat's one redirect target, tee's files), or null.
+ */
+function literalFileWriter(header: string): string[] | null {
 	const tokens: { operator?: string; literal?: string }[] = [];
 	const token = /(<<-?|1?>>?)|('[A-Za-z0-9_./:@%+=, \t-]*'|"[A-Za-z0-9_./:@%+=, \t-]*"|[A-Za-z0-9_./:@%+=,-]+)/y;
 	let at = 0;
@@ -73,34 +77,36 @@ function literalFileWriter(header: string): boolean {
 		if (header[at] === " " || header[at] === "\t") { at++; continue; }
 		token.lastIndex = at;
 		const match = token.exec(header);
-		if (!match) return false;
+		if (!match) return null;
 		at = token.lastIndex;
 		if (match[2] !== undefined) {
 			// Do not split concatenated/expanded words or reinterpret an unsupported fd
 			// (e.g. 2>f) as a filename followed by a stdout redirection.
-			if (at < header.length && !/[ \t<>]/.test(header[at])) return false;
-			if (/^\d+$/.test(match[2]) && /[<>]/.test(header[at] ?? "")) return false;
+			if (at < header.length && !/[ \t<>]/.test(header[at])) return null;
+			if (/^\d+$/.test(match[2]) && /[<>]/.test(header[at] ?? "")) return null;
 			tokens.push({ literal: match[2].replace(/^(['"])(.*)\1$/, "$2") });
 		} else tokens.push({ operator: match[1] });
 	}
 	const head = tokens.shift()?.literal;
 	const cat = ["cat", "/bin/cat", "/usr/bin/cat"].includes(head ?? "");
 	const tee = ["tee", "/bin/tee", "/usr/bin/tee"].includes(head ?? "");
-	if (!cat && !tee) return false;
+	if (!cat && !tee) return null;
 	let redirects = 0;
 	let files = 0;
+	const targets: string[] = [];
 	for (let i = 0; i < tokens.length; i++) {
 		const item = tokens[i];
 		if (item.operator) {
 			const target = tokens[++i]?.literal;
-			if (target === undefined) return false;
-			if (!item.operator.startsWith("<<") && (!target || ++redirects > 1)) return false;
+			if (target === undefined) return null;
+			if (!item.operator.startsWith("<<") && (!target || ++redirects > 1)) return null;
+			if (!item.operator.startsWith("<<")) targets.push(target);
 		} else {
-			if (!tee || !item.literal || (item.literal.startsWith("-") && item.literal !== "-a")) return false;
-			if (item.literal !== "-a") files++;
+			if (!tee || !item.literal || (item.literal.startsWith("-") && item.literal !== "-a")) return null;
+			if (item.literal !== "-a") { files++; targets.push(item.literal); }
 		}
 	}
-	return cat ? redirects === 1 : files > 0;
+	return (cat ? redirects === 1 : files > 0) ? targets : null;
 }
 
 /** Split a shell command into simple commands (arrays of unquoted words), recursing into $( ) and backticks. */
@@ -113,8 +119,10 @@ function simpleCommands(input: string, out: string[][] = [], depth = 0, heredocs
 	const pending: { delimiter: string; quoted: boolean; tabs: boolean; dataOnly: boolean }[] = [];
 	let owned = 0;
 	let sawHeredoc = false;
-	let docCommandSeen = false;
-	let commandSeen = false;
+	// Heredoc bodies written by a literal cat/tee are data, even next to other commands, unless
+	// something in the command line could execute that file or redefine cat/tee.
+	const docTargets: string[] = [];
+	const others: string[][] = [];
 	let commandStart = 0;
 	let i = 0;
 	let uncertain = false;
@@ -129,13 +137,10 @@ function simpleCommands(input: string, out: string[][] = [], depth = 0, heredocs
 	const endCommand = () => {
 		endWord();
 		if (words.length) out.push(words);
-		// Later commands might execute the file; earlier commands can redefine cat/tee
-		// through eval/source or PATH. Only an isolated writer qualifies for suppression.
-		if (words.length && (docCommandSeen || (owned < pending.length && commandSeen))) uncertain = true;
-		if (words.length) commandSeen = true;
-		const dataOnly = owned < pending.length && literalFileWriter(input.slice(commandStart, i));
-		if (owned < pending.length) docCommandSeen = true;
-		for (; owned < pending.length; owned++) pending[owned].dataOnly = dataOnly;
+		const targets = owned < pending.length ? literalFileWriter(input.slice(commandStart, i)) : null;
+		if (targets) docTargets.push(...targets.map(t => t.split("/").pop() || t));
+		else if (words.length) others.push(words);
+		for (; owned < pending.length; owned++) pending[owned].dataOnly = targets !== null;
 		// A compound command can pipe a cat/tee's output to a shell after its closing keyword.
 		if (["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "select", "function", "coproc", "!"].includes(words[0])) uncertain = true;
 		words = [];
@@ -215,8 +220,10 @@ function simpleCommands(input: string, out: string[][] = [], depth = 0, heredocs
 			i = stop + 1;
 		} else if (c === ";" || c === "&" || c === "|" || c === "\n" || c === "(" || c === ")" || c === "{" || c === "}") {
 			endCommand();
-			i++;
-			if (c !== "\n" && c !== ";") uncertain = true;
+			// `&&` and `||` only sequence commands; single `|`/`&`, subshells and groups stay uncertain.
+			const sequence = (c === "&" || c === "|") && input[i + 1] === c;
+			i += sequence ? 2 : 1;
+			if (c !== "\n" && c !== ";" && !sequence) uncertain = true;
 			if (heredocs && c === "\n" && pending.length) {
 				for (const doc of pending) {
 					const bodyStart = i;
@@ -254,6 +261,9 @@ function simpleCommands(input: string, out: string[][] = [], depth = 0, heredocs
 		}
 	}
 	endCommand();
+	// Other commands might execute a written file (it is named again by a non-reader) or redefine
+	// cat/tee (interpreters, eval/source, aliases, PATH). Then replay the legacy full scan.
+	if (others.some(w => executesOrRedefines(w, docTargets))) uncertain = true;
 	if (heredocs && sawHeredoc && (uncertain || pending.length)) {
 		// Replay the original tokenizer, including all bodies, rather than weakening its
 		// behavior in syntax this small lexer cannot prove to be non-executable data.
@@ -261,6 +271,19 @@ function simpleCommands(input: string, out: string[][] = [], depth = 0, heredocs
 		return simpleCommands(input, out, depth, false);
 	}
 	return out;
+}
+
+const RISKY_HEADS = new Set([...SHELLS, "ksh", "fish", "eval", "source", ".", "exec", "alias", "unalias", "function", "hash", "enable",
+	"builtin", "command", "xargs", "python", "python3", "node", "perl", "ruby", "deno", "bun", "npx", "chmod", "install", "ln", "make", "env"]);
+const FILE_READERS = new Set(["cat", "head", "tail", "wc", "ls", "stat", "grep", "rg", "mv", "cp", "rm", "echo", "printf", "mkdir", "touch",
+	"test", "[", "diff", "git", "sort", "jq", "true", "date", "cd"]);
+function executesOrRedefines(words: string[], targets: string[]): boolean {
+	if (words.some(w => /^(?:PATH|BASH_ENV|ENV|CDPATH)=/.test(w))) return true;
+	const cmd = commandWords(words);
+	const head = cmd[0] ?? "";
+	const name = head.split("/").pop() ?? "";
+	if (RISKY_HEADS.has(name) || RISKY_HEADS.has(head)) return true;
+	return !FILE_READERS.has(name) && words.some(w => targets.some(t => t && w.includes(t)));
 }
 
 /** The words of the command a simple command actually runs, after assignments and wrappers. */
@@ -326,6 +349,22 @@ function activeContext(): Promise<string> {
 	});
 }
 
+const UNREADABLE_CONTEXT = "(could not read the active context)";
+/**
+ * Orchestration only: the guard has no production classification of its own, so a state-changing
+ * command is treated as a production write when its target (the invocation incl. --server, an inline
+ * CHRONICLE_CONNECTION_STRING, the process environment, or the active context) names production.
+ * An unreadable context cannot be checked and is denied (immediately, never prompted).
+ */
+export function productionTarget(target: string, context: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+	if (context === UNREADABLE_CONTEXT) return "the active cratis context could not be read, so a production target cannot be ruled out";
+	const production = /(?:^|[^a-z0-9])prod(?:uction)?(?:[^a-z0-9]|$)/i;
+	if (production.test(target)) return "the command names a production target";
+	if (production.test(env.CHRONICLE_CONNECTION_STRING ?? "")) return "CHRONICLE_CONNECTION_STRING names a production target";
+	if (production.test(context)) return "the active cratis context is a production context";
+	return undefined;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "bash") return undefined;
@@ -340,6 +379,26 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const list = risky.map(i => `  ${i.text}`).join("\n");
+		if (isOrchestrated(process.env, ctx.cwd)) {
+			// Orchestration: never prompt. Allow and log, except production writes (denied at once).
+			const context = await activeContext();
+			const target = [...risky.map(i => i.text), ...(command.match(/CHRONICLE_CONNECTION_STRING=\S+/g) ?? [])].join(" ");
+			const production = productionTarget(target, context);
+			const detail = `${risky.map(i => i.text).join("; ")} | context: ${context.replace(/\s+/g, " ").slice(0, 300)}`;
+			if (production) {
+				orchLog("cratis", "deny", detail);
+				return {
+					block: true,
+					reason:
+						`cratis-cli-guard: state-changing cratis command(s) denied in orchestration because ${production}:\n${list}\n` +
+						"Do not retry or work around this. Report the exact command, the target server/context, what it will change " +
+						"and why to the user (or L0), who can run it; non-production targets run without a prompt.",
+				};
+			}
+			orchLog("cratis", "allow", detail);
+			if (ctx.hasUI) ctx.ui.notify(`cratis-cli-guard (orchestration): allowed '${risky.map(i => i.text).join("; ").replace(/\s+/g, " ").slice(0, 180)}'`, "info");
+			return undefined;
+		}
 		if (!ctx.hasUI) {
 			return {
 				block: true,
@@ -351,11 +410,17 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const context = await activeContext();
-		const choice = await ctx.ui.select(
+		const { choice, timedOut } = await guardSelect(ctx.ui, "cratis",
 			`⚠️ cratis command that may change state:\n\n${list}\n\nActive context:\n${context}\n\n` +
 				"Check the target (--server / CHRONICLE_CONNECTION_STRING override the context). Run it?",
-			["No", "Yes, run it"],
+			["No", "Yes, run it"], "deny", { cwd: ctx.cwd },
 		);
+		if (timedOut) return {
+			block: true,
+			reason:
+				`cratis-cli-guard: no answer to the confirmation within 60 s, so this command was not run:\n${list}\n` +
+				"Do not retry in a loop. Report the exact command, the target server/context and why, so the user can run or approve it.",
+		};
 		if (choice !== "Yes, run it") return { block: true, reason: "cratis-cli-guard: the user declined this cratis command." };
 		return undefined;
 	});

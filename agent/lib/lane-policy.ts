@@ -270,13 +270,60 @@ function publicationToken(text: string): boolean {
 	return /\b(?:push|send-pack|http-push|gh)\b|\bpr\s+(?:create|merge|edit|close|reopen|comment|review|ready)\b|\bissue\s+(?:create|edit|close|reopen|comment|delete|transfer|pin|unpin|lock|unlock|develop)\b|\brelease\s+(?:create|edit|delete|upload)\b|\bworkflow\s+(?:run|disable|enable)\b|\brun\s+(?:rerun|cancel|delete)\b/i.test(text)
 		|| /(?:alias\.[\w.-]+\s*(?:=|\s)|remote\.[^\s]+\.pushurl|url\.[^\s]+\.pushInsteadOf)/i.test(text);
 }
+const AUTHORITY_TEXT = /\.pi\/agent\/(?:lane-policy|guards\.json|lib\/(?:lane-policy|guards)\.ts|extensions\/(?:lane-policy|guards)\.ts)/;
+// Shell programs that only read their file operands (output redirection is checked separately).
+const SHELL_READERS = ["cat", "head", "tail", "wc", "stat", "ls", "grep", "rg", "echo", "printf", "pwd", "readlink", "jq", "diff", "cmp", "shasum", "sha256sum", "md5", "file", "sort", "uniq", "cut"];
+// Commands that may sit next to a heredoc whose body merely mentions an authority path.
+const DATA_COMMANDS = [...SHELL_READERS, "tee", "mkdir", "mv", "cp", "cd", "touch", "date", "true", "test", "["];
+// fd duplication/closing and /dev/null redirections write nothing.
+const HARMLESS_REDIRECT = /(?:\d+|&)?>>?[ \t]*(?:&(?:\d+|-)|\/dev\/null)(?=[\s;&|)]|$)/g;
+function authority(word: string, cwd: string): boolean {
+	return word.includes(dirname(policyPath())) || AUTHORITY_TEXT.test(word) || policyFile(word, cwd) || (word.includes("=") && policyFile(word.slice(word.indexOf("=") + 1), cwd));
+}
+/** Literal write destinations under a `.ai-work/` directory (lane messages, state, notes) are never authority writes. */
+function aiWorkDestination(path: string, cwd: string): boolean {
+	return !/[$`*?\[\]{}]/.test(path) && !path.split("/").includes("..") && /(?:^|\/)\.ai-work\//.test(path) && !authority(path, cwd);
+}
+/** Split redirections off a simple command: `>` targets (null if any target is not allowed) and the remaining words. */
+function redirections(words: string[], cwd: string, checkTargets: boolean): string[] | null {
+	const rest: string[] = [];
+	for (let k = 0; k < words.length; k++) {
+		if (words[k] === "<") { k++; continue; } // input redirection reads
+		if (words[k] === ">") {
+			while (words[k + 1] === ">") k++;
+			const target = words[++k];
+			if (checkTargets && (target === undefined || !aiWorkDestination(target, cwd))) return null;
+			continue;
+		}
+		rest.push(words[k]);
+	}
+	return rest;
+}
+function shellCommandSafe(words: string[], cwd: string): boolean {
+	const rest = redirections(words, cwd, true);
+	if (!rest) return false;
+	if (!rest.length || SHELL_READERS.some(p => argsOf(rest, p))) return true;
+	const operands = (p: string) => argsOf(rest, p)?.filter(w => !w.startsWith("-"));
+	const tee = operands("tee");
+	if (tee) return tee.every(w => aiWorkDestination(w, cwd));
+	const cp = operands("cp");
+	if (cp) return !argsOf(rest, "cp")!.some(w => /^(?:-[a-zA-Z]*t|--target)/.test(w)) && cp.length >= 2 && aiWorkDestination(cp[cp.length - 1], cwd);
+	for (const p of ["mkdir", "touch", "mv", "cd"]) {
+		const args = operands(p);
+		if (args) return !args.some(w => authority(w, cwd));
+	}
+	return false;
+}
 function tampering(command: string, ctx: Context): boolean {
-	const commands = expandedCommands(command, 0, true);
-	const mentions = command.includes(dirname(policyPath())) || /\.pi\/agent\/(?:lane-policy|guards\.json|lib\/(?:lane-policy|guards)\.ts|extensions\/(?:lane-policy|guards)\.ts)/.test(command) || commands.flat().some(w => policyFile(w, ctx.cwd) || w.includes("=") && policyFile(w.slice(w.indexOf("=") + 1), ctx.cwd));
-	if (!mentions) return false;
+	const commands = expandedCommands(command.replace(HARMLESS_REDIRECT, " "), 0, true);
+	const words = commands.flat().some(w => authority(w, ctx.cwd));
+	if (!words && !command.includes(dirname(policyPath())) && !AUTHORITY_TEXT.test(command)) return false;
+	// Mentioned only in heredoc bodies or comments: data, unless a command could execute it.
+	if (!words) return commands.some(w => { const rest = redirections(w, ctx.cwd, false)!; return rest.length > 0 && !DATA_COMMANDS.some(p => argsOf(rest, p)); });
 	// Authority files are read-only to shell tools. Unknown writers (links, downloads, dd,
-	// interpreters, patches, etc.) do not need individual mutation-verb exceptions.
-	return /[>]/.test(command) || commands.some(words => !["cat", "head", "tail", "wc", "stat", "ls", "grep", "echo", "printf", "pwd", "readlink"].some(p => argsOf(words, p)));
+	// interpreters, patches, etc.) do not need individual mutation-verb exceptions. Writes
+	// whose destination is under `.ai-work/` are allowed.
+	return commands.some(w => !shellCommandSafe(w, ctx.cwd));
 }
 export function assessCommand(command: string, ctx: Context, file = policyPath(), depth = 0): string | undefined {
 	if (isGuardOff("lane-policy")) return;

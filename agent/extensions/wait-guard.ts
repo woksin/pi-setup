@@ -20,6 +20,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isGuardOff } from "../lib/guards.ts";
+import { isOrchestrated, orchLog } from "../lib/orchestration.ts";
 
 export const MAX_TIMEOUT_SECONDS = 600;
 const LOOP_SLEEP_LIMIT = 30;
@@ -360,6 +361,11 @@ export default function (pi: ExtensionAPI) {
 			return undefined;
 		}
 		if (verdict.block) return { block: true, reason: verdict.block };
+		// Orchestration: an over-limit timeout is not a stall risk worth stopping a lane for; allow and log.
+		if (verdict.needsApproval && isOrchestrated(process.env, ctx.cwd)) {
+			orchLog("wait", "allow", `timeout ${timeout}s: ${command.replace(/\s+/g, " ").slice(0, 300)}`);
+			return undefined;
+		}
 		// Over-limit foreground timeouts are blocked outright (no interactive prompt): the model is
 		// told to shorten the timeout or move the work to a background agent / job_start instead.
 		if (verdict.needsApproval) return { block: true, reason: verdict.needsApproval };
