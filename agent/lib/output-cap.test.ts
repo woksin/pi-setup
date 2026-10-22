@@ -8,6 +8,8 @@ import {
 } from "./output-cap.ts";
 import extension from "../extensions/output-cap.ts";
 
+const PK = "PRIVATE" + " KEY";
+
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "pi-output-cap-")); });
 afterEach(() => { chmodSync(dir, 0o700); rmSync(dir, { recursive: true, force: true }); });
@@ -68,6 +70,43 @@ test("capResult writes the full output and points the marker at it; ranged reads
 	assert.equal(readFileSync(path, "utf8"), full);
 	assert.ok(content[0].text.includes(`[full output: ${path}, 1000 lines, ${full.length} chars;`));
 	assert.ok(content[0].text.length < 8300);
+});
+
+test("offloads and truncates masked full text, including env values in the elided middle", () => {
+	const value = "Pr0dMongo!pass";
+	const full = `{"name":"MONGODB_PASSWORD","value":"${value}"}\n` + lines(1000, i => i === 500
+		? `{"value":"${value}","name":"Chronicle__ClientSecret"}` : `ok ${i} ${"x".repeat(40)}`)
+		+ `\n-----BEGIN ${PK}-----\nfixture-material\n-----END ${PK}-----\n`;
+	const event = { toolName: "read", toolCallId: "masked", input: {}, content: text(full) };
+	const content = capResult(event, 12000, [dir])!;
+	const saved = readFileSync(join(dir, "masked.txt"), "utf8");
+	assert.equal(saved.match(/\[REDACTED:env-value\]/g)?.length, 2);
+	assert.match(saved, /\[REDACTED:private-key\]/);
+	for (const output of [saved, content[0].text]) {
+		assert.ok(!output.includes(value));
+		assert.ok(!output.includes("fixture-material"));
+	}
+	assert.match(content[0].text, /\[REDACTED:env-value\]/);
+	assert.match(content[0].text, /3 value\(s\) redacted/);
+	assert.ok(event.content[0].text.includes(value), "does not mutate the caller's parts");
+});
+
+test("an incomplete PEM is masked before any offload/truncation", () => {
+	const full = lines(1000) + "\n-----BEGIN RSA " + PK + "-----\nfixture-material";
+	const content = capResult({ toolName: "read", toolCallId: "fragment", input: {}, content: text(full) }, 12000, [dir])!;
+	for (const output of [readFileSync(join(dir, "fragment.txt"), "utf8"), content[0].text]) {
+		assert.match(output, /\[REDACTED:private-key\]/);
+		assert.ok(!output.includes("fixture-material"));
+	}
+});
+
+test("unscanned oversized output never reaches disk or the truncated transcript", () => {
+	const full = "x".repeat(2 * 1024 * 1024 + 1) + "Pr0dMongo!pass";
+	const content = capResult({ toolName: "read", toolCallId: "oversize", input: {}, content: text(full) }, 12000, [dir])!;
+	for (const output of [readFileSync(join(dir, "oversize.txt"), "utf8"), content[0].text]) {
+		assert.match(output, /Output omitted/);
+		assert.ok(!output.includes("Pr0dMongo!pass"));
+	}
 });
 
 test("offload falls back to the next directory and reports when nothing is writable", () => {
