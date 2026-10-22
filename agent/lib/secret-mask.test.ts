@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { mock, test } from "node:test";
 import { setGuards } from "./guards.ts";
 import { guardSelect } from "./orchestration.ts";
+import type { CratisRunner } from "./cratis-hooks-detect.ts";
 import { cratisRepo } from "./cratis-hooks-detect.test.ts";
 import extension from "../extensions/secret-mask.ts";
 import {
@@ -317,7 +318,7 @@ test("audit log contains exactly metadata, never text or values", () => temporar
 	assert.ok(Number.isFinite(Date.parse(rows[0].at)));
 }));
 
-function fixture(options: { hasUI?: boolean; orchestrated?: boolean; guardOff?: boolean; choice?: string; config?: Partial<typeof DEFAULTS> } = {}) {
+function fixture(options: { hasUI?: boolean; orchestrated?: boolean; guardOff?: boolean; choice?: string; config?: Partial<typeof DEFAULTS>; runner?: CratisRunner } = {}) {
 	const records: unknown[][] = [], decisions: unknown[][] = [], errors: string[] = [], notices: unknown[][] = [], selections: unknown[][] = [];
 	const config = { ...DEFAULTS, ...options.config };
 	const ctx: any = {
@@ -326,7 +327,7 @@ function fixture(options: { hasUI?: boolean; orchestrated?: boolean; guardOff?: 
 	};
 	const handlers = createHandlers({
 		config: () => config, role: () => "main", guardOff: () => options.guardOff ?? false,
-		orchestrated: () => options.orchestrated ?? false,
+		orchestrated: () => options.orchestrated ?? false, ...(options.runner ? { cratisRunner: options.runner } : {}),
 		select: async (ui, guard, title, choices, fallback, opts) => {
 			const directory = mkdtempSync(join(tmpdir(), "secret-mask-dialog-test-"));
 			try {
@@ -473,19 +474,50 @@ test("config flags are independent; enabled false and excluded scope disable all
 	assert.equal(f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: `sk-ant-${a}` }] }, f.ctx), undefined);
 });
 
-test("layering: with the Cratis secrets hook the local block stands down (redaction stays); without it, it blocks as before", async () => {
+test("layering: with the Cratis secrets hook, local stands down only where Cratis itself blocks (redaction stays)", async () => {
 	const withHook = cratisRepo();
 	const without = cratisRepo({ scripts: ["cratis-guard-store-mutations.sh"] });
+	const payloads: any[] = [];
+	// Stands in for cratis-guard-secrets.sh: blocks (exit 2) what its prefilter knows, allows the rest.
+	const cratis: CratisRunner = (script, cwd, stdin) => {
+		const input = JSON.parse(stdin);
+		payloads.push({ script, cwd, input });
+		return { status: /printenv|kubectl/.test(input.tool_input.command) ? 2 : 0 };
+	};
+	const env = process.env.CRATIS_HOOKS_ALLOW_SECRET_READS;
+	delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS;
 	try {
-		const on = fixture({ hasUI: false });
-		on.ctx.cwd = withHook.sub;
-		assert.equal(await on.call(), undefined); // cratis-guard-secrets.sh owns blocking; CRATIS_HOOKS_ALLOW_SECRET_READS is the switch
-		assert.deepEqual(on.decisions, [["secrets", "stand-down:cratis-hook", "environment"]]);
-		const redacted = on.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: "token: ghp_" + "a".repeat(36) }] }, on.ctx);
-		assert.ok(redacted, "redaction still runs");
-		assert.ok(!JSON.stringify(redacted).includes("ghp_" + "a".repeat(36)));
-		const off = fixture({ hasUI: false });
+		const overlap = fixture({ hasUI: false, runner: cratis });
+		overlap.ctx.cwd = withHook.sub;
+		assert.equal(await overlap.call("printenv"), undefined); // Cratis blocks it: one block
+		assert.deepEqual(overlap.decisions, [["secrets", "stand-down:cratis-hook", "environment"]]);
+		assert.equal(payloads[0].cwd, withHook.root);
+		assert.equal(payloads[0].input.tool_name, "Bash");
+		assert.ok(payloads[0].script.endsWith("cratis-guard-secrets.sh"));
+		const redacted = overlap.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: "token: ghp_" + "a".repeat(36) }] }, overlap.ctx);
+		assert.ok(redacted && !JSON.stringify(redacted).includes("ghp_" + "a".repeat(36)));
+
+		const localOnly = fixture({ hasUI: false, runner: cratis });
+		localOnly.ctx.cwd = withHook.sub;
+		assert.equal((await localOnly.call("helm get values x"))?.block, true); // Cratis allows it: local still blocks
+
+		for (const failing of [() => ({ status: null, error: new Error("ETIMEDOUT") }), () => ({ status: 127 }), () => { throw new Error("spawn"); }]) {
+			const f = fixture({ hasUI: false, runner: failing as CratisRunner });
+			f.ctx.cwd = withHook.sub;
+			assert.equal((await f.call("printenv"))?.block, true); // unknown result: fail closed to today's behaviour
+		}
+
+		process.env.CRATIS_HOOKS_ALLOW_SECRET_READS = "1";
+		const allowed = fixture({ hasUI: false, runner: () => { throw new Error("must not run"); } });
+		allowed.ctx.cwd = withHook.sub;
+		assert.equal(await allowed.call("helm get values x"), undefined); // one switch
+		delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS;
+
+		const off = fixture({ hasUI: false, runner: () => ({ status: 2 }) });
 		off.ctx.cwd = without.sub;
-		assert.equal((await off.call())?.block, true);
-	} finally { withHook.cleanup(); without.cleanup(); }
+		assert.equal((await off.call())?.block, true); // no Cratis script: unchanged
+	} finally {
+		if (env === undefined) delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS; else process.env.CRATIS_HOOKS_ALLOW_SECRET_READS = env;
+		withHook.cleanup(); without.cleanup();
+	}
 });

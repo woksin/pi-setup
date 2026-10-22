@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { cratisHookActive, cratisReadOnlyCommands, cratisSwitchOn, repoRoot } from "./cratis-hooks-detect.ts";
+import { cratisHookActive, cratisReadOnlyCommands, cratisSecretsStandsDown, cratisSwitchOn, repoRoot } from "./cratis-hooks-detect.ts";
 
 /** A temp repo with the named Cratis hook scripts and (optionally) the Cratis Pi extension. */
 export function cratisRepo(options: { scripts?: string[]; extension?: boolean; list?: string } = {}): { root: string; sub: string; cleanup: () => void } {
@@ -53,4 +53,17 @@ test("read-only list: read from the Cratis JSON; missing, unparsable or malforme
 		repos.push(absent);
 		assert.equal(cratisReadOnlyCommands(absent.sub, {}), undefined);
 	} finally { for (const r of repos) r.cleanup(); }
+});
+
+test("cratisSecretsStandsDown: real script exit 2 stands down, exit 0 / timeout / absent do not, the switch always does", () => {
+	const repo = cratisRepo();
+	const script = join(repo.root, ".cratis", "ai", "hooks", "scripts", "cratis-guard-secrets.sh");
+	try {
+		writeFileSync(script, '#!/usr/bin/env bash\ngrep -q printenv && { echo blocked >&2; exit 2; }\nexit 0\n');
+		assert.equal(cratisSecretsStandsDown(repo.sub, "printenv", {}), true);
+		assert.equal(cratisSecretsStandsDown(repo.sub, "helm get values x", {}), false);
+		assert.equal(cratisSecretsStandsDown(repo.sub, "helm get values x", { CRATIS_HOOKS_ALLOW_SECRET_READS: "1" }), true);
+		assert.equal(cratisSecretsStandsDown(repo.sub, "printenv", {}, () => ({ status: 2, error: new Error("timeout") })), false);
+		assert.equal(cratisSecretsStandsDown(mkdtempSync(join(tmpdir(), "no-cratis-")), "printenv", {}), false);
+	} finally { repo.cleanup(); }
 });

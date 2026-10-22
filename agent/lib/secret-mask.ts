@@ -7,9 +7,11 @@
  * (e.g. ^L13-LOCAL-FAKE); a match exempts that value, NEVER command blocking. Invalid
  * expressions are ignored. Keep this list narrow; its expressions are operator-trusted.
  * Layering with the Cratis hooks: where the repository has cratis-guard-secrets.sh and the Cratis Pi extension
- * (lib/cratis-hooks-detect.ts), that hook owns BLOCKING — this extension then refuses nothing, so a command is blocked
- * once, with one message, and CRATIS_HOOKS_ALLOW_SECRET_READS=1 (set where the harness starts) is the one switch;
- * /guards off secrets is not needed there. Redaction always stays on. Elsewhere blocking is unchanged.
+ * (lib/cratis-hooks-detect.ts), a command this extension would block is first put to that script (3 s, same payload
+ * as the Cratis extension). If Cratis blocks it, this extension stands down: one block, one message. If Cratis allows
+ * it (patterns only this extension knows, e.g. helm/op/security) or cannot say (spawn error, timeout), this extension
+ * blocks as before. CRATIS_HOOKS_ALLOW_SECRET_READS=1 (set where the harness starts) stands this extension down too.
+ * Redaction always stays on. Elsewhere blocking is unchanged.
  * /guards off secrets disables blocking only, NOT redaction. enabled:false disables these
  * handlers; output-cap independently pre-masks offloads. redactResults/redactInput and scope
  * are explicit operator controls, not guard switches.
@@ -26,9 +28,10 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isGuardOff } from "./guards.ts";
-import { cratisHookActive } from "./cratis-hooks-detect.ts";
+import { cratisSecretsStandsDown, spawnRunner } from "./cratis-hooks-detect.ts";
 import { guardSelect, isOrchestrated, orchLog } from "./orchestration.ts";
 import { logError, processRoles, scopeAllows } from "./output-cap.ts";
+import type { CratisRunner } from "./cratis-hooks-detect.ts";
 import type { Role, Scope } from "./output-cap.ts";
 
 export interface Config {
@@ -356,7 +359,8 @@ interface Dependencies {
 	config: () => Config;
 	guardOff: () => boolean;
 	orchestrated: (cwd: string) => boolean;
-	cratisSecrets: (cwd: string) => boolean;
+	cratisRunner: CratisRunner;
+	cratisSecrets: (cwd: string, command: string) => boolean;
 	select: typeof guardSelect;
 	decision: typeof orchLog;
 	record: typeof logRedaction;
@@ -369,7 +373,8 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 		config: loadConfig,
 		guardOff: () => isGuardOff("secrets"),
 		orchestrated: cwd => isOrchestrated(process.env, cwd),
-		cratisSecrets: cwd => cratisHookActive(cwd, "secrets"),
+		cratisRunner: spawnRunner,
+		cratisSecrets: (cwd, command) => cratisSecretsStandsDown(cwd, command, process.env, overrides.cratisRunner ?? spawnRunner),
 		select: guardSelect, decision: orchLog, record: logRedaction,
 		error: event => logError("secret-mask", event, "Secret masking could not complete; no credential values logged"),
 		role: session => roles.role(session), ...overrides,
@@ -404,7 +409,7 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 				if (!config?.blockCommands) return;
 				const matched = commandRule(String(event.input.command ?? ""));
 				if (!matched) return;
-				if (deps.cratisSecrets(ctx.cwd)) { deps.decision("secrets", "stand-down:cratis-hook", matched.name); return; }
+				if (deps.cratisSecrets(ctx.cwd, String(event.input.command ?? ""))) { deps.decision("secrets", "stand-down:cratis-hook", matched.name); return; }
 				if (deps.guardOff()) { deps.decision("secrets", "allow:guard-off", matched.name); return; }
 				const reason = blockReason(matched);
 				if (deps.orchestrated(ctx.cwd) || !ctx.hasUI) {

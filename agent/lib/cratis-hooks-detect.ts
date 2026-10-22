@@ -9,6 +9,7 @@
  * A concern counts as covered only when the repository root (nearest ancestor of the cwd holding `.git` or
  * `.cratis`) has both that script and the Cratis Pi extension directory. Pure filesystem reads; never throws.
  */
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
@@ -75,5 +76,34 @@ export function cratisReadOnlyCommands(cwd: string, env: NodeJS.ProcessEnv = pro
 		return (paths as string[]).map(path => path.trim().toLowerCase().split(/\s+/).join(" ")).filter(Boolean);
 	} catch {
 		return undefined;
+	}
+}
+
+export interface RunnerResult { status: number | null; error?: unknown }
+/** Runs a Cratis hook script synchronously with the Pi extension's payload on stdin. */
+export type CratisRunner = (script: string, cwd: string, stdin: string, timeoutMs: number) => RunnerResult;
+export const spawnRunner: CratisRunner = (script, cwd, stdin, timeoutMs) => {
+	const run = spawnSync("bash", [script], { cwd, input: stdin, timeout: timeoutMs, stdio: ["pipe", "ignore", "ignore"] });
+	return { status: run.status, error: run.error };
+};
+export const CRATIS_SCRIPT_TIMEOUT_MS = 3000;
+
+/**
+ * Would the Cratis secrets hook already block `command`? True only on its own verdict (exit 2, the code the
+ * Cratis Pi extension treats as a block) or when the human switch CRATIS_HOOKS_ALLOW_SECRET_READS=1 is set
+ * (one switch). A spawn error, timeout, or any other result is "no": the caller keeps blocking as it did before.
+ * Spawning is synchronous, which is fine because callers only ask for commands they would block anyway.
+ */
+export function cratisSecretsStandsDown(cwd: string, command: string, env: NodeJS.ProcessEnv = process.env, run: CratisRunner = spawnRunner): boolean {
+	if (!cratisHookActive(cwd, "secrets")) return false;
+	if (cratisSwitchOn("secrets", env)) return true;
+	const dir = scriptsDir(cwd);
+	const root = repoRoot(cwd);
+	if (dir === undefined || root === undefined) return false;
+	try {
+		const result = run(join(dir, SCRIPT.secrets), root, JSON.stringify({ cwd, tool_name: "Bash", tool_input: { command } }), CRATIS_SCRIPT_TIMEOUT_MS);
+		return !result.error && result.status === 2;
+	} catch {
+		return false;
 	}
 }
