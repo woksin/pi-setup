@@ -32,7 +32,8 @@
     "npm:pi-browser-use",
     "npm:donsetch",
     "npm:@woksin/pi-context-budget",
-    "npm:@woksin/pi-orch"
+    "npm:@woksin/pi-orch",
+    "./local-packages/pi-questions"
   ],
   "hideThinkingBlock": true,
   "modelThinkingLevels": {

@@ -1,0 +1,47 @@
+{
+  "name": "@woksin/pi-questions",
+  "version": "0.1.0",
+  "description": "A durable queue of questions and decisions for the user, answered back to the asking pi session",
+  "license": "MIT",
+  "author": "woksin",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "questions",
+    "decisions"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/woksin/pi-setup.git",
+    "directory": "agent/local-packages/pi-questions"
+  },
+  "homepage": "https://github.com/woksin/pi-setup/tree/main/agent/local-packages/pi-questions#readme",
+  "bugs": {
+    "url": "https://github.com/woksin/pi-setup/issues"
+  },
+  "files": [
+    "src/",
+    "dist/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "type": "module",
+  "bin": {
+    "pi-questions": "./dist/cli.js"
+  },
+  "scripts": {
+    "test": "node --test --test-timeout=30000 'test/*.test.ts'",
+    "prepack": "node scripts/build.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  }
+}

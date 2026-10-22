@@ -191,13 +191,15 @@ Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subage
 
 ### Experimental and git-only packages
 
+- `agent/local-packages/pi-questions` (bundled here, not on npm; `install.sh` installs it and adds `./local-packages/pi-questions` to `packages`): a durable queue of questions and decisions for the user. Sessions ask with the `user_questions` tool, the user answers with `/questions` and `/answer` from any session, and the asking session is woken with the answer. Items live in `~/.pi/agent/user-questions` (`PI_QUESTIONS_HOME` overrides). CLI: `node ~/.pi/agent/local-packages/pi-questions/dist/cli.js list|get|ask|wait`; a background watch on `wait Q-n` exits once the item is answered. See its README.
+
 - [woksin/pi-orch](https://github.com/woksin/pi-orch) (experimental; npm: [`@woksin/pi-orch`](https://www.npmjs.com/package/@woksin/pi-orch)): repo-owner orchestration with a durable order bus, batched candidate PRs and a shared GitHub poller. Expect rough edges; remove it from `packages` if you don't want it.
 - [woksin/pi-context-budget](https://github.com/woksin/pi-context-budget) (npm: [`@woksin/pi-context-budget`](https://www.npmjs.com/package/@woksin/pi-context-budget)): structured context handoffs and bounded long sessions. Observe mode by default; the default config is `context-budget.json`. Fresh-process fallback needs its `pi-session` wrapper on PATH (see that repo's INSTALL.md).
 
 ## What is deliberately not included
 
 - Auth, accounts, sessions, jobs, logs, backups, caches, trust and approval files, and any per-machine runtime state (`pi-phase/state`, `issue-work/` registry, `docker-guardian` state, `lane-policy/policy.json`, the active profile marker).
-- `local-packages/`: published separately (see above). The unloaded `model-safety-*` and `pi-subagents-reliability-*` packages are not part of the setup.
+- `local-packages/` other than `pi-questions`: published separately (see above). The unloaded `model-safety-*` and `pi-subagents-reliability-*` packages are not part of the setup.
 - Retired profiles, `*.bak*` files, and the `fd` and `rg` binaries in `bin/`.
 - The CodeScene skills (see above).
 - `user.json`: operator identity and repositories root are local install settings, never synced into this repo.

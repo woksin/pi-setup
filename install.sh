@@ -59,11 +59,22 @@ fi
 for d in agents extensions early-extensions lib workflows templates profiles loose-threads bin pi-phase lane-policy; do
   tree "agent/$d" "$PI/$d"
 done
+tree agent/local-packages/pi-questions "$PI/local-packages/pi-questions"
+[[ $DRY == --dry-run ]] || chmod +x "$PI/local-packages/pi-questions/dist/cli.js"
 put agent/AGENTS.md "$PI/AGENTS.md"
 put agent/AGENTS.subagent.md "$PI/AGENTS.subagent.md"
 for f in settings.json models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json; do
   [[ -e $PI/$f ]] || put "agent/$f" "$PI/$f"
 done
+# existing installs: register the bundled pi-questions package once (backup first)
+if [[ -e $PI/settings.json ]] && ! jq -e '.packages // [] | index("./local-packages/pi-questions")' "$PI/settings.json" >/dev/null; then
+  echo "register ./local-packages/pi-questions in $PI/settings.json"
+  if [[ $DRY != --dry-run ]]; then
+    cp -p "$PI/settings.json" "$PI/settings.json.bak-$TS"
+    jq '.packages = ((.packages // []) + ["./local-packages/pi-questions"])' "$PI/settings.json" > "$PI/settings.json.tmp-$TS"
+    mv "$PI/settings.json.tmp-$TS" "$PI/settings.json"
+  fi
+fi
 [[ -e $PI/docker-guardian/pinned.txt ]] || put agent/docker-guardian/pinned.example.txt "$PI/docker-guardian/pinned.txt"
 [[ -e $PI/dev-doctor.json ]] || put agent/dev-doctor.example.json "$PI/dev-doctor.json"
 [[ -e $PI/npm/package.json ]] || put agent/npm-package.json "$PI/npm/package.json"

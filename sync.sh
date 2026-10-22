@@ -12,6 +12,10 @@ for d in agents extensions early-extensions lib workflows templates loose-thread
 done
 "${RS[@]}" --exclude=fd --exclude=rg "$PI/bin/" agent/bin/
 "${RS[@]}" --exclude=state "$PI/pi-phase/" agent/pi-phase/
+# pi-questions ships as source inside this repo (no npm package); dist/ is the CLI, rebuilt here
+(cd "$PI/local-packages/pi-questions" && node scripts/build.mjs)
+"${RS[@]}" --exclude=.git --exclude=.github --exclude=.gitignore --exclude=.ai-work --exclude='*.tgz' --exclude='*.log' \
+  "$PI/local-packages/pi-questions/" agent/local-packages/pi-questions/
 # publishing sanitisers: per-user label in docker-guardian, author-specific inbox path and notes path
 sed -i '' -e "s#com\\.$(id -un)\\.#com.example.#g" agent/bin/docker-guardian agent/bin/pi-cleanup
 sed -i '' -e 's#\${INBOX_DIR:-[^}]*}#${INBOX_DIR:-$HOME/.pi/agent/inbox}#' agent/bin/inbox-watch
