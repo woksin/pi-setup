@@ -1,7 +1,7 @@
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { homeRel, sha256 } from "./manifest.ts";
+import { fileSha, homeRel } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
 import type { Action, Ctx } from "./types.ts";
 
@@ -11,14 +11,6 @@ export interface Reconciled {
   actions: Action[];
   /** The `keep` actions, in plan order; interactive runs may turn some into `take`. */
   conflicts: KeepAction[];
-}
-
-function diskSha(path: string): string | undefined {
-  try {
-    return lstatSync(path).isFile() ? sha256(readFileSync(path)) : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function newVersionNeedsWrite(newPath: string, content: Buffer): boolean {
@@ -36,12 +28,15 @@ export function reconcile(actions: Action[], manifest: Manifest | undefined, hom
     if (action.op !== "install" || action.merge) return action;
     if (!action.existed || !existsSync(action.path)) return { ...action, decision: "new" };
     const entry = manifest?.files[homeRel(home, action.path)];
-    if (!entry) return { ...action, decision: "replace" };
-    if (diskSha(action.path) === entry.sha256) return { ...action, decision: "update" };
+    if (!action.noMarkers) {
+      if (!entry) return { ...action, decision: "replace" };
+      if (fileSha(action.path) === entry.sha256) return { ...action, decision: "update" };
+    }
     const newPath = `${action.path}.pi-setup-new`;
     const keep: KeepAction = {
       op: "keep", path: action.path, newPath, content: action.content, mode: action.mode, mtimeMs: action.mtimeMs,
       write: newVersionNeedsWrite(newPath, action.content),
+      ...(action.noMarkers ? { noMarkers: true } : {}),
     };
     conflicts.push(keep);
     return keep;

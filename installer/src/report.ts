@@ -35,6 +35,8 @@ function symbol(status: string | undefined): string {
   return status === "not_ready" ? "✗" : "?";
 }
 
+export const KEPT_EDITS = "kept your edits; `pi-profile save` to adopt them into the profile";
+
 export function summaryLines(args: {
   settings: ResolvedSettings;
   detection: Detection;
@@ -61,6 +63,13 @@ export function summaryLines(args: {
     `Files: ${counts.added} new, ${counts.changed} changed${counts.kept ? `, ${counts.kept} kept (changed by you)` : ""}${counts.register ? ", register pi-questions" : ""}`,
     `npm install: ${args.skipNpm ? "skipped (--skip-npm)" : args.npm ? "yes" : "up to date"}`,
   );
+  const kept = actions.filter((a) => a.op === "keep");
+  if (kept.some((a) => /\/\.pi\/agent\/(agents\/[^/]+\.md|workflows\/[^/]+\.js)$/.test(a.path))) {
+    lines.push(KEPT_EDITS);
+  }
+  if (kept.some((a) => a.op === "keep" && a.noMarkers)) {
+    lines.push("AGENTS.md has no pi-profile routing markers, so it is reconciled as a whole file; the new version is in AGENTS.md.pi-setup-new");
+  }
   for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines.push(`warning: ${warning}`);
   return lines;
 }

@@ -16,7 +16,7 @@ import {
   chooseProfile, kimiNote, loadProfiles, overlayFor, pinnedModels, pinWarnings, profileNames, profilesDir,
 } from "./profiles.ts";
 import type { Choice } from "./profiles.ts";
-import { summaryLines } from "./report.ts";
+import { KEPT_EDITS, summaryLines } from "./report.ts";
 import { readSettings, resolveSettings } from "./settings.ts";
 import type { ResolvedSettings } from "./settings.ts";
 import { CANCEL, SetupError } from "./types.ts";
@@ -202,7 +202,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     spinner: prompter?.spinner(),
   };
   const result = await apply(ctx, r.actions, applyOptions, manifest);
-  const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:"));
+  const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no"));
   return finish(ctx, baseCtx, options, r, detection, shown, result.code, prompter, result.wrote);
 }
 

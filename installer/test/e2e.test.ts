@@ -137,18 +137,16 @@ describe("install (e2e)", () => {
     assert.deepEqual(profileCalls(box), []);
   });
 
-  test("an existing ACTIVE plus --profile runs pi-profile once (Q2)", () => {
+  test("an existing ACTIVE plus --profile switches ACTIVE without ever calling pi-profile", () => {
     const box = fresh();
     assert.equal(install(box, ARGS(box)).status, 0);
     const run = install(box, ["--yes", "--profile", "openai-only"]);
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    const calls = profileCalls(box);
-    assert.equal(calls.length, 1, calls.join("\n"));
-    assert.match(calls[0], /pi-profile use openai-only --force$/);
+    assert.deepEqual(profileCalls(box), []);
     assert.equal(readFileSync(piPath(box, "profiles/ACTIVE"), "utf8"), "openai-only\n");
     const again = install(box, ["--yes"]);
     assert.deepEqual(installLines(again.stdout), []);
-    assert.equal(profileCalls(box).length, 1);
+    assert.deepEqual(profileCalls(box), []);
   });
 
   test("Kimi missing is said once in the summary", () => {

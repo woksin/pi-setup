@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: a586111ef71b1fc1ae135b99fddf9d0ae4bc1b81a67eb91ddba42f6c3bcd5de9
+// pi-setup-source-sha256: 1e5df008beffd2bcee8aaae229d091e56e3488af5309e6a8d6c563b6436aca20
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -287,10 +287,17 @@ var init_settings = __esm({
 
 // src/manifest.ts
 import { createHash } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2 } from "node:fs";
+import { existsSync as existsSync3, lstatSync, readFileSync as readFileSync2 } from "node:fs";
 import { isAbsolute, join as join3, relative } from "node:path";
 function sha256(buf) {
   return createHash("sha256").update(buf).digest("hex");
+}
+function fileSha(path) {
+  try {
+    return lstatSync(path).isFile() ? sha256(readFileSync2(path)) : void 0;
+  } catch {
+    return void 0;
+  }
 }
 function emptyManifest(now) {
   const stamp = now.toISOString();
@@ -335,6 +342,7 @@ function validateManifest(home, m) {
     fromHomeRel(home, l2.target);
   }
   for (const rel of m.dirs) fromHomeRel(home, rel);
+  for (const rel of Object.keys(m.pendingNew ?? {})) fromHomeRel(home, rel);
   for (const [rel, j] of Object.entries(m.json)) {
     fromHomeRel(home, rel);
     if (j.backup !== void 0) checkBackupRel(j.backup);
@@ -518,7 +526,7 @@ var init_backups = __esm({
 import {
   chmodSync as chmodSync2,
   existsSync as existsSync5,
-  lstatSync,
+  lstatSync as lstatSync2,
   mkdirSync as mkdirSync3,
   readFileSync as readFileSync3,
   statSync as statSync4,
@@ -540,15 +548,11 @@ async function sourceOf(ctx) {
   };
   return { release: await git2(["describe", "--tags", "--exact-match", "HEAD"]), commit: await git2(["rev-parse", "HEAD"]) };
 }
-function touchesProfile(actions, piDir, profile) {
-  const watched = [join5(piDir, "agents"), join5(piDir, "workflows"), join5(piDir, "profiles", profile), join5(piDir, "AGENTS.md")];
-  return actions.some((a2) => (a2.op === "install" || a2.op === "register") && watched.some((w) => a2.path === w || a2.path.startsWith(`${w}/`)));
-}
 function npmInputs(piDir) {
   const pkg = join5(piDir, "npm", "package.json");
   if (!existsSync5(pkg)) return void 0;
   const lock = join5(piDir, "npm", "package-lock.json");
-  return { packageJson: hashFile(pkg), ...existsSync5(lock) ? { lock: hashFile(lock) } : {} };
+  return { packageJson: fileSha(pkg) ?? "", ...fileSha(lock) ? { lock: fileSha(lock) } : {} };
 }
 function needsNpm(actions, piDir, manifest, force = false) {
   const npmDir = join5(piDir, "npm");
@@ -577,7 +581,7 @@ async function apply(ctx, actions, options, manifest) {
   try {
     run.source = await sourceOf(ctx);
     for (const action of actions) run.execute(action);
-    code = await applyProfile(ctx, actions, options, piDir, run);
+    applyProfile(options, piDir, run);
     if (code === 0) {
       const npm = await runNpm(ctx, actions, options, piDir, manifest);
       code = npm.code;
@@ -589,25 +593,11 @@ async function apply(ctx, actions, options, manifest) {
   }
   return { code, wrote: run.wrote };
 }
-async function applyProfile(ctx, actions, options, piDir, run) {
-  const active = join5(piDir, "profiles", "ACTIVE");
-  if (options.activeBefore === void 0) {
-    mkdirSync3(dirname3(active), { recursive: true });
-    atomicWrite(active, `${options.profile}
-`, 420);
-    run.wrote = true;
-    run.trackActive(active, true);
-    return 0;
-  }
-  if (options.activeBefore === options.profile && !touchesProfile(actions, piDir, options.profile)) return 0;
-  run.wrote = true;
-  run.trackActive(active, false);
-  const result = await ctx.run("python3", [join5(piDir, "bin", "pi-profile"), "use", options.profile, "--force"], { timeoutMs: 6e4 });
-  if (result.code !== 0) {
-    ctx.err(`pi-profile use ${options.profile} failed: ${(result.stderr || result.stdout).trim()}`);
-    return 1;
-  }
-  return 0;
+function applyProfile(options, piDir, run) {
+  if (options.activeBefore === options.profile) return;
+  const path = join5(piDir, "profiles", "ACTIVE");
+  run.execute({ op: "install", path, content: Buffer.from(`${options.profile}
+`), mode: 420, existed: options.activeBefore !== void 0 });
 }
 async function runNpm(ctx, actions, options, piDir, manifest) {
   if (options.skipNpm) return { code: 0, ran: false };
@@ -629,19 +619,19 @@ function readActive(piDir) {
   const file = join5(piDir, "profiles", "ACTIVE");
   return existsSync5(file) ? readFileSync3(file, "utf8").trim() : void 0;
 }
-var KEEP_RUNS, hashFile, modeOf, Run;
+var KEEP_RUNS, modeOf, Run;
 var init_apply = __esm({
   "src/apply.ts"() {
     init_fsx();
     init_backups();
     init_manifest();
     KEEP_RUNS = 10;
-    hashFile = (path) => sha256(readFileSync3(path));
     modeOf = (path) => statSync4(path).mode & 4095;
     Run = class {
       backups;
       next;
-      touched = /* @__PURE__ */ new Set();
+      /** Files this run wrote or adopted; only these may be chmodded or recorded. */
+      written = /* @__PURE__ */ new Set();
       wrote = false;
       source;
       dirs = /* @__PURE__ */ new Set();
@@ -679,8 +669,9 @@ var init_apply = __esm({
       }
       install(a2) {
         const backup = a2.existed ? this.backupIfThere(a2.path) : void 0;
+        const priorSha = fileSha(a2.path);
         this.ensureDir(dirname3(a2.path));
-        if (a2.path.endsWith("/user.json") || a2.path.endsWith("/settings.json")) {
+        if (/\/(user\.json|settings\.json|ACTIVE)$/.test(a2.path)) {
           atomicWrite(a2.path, a2.content, a2.mode);
         } else {
           writeFileSync(a2.path, a2.content);
@@ -688,39 +679,47 @@ var init_apply = __esm({
         }
         if (a2.mtimeMs !== void 0) utimesSync2(a2.path, a2.mtimeMs / 1e3, a2.mtimeMs / 1e3);
         this.wrote = true;
-        if (a2.merge === "user-json") this.recordJson(a2.path, !a2.existed, backup, a2.jsonOps ?? []);
-        else this.recordFile(a2.path, backup);
+        if (a2.merge === "user-json") this.recordJson(a2.path, a2.content, priorSha, !a2.existed, backup, a2.jsonOps ?? []);
+        else this.recordFile(a2.path, a2.content, backup);
       }
-      recordFile(path, backup) {
+      /** Record a file this run wrote, with the hash of the bytes it wrote. */
+      recordFile(path, content, backup) {
         const rel = this.rel(path);
         const entry = this.next.files[rel] ?? { sha256: "", mode: 0, source: this.source, origin: backup ? "replaced" : "new", ...backup ? { backup } : {} };
-        entry.sha256 = hashFile(path);
+        entry.sha256 = sha256(content);
         entry.mode = modeOf(path);
         entry.source = this.source;
         delete entry.pending;
         this.next.files[rel] = entry;
-        this.touched.add(path);
+        this.written.add(path);
       }
-      recordJson(path, created, backup, ops) {
+      /** priorSha is the hash on disk just before this run wrote; a mismatch with the recorded one means the user edited the file. */
+      recordJson(path, content, priorSha, created, backup, ops) {
         const rel = this.rel(path);
         const entry = this.next.json[rel] ?? { created, sha256After: "", ops: [] };
+        if (this.next.json[rel] && priorSha !== entry.sha256After) entry.edited = true;
         if (backup && !entry.created && !entry.backup) entry.backup = backup;
         for (const op of ops) {
           if (op.op === "set") recordSet(entry, op);
           else recordArrayAdd(entry, op);
         }
-        entry.sha256After = hashFile(path);
+        entry.sha256After = sha256(content);
         this.next.json[rel] = entry;
       }
       register(a2) {
         const file = this.next.files[this.rel(a2.path)];
-        const unmodified = Boolean(file) && existsSync5(a2.path) && hashFile(a2.path) === file.sha256;
+        const priorSha = fileSha(a2.path);
+        const unmodified = Boolean(file) && priorSha === file.sha256;
         const backup = a2.existed ? this.backupIfThere(a2.path) : void 0;
         this.ensureDir(dirname3(a2.path));
         atomicWrite(a2.path, a2.content, a2.mode);
         this.wrote = true;
-        if (file && (unmodified || !a2.existed)) this.recordFile(a2.path, void 0);
-        else this.recordJson(a2.path, false, backup, a2.jsonOps ?? []);
+        if (file && (unmodified || !a2.existed)) {
+          this.recordFile(a2.path, a2.content, void 0);
+          this.recordJson(a2.path, a2.content, priorSha, true, void 0, a2.jsonOps ?? []);
+        } else {
+          this.recordJson(a2.path, a2.content, priorSha, false, backup, a2.jsonOps ?? []);
+        }
       }
       keep(a2) {
         if (a2.write) {
@@ -729,15 +728,17 @@ var init_apply = __esm({
           this.wrote = true;
         }
         const entry = this.next.files[this.rel(a2.path)];
-        if (entry) entry.pending = { path: this.rel(a2.newPath), sha256: sha256(a2.content) };
+        const pending = { path: this.rel(a2.newPath), sha256: sha256(a2.content) };
+        if (entry) entry.pending = pending;
+        else if (existsSync5(a2.newPath)) this.next.pendingNew = { ...this.next.pendingNew, [pending.path]: pending.sha256 };
       }
       adopt(path) {
         const rel = this.rel(path);
         const entry = this.next.files[rel];
         if (!entry) {
-          this.next.files[rel] = { sha256: hashFile(path), mode: modeOf(path), source: this.source, origin: "adopted" };
+          this.next.files[rel] = { sha256: fileSha(path) ?? "", mode: modeOf(path), source: this.source, origin: "adopted" };
         } else {
-          const sha = hashFile(path);
+          const sha = fileSha(path) ?? "";
           if (sha !== entry.sha256) {
             entry.sha256 = sha;
             entry.source = this.source;
@@ -745,11 +746,11 @@ var init_apply = __esm({
           entry.mode = modeOf(path);
           delete entry.pending;
         }
-        this.touched.add(path);
+        this.written.add(path);
       }
       symlink(a2) {
         try {
-          lstatSync(a2.path);
+          lstatSync2(a2.path);
           return;
         } catch {
         }
@@ -758,33 +759,19 @@ var init_apply = __esm({
         this.wrote = true;
         this.next.symlinks[this.rel(a2.path)] = { target: this.rel(a2.target) };
       }
+      /** Only for a file this run wrote or adopted; a kept (user-modified) file is never touched. */
       chmodX(path) {
-        if (existsSync5(path) && (statSync4(path).mode & 73) === 0) {
-          chmodSync2(path, statSync4(path).mode | 73);
+        if (!this.written.has(path) || !existsSync5(path)) return;
+        const mode = statSync4(path).mode;
+        if ((mode & 73) === 0) {
+          chmodSync2(path, mode | 73);
           this.wrote = true;
         }
-        this.touched.add(path);
+        const entry = this.next.files[this.rel(path)];
+        if (entry) entry.mode = modeOf(path);
       }
-      /** ACTIVE was written by this run, or pi-profile may have rewritten it. */
-      trackActive(path, created) {
-        const rel = this.rel(path);
-        if (created && !this.next.files[rel]) {
-          this.next.files[rel] = { sha256: "", mode: 0, source: this.source, origin: "new" };
-          this.touched.add(path);
-        } else if (this.next.files[rel]) {
-          this.touched.add(path);
-        }
-      }
-      /** Hash what is on disk now (pi-profile may have rewritten files), then save and prune. */
+      /** Save the manifest and prune old backups. */
       finish() {
-        for (const path of this.touched) {
-          const entry = this.next.files[this.rel(path)];
-          if (!entry || !existsSync5(path)) continue;
-          const sha = hashFile(path);
-          if (entry.sha256 !== "" && sha !== entry.sha256) entry.source = this.source;
-          entry.sha256 = sha;
-          entry.mode = modeOf(path);
-        }
         for (const rel of [...this.dirs].sort()) if (!this.next.dirs.includes(rel)) this.next.dirs.push(rel);
         if (this.wrote) this.next.source = this.source;
         const hasEntries = Object.keys(this.next.files).length + Object.keys(this.next.json).length + Object.keys(this.next.symlinks).length > 0;
@@ -1178,21 +1165,35 @@ function overlayFor(repoDir2, name, settings2) {
   const base = join8(profilesDir(repoDir2), name);
   if (!existsSync8(base)) throw new SetupError(`unknown profile '${name}'. available: ${profileNames(repoDir2).join(", ")}`);
   const sources = /* @__PURE__ */ new Map();
-  for (const sub of ["agents", "workflows"]) {
+  for (const [sub, ext] of [["agents", ".md"], ["workflows", ".js"]]) {
     for (const file of listFiles(join8(base, sub))) {
-      if (!file.includes("/")) sources.set(`${sub}/${file}`, join8(base, sub, file));
+      if (!file.includes("/") && file.endsWith(ext)) sources.set(`${sub}/${file}`, join8(base, sub, file));
     }
   }
   const routingPath = join8(base, "routing.md");
   return { sources, routing: existsSync8(routingPath) ? render(readFileSync5(routingPath), settings2) : void 0 };
 }
-function spliceRouting(agentsMd2, routing) {
-  const text2 = agentsMd2.toString("utf8");
+function markerLines(text2) {
   const start = text2.indexOf(START);
   const end = text2.indexOf(END);
-  if (start < 0 || end < 0 || end < start) throw new SetupError("routing markers not found in AGENTS.md");
+  if (start < 0 || end < 0 || end < start) return void 0;
   const bodyStart = text2.indexOf("\n", start) + 1;
-  return Buffer.from(text2.slice(0, bodyStart) + routing.toString("utf8") + text2.slice(end), "utf8");
+  if (bodyStart === 0 || bodyStart > end) return void 0;
+  const nl = text2.indexOf("\n", end);
+  return { start, bodyStart, end, endLineEnd: nl < 0 ? text2.length : nl };
+}
+function hasRoutingMarkers(content) {
+  return markerLines(content.toString("utf8")) !== void 0;
+}
+function spliceRouting(agentsMd2, routing, live) {
+  const text2 = agentsMd2.toString("utf8");
+  const m = markerLines(text2);
+  if (!m) throw new SetupError("routing markers not found in AGENTS.md");
+  const l2 = live ? markerLines(live.toString("utf8")) : void 0;
+  const liveText = live?.toString("utf8") ?? "";
+  const startLine = l2 ? liveText.slice(l2.start, l2.bodyStart) : text2.slice(m.start, m.bodyStart);
+  const endLine = l2 ? liveText.slice(l2.end, l2.endLineEnd) : text2.slice(m.end, m.endLineEnd);
+  return Buffer.from(text2.slice(0, m.start) + startLine + routing.toString("utf8") + endLine + text2.slice(m.endLineEnd), "utf8");
 }
 var START, END, FALLBACK_PROFILE;
 var init_profiles = __esm({
@@ -1207,7 +1208,7 @@ var init_profiles = __esm({
 });
 
 // src/plan.ts
-import { existsSync as existsSync9, lstatSync as lstatSync2, readdirSync as readdirSync5, readFileSync as readFileSync6, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync9, lstatSync as lstatSync3, readdirSync as readdirSync5, readFileSync as readFileSync6, statSync as statSync6 } from "node:fs";
 import { join as join9 } from "node:path";
 function fromSource(src, settings2) {
   const raw = readFileSync6(src);
@@ -1257,10 +1258,12 @@ function userJsonAction(actions, piDir, settings2) {
 `)
   });
 }
-function agentsMd(input) {
+function agentsMd(input, live) {
   const base = fromSource(join9(input.repoDir, "agent", "AGENTS.md"), input.settings);
-  if (!input.overlay.routing) return base;
-  return { content: spliceRouting(base.content, input.overlay.routing), mode: base.mode };
+  const existing = existsSync9(live) && statSync6(live).isFile() ? readFileSync6(live) : void 0;
+  const noMarkers = existing !== void 0 && !hasRoutingMarkers(existing);
+  if (!input.overlay.routing) return { ...base, noMarkers };
+  return { content: spliceRouting(base.content, input.overlay.routing, noMarkers ? void 0 : existing), mode: base.mode, noMarkers };
 }
 function registerAction(actions, piDir) {
   const path = join9(piDir, "settings.json");
@@ -1299,7 +1302,11 @@ function buildPlan(input) {
   }
   putTree(actions, join9(agent, "local-packages/pi-questions"), join9(piDir, "local-packages/pi-questions"), settings2);
   actions.push({ op: "chmod-x", path: join9(piDir, "local-packages/pi-questions/dist/cli.js") });
-  put(actions, join9(piDir, "AGENTS.md"), agentsMd(input));
+  const agentsPath = join9(piDir, "AGENTS.md");
+  const { noMarkers, ...agentsDesired } = agentsMd(input, agentsPath);
+  put(actions, agentsPath, agentsDesired);
+  const last = actions[actions.length - 1];
+  if (noMarkers && last.op === "install") last.noMarkers = true;
   putSource(actions, join9(agent, "AGENTS.subagent.md"), join9(piDir, "AGENTS.subagent.md"), settings2);
   for (const name of ONLY_IF_ABSENT) {
     if (!existsSync9(join9(piDir, name))) putSource(actions, join9(agent, name), join9(piDir, name), settings2);
@@ -1330,7 +1337,7 @@ function listSkills(repoDir2) {
 }
 function lstatExists(path) {
   try {
-    lstatSync2(path);
+    lstatSync3(path);
     return true;
   } catch {
     return false;
@@ -1350,16 +1357,9 @@ var init_plan = __esm({
 });
 
 // src/reconcile.ts
-import { existsSync as existsSync10, lstatSync as lstatSync3, mkdtempSync, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync10, mkdtempSync, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join10 } from "node:path";
-function diskSha(path) {
-  try {
-    return lstatSync3(path).isFile() ? sha256(readFileSync7(path)) : void 0;
-  } catch {
-    return void 0;
-  }
-}
 function newVersionNeedsWrite(newPath, content) {
   return !(existsSync10(newPath) && readFileSync7(newPath).equals(content));
 }
@@ -1369,8 +1369,10 @@ function reconcile(actions, manifest, home) {
     if (action.op !== "install" || action.merge) return action;
     if (!action.existed || !existsSync10(action.path)) return { ...action, decision: "new" };
     const entry = manifest?.files[homeRel(home, action.path)];
-    if (!entry) return { ...action, decision: "replace" };
-    if (diskSha(action.path) === entry.sha256) return { ...action, decision: "update" };
+    if (!action.noMarkers) {
+      if (!entry) return { ...action, decision: "replace" };
+      if (fileSha(action.path) === entry.sha256) return { ...action, decision: "update" };
+    }
     const newPath = `${action.path}.pi-setup-new`;
     const keep = {
       op: "keep",
@@ -1379,7 +1381,8 @@ function reconcile(actions, manifest, home) {
       content: action.content,
       mode: action.mode,
       mtimeMs: action.mtimeMs,
-      write: newVersionNeedsWrite(newPath, action.content)
+      write: newVersionNeedsWrite(newPath, action.content),
+      ...action.noMarkers ? { noMarkers: true } : {}
     };
     conflicts.push(keep);
     return keep;
@@ -1426,13 +1429,6 @@ import {
   unlinkSync as unlinkSync2
 } from "node:fs";
 import { dirname as dirname5, join as join11 } from "node:path";
-function shaOf(path) {
-  try {
-    return lstatSync4(path).isFile() ? sha256(readFileSync8(path)) : void 0;
-  } catch {
-    return void 0;
-  }
-}
 function restore(from, to) {
   mkdirSync4(dirname5(to), { recursive: true });
   try {
@@ -1559,6 +1555,11 @@ var init_uninstall = __esm({
       build() {
         const deleted = /* @__PURE__ */ new Set();
         for (const [rel, entry] of Object.entries(this.m.files)) if (this.file(rel, entry)) deleted.add(rel);
+        for (const [rel, sha] of Object.entries(this.m.pendingNew ?? {})) {
+          const path = this.abs(rel);
+          if (fileSha(path) === sha) this.add(`remove ${path}`, () => unlinkSync2(path));
+          delete this.remaining.pendingNew;
+        }
         for (const [rel, link] of Object.entries(this.m.symlinks)) this.symlink(rel, link.target);
         for (const [rel, entry] of Object.entries(this.m.json)) {
           if (deleted.has(rel)) delete this.remaining.json[rel];
@@ -1575,7 +1576,7 @@ var init_uninstall = __esm({
           return false;
         }
         const backup = this.backupFile(entry.backup);
-        if (shaOf(path) !== entry.sha256) {
+        if (fileSha(path) !== entry.sha256) {
           const note2 = backup ? `; your pre-install version: ${backup}` : "";
           this.add(`left (changed by you): ${path}${note2}`, () => {
           });
@@ -1602,7 +1603,7 @@ var init_uninstall = __esm({
         if (!entry.pending) return;
         const path = this.abs(entry.pending.path);
         const expected = entry.pending.sha256;
-        if (shaOf(path) === expected) this.add(`remove ${path}`, () => unlinkSync2(path));
+        if (fileSha(path) === expected) this.add(`remove ${path}`, () => unlinkSync2(path));
         if (this.remaining.files[rel]) delete this.remaining.files[rel].pending;
       }
       symlink(rel, target) {
@@ -1618,7 +1619,7 @@ var init_uninstall = __esm({
           return;
         }
         const backup = this.backupFile(entry.backup);
-        if (shaOf(path) === entry.sha256After && (entry.created || backup)) {
+        if (!entry.edited && fileSha(path) === entry.sha256After && (entry.created || backup)) {
           if (entry.created) this.add(`remove ${path}`, () => unlinkSync2(path));
           else this.add(`restore ${path} (from ${backup})`, () => {
             unlinkSync2(path);
@@ -1788,15 +1789,23 @@ function summaryLines(args) {
     `Files: ${counts.added} new, ${counts.changed} changed${counts.kept ? `, ${counts.kept} kept (changed by you)` : ""}${counts.register ? ", register pi-questions" : ""}`,
     `npm install: ${args.skipNpm ? "skipped (--skip-npm)" : args.npm ? "yes" : "up to date"}`
   );
+  const kept = actions.filter((a2) => a2.op === "keep");
+  if (kept.some((a2) => /\/\.pi\/agent\/(agents\/[^/]+\.md|workflows\/[^/]+\.js)$/.test(a2.path))) {
+    lines2.push(KEPT_EDITS);
+  }
+  if (kept.some((a2) => a2.op === "keep" && a2.noMarkers)) {
+    lines2.push("AGENTS.md has no pi-profile routing markers, so it is reconciled as a whole file; the new version is in AGENTS.md.pi-setup-new");
+  }
   for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines2.push(`warning: ${warning}`);
   return lines2;
 }
-var USER_SOURCES, ROOT_SOURCES;
+var USER_SOURCES, ROOT_SOURCES, KEPT_EDITS;
 var init_report = __esm({
   "src/report.ts"() {
     init_types();
     USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it" };
     ROOT_SOURCES = { flag: "from --repos-root", saved: "saved in user.json", scan: "best match found", default: "default", prompt: "you typed it" };
+    KEPT_EDITS = "kept your edits; `pi-profile save` to adopt them into the profile";
   }
 });
 
@@ -3364,7 +3373,7 @@ async function execute(ctx, options, prompter, baseCtx) {
     spinner: prompter?.spinner()
   };
   const result = await apply(ctx, r2.actions, applyOptions, manifest);
-  const shown = prompter || options.json ? [] : summary.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:"));
+  const shown = prompter || options.json ? [] : summary.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:") || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no"));
   return finish(ctx, baseCtx, options, r2, detection, shown, result.code, prompter, result.wrote);
 }
 function cancelled(ctx) {

@@ -6,7 +6,7 @@ import type { Options } from "./args.ts";
 import { atomicWrite } from "./fsx.ts";
 import { listBackups, tidy } from "./backups.ts";
 import {
-  backupsDir, fromHomeRel, manifestPath, pinnedBackups, readManifest, saveIfChanged, sha256, validateManifest,
+  backupsDir, fileSha, fromHomeRel, manifestPath, pinnedBackups, readManifest, saveIfChanged, sha256, validateManifest,
 } from "./manifest.ts";
 import type { JsonEntry, Manifest } from "./manifest.ts";
 import { deepEqual } from "./settings.ts";
@@ -25,14 +25,6 @@ const sameLink = (path: string, target: string): boolean => {
     return false;
   }
 };
-
-function shaOf(path: string): string | undefined {
-  try {
-    return lstatSync(path).isFile() ? sha256(readFileSync(path)) : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 /** Move a backup back over (or to) its original place; copy and unlink when rename crosses devices. */
 function restore(from: string, to: string): void {
@@ -78,6 +70,11 @@ class Plan {
   build(): Step[] {
     const deleted = new Set<string>();
     for (const [rel, entry] of Object.entries(this.m.files)) if (this.file(rel, entry)) deleted.add(rel);
+    for (const [rel, sha] of Object.entries(this.m.pendingNew ?? {})) {
+      const path = this.abs(rel);
+      if (fileSha(path) === sha) this.add(`remove ${path}`, () => unlinkSync(path));
+      delete this.remaining.pendingNew;
+    }
     for (const [rel, link] of Object.entries(this.m.symlinks)) this.symlink(rel, link.target);
     for (const [rel, entry] of Object.entries(this.m.json)) {
       if (deleted.has(rel)) delete this.remaining.json[rel];
@@ -95,7 +92,7 @@ class Plan {
       return false;
     }
     const backup = this.backupFile(entry.backup);
-    if (shaOf(path) !== entry.sha256) {
+    if (fileSha(path) !== entry.sha256) {
       const note = backup ? `; your pre-install version: ${backup}` : "";
       this.add(`left (changed by you): ${path}${note}`, () => {});
       if (!entry.backup) delete this.remaining.files[rel];
@@ -121,7 +118,7 @@ class Plan {
     if (!entry.pending) return;
     const path = this.abs(entry.pending.path);
     const expected = entry.pending.sha256;
-    if (shaOf(path) === expected) this.add(`remove ${path}`, () => unlinkSync(path));
+    if (fileSha(path) === expected) this.add(`remove ${path}`, () => unlinkSync(path));
     if (this.remaining.files[rel]) delete this.remaining.files[rel].pending;
   }
 
@@ -139,7 +136,7 @@ class Plan {
       return;
     }
     const backup = this.backupFile(entry.backup);
-    if (shaOf(path) === entry.sha256After && (entry.created || backup)) {
+    if (!entry.edited && fileSha(path) === entry.sha256After && (entry.created || backup)) {
       if (entry.created) this.add(`remove ${path}`, () => unlinkSync(path));
       else this.add(`restore ${path} (from ${backup})`, () => {
         unlinkSync(path);

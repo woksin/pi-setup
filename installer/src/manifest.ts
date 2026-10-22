@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { atomicWrite } from "./fsx.ts";
 import { deepEqual } from "./settings.ts";
@@ -25,6 +25,8 @@ export interface JsonEntry {
   created: boolean;
   backup?: string;
   sha256After: string;
+  /** The user changed the file between two runs of pi-setup, so a byte restore would lose their changes. */
+  edited?: boolean;
   ops: JsonOp[];
 }
 
@@ -38,6 +40,8 @@ export interface Manifest {
   dirs: string[];
   json: Record<string, JsonEntry>;
   /** sha256 of npm/package.json and package-lock.json after the last successful npm install. */
+  /** `.pi-setup-new` files written beside a user file that pi-setup does not track (rel path to sha256). */
+  pendingNew?: Record<string, string>;
   npm?: { packageJson: string; lock?: string };
 }
 
@@ -48,6 +52,15 @@ export const backupsDir = (piDir: string): string => join(dataDir(piDir), "backu
 
 export function sha256(buf: Buffer | string): string {
   return createHash("sha256").update(buf).digest("hex");
+}
+
+/** The one file hash used everywhere: sha256 of a regular file's bytes; undefined for anything else (missing, symlink, directory). */
+export function fileSha(path: string): string | undefined {
+  try {
+    return lstatSync(path).isFile() ? sha256(readFileSync(path)) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function emptyManifest(now: Date): Manifest {
@@ -104,6 +117,7 @@ export function validateManifest(home: string, m: Manifest): void {
     fromHomeRel(home, l.target);
   }
   for (const rel of m.dirs) fromHomeRel(home, rel);
+  for (const rel of Object.keys(m.pendingNew ?? {})) fromHomeRel(home, rel);
   for (const [rel, j] of Object.entries(m.json)) {
     fromHomeRel(home, rel);
     if (j.backup !== undefined) checkBackupRel(j.backup);

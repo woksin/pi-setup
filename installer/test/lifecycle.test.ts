@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { after, describe, test } from "node:test";
@@ -227,5 +227,119 @@ describe("uninstall (lifecycle e2e)", () => {
     assert.deepEqual(snapshot(box.home), expected);
     assert.ok(!existsSync(piPath(box, ".pi-setup")));
     assert.equal(readFileSync(piPath(box, "auth.json"), "utf8"), "SENTINEL-NOT-A-SECRET");
+  });
+});
+
+describe("data-loss regressions (review blockers)", () => {
+  const PROFILE_ARGS = (box: Sandbox, profile: string) => ["--yes", "--skip-npm", "--user", "einari", "--repos-root", join(box.root, "repos"), "--profile", profile];
+
+  test("B1/B4 an edited agent or workflow survives a rerun, also with a different --profile; pi-profile is never called", () => {
+    const box = fresh();
+    assert.equal(install(box, PROFILE_ARGS(box, "balanced")).status, 0);
+    const agent = piPath(box, "agents", "Explore.md");
+    mutate(agent);
+    const mine = readFileSync(agent);
+    for (const profile of ["balanced", "openai-only"]) {
+      const run = install(box, PROFILE_ARGS(box, profile));
+      assert.equal(run.status, 0, run.stdout + run.stderr);
+      assert.ok(readFileSync(agent).equals(mine), `${profile}: edit lost`);
+      assert.ok(existsSync(`${agent}.pi-setup-new`));
+      assert.ok(run.stdout.includes("kept your edits; `pi-profile save` to adopt them into the profile"), run.stdout);
+    }
+    assert.equal(readFileSync(piPath(box, "profiles/ACTIVE"), "utf8"), "openai-only\n");
+    assert.deepEqual(stubLog(box).filter((l) => l.includes("pi-profile")), []);
+    const out = install(box, ["uninstall", "--yes"]);
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.ok(readFileSync(agent).equals(mine), "uninstall kept the edit");
+  });
+
+  test("B2 a key the user added to user.json survives uninstall; the installer's keys are gone", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const path = piPath(box, "user.json");
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), myKey: "mine" }));
+    assert.equal(install(box, ["uninstall", "--yes"]).status, 0);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { myKey: "mine" });
+  });
+
+  test("B2 a user key added before a re-run that merges again survives a later uninstall", () => {
+    const box = fresh();
+    mkdirSync(piPath(box), { recursive: true });
+    writeFileSync(piPath(box, "user.json"), '{"githubUser":"old"}');
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const path = piPath(box, "user.json");
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), myKey: "mine" }));
+    assert.equal(install(box, ["--yes", "--skip-npm", "--user", "other", "--repos-root", join(box.root, "repos")]).status, 0);
+    assert.equal(install(box, ["uninstall", "--yes"]).status, 0);
+    const left = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(left.myKey, "mine");
+    assert.equal(left.githubUser, "old");
+  });
+
+  test("B2 a key added to your settings.json after install survives; the registered package is removed", () => {
+    const box = fresh();
+    mkdirSync(piPath(box), { recursive: true });
+    writeFileSync(piPath(box, "settings.json"), '{"keep":true}');
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const path = piPath(box, "settings.json");
+    assert.ok(JSON.parse(readFileSync(path, "utf8")).packages.includes("./local-packages/pi-questions"));
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), myKey: "mine" }));
+    assert.equal(install(box, ["uninstall", "--yes"]).status, 0);
+    const left = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(left.myKey, "mine");
+    assert.equal(left.keep, true);
+    assert.ok(!(left.packages ?? []).includes("./local-packages/pi-questions"));
+  });
+
+  test("B3 a user-modified cli.js is kept by a rerun and survives uninstall", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const cli = piPath(box, "local-packages/pi-questions/dist/cli.js");
+    mutate(cli);
+    chmodSync(cli, 0o644);
+    const mine = readFileSync(cli);
+    const run = install(box, RERUN);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.ok(readFileSync(cli).equals(mine));
+    assert.equal(statSync(cli).mode & 0o111, 0, "a kept file is not chmodded");
+    assert.equal(install(box, ["uninstall", "--yes"]).status, 0);
+    assert.ok(readFileSync(cli).equals(mine), "uninstall kept the user's cli.js");
+  });
+
+  test("routing markers: a legacy AGENTS.md keeps its own marker lines and only the body is replaced", () => {
+    const box = fresh();
+    assert.equal(install(box, PROFILE_ARGS(box, "balanced")).status, 0);
+    rmSync(piPath(box, ".pi-setup/manifest.json"));
+    const path = piPath(box, "AGENTS.md");
+    const text = readFileSync(path, "utf8");
+    const startLine = /<!-- pi-profile:routing:start[^\n]*\n/.exec(text)![0];
+    const custom = startLine.replace("-->", "(managed by someone else) -->");
+    writeFileSync(path, text.replace(startLine, custom).replace("<!-- pi-profile:routing:end -->", "<!-- pi-profile:routing:end --> trailing"));
+    assert.equal(install(box, PROFILE_ARGS(box, "openai-only")).status, 0);
+    const after = readFileSync(path, "utf8");
+    assert.ok(after.includes(custom), "start marker line unchanged");
+    assert.ok(after.includes("<!-- pi-profile:routing:end --> trailing"), "end marker line unchanged");
+    const routing = readFileSync(join(REPO, "agent/profiles/openai-only/routing.md"), "utf8");
+    assert.ok(after.includes(custom + routing + "<!-- pi-profile:routing:end -->"), "body replaced");
+  });
+
+  test("routing markers missing: AGENTS.md is reconciled as a whole file, kept, and the summary says so", () => {
+    const box = fresh();
+    mkdirSync(piPath(box), { recursive: true });
+    writeFileSync(piPath(box, "AGENTS.md"), "my own agents file, no markers\n");
+    const run = install(box, PROFILE_ARGS(box, "balanced"));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.equal(readFileSync(piPath(box, "AGENTS.md"), "utf8"), "my own agents file, no markers\n");
+    assert.match(readFileSync(piPath(box, "AGENTS.md.pi-setup-new"), "utf8"), /pi-profile:routing:start/);
+    assert.match(run.stdout, /AGENTS\.md has no pi-profile routing markers/);
+    assert.deepEqual(backupDirs(box).filter(() => false), []);
+  });
+
+  test("ACTIVE holds exactly <name>\\n and switches with --profile", () => {
+    const box = fresh();
+    assert.equal(install(box, PROFILE_ARGS(box, "balanced")).status, 0);
+    assert.equal(readFileSync(piPath(box, "profiles/ACTIVE")).toString("hex"), Buffer.from("balanced\n").toString("hex"));
+    assert.equal(install(box, PROFILE_ARGS(box, "openai-only")).status, 0);
+    assert.equal(readFileSync(piPath(box, "profiles/ACTIVE")).toString("hex"), Buffer.from("openai-only\n").toString("hex"));
   });
 });

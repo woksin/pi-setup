@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { atomicWrite } from "./fsx.ts";
 import { BackupRun, prune } from "./backups.ts";
 import {
-  emptyManifest, homeRel, noSource, pinnedBackups, recordArrayAdd, recordSet, saveIfChanged, sha256,
+  emptyManifest, fileSha, homeRel, noSource, pinnedBackups, recordArrayAdd, recordSet, saveIfChanged, sha256,
 } from "./manifest.ts";
 import type { FileEntry, JsonEntry, Manifest, Source } from "./manifest.ts";
 import type { Action, Ctx, JsonOp } from "./types.ts";
@@ -38,7 +38,6 @@ export function describe(action: Action): string | undefined {
   return undefined;
 }
 
-const hashFile = (path: string): string => sha256(readFileSync(path));
 const modeOf = (path: string): number => statSync(path).mode & 0o7777;
 
 async function sourceOf(ctx: Ctx): Promise<Source> {
@@ -53,7 +52,8 @@ async function sourceOf(ctx: Ctx): Promise<Source> {
 class Run {
   readonly backups: BackupRun;
   readonly next: Manifest;
-  readonly touched = new Set<string>();
+  /** Files this run wrote or adopted; only these may be chmodded or recorded. */
+  readonly written = new Set<string>();
   wrote = false;
   source: Source;
   private dirs = new Set<string>();
@@ -97,8 +97,9 @@ class Run {
 
   private install(a: Extract<Action, { op: "install" }>): void {
     const backup = a.existed ? this.backupIfThere(a.path) : undefined;
+    const priorSha = fileSha(a.path);
     this.ensureDir(dirname(a.path));
-    if (a.path.endsWith("/user.json") || a.path.endsWith("/settings.json")) {
+    if (/\/(user\.json|settings\.json|ACTIVE)$/.test(a.path)) {
       atomicWrite(a.path, a.content, a.mode);
     } else {
       writeFileSync(a.path, a.content);
@@ -106,42 +107,51 @@ class Run {
     }
     if (a.mtimeMs !== undefined) utimesSync(a.path, a.mtimeMs / 1000, a.mtimeMs / 1000);
     this.wrote = true;
-    if (a.merge === "user-json") this.recordJson(a.path, !a.existed, backup, a.jsonOps ?? []);
-    else this.recordFile(a.path, backup);
+    if (a.merge === "user-json") this.recordJson(a.path, a.content, priorSha, !a.existed, backup, a.jsonOps ?? []);
+    else this.recordFile(a.path, a.content, backup);
   }
 
-  private recordFile(path: string, backup: string | undefined): void {
+  /** Record a file this run wrote, with the hash of the bytes it wrote. */
+  private recordFile(path: string, content: Buffer, backup: string | undefined): void {
     const rel = this.rel(path);
     const entry: FileEntry = this.next.files[rel] ?? { sha256: "", mode: 0, source: this.source, origin: backup ? "replaced" : "new", ...(backup ? { backup } : {}) };
-    entry.sha256 = hashFile(path);
+    entry.sha256 = sha256(content);
     entry.mode = modeOf(path);
     entry.source = this.source;
     delete entry.pending;
     this.next.files[rel] = entry;
-    this.touched.add(path);
+    this.written.add(path);
   }
 
-  private recordJson(path: string, created: boolean, backup: string | undefined, ops: JsonOp[]): void {
+  /** priorSha is the hash on disk just before this run wrote; a mismatch with the recorded one means the user edited the file. */
+  private recordJson(path: string, content: Buffer, priorSha: string | undefined, created: boolean, backup: string | undefined, ops: JsonOp[]): void {
     const rel = this.rel(path);
     const entry: JsonEntry = this.next.json[rel] ?? { created, sha256After: "", ops: [] };
+    if (this.next.json[rel] && priorSha !== entry.sha256After) entry.edited = true;
     if (backup && !entry.created && !entry.backup) entry.backup = backup;
     for (const op of ops) {
       if (op.op === "set") recordSet(entry, op);
       else recordArrayAdd(entry, op);
     }
-    entry.sha256After = hashFile(path);
+    entry.sha256After = sha256(content);
     this.next.json[rel] = entry;
   }
 
   private register(a: Extract<Action, { op: "register" }>): void {
     const file = this.next.files[this.rel(a.path)];
-    const unmodified = Boolean(file) && existsSync(a.path) && hashFile(a.path) === file.sha256;
+    const priorSha = fileSha(a.path);
+    const unmodified = Boolean(file) && priorSha === file.sha256;
     const backup = a.existed ? this.backupIfThere(a.path) : undefined;
     this.ensureDir(dirname(a.path));
     atomicWrite(a.path, a.content, a.mode);
     this.wrote = true;
-    if (file && (unmodified || !a.existed)) this.recordFile(a.path, undefined);
-    else this.recordJson(a.path, false, backup, a.jsonOps ?? []);
+    if (file && (unmodified || !a.existed)) {
+      // pi-setup owns the whole file; the ops let uninstall still revert just them if the user edits it later.
+      this.recordFile(a.path, a.content, undefined);
+      this.recordJson(a.path, a.content, priorSha, true, undefined, a.jsonOps ?? []);
+    } else {
+      this.recordJson(a.path, a.content, priorSha, false, backup, a.jsonOps ?? []);
+    }
   }
 
   private keep(a: Extract<Action, { op: "keep" }>): void {
@@ -151,16 +161,18 @@ class Run {
       this.wrote = true;
     }
     const entry = this.next.files[this.rel(a.path)];
-    if (entry) entry.pending = { path: this.rel(a.newPath), sha256: sha256(a.content) };
+    const pending = { path: this.rel(a.newPath), sha256: sha256(a.content) };
+    if (entry) entry.pending = pending;
+    else if (existsSync(a.newPath)) this.next.pendingNew = { ...this.next.pendingNew, [pending.path]: pending.sha256 };
   }
 
   private adopt(path: string): void {
     const rel = this.rel(path);
     const entry = this.next.files[rel];
     if (!entry) {
-      this.next.files[rel] = { sha256: hashFile(path), mode: modeOf(path), source: this.source, origin: "adopted" };
+      this.next.files[rel] = { sha256: fileSha(path) ?? "", mode: modeOf(path), source: this.source, origin: "adopted" };
     } else {
-      const sha = hashFile(path);
+      const sha = fileSha(path) ?? "";
       if (sha !== entry.sha256) {
         entry.sha256 = sha;
         entry.source = this.source;
@@ -168,7 +180,7 @@ class Run {
       entry.mode = modeOf(path);
       delete entry.pending;
     }
-    this.touched.add(path);
+    this.written.add(path);
   }
 
   private symlink(a: Extract<Action, { op: "symlink" }>): void {
@@ -184,35 +196,20 @@ class Run {
     this.next.symlinks[this.rel(a.path)] = { target: this.rel(a.target) };
   }
 
+  /** Only for a file this run wrote or adopted; a kept (user-modified) file is never touched. */
   private chmodX(path: string): void {
-    if (existsSync(path) && (statSync(path).mode & 0o111) === 0) {
-      chmodSync(path, statSync(path).mode | 0o111);
+    if (!this.written.has(path) || !existsSync(path)) return;
+    const mode = statSync(path).mode;
+    if ((mode & 0o111) === 0) {
+      chmodSync(path, mode | 0o111);
       this.wrote = true;
     }
-    this.touched.add(path);
+    const entry = this.next.files[this.rel(path)];
+    if (entry) entry.mode = modeOf(path);
   }
 
-  /** ACTIVE was written by this run, or pi-profile may have rewritten it. */
-  trackActive(path: string, created: boolean): void {
-    const rel = this.rel(path);
-    if (created && !this.next.files[rel]) {
-      this.next.files[rel] = { sha256: "", mode: 0, source: this.source, origin: "new" };
-      this.touched.add(path);
-    } else if (this.next.files[rel]) {
-      this.touched.add(path);
-    }
-  }
-
-  /** Hash what is on disk now (pi-profile may have rewritten files), then save and prune. */
+  /** Save the manifest and prune old backups. */
   finish(): void {
-    for (const path of this.touched) {
-      const entry = this.next.files[this.rel(path)];
-      if (!entry || !existsSync(path)) continue;
-      const sha = hashFile(path);
-      if (entry.sha256 !== "" && sha !== entry.sha256) entry.source = this.source;
-      entry.sha256 = sha;
-      entry.mode = modeOf(path);
-    }
     for (const rel of [...this.dirs].sort()) if (!this.next.dirs.includes(rel)) this.next.dirs.push(rel);
     if (this.wrote) this.next.source = this.source;
     const hasEntries = Object.keys(this.next.files).length + Object.keys(this.next.json).length + Object.keys(this.next.symlinks).length > 0;
@@ -225,18 +222,12 @@ class Run {
   }
 }
 
-/** Whether this run changed anything pi-profile manages. */
-export function touchesProfile(actions: Action[], piDir: string, profile: string): boolean {
-  const watched = [join(piDir, "agents"), join(piDir, "workflows"), join(piDir, "profiles", profile), join(piDir, "AGENTS.md")];
-  return actions.some((a) => (a.op === "install" || a.op === "register") && watched.some((w) => a.path === w || a.path.startsWith(`${w}/`)));
-}
-
 /** Hashes of the npm inputs, as recorded after the last successful npm install. */
 export function npmInputs(piDir: string): { packageJson: string; lock?: string } | undefined {
   const pkg = join(piDir, "npm", "package.json");
   if (!existsSync(pkg)) return undefined;
   const lock = join(piDir, "npm", "package-lock.json");
-  return { packageJson: hashFile(pkg), ...(existsSync(lock) ? { lock: hashFile(lock) } : {}) };
+  return { packageJson: fileSha(pkg) ?? "", ...(fileSha(lock) ? { lock: fileSha(lock) } : {}) };
 }
 
 export function needsNpm(actions: Action[], piDir: string, manifest?: Manifest, force = false): boolean {
@@ -267,7 +258,7 @@ export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, 
   try {
     run.source = await sourceOf(ctx);
     for (const action of actions) run.execute(action);
-    code = await applyProfile(ctx, actions, options, piDir, run);
+    applyProfile(options, piDir, run);
     if (code === 0) {
       const npm = await runNpm(ctx, actions, options, piDir, manifest);
       code = npm.code;
@@ -280,24 +271,11 @@ export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, 
   return { code, wrote: run.wrote };
 }
 
-async function applyProfile(ctx: Ctx, actions: Action[], options: ApplyOptions, piDir: string, run: Run): Promise<number> {
-  const active = join(piDir, "profiles", "ACTIVE");
-  if (options.activeBefore === undefined) {
-    mkdirSync(dirname(active), { recursive: true });
-    atomicWrite(active, `${options.profile}\n`, 0o644);
-    run.wrote = true;
-    run.trackActive(active, true);
-    return 0;
-  }
-  if (options.activeBefore === options.profile && !touchesProfile(actions, piDir, options.profile)) return 0;
-  run.wrote = true;
-  run.trackActive(active, false);
-  const result = await ctx.run("python3", [join(piDir, "bin", "pi-profile"), "use", options.profile, "--force"], { timeoutMs: 60000 });
-  if (result.code !== 0) {
-    ctx.err(`pi-profile use ${options.profile} failed: ${(result.stderr || result.stdout).trim()}`);
-    return 1;
-  }
-  return 0;
+/** pi-profile is never run: the plan already wrote agents/, workflows/ and the routing block through reconciliation. Only ACTIVE is left. */
+function applyProfile(options: ApplyOptions, piDir: string, run: Run): void {
+  if (options.activeBefore === options.profile) return;
+  const path = join(piDir, "profiles", "ACTIVE");
+  run.execute({ op: "install", path, content: Buffer.from(`${options.profile}\n`), mode: 0o644, existed: options.activeBefore !== undefined });
 }
 
 async function runNpm(ctx: Ctx, actions: Action[], options: ApplyOptions, piDir: string, manifest?: Manifest): Promise<{ code: number; ran: boolean }> {
