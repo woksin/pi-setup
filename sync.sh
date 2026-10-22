@@ -9,7 +9,7 @@ REPO=$PWD
 PI="$HOME/.pi/agent"
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/pi-sync.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
-EX=(--exclude=__pycache__ --exclude=node_modules --exclude=.DS_Store --exclude='*.bak*')
+EX=(--exclude=__pycache__ --exclude=node_modules --exclude=.DS_Store --exclude='*.bak*' --exclude='*.pi-setup-new')
 PQ_EX=(--exclude=.git --exclude=.github --exclude=.gitignore --exclude=.ai-work --exclude='*.tgz' --exclude='*.log')
 RS=(rsync -a --delete "${EX[@]}")
 
