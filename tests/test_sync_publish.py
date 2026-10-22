@@ -23,6 +23,9 @@ def snapshot(root):
     return result
 
 
+# Built at runtime so the fixture itself never looks like a committed key.
+FAKE_KEY = "abc123" + "def456"
+
 class SyncPublishTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="pisync.", dir="/tmp")
@@ -82,15 +85,15 @@ class SyncPublishTests(unittest.TestCase):
     def test_planted_api_key_field_in_models_json_fails(self):
         path = self.pi / "models.json"
         data = json.loads(path.read_text())
-        data["providers"] = {"x": {"apiKey": "abc123def456"}}
+        data["providers"] = {"x": {"apiKey": FAKE_KEY}}
         path.write_text(json.dumps(data))
         result = self.run_command("./sync.sh", cwd=self.scratch, success=False)
         self.assertIn("agent/models.json: secret-like field providers.x.apiKey", result.stdout + result.stderr)
-        self.assertNotIn("abc123def456", result.stdout + result.stderr)
+        self.assertNotIn(FAKE_KEY, result.stdout + result.stderr)
 
     def test_models_json_checkout_unchanged_when_api_key_planted(self):
         path = self.pi / "models.json"
-        path.write_text(json.dumps({"providers": {"x": {"apiKey": "abc123def456"}}}))
+        path.write_text(json.dumps({"providers": {"x": {"apiKey": FAKE_KEY}}}))
         self.assert_sync_refused("agent/models.json")
 
     def test_reference_values_and_token_budgets_are_not_secret_fields(self):
