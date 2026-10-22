@@ -48,7 +48,7 @@ You are a subagent. The parent orchestrates. You never push, merge, open PRs, or
 
 - Plans, notes, scratch analyses, logs and handoffs go only inside `.ai-work/` at the repository root, never at the root itself or under documentation folders. It is gitignored and must stay untracked: never commit it, never `git add -f` it, never remove the ignore entries.
 - Before creating disposable task outputs or cleaning up, read `~/.pi/agent/skills/ai-work-lifecycle/SKILL.md`.
-- Check `df -h ~` before a heavy build or worktree; below 25 GiB free, stop and report (2026-10-21; between 25 and 40 GiB keep going and mention it).
+- Check `df -h ~` before a heavy build or worktree; follow the disk floor in ~/.pi/agent/AGENTS.md (currently 25 GiB stop / 40 GiB notice).
 
 ## Destructive-action safety
 

@@ -121,7 +121,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - Event modeling, event sourcing and Screenplay: in repositories with the Cratis AI corpus installed (`cratis ai`, profile `cratis/screenplay`), follow the corpus skills (start with `cratis-screenplay-event-modeling`) and use its Screenplay Modeler, Reviewer and Renderer agents. Keep the independent review on the other provider (`reviewer`/`second-opinion`/`sol-reviewer`). `cratis prologue start`, Extractor runs, `prologue interpret` with an LLM configured, and `render --force` need explicit approval.
 
 - Main session: Opus 5.5 medium by default (OpenAI-heavy: GPT-6.1 Sol high). Raise to high only for difficult design/debugging, then lower it.
-- `implementer` for clear, testable work; `careful-implementer` for behaviour-preserving changes; `opus-implementer` only when you can name the unresolved design question or hard-bug judgement.
+- `implementer` for clear, testable work; `careful-implementer` for behaviour-preserving changes; `opus-implementer` only when the brief names the hard reason (the unresolved design question or hard-bug judgement). Default scoped changes (a named file set and check) to `careful-implementer`. Every brief names the build configuration to verify (e.g. Release, warnings as errors).
 - Plan, then implement: once a request is decided to become an issue/task, run `planner` (high) to write `<repo>/.ai-work/<task>/plan.md`; read it, resolve BLOCKING questions, then hand the plan to the cheaper implementer it recommends. Skip the planner for trivial or mechanical changes (a known one-file edit, renames, bumps). After accepting the plan, pass a 1–3 sentence approach summary as `issue_work update plan=...` (or on claim). The planner is read-only apart from that one file.
 - `cleanup-steward` performs post-work inventory and only explicitly authorised, safety-checked cleanup.
 - Cross-provider review: `reviewer` reviews GPT-written work; `sol-reviewer` reviews Claude-written work. Follow "Review loops" in the global rules (blocking-only gate, delta rounds, cap of 3). Before merge run the `review` workflow (Opus + Sol) and always pass `author` (`gpt` when `implementer` wrote it, so Astra rather than Sol verifies Opus's findings); pass `deep: true` (Astra instead of Sol) only for security-sensitive, data-loss/migration, algorithmic/concurrency changes or a disputed blocker, as set out in the "Review loops" budget. Run the full review in parallel with the gate, not after it.
@@ -176,7 +176,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - Wrap separate consumer builds/tests and image commands too: `cratis-local-run <kind> <label> -- <cmd...>`.
 - Use kind `integration` for Docker builds and container specs; use `build` or `test` for other steps.
 - Long queue waits and the adapter's long budgets require `job_start`, not an overdue foreground tool call; keep queue and execution deadlines separate.
-- Check `df -h ~` before heavy work; stop below 25 GiB free, mention 25–40 GiB.
+- Check `df -h ~` before heavy work; follow the disk floor in "Disk hygiene".
 - Before consumer commits/pushes run the helper's `check`; at task end restore, check, review `clean` dry-run targets, then run `clean --apply` for the task's stamp.
 - Local proof replaces waiting, not the producer release and consumer pin bump.
 
@@ -276,7 +276,7 @@ Plans, handovers, session notes, continuation prompts, status boards, scratch an
 
 ## Disk hygiene — clean up what you create
 
-- Check `df -h ~` before creating a worktree or a heavy build. Below 40 GiB free, run `~/.pi/agent/bin/pi-cleanup` (dry run) and report, but keep building down to 25 GiB free (2026-10-21). Below 25 GiB start no new worktree or heavy phase and report.
+- Disk floor (single source; agent files reference this): 25 GiB free = stop, 40 GiB = cleanup notice. Check `df -h ~` before creating a worktree or a heavy build. Below 40 GiB free, run `~/.pi/agent/bin/pi-cleanup` (dry run) and report, but keep building down to 25 GiB free (2026-10-21). Below 25 GiB start no new worktree or heavy phase and report.
 - One worktree per issue or PR: reuse it for review rounds, rebases and merge tests instead of creating `-r2`, `-review`, `-base`, `-merge` or `wt/<n>` copies. Create worktrees under `<parent>/.worktrees/`, never inside `.ai-work/`.
 - Temporary worktrees (review, baseline, triage or merge-test copies) are removed before the session ends, using the checks below.
 - When a task you registered with `ai-work-lifecycle` is genuinely done, run `finish TASK --apply`; use `state TASK paused` for unfinished work instead of leaving it active.

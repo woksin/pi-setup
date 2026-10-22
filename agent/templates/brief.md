@@ -31,6 +31,7 @@ Copy to `<repo>/.ai-work/<task>/brief.md`, fill every section, and pass the agen
 Ordered, small steps, each naming the file(s) and the change, and the specs/tests to add first.
 
 ## Verify with
+- Configuration to verify: <e.g. Release, warnings as errors; must match CI>.
 - Iterate with: `<narrow affected-project command>`.
 - Finish with the Done gate once. Use `pi-phase run ... --log <repo>/.ai-work/<task>/<phase>.log` instead of redirects, pipes or `; echo $?`.
 

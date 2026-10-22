@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { isGuardOff } from "../lib/guards.ts";
+import { integrityWarnings, parseNotifications, type Notification, type RecordLike } from "../lib/subagent-integrity.ts";
 import { argsOf, executableCommands } from "./wait-guard.ts";
 
 const FETCH_HELP = "subagent-results: completion notification already delivered. Use that result; do not fetch it again. " +
@@ -23,6 +24,14 @@ export class ResultTracker {
   private delivered = new Map<string, { truncated: boolean; fetched: boolean }>();
   private aliases = new Map<string, string>();
   private observed = new Set<string>();
+  /** Called once per newly delivered notification (not for restored ones: set after restore). */
+  onFresh?: (notification: Notification, record: RecordLike | undefined) => void;
+  private replaying = false;
+  /** Run history restore without firing onFresh (reload must not re-warn on old notifications). */
+  replay(fn: () => void): void {
+    this.replaying = true;
+    try { fn(); } finally { this.replaying = false; }
+  }
 
   clear(): void { this.delivered.clear(); this.aliases.clear(); this.observed.clear(); }
   alias(id: string, name: unknown): void {
@@ -46,14 +55,16 @@ export class ResultTracker {
       if (!id || result === undefined) continue;
       const key = decode(id);
       // message_end and before_agent_start may observe the same notification.
-      if (!this.delivered.has(key)) this.delivered.set(key, { truncated: decode(result).endsWith(TRUNCATION), fetched: false });
+      const fresh = !this.delivered.has(key);
+      if (fresh) this.delivered.set(key, { truncated: decode(result).endsWith(TRUNCATION), fetched: false });
       // The documented pi-subagents manager registry exposes records by id.
       // Read identity only: no npm import, mutation, result read or consumption.
       const registry = (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] as
-        { getRecord?: (id: string) => { handle?: string; alias?: string } | undefined } | undefined;
+        { getRecord?: (id: string) => { handle?: string; alias?: string; sessionFile?: string } | undefined } | undefined;
       const record = registry?.getRecord?.(key);
       this.alias(key, record?.handle);
       this.alias(key, record?.alias);
+      if (fresh && !this.replaying) for (const n of parseNotifications(match[0])) this.onFresh?.(n, record);
     }
   }
   /** Reserve the one fetch at tool_call time, so parallel calls cannot both take it. */
@@ -87,6 +98,13 @@ export function readsTaskOutput(command: string, cwd: string): boolean {
 
 export default function (pi: ExtensionAPI) {
   const tracker = new ResultTracker();
+  // Integrity warnings: visible, no turn trigger; reach the model on its next turn.
+  tracker.onFresh = (n, record) => {
+    if (isGuardOff("subagent-results")) return;
+    for (const warning of integrityWarnings(n, record)) {
+      pi.sendMessage({ customType: "subagent-integrity", content: warning, display: true }, { triggerTurn: false, deliverAs: "nextTurn" });
+    }
+  };
   let unsubscribe: (() => void) | undefined;
   pi.on("session_start", (_event, ctx) => {
     tracker.clear();
@@ -96,7 +114,7 @@ export default function (pi: ExtensionAPI) {
       if (id) tracker.restarted(id);
     });
     // Restore notifications and fetch reservations after /reload, on the active branch only.
-    for (const entry of ctx.sessionManager.getBranch()) {
+    tracker.replay(() => { for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom_message") tracker.notification({ ...entry, role: "custom" });
       if (entry.type !== "message") continue;
       tracker.notification(entry.message);
@@ -111,7 +129,7 @@ export default function (pi: ExtensionAPI) {
         if (part.name === "get_subagent_result" && input.agent_id) tracker.fetch(input.agent_id, input.verbose === true);
         if (part.name === "Agent" && input.resume) tracker.restarted(input.resume);
       }
-    }
+    } });
   });
   pi.on("session_shutdown", () => { unsubscribe?.(); unsubscribe = undefined; });
   pi.on("message_end", event => { tracker.notification(event.message); });
