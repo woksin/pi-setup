@@ -83,6 +83,8 @@ export interface RunOptions {
   path?: string;
   env?: Record<string, string>;
   extraPath?: boolean;
+  /** Checkout to run from instead of this one; its installer/dist must hold the bundle. */
+  repo?: string;
 }
 
 /** Run the installer with a temp HOME, stub tools first on PATH and a non-TTY stdin. */
@@ -98,9 +100,9 @@ export function install(box: Sandbox, args: string[], options: RunOptions = {}):
   };
   const [cmd, argv] =
     options.entry === "node"
-      ? [process.execPath, [join(REPO, "installer/dist/pi-setup.mjs"), "install", ...args]]
+      ? [process.execPath, [join(options.repo ?? REPO, "installer/dist/pi-setup.mjs"), "install", ...args]]
       : ["/bin/bash", [join(REPO, "install.sh"), ...args]];
-  const result = spawnSync(cmd, argv, { cwd: REPO, env, input: "", encoding: "utf8", timeout: 100_000 });
+  const result = spawnSync(cmd, argv, { cwd: options.repo ?? REPO, env, input: "", encoding: "utf8", timeout: 100_000 });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 

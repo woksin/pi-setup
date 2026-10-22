@@ -19,7 +19,7 @@ export const USAGE = `Usage: ./install.sh [install] [options]
   --plan                print the full plan (detection, profile, actions), write nothing
   --json                print one JSON object on stdout (combine with --plan or --dry-run)
   --user <login>        GitHub login (default: saved, then gh, then ask)
-  --repos-root <dir>    repositories root (default: saved, then best scan match, then ~/repos)
+  --repos-root <dir>    repositories root (default: saved, then ~/repos; interactive runs suggest a detected root)
   --profile <name|auto> profile to apply (default: the active one, else chosen from your logins)
   --yes                 never prompt
   --skip-npm            do not run npm install in ~/.pi/agent/npm

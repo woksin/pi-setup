@@ -32,7 +32,7 @@ function pickProfile(
     return { name: activeBefore, reason: "keeping your active profile", provisional: false, source: "active" };
   }
   if (readOnly) {
-    return { name: "balanced", reason: "providers not probed in dry-run; using --profile, then the active profile, then balanced", provisional: false, source: "chooser" };
+    return { name: "balanced", reason: "provisional: the real install picks by logged-in providers", provisional: false, source: "chooser" };
   }
   return chooseProfile(ready, profiles);
 }
@@ -66,7 +66,6 @@ function resolveAll(
     flagRoot: answers.root ?? options.reposRoot,
     saved,
     detectedUser: detection.github.login,
-    scanRoot: detection.candidates[0]?.path,
     home: ctx.home,
     repoDir: ctx.repoDir,
   });
@@ -159,6 +158,10 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     answers = result;
   }
   const r = resolveAll(ctx, options, detection, saved, answers);
+  const better = detection.candidates[0]?.path;
+  if (!prompter && r.settings.rootSource === "default" && better && better !== r.settings.reposRoot) {
+    ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
+  }
   r.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
   const summary = summaryLines({ ...r, detection, kimi: readOnly ? undefined : kimiNote(r.profile, r.ready), skipNpm: options.skipNpm, probed: !readOnly });

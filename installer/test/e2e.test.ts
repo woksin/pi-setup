@@ -206,7 +206,7 @@ describe("install (e2e)", () => {
       assert.equal(run.status, 0, run.stdout + run.stderr);
       assert.deepEqual(stubLog(box).filter((l) => l.startsWith("pi ")), []);
       assert.deepEqual(snapshot(), before);
-      assert.match(run.stdout + run.stderr, /not probed in dry-run|providers not probed/);
+      assert.match(run.stdout + run.stderr, /provisional: the real install picks by logged-in providers/);
     });
   }
 });
