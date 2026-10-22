@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync,
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { after, describe, test } from "node:test";
-import { REPO, backupDirs, findBackups, install, installLines, piPath, sandbox, snapshot } from "./helpers/home.ts";
+import { REPO, backupDirs, findBackups, install, installLines, piPath, sandbox, snapshot, stubLog } from "./helpers/home.ts";
 import type { Sandbox } from "./helpers/home.ts";
 
 const boxes: Sandbox[] = [];
@@ -53,6 +53,26 @@ describe("manifest and re-runs (lifecycle e2e)", () => {
     assert.deepEqual(installLines(again.stdout), []);
     assert.deepEqual(snapshot(box.home, true), before);
     assert.ok(readFileSync(piPath(box, ".pi-setup/manifest.json")).equals(manifest));
+  });
+
+  test("L2b a plain re-run does not run npm again and writes nothing; --reinstall-npm or a changed package.json does", () => {
+    const box = fresh();
+    const npmCalls = () => stubLog(box).filter((l) => l.startsWith("npm install")).length;
+    assert.equal(install(box, ["--yes", "--user", "einari", "--repos-root", join(box.root, "repos")]).status, 0);
+    assert.equal(npmCalls(), 1);
+    const before = snapshot(box.home, true);
+    const again = install(box, []);
+    assert.equal(again.status, 0, again.stdout + again.stderr);
+    assert.match(again.stdout, /Everything up to date/);
+    assert.equal(npmCalls(), 1);
+    assert.deepEqual(snapshot(box.home, true), before);
+    assert.equal(install(box, ["--reinstall-npm"]).status, 0);
+    assert.equal(npmCalls(), 2);
+    mutate(piPath(box, "npm/package.json"));
+    assert.equal(install(box, []).status, 0);
+    assert.equal(npmCalls(), 3);
+    assert.equal(install(box, []).status, 0);
+    assert.equal(npmCalls(), 3);
   });
 
   test("L3 a file you changed is kept, the repo version goes to .pi-setup-new, and a third run writes nothing", () => {

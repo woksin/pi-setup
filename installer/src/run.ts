@@ -97,7 +97,7 @@ function resolveAll(
     ...pinWarnings(pinnedModels(join(profilesDir(ctx.repoDir), choice.name)), ready, detection.catalog),
     ...(kimi ? [kimi] : []),
   ];
-  return { settings, choice, actions, warnings, profile, ready, activeBefore, piDir, npm: needsNpm(actions, piDir), conflicts };
+  return { settings, choice, actions, warnings, profile, ready, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts };
 }
 
 function jsonReport(r: Resolved, detection: Detection, exitCode: number): string {
@@ -195,6 +195,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const applyOptions: ApplyOptions = {
     dryRun: options.dryRun,
     skipNpm: options.skipNpm || options.dryRun,
+    reinstallNpm: options.reinstallNpm,
     inheritNpm: !prompter && !options.json,
     profile: r.choice.name,
     activeBefore: r.activeBefore,

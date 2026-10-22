@@ -15,6 +15,7 @@ export interface Options {
   profile: string;
   yes: boolean;
   skipNpm: boolean;
+  reinstallNpm: boolean;
   plan: boolean;
   json: boolean;
 }
@@ -34,6 +35,7 @@ export const USAGE = `Usage: ./install.sh [install] [options]
   --profile <name|auto> profile to apply (default: the active one, else chosen from your logins)
   --yes                 never prompt
   --skip-npm            do not run npm install in ~/.pi/agent/npm
+  --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --help                this text`;
 
 const VALUE_FLAGS = new Set(["--user", "--repos-root", "--profile", "--ref", "--keep"]);
@@ -48,6 +50,7 @@ const BOOLEAN_FLAGS: Record<string, keyof Options> = {
   "--dry-run": "dryRun",
   "--yes": "yes",
   "--skip-npm": "skipNpm",
+  "--reinstall-npm": "reinstallNpm",
   "--plan": "plan",
   "--json": "json",
   "--help": "help",
@@ -60,7 +63,7 @@ function isAbsoluteOrHome(value: string): boolean {
 export function parseArgs(argv: string[], cwd: string): Parsed {
   const options: Options = {
     command: "install", sub: "list", keep: 10, ref: "", help: false, dryRun: false, user: "", reposRoot: "", profile: "",
-    yes: false, skipNpm: false, plan: false, json: false,
+    yes: false, skipNpm: false, reinstallNpm: false, plan: false, json: false,
   };
   let args = argv[0] === "install" ? argv.slice(1) : argv;
   if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups") {

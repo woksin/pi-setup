@@ -37,6 +37,8 @@ export interface Manifest {
   symlinks: Record<string, { target: string }>;
   dirs: string[];
   json: Record<string, JsonEntry>;
+  /** sha256 of npm/package.json and package-lock.json after the last successful npm install. */
+  npm?: { packageJson: string; lock?: string };
 }
 
 export const noSource = (): Source => ({ release: null, commit: null });

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 558c21e0c12f0dbbf55dce6a53921f09b91eaf2a4ff36421c32a7ae6785d87b4
+// pi-setup-source-sha256: a586111ef71b1fc1ae135b99fddf9d0ae4bc1b81a67eb91ddba42f6c3bcd5de9
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -544,13 +544,25 @@ function touchesProfile(actions, piDir, profile) {
   const watched = [join5(piDir, "agents"), join5(piDir, "workflows"), join5(piDir, "profiles", profile), join5(piDir, "AGENTS.md")];
   return actions.some((a2) => (a2.op === "install" || a2.op === "register") && watched.some((w) => a2.path === w || a2.path.startsWith(`${w}/`)));
 }
-function needsNpm(actions, piDir) {
+function npmInputs(piDir) {
+  const pkg = join5(piDir, "npm", "package.json");
+  if (!existsSync5(pkg)) return void 0;
+  const lock = join5(piDir, "npm", "package-lock.json");
+  return { packageJson: hashFile(pkg), ...existsSync5(lock) ? { lock: hashFile(lock) } : {} };
+}
+function needsNpm(actions, piDir, manifest, force = false) {
   const npmDir = join5(piDir, "npm");
   const pkg = join5(npmDir, "package.json");
   const lock = join5(npmDir, "node_modules", ".package-lock.json");
   if (actions.some((a2) => a2.op === "install" && a2.path === pkg)) return true;
   if (!existsSync5(pkg)) return false;
-  if (!existsSync5(join5(npmDir, "node_modules")) || !existsSync5(lock)) return true;
+  if (force || !existsSync5(join5(npmDir, "node_modules"))) return true;
+  const known = manifest?.npm;
+  if (known) {
+    const now = npmInputs(piDir);
+    return now?.packageJson !== known.packageJson || now?.lock !== known.lock;
+  }
+  if (!existsSync5(lock)) return true;
   return statSync4(pkg).mtimeMs > statSync4(lock).mtimeMs;
 }
 async function apply(ctx, actions, options, manifest) {
@@ -567,9 +579,10 @@ async function apply(ctx, actions, options, manifest) {
     for (const action of actions) run.execute(action);
     code = await applyProfile(ctx, actions, options, piDir, run);
     if (code === 0) {
-      const npm = await runNpm(ctx, actions, options, piDir);
+      const npm = await runNpm(ctx, actions, options, piDir, manifest);
       code = npm.code;
       if (npm.ran) run.wrote = true;
+      if (npm.ran && npm.code === 0) run.next.npm = npmInputs(piDir);
     }
   } finally {
     run.finish();
@@ -596,9 +609,9 @@ async function applyProfile(ctx, actions, options, piDir, run) {
   }
   return 0;
 }
-async function runNpm(ctx, actions, options, piDir) {
+async function runNpm(ctx, actions, options, piDir, manifest) {
   if (options.skipNpm) return { code: 0, ran: false };
-  if (!needsNpm(actions, piDir)) {
+  if (!needsNpm(actions, piDir, manifest, options.reinstallNpm)) {
     ctx.out("npm packages up to date");
     return { code: 0, ran: false };
   }
@@ -803,6 +816,7 @@ function parseArgs(argv, cwd) {
     profile: "",
     yes: false,
     skipNpm: false,
+    reinstallNpm: false,
     plan: false,
     json: false
   };
@@ -867,6 +881,7 @@ var init_args = __esm({
   --profile <name|auto> profile to apply (default: the active one, else chosen from your logins)
   --yes                 never prompt
   --skip-npm            do not run npm install in ~/.pi/agent/npm
+  --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --help                this text`;
     VALUE_FLAGS = /* @__PURE__ */ new Set(["--user", "--repos-root", "--profile", "--ref", "--keep"]);
     COMMON = ["--help", "--dry-run"];
@@ -880,6 +895,7 @@ var init_args = __esm({
       "--dry-run": "dryRun",
       "--yes": "yes",
       "--skip-npm": "skipNpm",
+      "--reinstall-npm": "reinstallNpm",
       "--plan": "plan",
       "--json": "json",
       "--help": "help"
@@ -3249,7 +3265,7 @@ function resolveAll(ctx, options, detection, saved, answers, manifest) {
     ...pinWarnings(pinnedModels(join13(profilesDir(ctx.repoDir), choice.name)), ready, detection.catalog),
     ...kimi ? [kimi] : []
   ];
-  return { settings: settings2, choice, actions, warnings, profile, ready, activeBefore, piDir, npm: needsNpm(actions, piDir), conflicts };
+  return { settings: settings2, choice, actions, warnings, profile, ready, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts };
 }
 function jsonReport(r2, detection, exitCode) {
   return JSON.stringify({
@@ -3341,6 +3357,7 @@ async function execute(ctx, options, prompter, baseCtx) {
   const applyOptions = {
     dryRun: options.dryRun,
     skipNpm: options.skipNpm || options.dryRun,
+    reinstallNpm: options.reinstallNpm,
     inheritNpm: !prompter && !options.json,
     profile: r2.choice.name,
     activeBefore: r2.activeBefore,

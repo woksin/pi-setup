@@ -15,6 +15,8 @@ const KEEP_RUNS = 10;
 export interface ApplyOptions {
   dryRun: boolean;
   skipNpm: boolean;
+  /** Run npm install even when package.json and the lock file are unchanged. */
+  reinstallNpm?: boolean;
   /** Pass npm's output straight through (not in a spinner, not in --json). */
   inheritNpm: boolean;
   /** Profile to make live, and whether ACTIVE existed before this run. */
@@ -229,13 +231,27 @@ export function touchesProfile(actions: Action[], piDir: string, profile: string
   return actions.some((a) => (a.op === "install" || a.op === "register") && watched.some((w) => a.path === w || a.path.startsWith(`${w}/`)));
 }
 
-export function needsNpm(actions: Action[], piDir: string): boolean {
+/** Hashes of the npm inputs, as recorded after the last successful npm install. */
+export function npmInputs(piDir: string): { packageJson: string; lock?: string } | undefined {
+  const pkg = join(piDir, "npm", "package.json");
+  if (!existsSync(pkg)) return undefined;
+  const lock = join(piDir, "npm", "package-lock.json");
+  return { packageJson: hashFile(pkg), ...(existsSync(lock) ? { lock: hashFile(lock) } : {}) };
+}
+
+export function needsNpm(actions: Action[], piDir: string, manifest?: Manifest, force = false): boolean {
   const npmDir = join(piDir, "npm");
   const pkg = join(npmDir, "package.json");
   const lock = join(npmDir, "node_modules", ".package-lock.json");
   if (actions.some((a) => a.op === "install" && a.path === pkg)) return true;
   if (!existsSync(pkg)) return false;
-  if (!existsSync(join(npmDir, "node_modules")) || !existsSync(lock)) return true;
+  if (force || !existsSync(join(npmDir, "node_modules"))) return true;
+  const known = manifest?.npm;
+  if (known) {
+    const now = npmInputs(piDir);
+    return now?.packageJson !== known.packageJson || now?.lock !== known.lock;
+  }
+  if (!existsSync(lock)) return true;
   return statSync(pkg).mtimeMs > statSync(lock).mtimeMs;
 }
 
@@ -253,9 +269,10 @@ export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, 
     for (const action of actions) run.execute(action);
     code = await applyProfile(ctx, actions, options, piDir, run);
     if (code === 0) {
-      const npm = await runNpm(ctx, actions, options, piDir);
+      const npm = await runNpm(ctx, actions, options, piDir, manifest);
       code = npm.code;
       if (npm.ran) run.wrote = true;
+      if (npm.ran && npm.code === 0) run.next.npm = npmInputs(piDir);
     }
   } finally {
     run.finish();
@@ -283,9 +300,9 @@ async function applyProfile(ctx: Ctx, actions: Action[], options: ApplyOptions, 
   return 0;
 }
 
-async function runNpm(ctx: Ctx, actions: Action[], options: ApplyOptions, piDir: string): Promise<{ code: number; ran: boolean }> {
+async function runNpm(ctx: Ctx, actions: Action[], options: ApplyOptions, piDir: string, manifest?: Manifest): Promise<{ code: number; ran: boolean }> {
   if (options.skipNpm) return { code: 0, ran: false };
-  if (!needsNpm(actions, piDir)) {
+  if (!needsNpm(actions, piDir, manifest, options.reinstallNpm)) {
     ctx.out("npm packages up to date");
     return { code: 0, ran: false };
   }
