@@ -180,6 +180,13 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - Before consumer commits/pushes run the helper's `check`; at task end restore, check, review `clean` dry-run targets, then run `clean --apply` for the task's stamp.
 - Local proof replaces waiting, not the producer release and consumer pin bump.
 
+## Blocked lanes
+
+- When blocked, run `lane-status set <LANE> waiting-on "<dep>" --until +60m` (or `barred-by "<order>"`); `lane-status clear <LANE>` when unblocked. Nudgers skip a lane while `lane-status suppressed <LANE>` exits 0.
+- While blocked, use watch timeouts of at most 60 min and post "still waiting on <dep>" to the coordinator at each timeout.
+- Close a lane with `lane-status close <LANE> --reassign-to <LANE2> --reason "..."` (posts ALL-lane-closed and lists its unread inbox), never by hand.
+- Live sessions, their state and lane status: `~/.pi/agent/session-watchdog/board.md`.
+
 ## Shipping finished work (default: push, PR, merge)
 
 In Cratis repositories (and any repository whose local rules opt in), shipping is the default end of a task — do not end a session asking "May I push and open the PRs?". When the ship bar is met, push, open the PR(s), wait for CI, run the final review, and merge, all without asking.

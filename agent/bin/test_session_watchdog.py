@@ -242,5 +242,61 @@ class Alarms(Base):
             self.assertTrue(any(f.startswith(f"{prefix}-session-watchdog-") and f.endswith(f"-{suffix}.md") for f in self.files()), suffix)
 
 
+class Board(Base):
+    def board(self, **kw):
+        self.run_wd(inject_ttys={100: "ttys001", 200: "ttys002"}, **kw)
+        with open(os.path.join(sw.STATE_DIR, "board.json")) as f:
+            return {r["pid"]: r for r in json.load(f)["sessions"]}
+
+    def test_idle_working_stuck_and_unmapped_rows(self):
+        os.environ["LANE_STATUS_DIR"] = os.path.join(self.tmp.name, "lanes")
+        self.addCleanup(os.environ.pop, "LANE_STATUS_DIR")
+        os.makedirs(os.environ["LANE_STATUS_DIR"])
+        with open(os.path.join(os.environ["LANE_STATUS_DIR"], "WORKER.status"), "w") as f:
+            f.write('waiting-on "x" until 2999-01-01T00:00:00Z\n')
+        sw_name = [{"type": "session_info", "id": "y", "name": "WORKER"}]
+        self.write(sw_name + [msg("a", NOW - 100, "user", "hi"), msg("b", NOW - 90, "assistant", [{"type": "text", "text": "ok"}], stopReason="stop")])
+        rows = self.board(procs={100: (self.cwd, NOW - 99999), 200: ("/other", NOW - 99999)})
+        self.assertEqual(rows[100]["state"], "idle")
+        self.assertEqual(rows[100]["tty"], "ttys001")
+        self.assertEqual(rows[100]["session_id"], "sid-1")
+        self.assertEqual(rows[100]["session_name"], "WORKER")
+        self.assertEqual(rows[100]["last_turn_end"], sw.iso_or_dash(NOW - 90))
+        self.assertEqual(rows[100]["last_record"], sw.iso_or_dash(NOW - 90))
+        self.assertEqual(rows[100]["lane"], "WORKER")
+        self.assertIn("waiting-on", rows[100]["lane_status"])
+        self.assertEqual((rows[200]["state"], rows[200]["session_id"]), ("unmapped", "unmapped"))
+        self.assertIn("| unmapped |", open(os.path.join(sw.STATE_DIR, "board.md")).read())
+        self.assertEqual([f for f in os.listdir(sw.STATE_DIR) if ".tmp." in f], [])
+        self.write([msg("a", NOW - 30, "assistant", [call("c1", command="sleep 1")], stopReason="toolUse")])
+        self.assertEqual(self.board(procs=self.procs(100))[100]["state"], "working")
+        self.write([msg("a", NOW - 3000, "assistant", [call("c1", command="sleep 1")], stopReason="toolUse")])
+        r = self.board(procs=self.procs(100))[100]
+        self.assertEqual((r["state"], r["lane"], r["last_turn_end"]), ("stuck", None, "-"))
+
+    def test_dry_run_writes_no_board(self):
+        self.write([msg("a", NOW - 90, "assistant", [{"type": "text", "text": "ok"}], stopReason="stop")])
+        self.run_wd(dry_run=True, inject_ttys={})
+        self.assertFalse(os.path.exists(os.path.join(sw.STATE_DIR, "board.json")))
+
+    def test_lane_for_name_prefix(self):
+        d = self.tmp.name
+        with open(os.path.join(d, "AB-1.status"), "w") as f:
+            f.write("working since x\n")
+        self.assertEqual(sw.lane_for("AB-1 worker", d), ("AB-1", "working since x"))
+        self.assertEqual(sw.lane_for("worker#1", d), (None, None))
+        self.assertEqual(sw.lane_for(None, d), (None, None))
+
+    def test_lane_for_bad_status_files_never_break_the_pass(self):
+        d = self.tmp.name
+        with open(os.path.join(d, "CD.status"), "wb") as f:
+            f.write(b"\xff\xfe waiting" + b"x" * 100000)  # invalid UTF-8, no newline, oversized
+        lane, line = sw.lane_for("CD", d)
+        self.assertEqual(lane, "CD")
+        self.assertLessEqual(len(line), 512)
+        os.mkfifo(os.path.join(d, "EF.status"))
+        self.assertEqual(sw.lane_for("EF", d), (None, None))  # FIFO is skipped, not opened
+
+
 if __name__ == "__main__":
     unittest.main()

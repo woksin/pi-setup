@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""lane-status: per-lane blocked/working status files (woksin/pi-setup#6).
+
+Files: $LANE_STATUS_DIR (default $INBOX_DIR/status when INBOX_DIR is set, else ~/.pi/agent/lane-status/),
+one `<LANE>.status` per lane, a single line:
+  working since <ISO>
+  waiting-on "<dep>" until <ISO>        barred-by "<order>" until <ISO>
+  closed reassigned-to <LANE2> at <ISO> [reason "<text>"]
+
+Commands:
+  set LANE waiting-on "<dep>" --until <ISO|+90m>    (also barred-by "<order>"; `set LANE working`)
+  clear LANE | get LANE | list
+  suppressed LANE   exit 0 if a waiting-on/barred-by line has until in the future (nudgers skip), else exit 1
+                    (prints "expired" when such a line has expired)
+  close LANE --reassign-to LANE2 [--reason "..."]   status `closed` + ALL-lane-closed-<LANE>-<HHMM>.md in INBOX_DIR
+                    listing LANE's unread inbox files (*-to-<LANE>-* newer than <LANE>-inbox.marker, see inbox-watch).
+                    No message file is moved or edited.
+Exit: 0 ok, 1 negative answer (suppressed/get), 2 usage or I/O error.
+"""
+import argparse, os, re, sys, tempfile, time
+from datetime import datetime, timezone
+
+LANE_RE = re.compile(r"^[A-Z][A-Z0-9-]{0,15}$")
+LINE_RE = re.compile(r'^(waiting-on|barred-by) "(.*)" until (\S+)$')
+
+
+class Err(Exception):
+    pass
+
+
+def status_dir():
+    d = os.environ.get("LANE_STATUS_DIR")
+    if d:
+        return d
+    inbox = os.environ.get("INBOX_DIR")
+    if inbox:
+        return os.path.join(inbox, "status")
+    return os.path.expanduser("~/.pi/agent/lane-status")
+
+
+def lane_name(s):
+    if not isinstance(s, str) or not LANE_RE.match(s):
+        raise Err(f"invalid lane name: {s!r} (expected ^[A-Z][A-Z0-9-]{{0,15}}$)")
+    return s
+
+
+def iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_until(s, now):
+    m = re.fullmatch(r"\+(\d+)([smhd])", s)
+    if m:
+        return now + int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    try:
+        d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        raise Err(f"invalid --until: {s!r} (ISO time or +90m/+2h/+1d)")
+    return d.timestamp()  # naive times are local
+
+
+def atomic_write(path, text):
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def path_for(lane):
+    return os.path.join(status_dir(), f"{lane}.status")
+
+
+def read_line(lane):
+    p = path_for(lane)
+    try:
+        if not os.path.isfile(p):  # missing, or not a regular file (never open FIFOs)
+            return None
+        with open(p, "rb") as f:
+            return f.read(512).split(b"\n", 1)[0].decode("utf-8", "replace").rstrip("\r")
+    except FileNotFoundError:
+        return None
+
+
+def blocked_until(line):
+    """Epoch of `until` for a waiting-on/barred-by line, else None."""
+    m = LINE_RE.match(line or "")
+    return parse_until(m.group(3), 0) if m else None
+
+
+def is_active(line, now):
+    u = blocked_until(line)
+    return u is not None and u > now
+
+
+def is_expired(line, now):
+    u = blocked_until(line)
+    return u is not None and u <= now
+
+
+def clean(s):
+    return " ".join(str(s).replace('"', "'").split())
+
+
+def cmd_set(a, now):
+    lane = lane_name(a.lane)
+    kind = a.kind
+    if kind == "working":
+        if a.dep or a.until:
+            raise Err("`working` takes no dependency or --until")
+        line = f"working since {iso(now)}"
+    else:
+        if not a.dep or not clean(a.dep):
+            raise Err(f'{kind} needs a "<dep>" text')
+        if not a.until:
+            raise Err(f"{kind} needs --until <ISO|+90m>")
+        line = f'{kind} "{clean(a.dep)}" until {iso(parse_until(a.until, now))}'
+    atomic_write(path_for(lane), line + "\n")
+    print(f"{lane}: {line}")
+    return 0
+
+
+def cmd_clear(a, now):
+    lane = lane_name(a.lane)
+    try:
+        os.unlink(path_for(lane))
+    except FileNotFoundError:
+        pass
+    return 0
+
+
+def cmd_get(a, now):
+    line = read_line(lane_name(a.lane))
+    if line is None:
+        return 1
+    print(line + (" (expired)" if is_expired(line, now) else ""))
+    return 0
+
+
+def cmd_list(a, now):
+    d = status_dir()
+    try:
+        names = sorted(os.listdir(d))
+    except FileNotFoundError:
+        return 0
+    for n in names:
+        if n.endswith(".status") and LANE_RE.match(n[:-7]):
+            line = read_line(n[:-7])
+            if line is not None:
+                print(f"{n[:-7]}: {line}" + (" (expired)" if is_expired(line, now) else ""))
+    return 0
+
+
+def cmd_suppressed(a, now):
+    line = read_line(lane_name(a.lane))
+    if is_active(line, now):
+        return 0
+    if is_expired(line, now):
+        print("expired")
+    return 1
+
+
+def unread_inbox(lane, inbox):
+    marker = os.path.join(inbox, f"{lane}-inbox.marker")
+    try:
+        mt = os.stat(marker).st_mtime
+    except OSError:
+        return None  # no marker: the lane never started watching (inbox-watch would only create one)
+    pat = re.compile(rf"-to-{re.escape(lane)}(-|\.md$)")
+    out = []
+    for n in sorted(os.listdir(inbox)):
+        p = os.path.join(inbox, n)
+        if n.endswith(".md") and pat.search(n) and os.path.isfile(p) and os.stat(p).st_mtime > mt:
+            out.append(n)
+    return out
+
+
+def cmd_close(a, now):
+    lane, to = lane_name(a.lane), lane_name(a.reassign_to)
+    if lane == to:
+        raise Err("--reassign-to must differ from the closed lane")
+    line = f"closed reassigned-to {to} at {iso(now)}"
+    if a.reason:
+        line += f' reason "{clean(a.reason)}"'
+    inbox = os.environ.get("INBOX_DIR")
+    unread = None
+    if inbox:
+        if not os.path.isdir(inbox):
+            raise Err(f"invalid INBOX_DIR: {inbox}")
+        unread = unread_inbox(lane, inbox)
+    atomic_write(path_for(lane), line + "\n")
+    print(f"{lane}: {line}")
+    if not inbox:
+        print("INBOX_DIR not set: no ALL- message posted", file=sys.stderr)
+        return 0
+    body = [f"Lane {lane} is closed. Reassigned to {to}." + (f" Reason: {clean(a.reason)}" if a.reason else ""), "",
+            f"{to}: pick up the work and any unread messages of {lane}. No message file was moved or edited.", ""]
+    if unread is None:
+        body.append(f"Unread inbox of {lane}: none known ({lane}-inbox.marker does not exist).")
+    elif unread:
+        body.append(f"Unread inbox files of {lane} (newer than {lane}-inbox.marker):")
+        body += [f"- {n}" for n in unread]
+    else:
+        body.append(f"Unread inbox files of {lane}: none.")
+    name = f"ALL-lane-closed-{lane}-{time.strftime('%H%M', time.localtime(now))}.md"
+    atomic_write(os.path.join(inbox, name), "\n".join(body) + "\n")
+    print(f"posted {name}")
+    return 0
+
+
+def build_parser():
+    ap = argparse.ArgumentParser(prog="lane-status", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("set", help="set a lane status")
+    s.add_argument("lane")
+    s.add_argument("kind", choices=["waiting-on", "barred-by", "working"])
+    s.add_argument("dep", nargs="?")
+    s.add_argument("--until")
+    s.set_defaults(fn=cmd_set)
+    for n, fn in (("clear", cmd_clear), ("get", cmd_get), ("suppressed", cmd_suppressed)):
+        p = sub.add_parser(n)
+        p.add_argument("lane")
+        p.set_defaults(fn=fn)
+    sub.add_parser("list").set_defaults(fn=cmd_list)
+    c = sub.add_parser("close", help="close a lane and hand it over")
+    c.add_argument("lane")
+    c.add_argument("--reassign-to", required=True)
+    c.add_argument("--reason")
+    c.set_defaults(fn=cmd_close)
+    return ap
+
+
+def main(argv=None, now=None):
+    a = build_parser().parse_args(argv)
+    try:
+        return a.fn(a, time.time() if now is None else now)
+    except Err as e:
+        print(f"lane-status: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"lane-status: I/O error: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

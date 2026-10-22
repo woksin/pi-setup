@@ -42,6 +42,8 @@ LEVEL_CRITICAL_PERCENT = 8
 FSEVENTSD_RSS_MAX_MB = 4 * 1024
 TAIL_STEPS = (256 * 1024, 1024 * 1024, 4 * 1024 * 1024)
 HEAD_BYTES = 16 * 1024
+BOARD_TAIL = 256 * 1024    # board facts come from one bounded tail read per mapped session
+LANE_RE = re.compile(r"^[A-Z][A-Z0-9-]{0,15}$")
 
 
 def log(msg):
@@ -243,6 +245,106 @@ def unmapped_candidates(procs, mapped_pids, mapped_files, now, sessions=SESSIONS
     return files
 
 
+def session_facts(path):
+    """(last record epoch, last turn-end epoch) from one bounded tail read; None where not in the tail."""
+    recs, _ = read_tail_records(path, BOARD_TAIL)
+    last = turn_end = None
+    for r in recs:
+        ts = parse_ts(r.get("timestamp"))
+        if ts is not None:
+            last = ts
+    for m in reversed(_msgs(recs)):
+        mm = m["message"]
+        if mm.get("role") == "assistant" and mm.get("stopReason") != "toolUse" and not _calls(m):
+            turn_end = parse_ts(m.get("timestamp"))
+            break
+    return last, turn_end
+
+
+def pi_ttys(pids):
+    """{pid: tty} from ps; empty on failure."""
+    if not pids:
+        return {}
+    try:
+        out = subprocess.run(["ps", "-o", "pid=,tty=", "-p", ",".join(map(str, pids))], capture_output=True,
+                             text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return {int(a): b.strip() for a, b in (l.split(None, 1) for l in out.splitlines() if len(l.split(None, 1)) == 2) if a.isdigit()}
+
+
+def lane_status_dir():
+    d = os.environ.get("LANE_STATUS_DIR")
+    if d:
+        return d
+    inbox = os.environ.get("INBOX_DIR")
+    return os.path.join(inbox, "status") if inbox else os.path.join(HOME, ".pi/agent/lane-status")
+
+
+def lane_for(name, status_dir):
+    """(lane, status line) when the session name is, or starts with, a lane that has a status file."""
+    if not name:
+        return None, None
+    for cand in dict.fromkeys([name.strip(), re.split(r"[\s:#/@]", name.strip(), maxsplit=1)[0]]):
+        if LANE_RE.match(cand):
+            path = os.path.join(status_dir, f"{cand}.status")
+            try:
+                if not os.path.isfile(path):  # never open FIFOs/devices
+                    continue
+                with open(path, "rb") as f:
+                    line = f.read(512).split(b"\n", 1)[0]  # bounded read
+                return cand, line.decode("utf-8", "replace").strip()
+            except OSError:
+                continue
+    return None, None
+
+
+def iso_or_dash(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if t else "-"
+
+
+def board_rows(procs, mapped, infos, now, ttys, status_dir):
+    """One row per live pi process. state: working | idle | stuck | unmapped (positive heartbeat mapping only)."""
+    by_pid = {pid: p for p, pid in mapped.items()}
+    rows = []
+    for pid in sorted(procs):
+        cwd = procs[pid][0]
+        row = {"pid": pid, "tty": ttys.get(pid, "?"), "cwd": cwd, "session_id": "unmapped", "session_name": "unmapped",
+               "last_record": None, "last_turn_end": None, "state": "unmapped", "lane": None, "lane_status": None}
+        path = by_pid.get(pid)
+        if path:
+            try:
+                sid, _, name = read_head_info(path)
+                last, turn_end = session_facts(path)
+                info = infos.get(path)
+                row.update(session_id=sid or os.path.basename(path), session_name=name or "-", last_record=last,
+                           last_turn_end=turn_end,
+                           state="idle" if not info else ("stuck" if now - info["since"] > threshold(info) else "working"))
+                row["lane"], row["lane_status"] = lane_for(name, status_dir)
+            except OSError as e:
+                log(f"board {path}: {e}")
+        rows.append(row)
+    return rows
+
+
+def write_board(rows, now, board_dir=None):
+    board_dir = board_dir or STATE_DIR
+    os.makedirs(board_dir, exist_ok=True)
+    doc = {"generated": iso_or_dash(now), "sessions": [dict(r, last_record=iso_or_dash(r["last_record"]),
+                                                          last_turn_end=iso_or_dash(r["last_turn_end"])) for r in rows]}
+    md = [f"# pi liveness board ({doc['generated']})", "",
+          "| pid | tty | cwd | session | name | last record | last turn end | state | lane status |", "|---|---|---|---|---|---|---|---|---|"]
+    for r in doc["sessions"]:
+        lane = f"{r['lane']}: {r['lane_status']}" if r["lane"] else "-"
+        md.append(f"| {r['pid']} | {r['tty']} | {r['cwd']} | {r['session_id']} | {r['session_name']} | {r['last_record']} | "
+                  f"{r['last_turn_end']} | {r['state']} | {lane.replace('|', '/')} |")
+    for name, text in (("board.json", json.dumps(doc, indent=1) + "\n"), ("board.md", "\n".join(md) + "\n")):
+        tmp = os.path.join(board_dir, f"{name}.tmp.{os.getpid()}")
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.replace(tmp, os.path.join(board_dir, name))
+
+
 def human(sec):
     sec = int(sec)
     return f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec >= 3600 else f"{sec // 60}m{sec % 60:02d}s"
@@ -328,7 +430,7 @@ def notify(suffix, title, text, messages_dir, dry_run):
     log(f"notified {suffix}: {text.splitlines()[0] if text else ''}")
 
 
-def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS, messages_dir=None, swap=None, level=-1, fsevents_mb=None, sessions=SESSIONS):
+def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS, messages_dir=None, swap=None, level=-1, fsevents_mb=None, sessions=SESSIONS, inject_ttys=None):
     now = time.time() if now is None else now
     if messages_dir is None:
         messages_dir = os.environ.get("SESSION_WATCHDOG_MESSAGES") or os.environ.get("DOCKER_GUARDIAN_MESSAGES", "")
@@ -344,6 +446,7 @@ def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS,
         except OSError:
             pass
     stuck, possible = [], []
+    infos = {}
     for confirmed, group in ((True, list(files)), (False, unmapped)):
         for path, mtime, cwd in group:
             try:
@@ -351,6 +454,7 @@ def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS,
             except OSError as e:
                 log(f"{path}: {e}")
                 continue
+            infos[path] = info
             if not info or now - info["since"] <= threshold(info):
                 continue
             sid, hcwd, name = read_head_info(path)
@@ -408,11 +512,22 @@ def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS,
         state["fseventsd"] = now
     for k in [k for k, v in notified.items() if now - v > 2 * RECENT]:
         del notified[k]
+    try:
+        rows = board_rows(procs, mapped, infos, now, pi_ttys(list(procs)) if inject_ttys is None else inject_ttys, lane_status_dir())
+        if not dry_run:
+            write_board(rows, now)
+    except OSError as e:
+        rows = []
+        log(f"board failed: {e}")
     if not dry_run:
         save_state(state)
     else:
         print(f"[dry-run] live pi procs={len(procs)} positively mapped={len(mapped)} ambiguous candidate files={len(unmapped)} stuck={len(stuck)} possibly-stuck={len(possible)} "
               f"level={'n/a' if lv is None else f'{lv:g}%'} swap={'n/a' if not sw else f'used {sw[0]:.0f}M free {sw[1]:.0f}M'} fseventsd={fs:.0f}M")
+        by_state = {}
+        for r in rows:
+            by_state[r["state"]] = by_state.get(r["state"], 0) + 1
+        print("[dry-run] board (not written): " + (", ".join(f"{k}={v}" for k, v in sorted(by_state.items())) or "no live pi processes"))
     return stuck
 
 
