@@ -3,7 +3,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { ACTIONS, acknowledge, assessCommand, emptyPolicy, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyPath, savePolicy, validatePolicy, type Policy, type Context } from "./lane-policy.ts";
+import { ACTIONS, acknowledge, assessCommand, emptyPolicy, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyPath, policyStore, savePolicy, validatePolicy, type Policy, type Context } from "./lane-policy.ts";
 import laneExtension from "../extensions/lane-policy.ts";
 import guardsExtension from "../extensions/guards.ts";
 import { setGuards } from "./guards.ts";
@@ -469,4 +469,73 @@ test("reading policy/guard config and writing .ai-work messages that mention it 
 	assert.equal(await f.fire("tool_call", { toolName: "bash", input: { command: `cat > .ai-work/m/messages/x.md <<'EOF'\n${guard}\nEOF` } }), undefined);
 	assert.ok((await f.fire("tool_call", { toolName: "bash", input: { command: `cat > '${guard}' <<'EOF'\n{}\nEOF` } }))?.block);
 	assert.equal(readFileSync(guard, "utf8"), "{}");
+});
+
+const livePaths = () => { const agent = join(home, ".pi/agent"); return { agent, guards: join(agent, "lib/guards.ts"), laneLib: join(agent, "lib/lane-policy.ts"), laneExt: join(agent, "extensions/lane-policy.ts"), json: join(agent, "guards.json"), store: policyPath() }; };
+
+test("read-only commands on authority files are never policy writes", () => {
+	const p = livePaths();
+	for (const c of [
+		`grep -n x ${p.agent}/lane-policy*.json`,
+		`cat ${p.json}; wc -l ${p.laneExt} ${p.laneLib}`,
+		`sed -n 1,40p ${p.laneExt}`,
+		`cat > /tmp/x <<'EOF'\nsee ${p.guards}\nEOF\ngh issue create --repo o/r --title t --body-file /tmp/x`,
+		`diff ${p.guards} agent/lib/guards.ts`, `cmp ${p.guards} /tmp/x`, `head -3 ${p.guards}; tail -3 ${p.guards}; rg x ${p.guards}`,
+		`ls -la ${p.agent}/lane-policy; stat ${p.json}; find ${p.agent}/lib -name '*.ts'`,
+		`git -C ${p.agent} diff lib/guards.ts`, `git show HEAD:agent/lib/guards.ts`, `git log -3 -- ${p.guards}`, `git status --short ${p.guards}`,
+	]) { allowed(c); allowed(c, { ...ctx, name: "PISETUP" }); }
+	// repo copy of an authority file is not the live authority file
+	allowed("git add agent/lib/guards.ts && git commit -m x && git diff agent/lib/guards.ts");
+});
+
+test("writes to authority files stay blocked for non-setup lanes", () => {
+	const p = livePaths(), other = { ...ctx, name: "lane-one" };
+	for (const c of [
+		`sed -i s/a/b/ ${p.guards}`, `sed -n 'w ${p.guards}' x`, `sed --in-place s/a/b/ ${p.guards}`, `printf x > ${p.json}`, `echo x >> ${p.json}`, `echo x | tee ${p.guards}`,
+		`cp /tmp/x ${p.guards}`, `mv /tmp/x ${p.laneLib}`, `rm ${p.guards}`, `ln -sf /tmp/x ${p.guards}`,
+		`python3 -c "open('${p.guards}','w').write('x')"`, `perl -pi -e s/a/b/ ${p.guards}`,
+		`git -C ${p.agent} diff --output=${p.guards} HEAD`, `find ${p.guards} -fprint ${p.guards}`,
+	]) { denied(c); denied(c, other); }
+});
+
+test("round 1: strict sed/git read-only allowlists", () => {
+	const p = livePaths(), other = { ...ctx, name: "lane-one" };
+	for (const c of [
+		`sed -n 'w/${p.json}' /tmp/x`, `sed -n 'w${p.guards}' /tmp/x`, `sed -n -e 'w ${p.json}' /tmp/x`, `sed --expression='w ${p.json}' /tmp/x`, `sed -f /tmp/script ${p.guards}`,
+		`sed -i.bak s/a/b/ ${p.guards}`, `sed -Ei s/a/b/ ${p.guards}`, `sed --in-place=.b s/a/b/ ${p.guards}`, `sed 's/a/b/w ${p.json}' x`, `sed -n '1e touch x' ${p.guards}`, `sed -n 'r ${p.guards}' x`, `sed -n '/a/p;w ${p.json}' x`,
+		`GIT_EXTERNAL_DIFF=/tmp/helper git diff --no-index --ext-diff ${p.guards} /tmp/x`, `env GIT_EXTERNAL_DIFF=/tmp/h git diff ${p.guards}`, `git -c core.pager=/tmp/h diff ${p.guards}`,
+		`git diff --ext-diff ${p.guards}`, `git diff --textconv ${p.guards}`, `git diff --output=${p.json} ${p.guards}`, `git --paginate diff ${p.guards}`, `git difftool ${p.guards}`, `git grep -O/tmp/h x ${p.guards}`, `git add ${p.guards}`, `git commit -am x ${p.guards}`,
+	]) { denied(c); denied(c, other); }
+	for (const c of [`sed -n '/error/p' ${p.json}`, `sed -n '1,40p;$=' ${p.guards}`, `sed -En '/a\\/b/,/c/p' ${p.guards}`, `sed -s -n -e '5q' -e '$p' ${p.guards}`, `sed --quiet 3p ${p.guards}`, `git -C ${p.agent} diff lib/guards.ts`]) { allowed(c); allowed(c, { ...ctx, name: "PISETUP" }); }
+});
+
+test("setup writer may write setup files but never the operator policy store, however spelled", async () => {
+	const p = livePaths(), setup = { ...ctx, name: "PISETUP" }, dir = join(p.agent, "lane-policy");
+	mkdirSync(dir, { recursive: true });
+	for (const c of [`sed -i s/a/b/ ${p.guards}`, `printf x > ${p.json}`, `cp /tmp/x ${p.laneLib}`, `perl -pi -e s/a/b/ ${p.laneExt}`, `printf x > ${dir}/README.md`, `cp /tmp/x ${dir}/setup-writers.json`, `rm ${p.guards}`, `cd ${p.agent}/lib && sed -i s/a/b/ guards.ts`]) allowed(c, setup);
+	for (const c of [
+		`printf x > ${p.store}`, `sed -i s/a/b/ ${p.store}`, `rm -rf ${dir}`, `rm -rf ${dir}/`, `rm ${dir}/policy.json`, `rm '${dir}/pol'icy.json`, `rm ${dir}/pol\\icy.json`, `rm ${dir}/pol*`, `rm ${dir}/*.json`, `rm ${dir}/p?licy.json`, `rm ${dir}/{policy,x}.json`,
+		`rm -rf ${p.agent}/lane-poli*`, `rm -rf ${p.agent}/*`, `rm -rf ${p.agent}`, `rm $HOME/.pi/agent/lane-policy/policy.json`, `rm "$X"`, `mv ${p.store} /tmp/x`, `mv /tmp/x ${p.store}`, `cp /tmp/x ${p.store}`, `ln -sf /tmp/x ${p.store}`,
+		`cd ${p.agent} && rm -rf lane-policy`, `cd ${p.agent}/lane-policy && rm policy.json`, `cd ${p.agent}/lane-policy && rm *`, `cd $SOMEWHERE && rm policy.json`, `find ${p.agent} -delete`, `find ${dir} -exec rm {} +`, `dd if=/tmp/x of=${p.store}`, `echo x | tee ${p.store}`, `printf x >> ${p.store}`,
+		`python3 -c "import shutil; shutil.rmtree('/Users/x/.pi/agent/lane-policy')"`, `python3 -c "import os; os.remove(os.path.expanduser('~/.pi/agent/lane-' + 'policy/policy.json'))"`, `node -e "require('fs').rmSync('/Users/x/.pi/agent/lane-policy/policy.json')"`, `bash -c 'rm ${p.store}'`, `eval "rm ~/.pi/agent/lane-policy/policy.json"`, `perl -e 'unlink "/Users/x/.pi/agent/lane-policy/policy.json"'`,
+		`apply_patch ${JSON.stringify({ patch: `*** Delete File: ${p.store}` })}`,
+	]) denied(c, setup);
+	assert.equal(policyStore(p.store, repo), true); assert.equal(policyStore(p.guards, repo), false);
+	for (const c of [
+		`sed -n -e 'w ${p.store}' /tmp/x`, `sed -n 'w${p.store}' /tmp/x`, `sed --expression='w ${p.store}' /tmp/x`, `sed -n '1p\\;w${p.store}' /tmp/x`, `sed 's/x/y/w ${p.store}' /tmp/x`,
+		`sed -n 'w ~/.pi/agent/lane-policy/policy.json' /tmp/x`, `sed -n 'w $HOME/.pi/agent/lane-policy/policy.json' /tmp/x`,
+	]) denied(c, setup);
+	for (const c of [`cat ${p.store}`, `grep -n x ${p.store}`, `sed -n p ${p.store}`, `sed -n '/rev/p' ${p.store}`, `cat ${p.store}; wc -l ${p.store}`]) allowed(c, setup);
+	for (const name of [undefined, "", "pisetup", "PISETUP "]) denied(`sed -i s/a/b/ ${p.guards}`, { ...ctx, name });
+	const named = (name: string | undefined) => { const f = fake(); f.extCtx.sessionManager.getSessionName = () => name; laneExtension(f.pi); return f; };
+	assert.equal(await named("PISETUP").fire("tool_call", { toolName: "write", input: { path: p.guards, content: "x" } }), undefined);
+	assert.ok((await named("PISETUP").fire("tool_call", { toolName: "write", input: { path: p.store, content: "x" } }))?.block);
+	assert.ok((await named("lane-one").fire("tool_call", { toolName: "write", input: { path: p.guards, content: "x" } }))?.block);
+	assert.ok((await named(undefined).fire("tool_call", { toolName: "edit", input: { path: p.guards } }))?.block);
+	writeFileSync(join(dir, "setup-writers.json"), JSON.stringify(["SETUP2"]));
+	denied(`sed -i s/a/b/ ${p.guards}`, setup); allowed(`sed -i s/a/b/ ${p.guards}`, { ...ctx, name: "SETUP2" });
+	writeFileSync(join(dir, "setup-writers.json"), "bad");
+	denied(`sed -i s/a/b/ ${p.guards}`, setup);
+	store(); grant("push", "other");
+	denied("git push origin lane:lane", setup);
 });
