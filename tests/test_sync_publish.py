@@ -105,6 +105,8 @@ class SyncPublishTests(unittest.TestCase):
         self.run_command("./sync.sh", cwd=self.scratch, success=False)
 
     def test_secret_mask_scanner_runs_when_installed_and_is_skipped_otherwise(self):
+        # install.sh now provides lib/secret-mask.ts in the fake live install; "not installed" means absent there
+        (self.pi / "lib/secret-mask.ts").unlink()
         skipped = self.run_command("./sync.sh", cwd=self.scratch)
         self.assertIn("secret-mask scanner not installed; skipped", skipped.stdout + skipped.stderr)
         (self.pi / "lib/secret-mask.ts").write_text(
