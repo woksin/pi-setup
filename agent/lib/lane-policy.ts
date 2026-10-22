@@ -20,7 +20,7 @@ export interface Repository {
 }
 export interface Policy { version: 1; revision: number; acknowledgements: Acknowledgement[]; repositories: Repository[]; forbidden: string[] }
 export interface Identity { common: string; root: string; branch: string }
-export interface Context { cwd: string; session: string }
+export interface Context { cwd: string; session: string; name?: string }
 export type Loaded = { policy: Policy; error?: undefined } | { policy?: undefined; error: string };
 export const policyPath = () => join(homedir(), ".pi/agent/lane-policy/policy.json");
 export const emptyPolicy = (): Policy => ({ version: 1, revision: 0, acknowledgements: [], repositories: [], forbidden: [] });
@@ -118,6 +118,25 @@ function denial(policy: Policy, repo: Repository | undefined, ctx: Context | und
 	const lane = repo?.bindings.find(b => b.session === writer?.session)?.lane;
 	const owner = writer ? `${lane ?? writer.session} (${writer.session}, branch ${writer.branch})` : `none assigned for ${action}; operator/coordinator ${repo?.coordinator ?? "unresolved"}`;
 	return `Lane policy r${policy.revision}: ${reason} Requested ${action} on ${repo?.slug ?? "unresolved repo"}:${branch || "unknown branch"}; writer=${owner}. ${lane ? `send branch+SHA to ${lane}` : "Hand off branch+SHA to the train writer/operator"}.`;
+}
+export const setupWritersPath = () => join(dirname(policyPath()), "setup-writers.json");
+/**
+ * Standing setup writers are recognised by the user-set Pi session name (`/name PISETUP`), never by
+ * model-writable env vars. The optional allow-list is itself an authority file; absent = ["PISETUP"],
+ * unreadable/invalid = nobody (fail closed).
+ */
+export function isSetupWriter(ctx: Context | undefined, file = setupWritersPath()): boolean {
+	if (!ctx?.name) return false;
+	try {
+		const names: unknown = JSON.parse(readFileSync(file, "utf8"));
+		return strings(names) && names.includes(ctx.name);
+	} catch (error: any) { return error.code === "ENOENT" && ctx.name === "PISETUP"; }
+}
+/** The operator-only policy store (policy.json plus its lock/temp files): never writable by a setup writer. */
+export function policyStore(path: string, cwd: string): boolean {
+	const candidate = canonical(resolve(cwd, path.replace(/^~(?=\/)/, homedir())));
+	const store = canonical(policyPath());
+	return candidate === store || candidate.startsWith(`${store}.`);
 }
 export function tamperReason(ctx: Context, file = policyPath()): string {
 	const loaded = loadPolicy(file);
@@ -274,7 +293,7 @@ const AUTHORITY_TEXT = /\.pi\/agent\/(?:lane-policy|guards\.json|lib\/(?:lane-po
 // Shell programs that only read their file operands (output redirection is checked separately).
 const SHELL_READERS = ["cat", "head", "tail", "wc", "stat", "ls", "grep", "rg", "echo", "printf", "pwd", "readlink", "jq", "diff", "cmp", "shasum", "sha256sum", "md5", "file", "sort", "uniq", "cut"];
 // Commands that may sit next to a heredoc whose body merely mentions an authority path.
-const DATA_COMMANDS = [...SHELL_READERS, "tee", "mkdir", "mv", "cp", "cd", "touch", "date", "true", "test", "["];
+const DATA_COMMANDS = [...SHELL_READERS, "tee", "mkdir", "mv", "cp", "cd", "touch", "date", "true", "test", "[", "gh", "git", "sed", "find"];
 // fd duplication/closing and /dev/null redirections write nothing.
 const HARMLESS_REDIRECT = /(?:\d+|&)?>>?[ \t]*(?:&(?:\d+|-)|\/dev\/null)(?=[\s;&|)]|$)/g;
 function authority(word: string, cwd: string): boolean {
@@ -299,10 +318,55 @@ function redirections(words: string[], cwd: string, checkTargets: boolean): stri
 	}
 	return rest;
 }
+const FIND_WRITERS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]);
+const GIT_READERS = new Set(["diff", "show", "log", "status", "ls-files", "ls-tree", "blame", "grep", "cat-file", "rev-parse"]);
+const GIT_UNSAFE_OPTION = /^(?:--ext-diff|--textconv|--output(?:=|$)|--open-files-in-pager|-O)/;
+// Strict sed allowlist: optional address (number, $, /regex/ with no unescaped slash; one range) then p, =, l, q or Q.
+const SED_ADDRESS = String.raw`(?:\d+|\$|/(?:[^/\\]|\\.)*/)`;
+const SED_COMMAND = String.raw`(?:${SED_ADDRESS}(?:,${SED_ADDRESS})?)?\s*(?:[p=l]|[qQ]\d*)`;
+const SED_SCRIPT = new RegExp(String.raw`^\s*${SED_COMMAND}(?:\s*;\s*${SED_COMMAND})*\s*;?\s*$`);
+/** True only for a sed invocation whose every option and script is in the read-only allowlist. */
+function sedReadOnly(args: string[]): boolean {
+	const scripts: string[] = [];
+	let sawScript = false, i = 0;
+	for (; i < args.length; i++) {
+		const a = args[i];
+		if (a === "--") { i++; break; }
+		if (!a.startsWith("-") || a === "-") break;
+		if (/^--(?:quiet|silent|posix)$/.test(a)) continue;
+		if (a.startsWith("--expression=")) { scripts.push(a.slice(13)); sawScript = true; continue; }
+		if (a === "--expression") { if (args[i + 1] === undefined) return false; scripts.push(args[++i]); sawScript = true; continue; }
+		const cluster = /^-([nErsuz]*)(e?)$/.exec(a);
+		if (!cluster) return false;
+		if (cluster[2]) { if (args[i + 1] === undefined) return false; scripts.push(args[++i]); sawScript = true; }
+	}
+	if (!sawScript) { if (args[i] === undefined) return false; scripts.push(args[i]); }
+	return scripts.every(sc => SED_SCRIPT.test(sc));
+}
+/** Strict git allowlist: bare `git` (no env/prefix words), no config/pager/exec globals, read-only subcommand, no helper-running options. */
+function gitReadOnly(rest: string[]): boolean {
+	if (rest[0] !== "git" && !rest[0]?.endsWith("/git")) return false;
+	const args = rest.slice(1);
+	while (args[0]?.startsWith("-")) {
+		const flag = args.shift()!;
+		if (["--no-pager", "--no-optional-locks", "-P"].includes(flag)) continue;
+		if (flag === "-C") { const path = args.shift(); if (path === undefined || /[$`~]/.test(path)) return false; continue; }
+		return false;
+	}
+	return GIT_READERS.has(args[0]) && !args.some(a => GIT_UNSAFE_OPTION.test(a));
+}
+/** Read-only forms of programs that can also write. The program must be the first word: env/prefix words disqualify. */
+function readOnlyForm(rest: string[]): boolean {
+	const name = rest[0]?.split("/").pop();
+	if (name === "sed") return sedReadOnly(rest.slice(1));
+	if (name === "find") return !rest.some(a => FIND_WRITERS.has(a));
+	if (name === "git") return gitReadOnly(rest);
+	return false;
+}
 function shellCommandSafe(words: string[], cwd: string): boolean {
 	const rest = redirections(words, cwd, true);
 	if (!rest) return false;
-	if (!rest.length || SHELL_READERS.some(p => argsOf(rest, p))) return true;
+	if (!rest.length || SHELL_READERS.some(p => argsOf(rest, p)) || readOnlyForm(rest)) return true;
 	const operands = (p: string) => argsOf(rest, p)?.filter(w => !w.startsWith("-"));
 	const tee = operands("tee");
 	if (tee) return tee.every(w => aiWorkDestination(w, cwd));
@@ -325,9 +389,65 @@ function tampering(command: string, ctx: Context): boolean {
 	// whose destination is under `.ai-work/` are allowed.
 	return commands.some(w => !shellCommandSafe(w, ctx.cwd));
 }
+const PATH_WRITERS = ["rm", "rmdir", "mv", "cp", "ln", "tee", "mkdir", "touch", "sed", "install", "truncate", "dd", "chmod", "find", "unlink", "rsync"];
+const OPAQUE = /^(?:sh|bash|zsh|dash|ksh|fish|node|deno|bun|python[\d.]*|perl|ruby|php|osascript|awk|gawk|xargs|env|eval|source|\.|sudo|exec|make|swift|lua|tclsh|Rscript|osacompile|command|nohup|time)$/;
+/** Could `word` (after statically known ~ and quote removal) name, contain, or glob-match the operator policy store? Unresolvable parts count as matching. */
+function storeWord(word: string, cwd: string | undefined, store: string): boolean {
+	const eq = word.indexOf("=");
+	if (eq > 0 && !word.startsWith("-") && storeWord(word.slice(eq + 1), cwd, store)) return true;
+	const w = word.replace(/\\/g, "").replace(/^~(?=\/|$)/, homedir());
+	const meta = w.search(/[*?\[{$`]/);
+	if (!isAbsolute(w) && cwd === undefined) return true;
+	if (meta < 0) {
+		const p = canonical(resolve(cwd ?? "/", w));
+		return p === store || store.startsWith(`${p}${sep}`) || p.startsWith(`${store}.`);
+	}
+	if (meta === 0 || cwd === undefined && !isAbsolute(w)) return true;
+	const prefix = w.slice(0, meta), slash = prefix.lastIndexOf("/") + 1;
+	const base = join(canonical(resolve(cwd ?? "/", prefix.slice(0, slash) || ".")), prefix.slice(slash));
+	return store.startsWith(base);
+}
+/**
+ * For a setup writer only: can this command write, delete, move or glob over the operator policy store
+ * (or an ancestor directory of it)? Every operand of a path-writing program is a candidate target.
+ * Opaque interpreters whose targets cannot be determined are denied if the command mentions the store in any form.
+ */
+function storeAtRisk(command: string, ctx: Context): boolean {
+	const store = canonical(policyPath());
+	if (/^apply_patch /.test(command)) {
+		const targets = [...command.matchAll(/\*\*\* (?:Update File|Add File|Delete File|Move to): ?([^\\"\n]+)/g)].map(m => m[1].trim());
+		return targets.some(t => storeWord(t, ctx.cwd, store));
+	}
+	// Structural rule: any word naming the policy dir or policy.json (raw, unquoted, ~/$HOME-expanded) means every segment must be strictly read-only.
+	const plain = (w: string) => w.replace(/[\\'"]/g, "").replace(/^(?:[^/=]*=)?~(?=\/)/, m => m.replace("~", homedir())).replace(/\$\{?HOME\}?/g, homedir());
+	const segments = expandedCommands(command, 0, true);
+	const benign = (x: string) => x.split(`${dirname(policyPath())}/README.md`).join("").split(`${dirname(policyPath())}/setup-writers.json`).join("");
+	const names = (w: string) => [w, plain(w)].map(benign).some(x => x.includes(dirname(policyPath())) || x.includes(".pi/agent/lane-policy") || x.includes("policy.json"));
+	if (segments.some(words => words.some(names))) {
+		return !segments.every(words => !words.includes(">") && (words.length === 0 || argsOf(words, "cd") !== undefined || SHELL_READERS.some(r => argsOf(words, r)) || readOnlyForm(words.filter(w => w !== "<")) ));
+	}
+	let cwd: string | undefined = ctx.cwd;
+	const mention = /polic|lane/i.test(command.replace(/[\\'"`]/g, "").replace(/lane-policy(?:\.test)?\.ts|lane-policy\/README\.md/g, "").replace(/\S*\.ai-work\/(?:(?!\.\.(?:\/|$))[\w.-]+\/?)*/g, ""));
+	for (const words of expandedCommands(command, 0, true)) {
+		const cd = argsOf(words, "cd");
+		if (cd) {
+			const path = cd.find(a => !a.startsWith("-"));
+			cwd = path !== undefined && cwd !== undefined && !/[*?\[{$`]/.test(path) ? resolve(cwd, path.replace(/^~(?=\/|$)/, homedir())) : undefined;
+			continue;
+		}
+		const rest = words.filter((w, k) => w !== ">" && w !== "<" && words[k - 1] !== "<" && words[k - 1] !== ">");
+		if (words.some((w, k) => w === ">" && words[k + 1] !== undefined && storeWord(words[k + 1], cwd, store))) return true;
+		const i = rest.findIndex(w => !/^[A-Za-z_]\w*=/.test(w));
+		const name = rest[i]?.split("/").pop() ?? "";
+		if (name === "git" && rest.some(w => w === "clean" || w === "rm") && cwd !== undefined && store.startsWith(cwd)) return true;
+		if (PATH_WRITERS.includes(name)) { if (!readOnlyForm(rest.slice(i)) && rest.slice(i + 1).some(w => storeWord(w, cwd, store))) return true; continue; }
+		if (OPAQUE.test(name) && mention) return true;
+	}
+	return false;
+}
 export function assessCommand(command: string, ctx: Context, file = policyPath(), depth = 0): string | undefined {
 	if (isGuardOff("lane-policy")) return;
-	if (tampering(command, ctx)) return tamperReason(ctx, file);
+	if (isSetupWriter(ctx) ? storeAtRisk(command, ctx) : tampering(command, ctx)) return tamperReason(ctx, file);
 	const commands = expandedCommands(command, 0, true);
 	const loaded = loadPolicy(file);
 	if (loaded.error) return publicationToken(command) ? "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer." : undefined;
