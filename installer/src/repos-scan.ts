@@ -24,27 +24,45 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** One point per child that is a git checkout, one more when its origin belongs to the user or an org. */
+function isCheckout(dir: string): boolean {
+  return existsSync(join(dir, ".git"));
+}
+
+/**
+ * One point per checkout directly below the folder (<root>/<repo>) and per checkout one level further down
+ * (<root>/<org>/<repo>), one more when its origin belongs to the user or an org.
+ */
 export function scoreCandidate(
   path: string,
   owners: string[],
   options: { maxChildren: number; expired: () => boolean },
 ): number {
-  let entries: string[];
-  try {
-    entries = readdirSync(path).filter((name) => !SKIP.has(name)).slice(0, options.maxChildren);
-  } catch {
-    return 0;
-  }
   const names = owners.filter(Boolean).map(escapeRegExp);
   const owned = names.length ? new RegExp(`[:/](${names.join("|")})/`, "i") : undefined;
+  const list = (dir: string): string[] => {
+    try {
+      return readdirSync(dir).filter((name) => !SKIP.has(name)).slice(0, options.maxChildren);
+    } catch {
+      return [];
+    }
+  };
+  const points = (dir: string): number => {
+    const git = join(dir, ".git");
+    return 1 + (owned && statSync(git).isDirectory() && owned.test(originUrl(git)) ? 1 : 0);
+  };
   let score = 0;
-  for (const name of entries) {
+  let budget = options.maxChildren * 4;
+  for (const name of list(path)) {
     if (options.expired()) break;
-    const git = join(path, name, ".git");
-    if (!existsSync(git)) continue;
-    score += 1;
-    if (owned && statSync(git).isDirectory() && owned.test(originUrl(git))) score += 1;
+    const child = join(path, name);
+    if (isCheckout(child)) {
+      score += points(child);
+      continue;
+    }
+    for (const grand of list(child)) {
+      if (options.expired() || budget-- <= 0) break;
+      if (isCheckout(join(child, grand))) score += points(join(child, grand));
+    }
   }
   return score;
 }
@@ -71,7 +89,8 @@ export async function candidateRoots(ctx: Ctx): Promise<string[]> {
   const common = await ctx.run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
     cwd: ctx.repoDir, timeoutMs: 3000,
   });
-  if (common.code === 0 && common.stdout.trim()) list.push(dirname(dirname(common.stdout.trim())));
+  // The templates expect <root>/<org>/<repo>, so the installer's own checkout implies the grandparent.
+  if (common.code === 0 && common.stdout.trim()) list.push(dirname(dirname(dirname(common.stdout.trim()))));
   list.push(...NAMES.map((n) => join(ctx.home, n)));
   if (ctx.platform === "darwin") {
     let volumes: string[] = [];

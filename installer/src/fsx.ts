@@ -1,6 +1,6 @@
 import {
   chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync,
-  renameSync, statSync, utimesSync, writeSync,
+  realpathSync, renameSync, statSync, utimesSync, writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -32,7 +32,9 @@ export function backupCopy(from: string, to: string): void {
 }
 
 /** Write through a temporary file in the same directory, then rename. */
-export function atomicWrite(path: string, data: Buffer | string, mode: number, pid = process.pid): void {
+export function atomicWrite(link: string, data: Buffer | string, mode: number, pid = process.pid): void {
+  // Write through a symlink so the link survives the rename.
+  const path = existsSync(link) ? realpathSync(link) : link;
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp-${pid}`;
   const fd = openSync(tmp, "w", mode);

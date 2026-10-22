@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: d6901590fa2b9ec895bd151dfef88b38c801d49d67ec63e1e5bf4a28b0977ffe
+// pi-setup-source-sha256: 9af03a0c2b890ebf8161965a045cb2b7eb3571a4bbeb0103550226a190e3e672
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -130,6 +130,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync as statSync2,
   utimesSync,
@@ -155,7 +156,8 @@ function backupCopy(from, to) {
   chmodSync(to, st.mode & 4095);
   utimesSync(to, st.atime, st.mtime);
 }
-function atomicWrite(path, data, mode, pid = process.pid) {
+function atomicWrite(link, data, mode, pid = process.pid) {
+  const path = existsSync(link) ? realpathSync(link) : link;
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp-${pid}`;
   const fd = openSync(tmp, "w", mode);
@@ -336,7 +338,7 @@ var init_args = __esm({
   --plan                print the full plan (detection, profile, actions), write nothing
   --json                print one JSON object on stdout (combine with --plan or --dry-run)
   --user <login>        GitHub login (default: saved, then gh, then ask)
-  --repos-root <dir>    repositories root (default: saved, then best scan match, then ~/repos)
+  --repos-root <dir>    repositories root (default: saved, then ~/repos; interactive runs suggest a detected root)
   --profile <name|auto> profile to apply (default: the active one, else chosen from your logins)
   --yes                 never prompt
   --skip-npm            do not run npm install in ~/.pi/agent/npm
@@ -368,22 +370,36 @@ function originUrl(gitDir) {
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+function isCheckout(dir) {
+  return existsSync3(join4(dir, ".git"));
+}
 function scoreCandidate(path, owners, options) {
-  let entries;
-  try {
-    entries = readdirSync2(path).filter((name) => !SKIP.has(name)).slice(0, options.maxChildren);
-  } catch {
-    return 0;
-  }
   const names = owners.filter(Boolean).map(escapeRegExp);
   const owned = names.length ? new RegExp(`[:/](${names.join("|")})/`, "i") : void 0;
+  const list = (dir) => {
+    try {
+      return readdirSync2(dir).filter((name) => !SKIP.has(name)).slice(0, options.maxChildren);
+    } catch {
+      return [];
+    }
+  };
+  const points = (dir) => {
+    const git = join4(dir, ".git");
+    return 1 + (owned && statSync4(git).isDirectory() && owned.test(originUrl(git)) ? 1 : 0);
+  };
   let score = 0;
-  for (const name of entries) {
+  let budget = options.maxChildren * 4;
+  for (const name of list(path)) {
     if (options.expired()) break;
-    const git = join4(path, name, ".git");
-    if (!existsSync3(git)) continue;
-    score += 1;
-    if (owned && statSync4(git).isDirectory() && owned.test(originUrl(git))) score += 1;
+    const child = join4(path, name);
+    if (isCheckout(child)) {
+      score += points(child);
+      continue;
+    }
+    for (const grand of list(child)) {
+      if (options.expired() || budget-- <= 0) break;
+      if (isCheckout(join4(child, grand))) score += points(join4(child, grand));
+    }
   }
   return score;
 }
@@ -405,7 +421,7 @@ async function candidateRoots(ctx) {
     cwd: ctx.repoDir,
     timeoutMs: 3e3
   });
-  if (common.code === 0 && common.stdout.trim()) list.push(dirname3(dirname3(common.stdout.trim())));
+  if (common.code === 0 && common.stdout.trim()) list.push(dirname3(dirname3(dirname3(common.stdout.trim()))));
   list.push(...NAMES.map((n3) => join4(ctx.home, n3)));
   if (ctx.platform === "darwin") {
     let volumes = [];
@@ -2330,7 +2346,7 @@ function pickProfile(options, activeBefore, ready, profiles, names, readOnly = f
     return { name: activeBefore, reason: "keeping your active profile", provisional: false, source: "active" };
   }
   if (readOnly) {
-    return { name: "balanced", reason: "providers not probed in dry-run; using --profile, then the active profile, then balanced", provisional: false, source: "chooser" };
+    return { name: "balanced", reason: "provisional: the real install picks by logged-in providers", provisional: false, source: "chooser" };
   }
   return chooseProfile(ready, profiles);
 }
@@ -2345,7 +2361,6 @@ function resolveAll(ctx, options, detection, saved, answers) {
     flagRoot: answers.root ?? options.reposRoot,
     saved,
     detectedUser: detection.github.login,
-    scanRoot: detection.candidates[0]?.path,
     home: ctx.home,
     repoDir: ctx.repoDir
   });
@@ -2434,6 +2449,10 @@ async function execute(ctx, options, prompter, baseCtx) {
     answers = result;
   }
   const r2 = resolveAll(ctx, options, detection, saved, answers);
+  const better = detection.candidates[0]?.path;
+  if (!prompter && r2.settings.rootSource === "default" && better && better !== r2.settings.reposRoot) {
+    ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
+  }
   r2.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r2.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
   const summary = summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly });
