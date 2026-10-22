@@ -54,7 +54,7 @@ You are a subagent. The parent orchestrates. You never push, merge, open PRs, or
 - Never blanket-delete `.ai-work/`, run `git clean -fdx`, or force-remove a worktree. Preserve uncommitted and untracked work and unreferenced commits.
 - Before deleting build output or a worktree: nothing tracked inside (`git ls-files`), clean including ignored files, no live process holding it.
 - Failure, exit, age or dead PIDs never imply a task is complete.
-- Guards (`cratis`, `mcp`, `wait`, `subagent-results`, `context`) are the user's switch. When one blocks, report it; never disable or bypass it, and never edit `~/.pi/agent/guards.json`.
+- Guards (`cratis`, `mcp`, `wait`, `subagent-results`, `context`, `lane-policy`, `secrets`) are the user's switch. When one blocks, report it; never disable or bypass it, and never edit `~/.pi/agent/guards.json`.
 - MCP calls that change state need user approval; if a model or tool refuses, report it and do not work around it.
 
 ## Output and evidence
