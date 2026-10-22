@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { mock, test } from "node:test";
 import { setGuards } from "./guards.ts";
 import { guardSelect } from "./orchestration.ts";
+import { cratisRepo } from "./cratis-hooks-detect.test.ts";
 import extension from "../extensions/secret-mask.ts";
 import {
 	commandRule, createHandlers, DEFAULTS, INPUT_NOTICE, loadConfig, logRedaction,
@@ -470,4 +471,21 @@ test("config flags are independent; enabled false and excluded scope disable all
 	assert.equal(await f.call(), undefined);
 	assert.equal(f.handlers.input({ text: `sk-ant-${a}` }, f.ctx), undefined);
 	assert.equal(f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: `sk-ant-${a}` }] }, f.ctx), undefined);
+});
+
+test("layering: with the Cratis secrets hook the local block stands down (redaction stays); without it, it blocks as before", async () => {
+	const withHook = cratisRepo();
+	const without = cratisRepo({ scripts: ["cratis-guard-store-mutations.sh"] });
+	try {
+		const on = fixture({ hasUI: false });
+		on.ctx.cwd = withHook.sub;
+		assert.equal(await on.call(), undefined); // cratis-guard-secrets.sh owns blocking; CRATIS_HOOKS_ALLOW_SECRET_READS is the switch
+		assert.deepEqual(on.decisions, [["secrets", "stand-down:cratis-hook", "environment"]]);
+		const redacted = on.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: "token: ghp_" + "a".repeat(36) }] }, on.ctx);
+		assert.ok(redacted, "redaction still runs");
+		assert.ok(!JSON.stringify(redacted).includes("ghp_" + "a".repeat(36)));
+		const off = fixture({ hasUI: false });
+		off.ctx.cwd = without.sub;
+		assert.equal((await off.call())?.block, true);
+	} finally { withHook.cleanup(); without.cleanup(); }
 });

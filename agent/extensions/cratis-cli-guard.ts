@@ -19,6 +19,13 @@
  * rtk proxy, …), and inside `bash -c '…'` / `sh -c` / `eval`. Arguments and quoted text — search
  * terms, commit messages, PR titles, paths — are never treated as a call.
  *
+ * Layering with the Cratis hooks: where the repository has the Cratis Pi hooks installed (lib/cratis-hooks-detect.ts),
+ * `cratis chronicle` mutations are already refused by cratis-guard-store-mutations.sh, so this guard stands down for them
+ * (one block, one message; CRATIS_HOOKS_ALLOW_STORE_MUTATIONS=1 is the switch, /guards off cratis is not needed) and
+ * reads the Cratis read-only list at runtime (falling back to the list below when absent or unparsable). It keeps what
+ * Cratis lacks: `prologue start` confirmation, and — when a human has set the Cratis switch — the production check
+ * (a production target is still denied; anything else runs without a prompt). Outside such repositories nothing changes.
+ *
  * Production (orchestration: state-changing commands only; read-only commands are allowed and logged):
  * besides the prod/production name heuristic, ~/.pi/agent/cratis-production.json (re-read at every check;
  * missing/invalid → built-in defaults, logged) lists production `contexts` (glob `*`, case-insensitive),
@@ -31,6 +38,7 @@ import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { cratisHookActive, cratisReadOnlyCommands, cratisSwitchOn } from "../lib/cratis-hooks-detect.ts";
 import { isGuardOff } from "../lib/guards.ts";
 import { guardSelect, isOrchestrated, orchLog } from "../lib/orchestration.ts";
 
@@ -504,8 +512,9 @@ export default function (pi: ExtensionAPI) {
 		if (!/cratis/.test(command)) return undefined;
 
 		const config = /chronicle/.test(command) ? loadProductionConfig() : DEFAULT_PRODUCTION_CONFIG;
-		const invocations = classifyCratisInvocations(command, 0, config.extraReadOnly);
-		const risky = invocations.filter(i => !i.readOnly);
+		const cratisActive = cratisHookActive(ctx.cwd, "store-mutations");
+		const invocations = classifyCratisInvocations(command, 0, [...config.extraReadOnly, ...(cratisActive ? cratisReadOnlyCommands(ctx.cwd) ?? [] : [])]);
+		let risky = invocations.filter(i => !i.readOnly);
 		if (risky.length === 0) {
 			// Read-only commands are never production-checked or prompted; in orchestration they are logged.
 			if (invocations.length > 0 && isOrchestrated(process.env, ctx.cwd)) orchLog("cratis", "allow", `read-only: ${invocations.map(i => i.text).join("; ")}`);
@@ -514,6 +523,19 @@ export default function (pi: ExtensionAPI) {
 		if (isGuardOff("cratis")) {
 			if (ctx.hasUI) ctx.ui.notify(`cratis-cli-guard off: allowed '${risky.map(i => i.text).join("; ").replace(/\s+/g, " ").slice(0, 180)}'`, "info");
 			return undefined;
+		}
+
+		if (cratisActive) {
+			// Chronicle mutations belong to cratis-guard-store-mutations.sh: it blocks them, so block nothing twice.
+			const covered = risky.filter(i => i.path.startsWith("chronicle"));
+			risky = risky.filter(i => !covered.includes(i));
+			if (covered.length > 0 && cratisSwitchOn("store-mutations")) {
+				// A human lifted the Cratis block; the production check is the part Cratis does not have.
+				const target = [...covered.map(i => i.text), ...(command.match(/CHRONICLE_CONNECTION_STRING=\S+/g) ?? [])].join(" ");
+				const production = await productionCheck(target, await activeContext(), config);
+				if (production) return { block: true, reason: `cratis-cli-guard: state-changing cratis command(s) denied on production (CRATIS_HOOKS_ALLOW_STORE_MUTATIONS does not cover production). Matched rule: ${production}.\n${covered.map(i => `  ${i.text}`).join("\n")}` };
+			}
+			if (risky.length === 0) return undefined;
 		}
 
 		const list = risky.map(i => `  ${i.text}`).join("\n");
