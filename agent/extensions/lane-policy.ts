@@ -2,7 +2,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
 import { isGuardOff } from "../lib/guards.ts";
-import { ACTIONS, acknowledge, assessCommand, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, savePolicy, tamperReason, type Context } from "../lib/lane-policy.ts";
+import { ACTIONS, acknowledge, assessCommand, identity, isSetupWriter, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyStore, savePolicy, tamperReason, type Context } from "../lib/lane-policy.ts";
 
 const HELP = `Lane policy (operator TUI command only; all writes require confirmation):
 status | help | ack current-revision
@@ -14,7 +14,7 @@ grant session-id action exact-target 1..60 minutes
 revoke session|writer|grants session-id
 forbid owner/repo/#number | clear-forbidden exact-target
 Non-coordinators must append --override to authority changes. ACK is for the invoking bound session only; it grants no authority and does not change the revision. All authority changes invalidate older exception grants. Grants target a branch for push/pr-create, a numeric issue/PR for issue-write/pr-comment. Merge remains blocked in this first slice. /guards off|on lane-policy controls enforcement. No live lanes are enrolled automatically.`;
-const context = (ctx: ExtensionContext): Context => ({ cwd: ctx.cwd, session: ctx.sessionManager.getSessionId() });
+const context = (ctx: ExtensionContext): Context => ({ cwd: ctx.cwd, session: ctx.sessionManager.getSessionId(), name: ctx.sessionManager.getSessionName?.() });
 const clean = (text: string) => text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 const record = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
 
@@ -36,7 +36,7 @@ function toolReason(name: string, value: unknown, actor: Context, depth = 0): st
 	}
 	if (["write", "edit", "apply_patch"].includes(name)) {
 		const path = input.path ?? input.file_path;
-		if (typeof path === "string" && policyFile(path, actor.cwd)) return tamperReason(actor);
+		if (typeof path === "string" && policyFile(path, actor.cwd) && !(isSetupWriter(actor) && !policyStore(path, actor.cwd))) return tamperReason(actor);
 		if (name === "apply_patch") return assessCommand(`apply_patch ${JSON.stringify(value)}`, actor);
 		return;
 	}

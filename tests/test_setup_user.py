@@ -69,7 +69,7 @@ class SettingsTests(unittest.TestCase):
     def test_legacy_sync_fallback_and_provenance(self):
         # Exercise sync's actual fallback arguments without touching the live install.
         command = next(line for line in (REPO / "sync.sh").read_text().splitlines()
-                       if line.startswith("python3 setup-user.py normalize "))
+                       if line.startswith('python3 "$REPO/setup-user.py" normalize '))
         _, _, _, _, user, root = shlex.split(command)
         scratch = Path(self.scratch.name)
         templates = [Path(p) for p in setup_user.TEMPLATES]

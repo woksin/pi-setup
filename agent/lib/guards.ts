@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 export const GUARD_NAMES = ["cratis", "mcp", "wait", "subagent-results", "context", "lane-policy", "secrets"] as const;
 export type GuardName = (typeof GUARD_NAMES)[number];
 type Values = Partial<Record<GuardName, boolean>>;
+export interface GuardMeta { at?: string; reason?: string }
 export interface GuardStatus {
 	name: GuardName;
 	off: boolean;
@@ -97,6 +98,59 @@ export function guardStatus(): GuardStatus[] {
 	});
 }
 
+type MetaMap = Partial<Record<GuardName, GuardMeta>>;
+
+/** Sidecar next to the guards file (guards.json -> guards.meta.json) so guards.json stays readable by older readers. */
+function metaPath(): string {
+	const file = filePath();
+	return file.endsWith(".json") ? `${file.slice(0, -5)}.meta.json` : `${file}.meta`;
+}
+
+/** Informational only: a missing or corrupt sidecar yields {} and never affects guard state. */
+function readMeta(): MetaMap {
+	const meta: MetaMap = {};
+	try {
+		const data = JSON.parse(readFileSync(metaPath(), "utf8"));
+		if (!data || typeof data !== "object" || Array.isArray(data)) return meta;
+		for (const [name, entry] of Object.entries(data as Record<string, any>)) {
+			if (!GUARD_NAMES.includes(name as GuardName) || !entry || typeof entry !== "object") continue;
+			meta[name as GuardName] = {
+				...(typeof entry.at === "string" ? { at: entry.at } : {}),
+				...(typeof entry.reason === "string" ? { reason: entry.reason } : {}),
+			};
+		}
+	} catch { /* missing or corrupt: date unknown */ }
+	return meta;
+}
+
+export interface PersistedOff extends GuardMeta { name: GuardName }
+
+/** Guards that are effectively off because of the persisted file, with the recorded date/reason when known. */
+export function persistedOffGuards(): PersistedOff[] {
+	const meta = readMeta();
+	return guardStatus().filter(entry => entry.off && entry.source === "persisted")
+		.map(entry => ({ name: entry.name, ...meta[entry.name] }));
+}
+
+function since(at: string | undefined): string {
+	const date = at ? new Date(at) : undefined;
+	return date && !Number.isNaN(date.getTime()) ? `since ${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}` : "date unknown";
+}
+
+const REASON_MAX = 40;
+/** Short note such as "since 10-13, reason" or "date unknown" for a persisted-off guard. */
+export function persistedNote(entry: GuardMeta): string {
+	const reason = entry.reason?.replace(/\s+/g, " ").trim();
+	const shown = reason && reason.length > REASON_MAX ? `${reason.slice(0, REASON_MAX - 1)}…` : reason;
+	return shown ? `${since(entry.at)}, ${shown}` : since(entry.at);
+}
+
+/** Footer text for persisted-off guards only (with date/reason), or undefined when none remain. */
+export function guardsStatusText(): string | undefined {
+	const off = persistedOffGuards();
+	return off.length ? `guards off: ${off.map(entry => `${entry.name} (${persistedNote(entry)})`).join(", ")}` : undefined;
+}
+
 export function isGuardOff(name: GuardName): boolean {
 	namesOf([name]);
 	return guardStatus().find(entry => entry.name === name)!.off;
@@ -168,10 +222,32 @@ function withPersistenceLock(file: string, write: () => void): void {
 	}
 }
 
+// Best effort: losing metadata only means "date unknown", so it must not fail the guard change.
+function writeMeta(values: Record<GuardName, boolean>, selected: GuardName[], off: boolean, reason: string | undefined): void {
+	const target = metaPath();
+	const temporary = `${target}.${randomUUID()}.tmp`;
+	try {
+		const meta: MetaMap = {};
+		for (const [name, entry] of Object.entries(readMeta())) if (values[name as GuardName]) meta[name as GuardName] = entry;
+		const at = new Date().toISOString();
+		for (const name of selected) {
+			if (off) meta[name] = { at, ...(reason?.trim() ? { reason: reason.trim() } : {}) };
+			else delete meta[name];
+		}
+		writeFileSync(temporary, `${JSON.stringify(meta, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+		renameSync(temporary, target);
+	} catch (error) {
+		warn(state(), `Cannot write ${target}: ${(error as Error).message}. Date/reason will show as unknown.`);
+	} finally {
+		try { unlinkSync(temporary); } catch { /* nothing to clean */ }
+	}
+}
+
 /** Persistent changes replace the selected process overrides; other process overrides remain. */
-export function setGuards(names: string | readonly string[], off: boolean, { persist = false }: { persist?: boolean } = {}): void {
+export function setGuards(names: string | readonly string[], off: boolean, { persist = false, reason }: { persist?: boolean; reason?: string } = {}): void {
 	const selected = namesOf(names);
 	if (typeof off !== "boolean") throw new Error("Guard off must be a boolean.");
+	if (reason !== undefined && (!persist || !off)) throw new Error("A reason is only recorded with off --persist.");
 	const shared = state();
 	if (!persist) {
 		for (const name of selected) shared.session[name] = off;
@@ -188,6 +264,7 @@ export function setGuards(names: string | readonly string[], off: boolean, { per
 		try {
 			writeFileSync(temporary, `${JSON.stringify({ off: values }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
 			renameSync(temporary, file);
+			writeMeta(values, selected, off, reason);
 		} finally {
 			try { unlinkSync(temporary); } catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

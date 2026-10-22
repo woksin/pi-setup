@@ -4,12 +4,13 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import fs, { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import childProcess, { spawn, spawnSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { GUARD_NAMES, guardStatus, isGuardOff, setGuards } from "./guards.ts";
-import guardsExtension from "../extensions/guards.ts";
+import { GUARD_NAMES, guardStatus, guardsStatusText, isGuardOff, persistedOffGuards, setGuards } from "./guards.ts";
+import guardsExtension, { tokenize } from "../extensions/guards.ts";
 import cratisExtension, { DEFAULT_PRODUCTION_CONFIG, classifyCratisInvocations, forwardedPorts, readOnlyList, productionSources, productionTarget } from "../extensions/cratis-cli-guard.ts";
 import waitExtension, { assess, PollTracker } from "../extensions/wait-guard.ts";
 
@@ -138,6 +139,10 @@ function entry(name: string) { return guardStatus().find(status => status.name =
 function stored(off = false, overrides: Record<string, boolean> = {}) {
 	return { off: Object.fromEntries(GUARD_NAMES.map(name => [name, overrides[name] ?? off])) };
 }
+// Specs about values ignore the informational meta block (covered by its own specs).
+function offOnly() {
+	return { off: JSON.parse(readFileSync(file, "utf8")).off };
+}
 function bash(command: string, timeout?: number) {
 	return { toolName: "bash", input: { command, ...(timeout !== undefined ? { timeout } : {}) } };
 }
@@ -237,7 +242,7 @@ test("persist round-trip merges settings, replaces selected session values and r
 	assert.deepEqual(entry("mcp"), { name: "mcp", off: false, source: "persisted" });
 	assert.equal(entry("cratis").source, "session");
 	setGuards("cratis", false, { persist: true });
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
+	assert.deepEqual(offOnly(), stored());
 	assert.equal(entry("cratis").source, "persisted");
 	const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
 		import { guardStatus } from ${JSON.stringify(new URL("./guards.ts", import.meta.url).href)};
@@ -258,7 +263,7 @@ test("repairing a corrupt file persists all guards on without re-enabling env op
 	const app = fake();
 	guardsExtension(app.pi);
 	await app.commands.get("guards").handler("on wait --persist", app.ctx);
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
+	assert.deepEqual(offOnly(), stored());
 	assert.ok(guardStatus().every(status => !status.off && status.source === "persisted"));
 	assert.equal(existsSync(`${file}.lock`), false);
 });
@@ -276,7 +281,7 @@ test("repairing an unreadable file also persists fail-safe values instead of env
 	setGuards("wait", false, { persist: true });
 	reader.mock.restore();
 	syncBuiltinESMExports();
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
+	assert.deepEqual(offOnly(), stored());
 	assert.equal(existsSync(`${file}.lock`), false);
 });
 
@@ -285,7 +290,7 @@ test("persistent named updates retain only persisted values and fill omissions w
 	writeFileSync(file, JSON.stringify({ off: { cratis: true } }));
 	setGuards("cratis", false); // process-only override must not change the stored cratis value
 	setGuards("wait", true, { persist: true });
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored(false, { cratis: true, wait: true }));
+	assert.deepEqual(offOnly(), stored(false, { cratis: true, wait: true }));
 	assert.equal(entry("cratis").source, "session");
 	assert.equal(isGuardOff("mcp"), false);
 	assert.equal(statSync(file).mode & 0o777, 0o600);
@@ -296,7 +301,7 @@ test("first persisted write fills every guard with on rather than inheriting env
 	process.env.PI_GUARDS_OFF = "all";
 	assert.ok(guardStatus().every(status => status.off));
 	setGuards("wait", false, { persist: true });
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
+	assert.deepEqual(offOnly(), stored());
 	assert.ok(guardStatus().every(status => !status.off));
 });
 
@@ -339,7 +344,7 @@ test("concurrent child-process named updates all survive", { timeout: 10000 }, a
 		for (const { child } of children) child.send("go");
 		const results = await Promise.all(children.map(child => child.finished));
 		for (const result of results) assert.equal(result.code, 0, result.stderr);
-		assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored(true));
+		assert.deepEqual(offOnly(), stored(true));
 		assert.equal(statSync(file).mode & 0o777, 0o600);
 		assert.equal(existsSync(`${file}.lock`), false);
 	} finally {
@@ -353,7 +358,7 @@ test("an abandoned stale persistence lock is recovered", () => {
 	const old = new Date(Date.now() - 10000);
 	utimesSync(`${file}.lock`, old, old);
 	setGuards("mcp", true, { persist: true });
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored(false, { mcp: true }));
+	assert.deepEqual(offOnly(), stored(false, { mcp: true }));
 	assert.equal(existsSync(`${file}.lock`), false);
 });
 
@@ -766,18 +771,108 @@ test("/guards status, default all, named lists, persist parsing and footer set/c
 	assert.equal(app.notices.at(-1)?.text, GUARD_NAMES.map(name => `${name}: on (default)`).join("\n"));
 	await command.handler("off", app.ctx);
 	assert.ok(guardStatus().every(status => status.off && status.source === "session"));
-	assert.equal(app.statuses.at(-1)?.text, `guards off: ${GUARD_NAMES.join(",")}`);
+	assert.equal(app.statuses.at(-1)?.text, undefined, "session-only offs are not shown");
 	assert.equal(existsSync(file), false);
 	await command.handler("on all", app.ctx);
 	assert.equal(app.statuses.at(-1)?.text, undefined);
 	await command.handler("  off   cratis   mcp  ", app.ctx);
-	assert.equal(app.statuses.at(-1)?.text, "guards off: cratis,mcp");
+	assert.equal(app.statuses.at(-1)?.text, undefined);
 	await command.handler("on --persist cratis mcp", app.ctx);
 	assert.equal(app.statuses.at(-1)?.text, undefined);
 	assert.equal(entry("cratis").source, "persisted");
 	await command.handler("off wait --persist", app.ctx);
 	assert.deepEqual(entry("wait"), { name: "wait", off: true, source: "persisted" });
-	assert.equal(app.statuses.at(-1)?.text, "guards off: wait");
+	assert.match(app.statuses.at(-1)!.text!, /^guards off: wait \(since \d\d-\d\d\)$/);
+});
+
+test("persisted-off guards are named with date and reason; --reason is stored and on removes it", async () => {
+	const app = fake();
+	guardsExtension(app.pi);
+	const command = app.commands.get("guards");
+	await command.handler(`off cratis --persist --reason "lab box, no prod"`, app.ctx);
+	const sidecar = file.replace(/\.json$/, ".meta.json");
+	const meta = () => JSON.parse(readFileSync(sidecar, "utf8"));
+	assert.equal(JSON.parse(readFileSync(file, "utf8")).off.cratis, true);
+	assert.equal(meta().cratis.reason, "lab box, no prod");
+	assert.ok(!Number.isNaN(Date.parse(meta().cratis.at)));
+	assert.deepEqual(Object.keys(meta()), ["cratis"]);
+	assert.match(app.statuses.at(-1)!.text!, /^guards off: cratis \(since \d\d-\d\d, lab box, no prod\)$/);
+	assert.match(app.notices.at(-1)!.text, /cratis: off \(persisted, since \d\d-\d\d, lab box, no prod\)/);
+	await command.handler("off wait --persist", app.ctx);
+	assert.equal(meta().cratis.reason, "lab box, no prod", "other meta is kept");
+	assert.equal(meta().wait.reason, undefined);
+	await command.handler("on cratis --persist", app.ctx);
+	assert.deepEqual(Object.keys(meta()), ["wait"]);
+	await command.handler("on wait --persist", app.ctx);
+	assert.deepEqual(meta(), {});
+	assert.equal(app.statuses.at(-1)?.text, undefined);
+	await command.handler("off mcp --reason x", app.ctx);
+	assert.equal(app.notices.at(-1)?.type, "error");
+	await command.handler("off mcp --persist --reason", app.ctx);
+	assert.equal(app.notices.at(-1)?.type, "error");
+	assert.equal(isGuardOff("mcp"), false);
+});
+
+test("old-format files are read; missing/corrupt sidecar means date unknown; corrupt guards file defaults on", () => {
+	writeFileSync(file, JSON.stringify({ off: { cratis: true, wait: false } }));
+	assert.deepEqual(persistedOffGuards(), [{ name: "cratis" }]);
+	assert.equal(guardsStatusText(), "guards off: cratis (date unknown)");
+	const sidecar = file.replace(/\.json$/, ".meta.json");
+	writeFileSync(sidecar, JSON.stringify({ cratis: { at: "2024-10-13T12:00:00Z", reason: "r" }, bogus: 1 }));
+	assert.match(guardsStatusText()!, /^guards off: cratis \(since 10-1[23], r\)$/);
+	writeFileSync(sidecar, "{bad");
+	assert.equal(guardsStatusText(), "guards off: cratis (date unknown)");
+	assert.equal(isGuardOff("cratis"), true, "a corrupt sidecar never changes guard state");
+	writeFileSync(sidecar, "[]");
+	assert.equal(guardsStatusText(), "guards off: cratis (date unknown)");
+	writeFileSync(file, "{bad");
+	delete (globalThis as any)[key];
+	assert.equal(guardsStatusText(), undefined);
+	assert.deepEqual(persistedOffGuards(), []);
+});
+
+test("status line is built from persisted offs only and clears when none remain", async () => {
+	process.env.PI_GUARDS_OFF = "wait";
+	assert.equal(guardsStatusText(), undefined);
+	setGuards("mcp", true);
+	assert.equal(guardsStatusText(), undefined);
+	setGuards("cratis", true, { persist: true });
+	assert.match(guardsStatusText()!, /^guards off: cratis \(since \d\d-\d\d\)$/);
+	setGuards("cratis", false, { persist: true });
+	assert.equal(guardsStatusText(), undefined);
+	assert.equal(isGuardOff("mcp"), true);
+});
+
+test("metadata lives in a sidecar; guards.json stays readable by the previous reader", async () => {
+	setGuards("cratis", true, { persist: true, reason: "r" });
+	setGuards("wait", true, { persist: true });
+	const data = JSON.parse(readFileSync(file, "utf8"));
+	assert.deepEqual(Object.keys(data), ["off"]);
+	const meta = JSON.parse(readFileSync(file.replace(/\.json$/, ".meta.json"), "utf8"));
+	assert.equal(meta.cratis.reason, "r");
+	assert.ok(meta.wait.at);
+	// Reference reader: the live (pre-change) lib rejects unknown top-level keys as corruption.
+	const old = await import(pathToFileURL(join(homedir(), ".pi", "agent", "lib", "guards.ts")).href);
+	assert.equal(old.isGuardOff("cratis"), true);
+	assert.equal(old.guardStatus().find((x: any) => x.name === "cratis").source, "persisted");
+	assert.equal(warnings.filter(w => /Cannot (read|write)/.test(w)).length, 0, "no corruption/sidecar warnings");
+	setGuards("cratis", false, { persist: true });
+	assert.deepEqual(Object.keys(JSON.parse(readFileSync(file.replace(/\.json$/, ".meta.json"), "utf8"))), ["wait"]);
+});
+
+test("--reason handles escaped and unmatched quotes", async () => {
+	assert.deepEqual(tokenize(`off a "b c" 'd e' f\\ g ""`), ["off", "a", "b c", "d e", "f g", ""]);
+	const app = fake();
+	guardsExtension(app.pi);
+	const command = app.commands.get("guards");
+	await command.handler(`off wait --persist --reason "can't use \\"wait\\" here"`, app.ctx);
+	assert.equal(JSON.parse(readFileSync(file.replace(/\.json$/, ".meta.json"), "utf8")).wait.reason, `can't use "wait" here`);
+	for (const bad of [`off mcp --persist --reason "oops`, `off mcp --persist --reason 'oops`, `off mcp\\`]) {
+		await command.handler(bad, app.ctx);
+		assert.equal(app.notices.at(-1)?.type, "error");
+		assert.match(app.notices.at(-1)!.text, /^Usage:/);
+		assert.equal(isGuardOff("mcp"), false);
+	}
 });
 
 test("/guards rejects invalid arguments without changing state", async () => {
@@ -798,7 +893,7 @@ test("subagent-results shares the named switch and persistence contract", () => 
 	assert.deepEqual(entry("subagent-results"), { name: "subagent-results", off: true, source: "session" });
 	setGuards("subagent-results", false, { persist: true });
 	assert.deepEqual(entry("subagent-results"), { name: "subagent-results", off: false, source: "persisted" });
-	assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), stored());
+	assert.deepEqual(offOnly(), stored());
 });
 
 test("lane-policy has named env/persisted/session precedence and operator persistence", async () => {
@@ -842,14 +937,15 @@ test("footer picks up env and external persisted changes at lifecycle/tool bound
 	const app = fake();
 	guardsExtension(app.pi);
 	await app.fire("session_start");
-	assert.equal(app.statuses.at(-1)?.text, "guards off: mcp");
+	assert.equal(app.statuses.at(-1)?.text, undefined, "env-only offs are not shown");
 	writeFileSync(file, JSON.stringify({ off: { mcp: false, wait: true } }));
 	await app.fire("before_agent_start");
-	assert.equal(app.statuses.at(-1)?.text, "guards off: wait");
+	assert.equal(app.statuses.at(-1)?.text, "guards off: wait (date unknown)");
 	writeFileSync(file, JSON.stringify({ off: { mcp: false, wait: false } }));
 	await app.fire("tool_call", bash("printf ok"));
 	assert.equal(app.statuses.at(-1)?.text, undefined);
 	unlinkSync(file);
 	await app.fire("agent_end");
-	assert.equal(app.statuses.at(-1)?.text, "guards off: mcp");
+	assert.equal(app.statuses.at(-1)?.text, undefined);
+	assert.equal(isGuardOff("mcp"), true);
 });
