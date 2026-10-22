@@ -169,6 +169,17 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - Merge with a merge commit: `gh pr merge <n> --merge`. Never `--squash` or `--rebase`, and never pick the method interactively. If the repository only allows squash or rebase, stop and ask.
 - Exception: never merge a PR that triggers a major release (e.g. a `major` label or breaking public API changes). Leave it for `{{GITHUB_USER}}` and say why.
 
+## Local cross-repository verification
+
+- When a lower-layer Cratis fix needs proof in a consumer, use `cratis-engineering-local-cross-repo-verification` before waiting for release chains.
+- Set `CRATIS_LOCAL_RUN=~/.pi/agent/bin/cratis-local-run` after installing the proposed adapter; the helper sends each heavy step through pi-phase.
+- Wrap separate consumer builds/tests and image commands too: `cratis-local-run <kind> <label> -- <cmd...>`.
+- Use kind `integration` for Docker builds and container specs; use `build` or `test` for other steps.
+- Long queue waits and the adapter's long budgets require `job_start`, not an overdue foreground tool call; keep queue and execution deadlines separate.
+- Check `df -h ~` before heavy work; stop below 25 GiB free, mention 25–40 GiB.
+- Before consumer commits/pushes run the helper's `check`; at task end restore, check, review `clean` dry-run targets, then run `clean --apply` for the task's stamp.
+- Local proof replaces waiting, not the producer release and consumer pin bump.
+
 ## Shipping finished work (default: push, PR, merge)
 
 In Cratis repositories (and any repository whose local rules opt in), shipping is the default end of a task — do not end a session asking "May I push and open the PRs?". When the ship bar is met, push, open the PR(s), wait for CI, run the final review, and merge, all without asking.

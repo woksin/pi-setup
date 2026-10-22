@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Copyright (c) Cratis. All rights reserved.
+# Licensed under the MIT license. See LICENSE file in the project root for full license information.
+set -euo pipefail
+if [ "$#" -lt 4 ] || [ "$3" != -- ]; then
+    printf 'Usage: cratis-local-run <kind> <label> -- <cmd...>\n' >&2
+    exit 2
+fi
+kind=$1 label=$2
+shift 3
+exec "$HOME/.pi/agent/bin/pi-phase" run --kind "$kind" --label "$label" \
+    --timeout "${CRATIS_LOCAL_RUN_TIMEOUT:-900}" --approved-long-timeout \
+    --queue-timeout "${CRATIS_LOCAL_RUN_QUEUE_TIMEOUT:-3600}" -- "$@"
