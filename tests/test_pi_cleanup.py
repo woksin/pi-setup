@@ -230,13 +230,22 @@ class BinSweepScenarios(CleanupConfigTests):
         self.assertTrue(self.output.exists())
 
 
-GIT_ENV = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', XDG_CONFIG_HOME='/nonexistent',
+def git_env(home):
+    """Hermetic git environment: no inherited GIT_* (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...), temp HOME/config."""
+    home = Path(home)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    empty = home / 'empty-gitconfig'
+    empty.touch()
+    env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / 'xdg'), GIT_CONFIG_NOSYSTEM='1',
+               GIT_CONFIG_GLOBAL=str(empty),
                GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
                GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+    return env
 
 
 def g(cwd, *args):
-    return subprocess.run(['git', *args], cwd=cwd, env=GIT_ENV, check=True, capture_output=True, text=True).stdout
+    return subprocess.run(['git', *args], cwd=cwd, env=git_env(os.environ['HOME']), check=True,
+                          capture_output=True, text=True).stdout
 
 
 class RepoFixture(unittest.TestCase):
@@ -250,6 +259,13 @@ class RepoFixture(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         (self.tmp / 'home').mkdir()
+        tool_env = dict(git_env(self.tmp / 'home'), GIT_TERMINAL_PROMPT='0', GIT_OPTIONAL_LOCKS='0',
+                        GH_PROMPT_DISABLED='1', GH_NO_UPDATE_NOTIFIER='1', LC_ALL='C')
+        for key in ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'):
+            tool_env.pop(key)
+        env = patch.dict(cleanup.ENV, tool_env, clear=True)  # the tool's git/gh env, sanitised
+        env.start()
+        self.addCleanup(env.stop)
         self.repos = self.tmp / 'repos'
         self.main = self.repos / 'main'
         self.wt = self.repos / 'wt'
@@ -264,10 +280,6 @@ class RepoFixture(unittest.TestCase):
         g(self.main, 'push', '-q', '-u', 'origin', 'main')
         g(self.main, 'worktree', 'add', '-q', '-b', 'feature', str(self.wt))
         self.gh_calls = []
-        env = patch.dict(cleanup.ENV, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null',
-                            XDG_CONFIG_HOME=str(self.tmp / 'xdg'))
-        env.start()  # the tool's git must not read the developer's global excludes
-        self.addCleanup(env.stop)
         for name, side in (('take_snapshot', lambda: cleanup.PathSet([])),):
             p = patch.object(cleanup, name, side_effect=side)
             p.start()
@@ -464,6 +476,47 @@ class WorktreeRemovalSafetyTests(RepoFixture):
         self.assertEqual(rows['wt']['action'], 'failed')
         self.assertIn('archive aborted', rows['wt']['result'])
         self.assertEqual((self.wt / '.ai-work/plan.md').read_text(), 'keep me\n')
+
+
+class InheritedGitEnvironmentTests(WorktreeRemovalSafetyTests):
+    """Run the removal scenarios with GIT_DIR & co pointing at a decoy repo; the decoy must stay untouched."""
+
+    def setUp(self):
+        self.decoy_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.decoy_temp.cleanup)
+        self.decoy = Path(self.decoy_temp.name).resolve()
+        clean = git_env(self.decoy)
+        for args in (('init', '-q', '-b', 'main'),):
+            subprocess.run(['git', *args], cwd=self.decoy, env=clean, check=True, capture_output=True)
+        (self.decoy / 'tracked.txt').write_text('original\n')
+        subprocess.run(['git', 'add', '.'], cwd=self.decoy, env=clean, check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'decoy'], cwd=self.decoy, env=clean, check=True, capture_output=True)
+        (self.decoy / 'tracked.txt').write_text('uncommitted edit\n')
+        (self.decoy / 'untracked.txt').write_text('precious\n')
+        self.before = self.decoy_state()
+        env = patch.dict(os.environ, GIT_DIR=str(self.decoy / '.git'), GIT_WORK_TREE=str(self.decoy),
+                         GIT_INDEX_FILE=str(self.decoy / '.git/index'))
+        env.start()
+        self.addCleanup(env.stop)
+        super().setUp()
+
+    def decoy_state(self):
+        clean = git_env(self.decoy)
+        status = subprocess.run(['git', 'status', '--porcelain'], cwd=self.decoy, env=clean, capture_output=True,
+                                text=True).stdout
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.decoy, env=clean, capture_output=True,
+                              text=True).stdout
+        return (status, head, (self.decoy / 'tracked.txt').read_text(), (self.decoy / 'untracked.txt').read_text())
+
+    def tearDown(self):
+        self.assertEqual(self.decoy_state(), self.before)
+
+    def test_decoy_repo_is_untouched_by_fixtures_reset_and_apply(self):
+        self.reset_wt()  # reset --hard + clean in the fixture
+        rows = self.plan()
+        self.assertIsNone(self.apply(rows))
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(self.decoy_state(), self.before)
 
 
 class BuildPurgeSafetyTests(RepoFixture):
