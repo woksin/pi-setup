@@ -1,6 +1,7 @@
 """Operator configuration and isolated install/sync regressions (no live HOME)."""
 import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import shutil
@@ -168,7 +169,8 @@ class InstallTests(unittest.TestCase):
         author = (REPO / "LICENSE").read_text().splitlines()[2].split()[-1]
         residuals = self.run_command("grep", "-rIn", "-i", author, str(self.home)).stdout.splitlines()
         for line in residuals:
-            self.assertTrue("issue-work.test.ts:" in line or f"{author}/" in line or f"com.{author}." in line, line)
+            licence = ("/LICENSE:" in line and ":Copyright (c) " in line) or ("/package.json:" in line and '"author":' in line)  # package authorship stays
+            self.assertTrue(licence or "issue-work.test.ts:" in line or f"{author}/" in line or f"com.{author}." in line, line)
         roots = self.run_command("grep", "-rIn", "/Volumes/" + "sourcecode", str(self.home), success=False)
         self.assertEqual(roots.returncode, 1, roots.stderr)
         self.assertEqual(roots.stdout, "")
@@ -188,7 +190,8 @@ class InstallTests(unittest.TestCase):
         self.install("--user", "another-user", "--repos-root", "/tmp/other repos")
         self.assertIn("--add-assignee another-user", (pi / "AGENTS.md").read_text())
         self.assertEqual(next(pi.glob("AGENTS.md.bak-*")).read_bytes(), original)
-        self.assertEqual((pi / "settings.json").read_text(), '{"keep": true}\n')
+        self.assertEqual(json.loads((pi / "settings.json").read_text()),
+                         {"keep": True, "packages": ["./local-packages/pi-questions"]})
         self.assertEqual(json.loads(next(pi.glob("user.json.bak-*")).read_text())["githubUser"], "einari")
 
     def test_sync_round_trip_in_scratch_copy(self):
@@ -211,7 +214,8 @@ class InstallTests(unittest.TestCase):
         for directory in ("agent", "skills", "tools"):
             for path in (scratch / directory).rglob("*"):
                 if path.is_file():
-                    self.assertNotIn(b"einari", path.read_bytes(), str(path))
+                    # "einari-issues" is a fixture project/path name, not the rendered user
+                    self.assertIsNone(re.search(rb"einari(?!-issues)", path.read_bytes()), str(path))
                     self.assertNotIn(b"/tmp/x/repos", path.read_bytes(), str(path))
         self.assertEqual((scratch / "agent/lib/issue-work.test.ts").read_bytes(),
                          (REPO / "agent/lib/issue-work.test.ts").read_bytes())

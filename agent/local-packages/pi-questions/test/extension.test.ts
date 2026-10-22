@@ -100,15 +100,15 @@ test("/questions all uses the all-repos view with asker lanes", async t => {
 	const { root, home, repoA, repoB } = env(t);
 	const a = session(t, { root, home, sessionId: "sa", lane: "LANE-A", cwd: repoA });
 	const l0 = session(t, { root, home, sessionId: "sl0", lane: "L0", cwd: root });
-	await a.call({ action: "ask", kind: "question", title: "Something for woksin" });
+	await a.call({ action: "ask", kind: "question", title: "Something for alice" });
 	seed(home, { title: "Beta side matter" }, { sessionId: "sb", lane: "LANE-B", repo: "acme/beta" });
 	void repoB;
 	await l0.command("questions", "all");
-	assert.match(l0.notes[0].text, /Something for woksin/);
+	assert.match(l0.notes[0].text, /Something for alice/);
 	assert.match(l0.notes[0].text, /Beta side matter/);
 	assert.match(l0.notes[0].text, /asker LANE-B/);
 	await l0.command("questions", "");
-	assert.doesNotMatch(l0.notes[1].text, /Something for woksin/);
+	assert.doesNotMatch(l0.notes[1].text, /Something for alice/);
 	await l0.command("questions", "search beta side");
 	assert.match(l0.notes[2].text, /Q-2/);
 });
@@ -204,7 +204,7 @@ test("hasUI false: mutations are refused, list, get and search still work", asyn
 
 test("record_answer: only a quote from this session's interactive input is accepted", async t => {
 	const { root, home } = env(t);
-	writeUser(root, "woksin");
+	writeUser(root, "alice");
 	const s = session(t, { root, home, sessionId: "s1", lane: "L0" });
 	await s.call({ action: "ask", kind: "decision", title: "Which path", options: [{ key: "a", text: "left" }, { key: "b", text: "right" }] });
 	await assert.rejects(s.call({ action: "record_answer", id: "Q-1", quote: "go left" }), /not in the user's input in this session/);
@@ -216,7 +216,7 @@ test("record_answer: only a quote from this session's interactive input is accep
 	const r = await s.call({ action: "record_answer", id: "Q-1", quote: "go left", option: "a" });
 	const item = r.details.item;
 	assert.equal(item.status, "decided");
-	assert.deepEqual({ text: item.answer.text, by: item.answer.by, via: item.answer.via, option: item.answer.option }, { text: "go left", by: "woksin", via: "quote", option: "a" });
+	assert.deepEqual({ text: item.answer.text, by: item.answer.by, via: item.answer.via, option: item.answer.option }, { text: "go left", by: "alice", via: "quote", option: "a" });
 	assert.equal(item.answer.source, "Q-1: go   left please");
 	assert.equal(item.history.at(-1).actor.kind, "user");
 	await assert.rejects(s.call({ action: "record_answer", id: "Q-1", quote: "go left" }), /reopen it first/);
@@ -228,22 +228,22 @@ test("answer.by falls back to the OS user when user.json is absent", async t => 
 	await s.call({ action: "ask", kind: "question", title: "Anything at all" });
 	await s.command("answer", "1 sure");
 	const item = readItem(home, "Q-1")!;
-	assert.ok(item.answer.by.length > 0 && item.answer.by !== "woksin-fixture");
+	assert.ok(item.answer.by.length > 0 && item.answer.by !== "alice-fixture");
 	assert.equal(item.answer.via, "command");
 });
 
 test("commands: /answer /decide /defer /close /q write the user as actor; errors are notified", async t => {
 	const { root, home } = env(t);
-	writeUser(root, "woksin");
+	writeUser(root, "alice");
 	const s = session(t, { root, home, sessionId: "s1" });
 	await s.call({ action: "ask", kind: "decision", title: "Command target one", options: [{ key: "a", text: "A" }, { key: "b", text: "B" }] });
 	await s.call({ action: "ask", kind: "question", title: "Second unrelated topic" });
 	await s.call({ action: "ask", kind: "question", title: "Third distinct matter" });
 	await s.command("decide", "1 2 because");
 	let item = readItem(home, "Q-1")!;
-	assert.deepEqual([item.status, item.answer.option, item.answer.text, item.answer.via, item.answer.by], ["decided", "b", "because", "command", "woksin"]);
+	assert.deepEqual([item.status, item.answer.option, item.answer.text, item.answer.via, item.answer.by], ["decided", "b", "because", "command", "alice"]);
 	assert.equal(item.history.at(-1).actor.kind, "user");
-	assert.equal(item.history.at(-1).actor.name, "woksin");
+	assert.equal(item.history.at(-1).actor.name, "alice");
 	await s.command("q", "1 reopen");
 	await s.command("q", "1 comment thinking about it");
 	await s.command("q", "2 answer verbatim words");
