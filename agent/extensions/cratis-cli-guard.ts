@@ -19,7 +19,7 @@
  * rtk proxy, …), and inside `bash -c '…'` / `sh -c` / `eval`. Arguments and quoted text — search
  * terms, commit messages, PR titles, paths — are never treated as a call.
  *
- * Layering with the Cratis hooks: where the Cratis Pi hooks are installed under process.cwd() (lib/cratis-hooks-detect.ts),
+ * Layering with the Cratis hooks: where the Cratis Pi hooks are installed under process.cwd() AND their extension is proven loaded (its `cratis_quality_gate` tool is registered from that directory; an untrusted project's hooks never count, and no repository script is run then) (lib/cratis-hooks-detect.ts),
  * this guard runs cratis-guard-store-mutations.sh on a chronicle mutation it would confirm and stands down only when the
  * script itself blocks it (exit 2; a silent no-op such as missing `jq`, a timeout or an error keeps this guard blocking)
  * (one block, one message; CRATIS_HOOKS_ALLOW_STORE_MUTATIONS=1 is the switch, /guards off cratis is not needed) and
@@ -518,8 +518,9 @@ export default function (pi: ExtensionAPI) {
 		if (!/cratis/.test(command)) return undefined;
 
 		const config = /chronicle/.test(command) ? loadProductionConfig() : DEFAULT_PRODUCTION_CONFIG;
-		const cratisActive = cratisHookActive(process.cwd(), "store-mutations");
-		const invocations = classifyCratisInvocations(command, 0, [...config.extraReadOnly, ...(cratisActive ? cratisReadOnlyCommands() ?? [] : [])]);
+		const cratis = { run: cratisRunner, tools: () => pi.getAllTools() };
+		const cratisActive = cratisHookActive("store-mutations", cratis);
+		const invocations = classifyCratisInvocations(command, 0, [...config.extraReadOnly, ...(cratisActive ? cratisReadOnlyCommands(cratis) ?? [] : [])]);
 		let risky = invocations.filter(i => !i.readOnly);
 		if (risky.length === 0) {
 			// Read-only commands are never production-checked or prompted; in orchestration they are logged.
@@ -534,7 +535,7 @@ export default function (pi: ExtensionAPI) {
 		if (cratisActive) {
 			// Chronicle mutations belong to cratis-guard-store-mutations.sh: stand down only where it really blocks them.
 			const covered = risky.filter(i => i.path.startsWith("chronicle"));
-			const verdict = covered.length > 0 ? cratisVerdict("store-mutations", ctx.cwd, command, process.env, cratisRunner) : "none";
+			const verdict = covered.length > 0 ? cratisVerdict("store-mutations", ctx.cwd, command, cratis) : "none";
 			if (verdict !== "none") risky = risky.filter(i => !covered.includes(i));
 			if (verdict === "switch") {
 				// A human lifted the Cratis block; the production check is the part Cratis does not have.

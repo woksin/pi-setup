@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHandlers } from "../lib/secret-mask.ts";
 
 export default function (pi: ExtensionAPI) {
-	const handlers = createHandlers();
+	const handlers = createHandlers({ tools: () => pi.getAllTools() });
 	pi.on("session_start", handlers.sessionStart);
 	pi.on("tool_call", handlers.toolCall);
 	pi.on("tool_result", handlers.toolResult);

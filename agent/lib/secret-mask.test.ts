@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { mock, test } from "node:test";
 import { setGuards } from "./guards.ts";
 import { guardSelect } from "./orchestration.ts";
-import type { CratisRunner } from "./cratis-hooks-detect.ts";
-import { cratisRepo } from "./cratis-hooks-detect.test.ts";
+import type { CratisRunner, ToolLister } from "./cratis-hooks-detect.ts";
+import { cratisRepo, loaded, notLoaded } from "./cratis-hooks-detect.test.ts";
 import extension from "../extensions/secret-mask.ts";
 import {
 	commandRule, createHandlers, DEFAULTS, INPUT_NOTICE, loadConfig, logRedaction,
@@ -318,7 +318,7 @@ test("audit log contains exactly metadata, never text or values", () => temporar
 	assert.ok(Number.isFinite(Date.parse(rows[0].at)));
 }));
 
-function fixture(options: { hasUI?: boolean; orchestrated?: boolean; guardOff?: boolean; choice?: string; config?: Partial<typeof DEFAULTS>; runner?: CratisRunner } = {}) {
+function fixture(options: { hasUI?: boolean; orchestrated?: boolean; guardOff?: boolean; choice?: string; config?: Partial<typeof DEFAULTS>; runner?: CratisRunner; tools?: ToolLister } = {}) {
 	const records: unknown[][] = [], decisions: unknown[][] = [], errors: string[] = [], notices: unknown[][] = [], selections: unknown[][] = [];
 	const config = { ...DEFAULTS, ...options.config };
 	const ctx: any = {
@@ -327,7 +327,7 @@ function fixture(options: { hasUI?: boolean; orchestrated?: boolean; guardOff?: 
 	};
 	const handlers = createHandlers({
 		config: () => config, role: () => "main", guardOff: () => options.guardOff ?? false,
-		orchestrated: () => options.orchestrated ?? false, ...(options.runner ? { cratisRunner: options.runner } : {}),
+		orchestrated: () => options.orchestrated ?? false, ...(options.runner ? { cratisRunner: options.runner } : {}), ...(options.tools ? { tools: options.tools } : {}),
 		select: async (ui, guard, title, choices, fallback, opts) => {
 			const directory = mkdtempSync(join(tmpdir(), "secret-mask-dialog-test-"));
 			try {
@@ -489,40 +489,64 @@ test("layering: with the Cratis secrets hook, local stands down only where Crati
 	const env = process.env.CRATIS_HOOKS_ALLOW_SECRET_READS;
 	delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS;
 	try {
-		const overlap = fixture({ hasUI: false, runner: cratis });
+		const overlap = fixture({ hasUI: false, runner: cratis, tools: loaded(withHook) });
 		overlap.ctx.cwd = withHook.sub;
 		assert.equal(await overlap.call("printenv"), undefined); // Cratis blocks it: one block
 		assert.deepEqual(overlap.decisions, [["secrets", "stand-down:cratis-hook", "environment"]]);
 		assert.equal(payloads[0].cwd, withHook.sub);
-		assert.ok(payloads[0].script.startsWith(withHook.root) || payloads[0].script.includes(".cratis/ai/hooks/scripts"));
 		assert.equal(payloads[0].input.tool_name, "Bash");
 		assert.ok(payloads[0].script.endsWith("cratis-guard-secrets.sh"));
 		const redacted = overlap.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: "token: ghp_" + "a".repeat(36) }] }, overlap.ctx);
 		assert.ok(redacted && !JSON.stringify(redacted).includes("ghp_" + "a".repeat(36)));
 
-		const localOnly = fixture({ hasUI: false, runner: cratis });
+		const localOnly = fixture({ hasUI: false, runner: cratis, tools: loaded(withHook) });
 		localOnly.ctx.cwd = withHook.sub;
 		assert.equal((await localOnly.call("helm get values x"))?.block, true); // Cratis allows it: local still blocks
 
 		for (const failing of [() => ({ status: null, error: new Error("ETIMEDOUT") }), () => ({ status: 127 }), () => { throw new Error("spawn"); }]) {
-			const f = fixture({ hasUI: false, runner: failing as CratisRunner });
+			const f = fixture({ hasUI: false, runner: failing as CratisRunner, tools: loaded(withHook) });
 			f.ctx.cwd = withHook.sub;
 			assert.equal((await f.call("printenv"))?.block, true); // unknown result: fail closed to today's behaviour
 		}
 
 		process.env.CRATIS_HOOKS_ALLOW_SECRET_READS = "1";
-		const allowed = fixture({ hasUI: false, runner: () => { throw new Error("must not run"); } });
+		const allowed = fixture({ hasUI: false, runner: () => { throw new Error("must not run"); }, tools: loaded(withHook) });
 		allowed.ctx.cwd = withHook.sub;
 		assert.equal(await allowed.call("helm get values x"), undefined); // one switch
 		delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS;
 
 		process.chdir(without.root);
-		const off = fixture({ hasUI: false, runner: () => ({ status: 2 }) });
+		const off = fixture({ hasUI: false, runner: () => ({ status: 2 }), tools: loaded(without) });
 		off.ctx.cwd = without.sub;
 		assert.equal((await off.call())?.block, true); // no Cratis secrets script under process.cwd(): unchanged
 	} finally {
 		process.chdir(before);
 		if (env === undefined) delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS; else process.env.CRATIS_HOOKS_ALLOW_SECRET_READS = env;
 		withHook.cleanup(); without.cleanup();
+	}
+});
+
+test("layering: Cratis extension not registered (untrusted project) or registered from elsewhere → local blocks, nothing is spawned, the switch is not honoured", async () => {
+	const repo = cratisRepo();
+	const elsewhere = cratisRepo();
+	const before = process.cwd();
+	const env = process.env.CRATIS_HOOKS_ALLOW_SECRET_READS;
+	let spawns = 0;
+	const counting: CratisRunner = () => { spawns++; return { status: 2 }; };
+	process.chdir(repo.root);
+	try {
+		for (const tools of [notLoaded, undefined, loaded(repo, join(elsewhere.root, ".cratis", "ai", "harnesses", "pi", "extensions", "cratis-hooks", "index.ts"))]) {
+			for (const allow of [false, true]) {
+				if (allow) process.env.CRATIS_HOOKS_ALLOW_SECRET_READS = "1"; else delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS;
+				const f = fixture({ hasUI: false, runner: counting, tools });
+				f.ctx.cwd = repo.sub;
+				assert.equal((await f.call("printenv"))?.block, true);
+			}
+		}
+		assert.equal(spawns, 0);
+	} finally {
+		process.chdir(before);
+		if (env === undefined) delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS; else process.env.CRATIS_HOOKS_ALLOW_SECRET_READS = env;
+		repo.cleanup(); elsewhere.cleanup();
 	}
 });

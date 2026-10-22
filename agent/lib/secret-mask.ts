@@ -7,7 +7,7 @@
  * (e.g. ^L13-LOCAL-FAKE); a match exempts that value, NEVER command blocking. Invalid
  * expressions are ignored. Keep this list narrow; its expressions are operator-trusted.
  * Layering with the Cratis hooks: where the repository has cratis-guard-secrets.sh and the Cratis Pi extension
- * (lib/cratis-hooks-detect.ts: found under process.cwd() like the Cratis extension does), a command this extension
+ * (lib/cratis-hooks-detect.ts: its `cratis_quality_gate` tool must be registered in this Pi process from the extension under process.cwd(), so an untrusted project's hooks never count), a command this extension
  * would block is first put to that script (3 s, same script, cwd and payload as the Cratis extension). If Cratis blocks it, this extension stands down: one block, one message. If Cratis allows
  * it (patterns only this extension knows, e.g. helm/op/security) or cannot say (spawn error, timeout), this extension
  * blocks as before. CRATIS_HOOKS_ALLOW_SECRET_READS=1 (set where the harness starts) stands this extension down too.
@@ -31,7 +31,7 @@ import { isGuardOff } from "./guards.ts";
 import { cratisVerdict, spawnRunner } from "./cratis-hooks-detect.ts";
 import { guardSelect, isOrchestrated, orchLog } from "./orchestration.ts";
 import { logError, processRoles, scopeAllows } from "./output-cap.ts";
-import type { CratisRunner } from "./cratis-hooks-detect.ts";
+import type { CratisRunner, ToolLister } from "./cratis-hooks-detect.ts";
 import type { Role, Scope } from "./output-cap.ts";
 
 export interface Config {
@@ -360,6 +360,7 @@ interface Dependencies {
 	guardOff: () => boolean;
 	orchestrated: (cwd: string) => boolean;
 	cratisRunner: CratisRunner;
+	tools?: ToolLister;
 	cratisSecrets: (cwd: string, command: string) => boolean;
 	select: typeof guardSelect;
 	decision: typeof orchLog;
@@ -374,7 +375,7 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 		guardOff: () => isGuardOff("secrets"),
 		orchestrated: cwd => isOrchestrated(process.env, cwd),
 		cratisRunner: spawnRunner,
-		cratisSecrets: (cwd, command) => cratisVerdict("secrets", cwd, command, process.env, overrides.cratisRunner ?? spawnRunner) !== "none",
+		cratisSecrets: (cwd, command) => cratisVerdict("secrets", cwd, command, { run: overrides.cratisRunner ?? spawnRunner, tools: overrides.tools }) !== "none",
 		select: guardSelect, decision: orchLog, record: logRedaction,
 		error: event => logError("secret-mask", event, "Secret masking could not complete; no credential values logged"),
 		role: session => roles.role(session), ...overrides,
