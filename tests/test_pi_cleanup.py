@@ -61,7 +61,10 @@ class BinSweepScenarios(CleanupConfigTests):
         self.obj = self.root / 'Source/App/obj/state'
         self.obj.parent.mkdir()
         self.obj.write_text('incremental state')
-        subprocess.run(['git', 'init', '-q', str(self.root)], check=True, capture_output=True)
+        genv_home = tempfile.TemporaryDirectory(prefix='pi-cleanup-home.')
+        self.addCleanup(genv_home.cleanup)
+        self.genv = git_env(genv_home.name)  # hermetic: no inherited GIT_*
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True, capture_output=True, env=self.genv)
         self.lsof = ''
         self.phase = 'pi-phase: no active phases\n'
         self.free = patch.object(cleanup.shutil, 'disk_usage')
@@ -74,7 +77,7 @@ class BinSweepScenarios(CleanupConfigTests):
             return self.lsof
         if cmd[-1] == 'status':
             return self.phase
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=self.genv)
         return result.stdout if result.returncode == 0 else None
 
     def sweep(self, apply=True):
@@ -166,7 +169,7 @@ class BinSweepScenarios(CleanupConfigTests):
         self.assertTrue(self.output.exists())
 
     def test_tracked_file_keeps_worktree(self):
-        subprocess.run(['git', '-C', str(self.root), 'add', str(self.output)], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(self.root), 'add', str(self.output)], check=True, capture_output=True, env=self.genv)
         self.assertIn('tracked files', self.sweep()['reason'])
         self.assertTrue(self.output.exists())
 
