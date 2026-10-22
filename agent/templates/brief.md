@@ -40,7 +40,7 @@ Ordered, small steps, each naming the file(s) and the change, and the specs/test
 - The spec is ambiguous or the fix needs a design decision.
 - You would need to touch files outside "Files you own".
 - Two attempts at the same code or test failure did not change the result.
-- `pi-phase` exit 75 (queue timeout) is not a failed attempt. Continue code work, then retry the phase in the background (`job_start`) with a larger `--queue-timeout` (up to 600; above that requires `--approved-long-timeout` and a concrete runtime basis). Stop only after 3 consecutive queue-timeout 75s on the same phase and all code work is done; report "gate not run: queue saturated", not "failed". A duplicate CI watcher also returns 75: reuse the existing watch, do not retry it.
+- `pi-phase` exit 75 (queue timeout) is not a failed attempt. Never loop short requeues (each retry goes to the back). Continue code work, then retry the phase once in the background (`job_start`) with `--queue-timeout 3600 --approved-long-timeout` (up to 7200 for integration; a deep `pi-phase status` queue is the runtime basis) and `--priority low` unless a merge waits on it. If that also times out, report "gate not run: queue saturated", not "failed". A duplicate CI watcher also returns 75: reuse the existing watch, do not retry it.
 
 ## Report back (≤ 1.5k characters; details go in a file)
 Status (done / blocked), commits (SHA + subject), gate command + exit code, files changed, anything skipped or open.
