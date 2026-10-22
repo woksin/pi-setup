@@ -4,6 +4,8 @@ import { afterEach, beforeEach, test } from "node:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ToolLister } from "./cratis-hooks-detect.ts";
+import { cratisRepo, inCwd, loaded, notLoaded } from "./cratis-hooks-detect.test.ts";
 import cratisExtension, { DEFAULT_PRODUCTION_CONFIG, classifyCratisInvocations, loadProductionConfig, productionSources, productionTarget, readOnlyList } from "../extensions/cratis-cli-guard.ts";
 
 const ENV = ["PATH", "PI_GUARDS_FILE", "PI_GUARDS_OFF", "PI_ORCH_ID", "PI_ORCH_MODE_FILE", "PI_ORCH_REPO_ROOT", "PI_ORCH_MESSAGES_DIR", "PI_GUARD_DECISIONS_LOG", "PI_CRATIS_PRODUCTION_FILE", "CHRONICLE_CONNECTION_STRING"];
@@ -190,11 +192,11 @@ test("loadProductionConfig: valid file honoured; invalid/missing → defaults", 
 
 // ---- handler -----------------------------------------------------------------------------------
 
-function app(hasUI: boolean, answer: string | undefined = "Yes, run it") {
+function app(hasUI: boolean, answer: string | undefined = "Yes, run it", cwd = "/nowhere", tools?: ToolLister) {
 	let h: any;
 	const selections: string[] = [];
-	cratisExtension({ on: (_: string, fn: any) => { h = fn; } } as any);
-	const ctx = { cwd: "/nowhere", hasUI, ui: { notify: () => {}, select: async (t: string) => { selections.push(t); return answer; } } };
+	cratisExtension({ on: (_: string, fn: any) => { h = fn; }, ...(tools ? { getAllTools: tools } : {}) } as any);
+	const ctx = { cwd, hasUI, ui: { notify: () => {}, select: async (t: string) => { selections.push(t); return answer; } } };
 	return { selections, call: (command: string, toolName = "bash") => h({ toolName, input: { command } }, ctx) as Promise<any> };
 }
 const decisions = () => existsSync(process.env.PI_GUARD_DECISIONS_LOG!) ? readFileSync(process.env.PI_GUARD_DECISIONS_LOG!, "utf8").trim().split("\n").filter(Boolean).map(l => JSON.parse(l)) : [];
@@ -238,4 +240,92 @@ test("handler: orchestration denies when the active context cannot be read", asy
 	const result = await app(false).call("cratis chronicle replay x");
 	assert.equal(result?.block, true);
 	assert.match(result.reason, /could not be read/);
+});
+
+const SCRIPT = (repo: { root: string }, body: string) => writeFileSync(join(repo.root, ".cratis", "ai", "hooks", "scripts", "cratis-guard-store-mutations.sh"), `#!/usr/bin/env bash\n${body}\n`);
+const loadedApp = (repo: { root: string; sub: string }, hasUI: boolean, answer?: string) => app(hasUI, answer, repo.sub, loaded(repo));
+
+test("layering: stands down only when the real Cratis script blocks (exit 2); a silent exit 0 (missing jq) keeps the local block", async () => {
+	const repo = cratisRepo();
+	try {
+		await inCwd(repo.root, async () => {
+			SCRIPT(repo, "cat >/dev/null; exit 2");
+			const on = loadedApp(repo, false);
+			assert.equal(await on.call("cratis chronicle replay x"), undefined); // Cratis blocks it: no second block
+			assert.match((await on.call("cratis prologue start db")).reason, /blocked without a UI/); // not covered by Cratis
+			const ui = loadedApp(repo, true, "No");
+			assert.equal(await ui.call("cratis chronicle replay x"), undefined);
+			assert.equal(ui.selections.length, 0);
+
+			SCRIPT(repo, "cat >/dev/null; exit 0"); // `hook_have jq || exit 0`: nobody would block it
+			assert.match((await loadedApp(repo, false).call("cratis chronicle observers replay x")).reason, /blocked without a UI/);
+			const asks = loadedApp(repo, true, "No");
+			assert.equal((await asks.call("cratis chronicle replay x")).reason, "cratis-cli-guard: the user declined this cratis command.");
+			assert.equal(asks.selections.length, 1);
+			SCRIPT(repo, "exit 1"); // broken script: not a block verdict either
+			assert.match((await loadedApp(repo, false).call("cratis chronicle replay x")).reason, /blocked without a UI/);
+		});
+	} finally { repo.cleanup(); }
+});
+
+test("layering: Cratis extension not registered (untrusted project) or registered from elsewhere → local blocks and no repository script runs", async () => {
+	const repo = cratisRepo();
+	const elsewhere = cratisRepo();
+	const marker = join(repo.root, "ran");
+	try {
+		SCRIPT(repo, `touch "${marker}"; exit 2`);
+		await inCwd(repo.root, async () => {
+			for (const tools of [notLoaded, undefined, loaded(repo, join(elsewhere.root, ".cratis", "ai", "harnesses", "pi", "extensions", "cratis-hooks", "index.ts"))]) {
+				assert.match((await app(false, undefined, repo.sub, tools).call("cratis chronicle replay x")).reason, /blocked without a UI/);
+			}
+			process.env.CRATIS_HOOKS_ALLOW_STORE_MUTATIONS = "1"; // the switch is not honoured either
+			try { assert.match((await app(false, undefined, repo.sub, notLoaded).call("cratis chronicle replay x")).reason, /blocked without a UI/); }
+			finally { delete process.env.CRATIS_HOOKS_ALLOW_STORE_MUTATIONS; }
+		});
+		assert.equal(existsSync(marker), false); // untrusted repository code was never executed
+	} finally { repo.cleanup(); elsewhere.cleanup(); }
+});
+
+test("layering: Cratis scripts are selected from process.cwd(), not the tool cwd", async () => {
+	const holder = cratisRepo(); // process.cwd(): holds the scripts the Cratis extension runs
+	const toolRepo = cratisRepo(); // the tool's cwd: has its own scripts
+	try {
+		SCRIPT(holder, "cat >/dev/null; exit 2");
+		SCRIPT(toolRepo, "exit 0");
+		await inCwd(holder.root, async () => assert.equal(await app(false, undefined, toolRepo.sub, loaded(holder)).call("cratis chronicle replay x"), undefined));
+		await inCwd(toolRepo.root, async () => assert.match((await app(false, undefined, holder.sub, loaded(toolRepo)).call("cratis chronicle replay x")).reason, /blocked without a UI/));
+	} finally { holder.cleanup(); toolRepo.cleanup(); }
+});
+
+test("layering: the Cratis read-only list is read at runtime; unparsable or missing JSON falls back to the local list", async () => {
+	const fresh = cratisRepo({ list: JSON.stringify({ group: "chronicle", readOnly: [{ command: "future inspect" }], mutating: [] }) });
+	const broken = cratisRepo({ list: "{ nope" });
+	try {
+		assert.deepEqual(classifyCratisInvocations("cratis chronicle future inspect", 0, []).map(i => i.readOnly), [false]);
+		await inCwd(fresh.root, async () => {
+			const a = loadedApp(fresh, true, "No");
+			assert.equal(await a.call("cratis chronicle future inspect"), undefined); // read-only per Cratis' list: never prompted
+			assert.equal(a.selections.length, 0);
+			assert.equal((await app(true, "No", fresh.sub, notLoaded).call("cratis chronicle future inspect")).block, true); // untrusted: list not believed
+		});
+		await inCwd(broken.root, async () => {
+			SCRIPT(broken, "exit 0");
+			const b = loadedApp(broken, true, "No");
+			assert.equal(await b.call("cratis chronicle jobs list"), undefined); // built-in list still classifies reads
+			assert.equal((await b.call("cratis chronicle future inspect")).block, true); // local list only: unknown → confirm → declined
+		});
+	} finally { fresh.cleanup(); broken.cleanup(); }
+});
+
+test("layering: with the Cratis switch set, a covered chronicle command runs unprompted unless the target is production", async () => {
+	const repo = cratisRepo();
+	process.env.CRATIS_HOOKS_ALLOW_STORE_MUTATIONS = "1";
+	try {
+		await inCwd(repo.root, async () => {
+			const a = loadedApp(repo, true, "No");
+			assert.equal(await a.call("cratis chronicle replay x"), undefined);
+			assert.equal(a.selections.length, 0);
+			assert.match((await a.call("cratis chronicle replay x --server chronicle://prod-db:35000")).reason, /denied on production/);
+		});
+	} finally { delete process.env.CRATIS_HOOKS_ALLOW_STORE_MUTATIONS; repo.cleanup(); }
 });

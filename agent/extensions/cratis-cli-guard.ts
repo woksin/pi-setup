@@ -19,6 +19,14 @@
  * rtk proxy, …), and inside `bash -c '…'` / `sh -c` / `eval`. Arguments and quoted text — search
  * terms, commit messages, PR titles, paths — are never treated as a call.
  *
+ * Layering with the Cratis hooks: where the Cratis Pi hooks are installed under process.cwd() AND their extension is proven loaded (its `cratis_quality_gate` tool is registered from that directory; an untrusted project's hooks never count, and no repository script is run then) (lib/cratis-hooks-detect.ts),
+ * this guard runs cratis-guard-store-mutations.sh on a chronicle mutation it would confirm and stands down only when the
+ * script itself blocks it (exit 2; a silent no-op such as missing `jq`, a timeout or an error keeps this guard blocking)
+ * (one block, one message; CRATIS_HOOKS_ALLOW_STORE_MUTATIONS=1 is the switch, /guards off cratis is not needed) and
+ * reads the Cratis read-only list at runtime (falling back to the list below when absent or unparsable). It keeps what
+ * Cratis lacks: `prologue start` confirmation, and — when a human has set the Cratis switch — the production check
+ * (a production target is still denied; anything else runs without a prompt). Outside such repositories nothing changes.
+ *
  * Production (orchestration: state-changing commands only; read-only commands are allowed and logged):
  * besides the prod/production name heuristic, ~/.pi/agent/cratis-production.json (re-read at every check;
  * missing/invalid → built-in defaults, logged) lists production `contexts` (glob `*`, case-insensitive),
@@ -31,6 +39,8 @@ import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { cratisHookActive, cratisReadOnlyCommands, cratisVerdict, spawnRunner } from "../lib/cratis-hooks-detect.ts";
+import type { CratisRunner } from "../lib/cratis-hooks-detect.ts";
 import { isGuardOff } from "../lib/guards.ts";
 import { guardSelect, isOrchestrated, orchLog } from "../lib/orchestration.ts";
 
@@ -497,6 +507,10 @@ async function productionCheck(target: string, context: string, config: Producti
 	return productionTarget(target, context, process.env, config, ports, explicit === undefined ? undefined : lookupCratisContext(explicit));
 }
 
+/** Test seam: how the Cratis store-mutations script is run. */
+export let cratisRunner: CratisRunner = spawnRunner;
+export function setCratisRunner(run: CratisRunner): void { cratisRunner = run; }
+
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "bash") return undefined;
@@ -504,8 +518,10 @@ export default function (pi: ExtensionAPI) {
 		if (!/cratis/.test(command)) return undefined;
 
 		const config = /chronicle/.test(command) ? loadProductionConfig() : DEFAULT_PRODUCTION_CONFIG;
-		const invocations = classifyCratisInvocations(command, 0, config.extraReadOnly);
-		const risky = invocations.filter(i => !i.readOnly);
+		const cratis = { run: cratisRunner, tools: () => pi.getAllTools() };
+		const cratisActive = cratisHookActive("store-mutations", cratis);
+		const invocations = classifyCratisInvocations(command, 0, [...config.extraReadOnly, ...(cratisActive ? cratisReadOnlyCommands(cratis) ?? [] : [])]);
+		let risky = invocations.filter(i => !i.readOnly);
 		if (risky.length === 0) {
 			// Read-only commands are never production-checked or prompted; in orchestration they are logged.
 			if (invocations.length > 0 && isOrchestrated(process.env, ctx.cwd)) orchLog("cratis", "allow", `read-only: ${invocations.map(i => i.text).join("; ")}`);
@@ -514,6 +530,20 @@ export default function (pi: ExtensionAPI) {
 		if (isGuardOff("cratis")) {
 			if (ctx.hasUI) ctx.ui.notify(`cratis-cli-guard off: allowed '${risky.map(i => i.text).join("; ").replace(/\s+/g, " ").slice(0, 180)}'`, "info");
 			return undefined;
+		}
+
+		if (cratisActive) {
+			// Chronicle mutations belong to cratis-guard-store-mutations.sh: stand down only where it really blocks them.
+			const covered = risky.filter(i => i.path.startsWith("chronicle"));
+			const verdict = covered.length > 0 ? cratisVerdict("store-mutations", ctx.cwd, command, cratis) : "none";
+			if (verdict !== "none") risky = risky.filter(i => !covered.includes(i));
+			if (verdict === "switch") {
+				// A human lifted the Cratis block; the production check is the part Cratis does not have.
+				const target = [...covered.map(i => i.text), ...(command.match(/CHRONICLE_CONNECTION_STRING=\S+/g) ?? [])].join(" ");
+				const production = await productionCheck(target, await activeContext(), config);
+				if (production) return { block: true, reason: `cratis-cli-guard: state-changing cratis command(s) denied on production (CRATIS_HOOKS_ALLOW_STORE_MUTATIONS does not cover production). Matched rule: ${production}.\n${covered.map(i => `  ${i.text}`).join("\n")}` };
+			}
+			if (risky.length === 0) return undefined;
 		}
 
 		const list = risky.map(i => `  ${i.text}`).join("\n");
