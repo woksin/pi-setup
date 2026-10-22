@@ -32,6 +32,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { ORIGINAL_ENTRY, publishFallbackState, restoreOriginal, type OriginalEntryData } from "../lib/provider-fallback-state.ts";
 
 interface FallbackConfig {
 	enabled?: boolean;
@@ -211,6 +212,10 @@ function formatUntil(until: number): string {
 	return minutes >= 120 ? `~${Math.round(minutes / 60)} h` : `~${minutes} min`;
 }
 
+function untilClock(until: number): string {
+	return new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 export const DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK = 150_000;
 
 /**
@@ -238,15 +243,62 @@ export default function (pi: ExtensionAPI) {
 	/** The model this extension moved the session away from (cleared on a manual model change). */
 	let originalRef: string | undefined;
 	let selfSwitching = false;
+	let originalReason: string | undefined;
+	/** The model fallback switched TO; a persisted original is only restorable while the session is still on it. */
+	let originalDestination: string | undefined;
+	let sessionId: string | undefined;
+	let restoreNote: string | undefined;
+	/** Original + reason published while a fallback switch is in flight (before it is remembered). */
+	let pendingOriginal: { ref: string; reason: string } | undefined;
+
+	/** Remember (and persist, main sessions only) the model we moved away from, so a reload can restore it. */
+	function rememberOriginal(ctx: ExtensionContext, ref: string, reason: string, destination: string): void {
+		originalRef = ref;
+		originalDestination = destination;
+		originalReason = reason;
+		restoreNote = undefined;
+		publishState();
+		if (ctx.hasUI) pi.appendEntry<OriginalEntryData>(ORIGINAL_ENTRY, { originalRef: ref, destination, reason, at: Date.now() });
+	}
+
+	function forgetOriginal(ctx: ExtensionContext): void {
+		const had = originalRef !== undefined;
+		originalRef = undefined;
+		originalReason = undefined;
+		originalDestination = undefined;
+		restoreNote = undefined;
+		publishState();
+		if (had && ctx.hasUI) pi.appendEntry<OriginalEntryData>(ORIGINAL_ENTRY, { originalRef: null, at: Date.now() });
+	}
+
+	/** Main sessions only: subagents share this process and must not overwrite the main session's state. */
+	let isMain = false;
+	function publishState(): void {
+		if (!isMain) return;
+		publishFallbackState(
+			originalRef || pendingOriginal || selfSwitching
+				? {
+						originalRef: originalRef ?? pendingOriginal?.ref,
+						reason: originalRef ? originalReason : pendingOriginal?.reason,
+						at: Date.now(),
+						sessionId,
+						switching: selfSwitching,
+						restoreNote,
+					}
+				: undefined,
+		);
+	}
 	let lastLimitHeaders: { at: number; provider?: string; headers: Record<string, string> } | undefined;
 
 	/** Switch to `ref`, keeping the current thinking level (pi clamps it to the target). */
-	async function switchTo(ctx: ExtensionContext, ref: string): Promise<string | undefined> {
+	async function switchTo(ctx: ExtensionContext, ref: string, pending?: { ref: string; reason: string }): Promise<string | undefined> {
 		const { provider, id } = splitRef(ref);
 		const model = ctx.modelRegistry.find(provider, id);
 		if (!model) return `model ${ref} not found`;
 		const level = pi.getThinkingLevel();
 		selfSwitching = true;
+		pendingOriginal = pending;
+		publishState();
 		try {
 			if (!(await pi.setModel(model))) return `no credentials for ${provider}`;
 			pi.setThinkingLevel(level);
@@ -254,6 +306,8 @@ export default function (pi: ExtensionAPI) {
 			return error instanceof Error ? error.message : String(error);
 		} finally {
 			selfSwitching = false;
+			pendingOriginal = undefined;
+			publishState();
 		}
 		return undefined;
 	}
@@ -289,15 +343,24 @@ export default function (pi: ExtensionAPI) {
 		const current = refOf(ctx.model);
 		if (!config || !current) return;
 
-		if (originalRef && config.restoreWhenExpired !== false && originalRef !== current) {
+		if (originalRef && originalRef !== current && originalDestination !== current) {
+			// Stale record (e.g. restored from an entry after a /model change on another branch): never override the active model.
+			forgetOriginal(ctx);
+		}
+		if (originalRef && originalRef !== current && config.restoreWhenExpired === false) {
+			restoreNote = "restoreWhenExpired is disabled";
+			publishState();
+		} else if (originalRef && originalRef !== current) {
 			const original = splitRef(originalRef);
 			if (limitedUntil(original.provider) === undefined) {
 				const failure = await switchTo(ctx, originalRef);
 				if (!failure) {
 					notify(ctx, `provider-fallback: ${original.provider} limit expired; back on ${originalRef}.`, "info");
-					originalRef = undefined;
+					forgetOriginal(ctx);
 					return;
 				}
+				restoreNote = `${originalRef}: ${failure}`;
+				publishState();
 			}
 		}
 
@@ -311,19 +374,47 @@ export default function (pi: ExtensionAPI) {
 			notify(ctx, `provider-fallback: ${currentProvider} is limited (${formatUntil(until)} left); ${veto}.`, "warning");
 			return;
 		}
-		const failure = await switchTo(ctx, target);
+		const reason = `${currentProvider} limited until ${untilClock(until)}`;
+		const failure = await switchTo(ctx, target, { ref: originalRef ?? current, reason });
 		if (failure) {
 			notify(ctx, `provider-fallback: ${currentProvider} is limited but switching to ${target} failed: ${failure}`, "warning");
 			return;
 		}
-		originalRef ??= current;
+		rememberOriginal(ctx, originalRef ?? current, reason, target);
 		notify(ctx, `provider-fallback: ${currentProvider} limited (${formatUntil(until)} left); using ${target} instead of ${current}.`, "warning");
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
 		fallbacksThisPrompt = 0;
 		pendingContinue = false;
+		isMain = ctx.hasUI;
+		originalRef = undefined;
+		originalReason = undefined;
+		originalDestination = undefined;
+		restoreNote = undefined;
+		try {
+			sessionId = ctx.sessionManager.getSessionId();
+		} catch {
+			sessionId = undefined;
+		}
+		if (isMain) {
+			// A reload / context reset loses the in-memory originalRef: take it from the latest persisted entry.
+			try {
+				const restored = restoreOriginal(ctx.sessionManager.getBranch());
+				originalRef = restored?.originalRef;
+				originalReason = restored?.reason;
+				originalDestination = restored?.destination;
+			} catch {
+				// entries unavailable: behave as before
+			}
+		}
+		publishState();
 		await preempt(ctx);
+	});
+
+	pi.on("session_shutdown", async () => {
+		if (isMain) publishFallbackState(undefined);
+		isMain = false;
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
@@ -332,8 +423,8 @@ export default function (pi: ExtensionAPI) {
 		await preempt(ctx);
 	});
 
-	pi.on("model_select", async (event) => {
-		if (!selfSwitching && event.source !== "restore") originalRef = undefined;
+	pi.on("model_select", async (event, ctx) => {
+		if (!selfSwitching && event.source !== "restore") forgetOriginal(ctx);
 	});
 
 	pi.on("after_provider_response", async (event, ctx) => {
@@ -401,12 +492,13 @@ export default function (pi: ExtensionAPI) {
 		}
 		const veto = contextVeto(ctx, config);
 		if (veto) return note(`provider-fallback: ${from} ${what} (${formatUntil(until)}); ${veto}. Not switching.`, "error");
-		const failure = await switchTo(ctx, target);
+		const reason = `${message.provider} ${kind === "limit" ? "limited" : "unavailable"} until ${untilClock(until)}`;
+		const failure = await switchTo(ctx, target, { ref: originalRef ?? from, reason });
 		if (failure) return note(`provider-fallback: ${from} hit a limit; switching to ${target} failed: ${failure}`, "error");
 
 		fallbacksThisPrompt++;
 		pendingContinue = true;
-		originalRef ??= from;
+		rememberOriginal(ctx, originalRef ?? from, reason, target);
 		const text = `provider-fallback: ${from} ${what} (${formatUntil(until)}); continuing on ${target}.`;
 		notify(ctx, text, "warning");
 		return {
