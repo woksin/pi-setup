@@ -16,7 +16,7 @@ export interface DetectRequest {
   /** Scan for a repositories root (not given by flag or saved). */
   needScan: boolean;
   /** Probe pi auth and the catalog (false when probing would create ~/.pi/agent). */
-  probePi: boolean;
+  probePi: boolean; // false in --dry-run/--plan: pi probes can write state
   login?: string;
 }
 
@@ -99,7 +99,7 @@ export async function detect(ctx: Ctx, request: DetectRequest): Promise<Detectio
   const providers: Record<string, ProviderState> = {};
   const probePi = request.probePi && piPresent;
   const [tools, github, states, catalog] = await Promise.all([
-    Promise.all(TOOLS.map((t) => probeTool(ctx, t))),
+    Promise.all(TOOLS.map((t) => (t === "pi" && !request.probePi ? Promise.resolve<ToolState>({ name: t, path: ctx.which(t) }) : probeTool(ctx, t)))),
     probeGithub(ctx, request),
     Promise.all(PROVIDER_IDS.map((id) => (probePi ? probeProvider(ctx, id) : Promise.resolve<ProviderState>({ status: "unknown" })))),
     probePi ? probeCatalog(ctx) : Promise.resolve(null),

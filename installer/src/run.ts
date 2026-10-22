@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { apply, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
@@ -21,7 +20,7 @@ const savedString = (saved: Record<string, unknown>, key: string): string =>
   typeof saved[key] === "string" ? (saved[key] as string) : "";
 
 function pickProfile(
-  options: Options, activeBefore: string | undefined, ready: Set<string>, profiles: ProfileMeta[], names: string[],
+  options: Options, activeBefore: string | undefined, ready: Set<string>, profiles: ProfileMeta[], names: string[], readOnly = false,
 ): Choice {
   if (options.profile && options.profile !== "auto") {
     if (!names.includes(options.profile)) {
@@ -31,6 +30,9 @@ function pickProfile(
   }
   if (options.profile !== "auto" && activeBefore && names.includes(activeBefore)) {
     return { name: activeBefore, reason: "keeping your active profile", provisional: false, source: "active" };
+  }
+  if (readOnly) {
+    return { name: "balanced", reason: "providers not probed in dry-run; using --profile, then the active profile, then balanced", provisional: false, source: "chooser" };
   }
   return chooseProfile(ready, profiles);
 }
@@ -75,10 +77,10 @@ function resolveAll(
   const activeBefore = readActive(piDir);
   const ready = readyProviders(detection);
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
-  const choice = pickProfile(asked, activeBefore, ready, profiles, names);
+  const choice = pickProfile(asked, activeBefore, ready, profiles, names, options.dryRun || options.plan);
   const profile = profiles.find((p) => p.name === choice.name);
   const actions = buildPlan({ repoDir: ctx.repoDir, home: ctx.home, settings, overlay: overlayFor(ctx.repoDir, choice.name, settings) });
-  const kimi = kimiNote(profile, ready);
+  const kimi = options.dryRun || options.plan ? undefined : kimiNote(profile, ready);
   const warnings = [
     ...settings.warnings,
     ...detection.warnings,
@@ -140,7 +142,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     needLogin: !known,
     wantGithubDetails: Boolean(prompter),
     needScan: Boolean(prompter) || !knownRoot,
-    probePi: !(readOnly && !existsSync(piDir)),
+    probePi: !readOnly,
     login: options.user || savedString(saved, "githubUser") || undefined,
   });
   spin?.stop("Looked around");
@@ -159,7 +161,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const r = resolveAll(ctx, options, detection, saved, answers);
   r.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
-  const summary = summaryLines({ ...r, detection, kimi: kimiNote(r.profile, r.ready), skipNpm: options.skipNpm });
+  const summary = summaryLines({ ...r, detection, kimi: readOnly ? undefined : kimiNote(r.profile, r.ready), skipNpm: options.skipNpm, probed: !readOnly });
   if (options.plan) return finish(ctx, baseCtx, options, r, detection, summary, 0);
   if (prompter && !(await confirmApply(prompter, summary))) return cancelled(ctx);
 

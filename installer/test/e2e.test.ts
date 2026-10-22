@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
+import { lstatSync } from "node:fs";
 import { REPO, findBackups, homeEntries, install, installLines, piPath, sandbox, stubLog } from "./helpers/home.ts";
 import type { Sandbox } from "./helpers/home.ts";
 
@@ -181,4 +182,31 @@ describe("install (e2e)", () => {
     assert.ok(data.actions.length > 50);
     assert.deepEqual(homeEntries(box), []);
   });
+
+  for (const mode of ["--dry-run", "--plan"]) {
+    test(`${mode} with an existing ~/.pi/agent makes zero pi calls and changes nothing`, () => {
+      const box = fresh();
+      mkdirSync(piPath(box), { recursive: true });
+      writeFileSync(piPath(box, "user.json"), '{"githubUser":"einari","reposRoot":"/tmp/r"}');
+      const snapshot = () => {
+        const out: string[] = [];
+        const walk = (d: string) => {
+          for (const e of readdirSync(d, { withFileTypes: true })) {
+            const p = join(d, e.name);
+            const st = lstatSync(p);
+            out.push(`${p} ${st.mtimeMs} ${st.size}`);
+            if (e.isDirectory()) walk(p);
+          }
+        };
+        walk(box.home);
+        return out.sort();
+      };
+      const before = snapshot();
+      const run = install(box, ["--yes", mode]);
+      assert.equal(run.status, 0, run.stdout + run.stderr);
+      assert.deepEqual(stubLog(box).filter((l) => l.startsWith("pi ")), []);
+      assert.deepEqual(snapshot(), before);
+      assert.match(run.stdout + run.stderr, /not probed in dry-run|providers not probed/);
+    });
+  }
 });

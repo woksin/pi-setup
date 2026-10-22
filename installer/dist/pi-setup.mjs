@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: a7ad9a5b46ac6d1f03f31506cefe628032ad338340ffd435ae208380ddb33d8b
+// pi-setup-source-sha256: d6901590fa2b9ec895bd151dfef88b38c801d49d67ec63e1e5bf4a28b0977ffe
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -515,7 +515,7 @@ async function detect(ctx, request) {
   const providers = {};
   const probePi = request.probePi && piPresent;
   const [tools, github, states, catalog] = await Promise.all([
-    Promise.all(TOOLS.map((t2) => probeTool(ctx, t2))),
+    Promise.all(TOOLS.map((t2) => t2 === "pi" && !request.probePi ? Promise.resolve({ name: t2, path: ctx.which(t2) }) : probeTool(ctx, t2))),
     probeGithub(ctx, request),
     Promise.all(PROVIDER_IDS.map((id) => probePi ? probeProvider(ctx, id) : Promise.resolve({ status: "unknown" }))),
     probePi ? probeCatalog(ctx) : Promise.resolve(null)
@@ -890,12 +890,13 @@ function countActions(actions) {
     links: actions.filter((a2) => a2.op === "symlink").length
   };
 }
-function detectionLines(detection) {
+function detectionLines(detection, probed = true) {
   const lines2 = [`OS: ${detection.os}`];
   lines2.push(`Tools: ${detection.tools.map((t2) => `${t2.name} ${t2.path ? "\u2713" : "\u2717"}`).join(", ")}`);
   const github = detection.github;
   lines2.push(`GitHub: ${github.login ? `${github.login}${github.host ? ` on ${github.host}` : ""}` : "no login found"}`);
-  lines2.push(
+  if (!probed) lines2.push("Providers: not probed in dry-run (pi probes can write state)");
+  else lines2.push(
     "Providers: " + PROVIDER_IDS.map((id) => `${PROVIDER_LABELS[id]} ${symbol(detection.providers[id]?.status)}`).join(", ")
   );
   return lines2;
@@ -910,7 +911,7 @@ function summaryLines(args) {
   const lines2 = [
     `GitHub login: ${settings2.githubUser} (${USER_SOURCES[settings2.userSource]})`,
     `Repositories root: ${settings2.reposRoot} (${ROOT_SOURCES[settings2.rootSource]})`,
-    ...detectionLines(args.detection),
+    ...detectionLines(args.detection, args.probed),
     `Profile: ${choice.name} (${choice.reason})${choice.provisional ? " [provisional]" : ""}`
   ];
   if (args.profile?.summary) lines2.push(args.profile.summary);
@@ -2317,9 +2318,8 @@ var run_exports = {};
 __export(run_exports, {
   main: () => main
 });
-import { existsSync as existsSync8 } from "node:fs";
 import { join as join8 } from "node:path";
-function pickProfile(options, activeBefore, ready, profiles, names) {
+function pickProfile(options, activeBefore, ready, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
     if (!names.includes(options.profile)) {
       throw new SetupError(`unknown profile '${options.profile}'. available: ${names.join(", ")}`);
@@ -2328,6 +2328,9 @@ function pickProfile(options, activeBefore, ready, profiles, names) {
   }
   if (options.profile !== "auto" && activeBefore && names.includes(activeBefore)) {
     return { name: activeBefore, reason: "keeping your active profile", provisional: false, source: "active" };
+  }
+  if (readOnly) {
+    return { name: "balanced", reason: "providers not probed in dry-run; using --profile, then the active profile, then balanced", provisional: false, source: "chooser" };
   }
   return chooseProfile(ready, profiles);
 }
@@ -2353,10 +2356,10 @@ function resolveAll(ctx, options, detection, saved, answers) {
   const activeBefore = readActive(piDir);
   const ready = readyProviders(detection);
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
-  const choice = pickProfile(asked, activeBefore, ready, profiles, names);
+  const choice = pickProfile(asked, activeBefore, ready, profiles, names, options.dryRun || options.plan);
   const profile = profiles.find((p) => p.name === choice.name);
   const actions = buildPlan({ repoDir: ctx.repoDir, home: ctx.home, settings: settings2, overlay: overlayFor(ctx.repoDir, choice.name, settings2) });
-  const kimi = kimiNote(profile, ready);
+  const kimi = options.dryRun || options.plan ? void 0 : kimiNote(profile, ready);
   const warnings = [
     ...settings2.warnings,
     ...detection.warnings,
@@ -2415,7 +2418,7 @@ async function execute(ctx, options, prompter, baseCtx) {
     needLogin: !known,
     wantGithubDetails: Boolean(prompter),
     needScan: Boolean(prompter) || !knownRoot,
-    probePi: !(readOnly && !existsSync8(piDir)),
+    probePi: !readOnly,
     login: options.user || savedString2(saved, "githubUser") || void 0
   });
   spin?.stop("Looked around");
@@ -2433,7 +2436,7 @@ async function execute(ctx, options, prompter, baseCtx) {
   const r2 = resolveAll(ctx, options, detection, saved, answers);
   r2.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r2.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
-  const summary = summaryLines({ ...r2, detection, kimi: kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm });
+  const summary = summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly });
   if (options.plan) return finish(ctx, baseCtx, options, r2, detection, summary, 0);
   if (prompter && !await confirmApply(prompter, summary)) return cancelled(ctx);
   const applyOptions = {

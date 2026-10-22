@@ -16,12 +16,13 @@ export function countActions(actions: Action[]): { added: number; changed: numbe
   };
 }
 
-export function detectionLines(detection: Detection): string[] {
+export function detectionLines(detection: Detection, probed = true): string[] {
   const lines = [`OS: ${detection.os}`];
   lines.push(`Tools: ${detection.tools.map((t) => `${t.name} ${t.path ? "✓" : "✗"}`).join(", ")}`);
   const github = detection.github;
   lines.push(`GitHub: ${github.login ? `${github.login}${github.host ? ` on ${github.host}` : ""}` : "no login found"}`);
-  lines.push(
+  if (!probed) lines.push("Providers: not probed in dry-run (pi probes can write state)");
+  else lines.push(
     "Providers: " +
       PROVIDER_IDS.map((id) => `${PROVIDER_LABELS[id]} ${symbol(detection.providers[id]?.status)}`).join(", "),
   );
@@ -39,6 +40,7 @@ export function summaryLines(args: {
   choice: Choice;
   profile: ProfileMeta | undefined;
   actions: Action[];
+  probed: boolean;
   npm: boolean;
   skipNpm: boolean;
   kimi: string | undefined;
@@ -49,7 +51,7 @@ export function summaryLines(args: {
   const lines = [
     `GitHub login: ${settings.githubUser} (${USER_SOURCES[settings.userSource]})`,
     `Repositories root: ${settings.reposRoot} (${ROOT_SOURCES[settings.rootSource]})`,
-    ...detectionLines(args.detection),
+    ...detectionLines(args.detection, args.probed),
     `Profile: ${choice.name} (${choice.reason})${choice.provisional ? " [provisional]" : ""}`,
   ];
   if (args.profile?.summary) lines.push(args.profile.summary);
