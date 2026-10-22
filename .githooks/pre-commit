@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Enable with: git config core.hooksPath .githooks
+exec gitleaks protect --staged --no-banner --redact
