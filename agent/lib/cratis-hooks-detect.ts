@@ -1,17 +1,21 @@
 /**
- * cratis-hooks-detect — is a Cratis Pi hook active for a working directory?
+ * cratis-hooks-detect — would the Cratis Pi hooks already refuse a command?
  *
- * The Cratis AI corpus ships Pi hooks (`.cratis/ai/harnesses/pi/extensions/cratis-hooks`) that run
- * `.cratis/ai/hooks/scripts/cratis-guard-*.sh` on every Bash `tool_call`. Where a local guard covers the same
- * concern, it stands down for *blocking* so a command is refused once, with one message and one switch:
+ * Mirrors Cratis' `.cratis/ai/harnesses/pi/extensions/cratis-hooks/index.ts`, which on every Bash `tool_call` runs
+ * `<process.cwd()>/.cratis/ai/hooks/scripts/cratis-guard-*.sh` (exit 2 = block) with cwd = the tool's cwd and the
+ * payload `{cwd, tool_name:"Bash", tool_input:{command}}`. A managed Cratis setup makes Pi load that extension via
+ * the project symlink `.pi/extensions -> ../.cratis/ai/harnesses/pi/extensions`. Where a local guard covers the same
+ * concern it stands down for *blocking* only when the Cratis script itself says so, so the command is refused once:
  *   - secrets          → cratis-guard-secrets.sh          (switch CRATIS_HOOKS_ALLOW_SECRET_READS=1)
  *   - store-mutations  → cratis-guard-store-mutations.sh  (switch CRATIS_HOOKS_ALLOW_STORE_MUTATIONS=1)
- * A concern counts as covered only when the repository root (nearest ancestor of the cwd holding `.git` or
- * `.cratis`) has both that script and the Cratis Pi extension directory. Pure filesystem reads; never throws.
+ * File presence is only a pre-check. Everything unknown (extension not found under process.cwd(), scripts not in
+ * process.cwd()'s `.cratis`, spawn error, timeout, exit 0 — e.g. the script's silent no-op when `jq` is missing) means
+ * "Cratis does not block it", so the local guard keeps blocking. Packaged `@cratis/pi` installs (bundled corpus) cannot
+ * be located from here and are treated the same way. Never throws.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 
 export type CratisConcern = "secrets" | "store-mutations";
 
@@ -21,36 +25,24 @@ const SCRIPT: Record<CratisConcern, string> = {
 };
 const MUTATIONS_JSON = "cratis-store-mutations.json";
 
-/** The nearest ancestor of `cwd` (inclusive) that holds `.git` or `.cratis`. */
-export function repoRoot(cwd: string): string | undefined {
-	if (typeof cwd !== "string" || cwd === "") return undefined; // a context without a cwd is not a Cratis repository
-	let dir = resolve(cwd);
-	for (;;) {
-		if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".cratis"))) return dir;
-		const parent = dirname(dir);
-		if (parent === dir) return undefined;
-		dir = parent;
-	}
-}
-
 function isFile(path: string): boolean {
 	try { return statSync(path).isFile(); } catch { return false; }
 }
-function isDirectory(path: string): boolean {
-	try { return statSync(path).isDirectory(); } catch { return false; }
+
+/**
+ * The scripts directory the Cratis extension uses for this Pi process (`<base>/.cratis/ai/hooks/scripts`, base =
+ * process.cwd()), provided the Cratis extension is loaded from the project (`<base>/.pi/extensions/cratis-hooks`).
+ */
+function scriptsDir(base: string): string | undefined {
+	if (typeof base !== "string" || base === "") return undefined;
+	if (!isFile(join(base, ".pi", "extensions", "cratis-hooks", "index.ts"))) return undefined;
+	const dir = join(base, ".cratis", "ai", "hooks", "scripts");
+	return existsSync(dir) ? dir : undefined;
 }
 
-/** The Cratis `scripts` directory of the repository around `cwd`, when its Pi extension is installed too. */
-function scriptsDir(cwd: string): string | undefined {
-	const root = repoRoot(cwd);
-	if (!root) return undefined;
-	const ai = join(root, ".cratis", "ai");
-	return isDirectory(join(ai, "harnesses", "pi", "extensions", "cratis-hooks")) ? join(ai, "hooks", "scripts") : undefined;
-}
-
-/** True when the Cratis hook for `concern` is installed for the repository around `cwd`. */
-export function cratisHookActive(cwd: string, concern: CratisConcern): boolean {
-	const dir = scriptsDir(cwd);
+/** True when the Cratis hook for `concern` appears installed and loaded for this Pi process (pre-check only). */
+export function cratisHookActive(base: string, concern: CratisConcern): boolean {
+	const dir = scriptsDir(base);
 	return dir !== undefined && isFile(join(dir, SCRIPT[concern]));
 }
 
@@ -64,8 +56,8 @@ export function cratisSwitchOn(concern: CratisConcern, env: NodeJS.ProcessEnv = 
  * CRATIS_HOOKS_STORE_MUTATIONS), lower-cased. Undefined when the hook is not active, or the file is missing or
  * not a usable list — the caller then keeps its own list.
  */
-export function cratisReadOnlyCommands(cwd: string, env: NodeJS.ProcessEnv = process.env): string[] | undefined {
-	const dir = scriptsDir(cwd);
+export function cratisReadOnlyCommands(env: NodeJS.ProcessEnv = process.env, base: string = process.cwd()): string[] | undefined {
+	const dir = scriptsDir(base);
 	if (dir === undefined || !isFile(join(dir, SCRIPT["store-mutations"]))) return undefined;
 	try {
 		const data: unknown = JSON.parse(readFileSync(env.CRATIS_HOOKS_STORE_MUTATIONS || join(dir, MUTATIONS_JSON), "utf8"));
@@ -88,22 +80,25 @@ export const spawnRunner: CratisRunner = (script, cwd, stdin, timeoutMs) => {
 };
 export const CRATIS_SCRIPT_TIMEOUT_MS = 3000;
 
+export type CratisVerdict = "blocked" | "switch" | "none";
+
 /**
- * Would the Cratis secrets hook already block `command`? True only on its own verdict (exit 2, the code the
- * Cratis Pi extension treats as a block) or when the human switch CRATIS_HOOKS_ALLOW_SECRET_READS=1 is set
- * (one switch). A spawn error, timeout, or any other result is "no": the caller keeps blocking as it did before.
+ * What the Cratis hook for `concern` does with `command`: "blocked" (the script exited 2, the code the Cratis Pi
+ * extension treats as a block), "switch" (the human allow switch is set in the harness environment, so Cratis lets it
+ * through), or "none" (not active, or anything else — the caller keeps its own blocking). The script is run exactly
+ * as the Cratis extension runs it: from `base` (process.cwd()), with cwd = `cwd` and the same payload, 3 s timeout.
  * Spawning is synchronous, which is fine because callers only ask for commands they would block anyway.
  */
-export function cratisSecretsStandsDown(cwd: string, command: string, env: NodeJS.ProcessEnv = process.env, run: CratisRunner = spawnRunner): boolean {
-	if (!cratisHookActive(cwd, "secrets")) return false;
-	if (cratisSwitchOn("secrets", env)) return true;
-	const dir = scriptsDir(cwd);
-	const root = repoRoot(cwd);
-	if (dir === undefined || root === undefined) return false;
+export function cratisVerdict(concern: CratisConcern, cwd: string | undefined, command: string, env: NodeJS.ProcessEnv = process.env, run: CratisRunner = spawnRunner, base: string = process.cwd()): CratisVerdict {
+	if (!cratisHookActive(base, concern)) return "none";
+	if (cratisSwitchOn(concern, env)) return "switch";
+	const dir = scriptsDir(base);
+	if (dir === undefined) return "none";
 	try {
-		const result = run(join(dir, SCRIPT.secrets), root, JSON.stringify({ cwd, tool_name: "Bash", tool_input: { command } }), CRATIS_SCRIPT_TIMEOUT_MS);
-		return !result.error && result.status === 2;
+		const where = cwd || base;
+		const result = run(join(dir, SCRIPT[concern]), where, JSON.stringify({ cwd: where, tool_name: "Bash", tool_input: { command } }), CRATIS_SCRIPT_TIMEOUT_MS);
+		return !result.error && result.status === 2 ? "blocked" : "none";
 	} catch {
-		return false;
+		return "none";
 	}
 }

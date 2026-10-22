@@ -477,6 +477,8 @@ test("config flags are independent; enabled false and excluded scope disable all
 test("layering: with the Cratis secrets hook, local stands down only where Cratis itself blocks (redaction stays)", async () => {
 	const withHook = cratisRepo();
 	const without = cratisRepo({ scripts: ["cratis-guard-store-mutations.sh"] });
+	const before = process.cwd();
+	process.chdir(withHook.root); // the Cratis extension selects its scripts from process.cwd()
 	const payloads: any[] = [];
 	// Stands in for cratis-guard-secrets.sh: blocks (exit 2) what its prefilter knows, allows the rest.
 	const cratis: CratisRunner = (script, cwd, stdin) => {
@@ -491,7 +493,8 @@ test("layering: with the Cratis secrets hook, local stands down only where Crati
 		overlap.ctx.cwd = withHook.sub;
 		assert.equal(await overlap.call("printenv"), undefined); // Cratis blocks it: one block
 		assert.deepEqual(overlap.decisions, [["secrets", "stand-down:cratis-hook", "environment"]]);
-		assert.equal(payloads[0].cwd, withHook.root);
+		assert.equal(payloads[0].cwd, withHook.sub);
+		assert.ok(payloads[0].script.startsWith(withHook.root) || payloads[0].script.includes(".cratis/ai/hooks/scripts"));
 		assert.equal(payloads[0].input.tool_name, "Bash");
 		assert.ok(payloads[0].script.endsWith("cratis-guard-secrets.sh"));
 		const redacted = overlap.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: "token: ghp_" + "a".repeat(36) }] }, overlap.ctx);
@@ -513,10 +516,12 @@ test("layering: with the Cratis secrets hook, local stands down only where Crati
 		assert.equal(await allowed.call("helm get values x"), undefined); // one switch
 		delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS;
 
+		process.chdir(without.root);
 		const off = fixture({ hasUI: false, runner: () => ({ status: 2 }) });
 		off.ctx.cwd = without.sub;
-		assert.equal((await off.call())?.block, true); // no Cratis script: unchanged
+		assert.equal((await off.call())?.block, true); // no Cratis secrets script under process.cwd(): unchanged
 	} finally {
+		process.chdir(before);
 		if (env === undefined) delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS; else process.env.CRATIS_HOOKS_ALLOW_SECRET_READS = env;
 		withHook.cleanup(); without.cleanup();
 	}
