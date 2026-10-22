@@ -1523,6 +1523,39 @@ def build_summary_lines(rep):
     return L
 
 
+GUARDS_STALE_DAYS = 14
+
+
+def stale_guards_off(now=None):
+    """Persisted-off guards older than GUARDS_STALE_DAYS (or with unknown date). Read-only; [] on any problem."""
+    path = os.environ.get("PI_GUARDS_FILE") or os.path.expanduser("~/.pi/agent/guards.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        off = data.get("off") or {}
+        try:  # sidecar guards.meta.json holds dates; missing/corrupt means date unknown
+            with open(path[:-5] + ".meta.json" if path.endswith(".json") else path + ".meta") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        now = now or time.time()
+        found = []
+        for name in sorted(n for n, v in off.items() if v is True):
+            at = (meta.get(name) or {}).get("at") if isinstance(meta.get(name), dict) else None
+            try:
+                days = (now - datetime.fromisoformat(at.replace("Z", "+00:00")).timestamp()) / 86400
+            except (AttributeError, ValueError, TypeError):
+                found.append({"name": name, "days": None})
+                continue
+            if days > GUARDS_STALE_DAYS:
+                found.append({"name": name, "days": int(days)})
+        return found
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
 def render_text(rep):
     out = [f"pi-cleanup {'APPLY' if rep['apply'] else 'DRY RUN (no changes made)'}  steps={','.join(rep['steps_selected'])}  "
            f"idle-days: build={rep['build_idle_days']:g} worktrees={rep['idle_days']:g}  roots={', '.join(rep['roots']) or '-'}"]
@@ -1554,6 +1587,10 @@ def render_text(rep):
         k = sg["kept_worktrees"]
         out.append(f"  remaining kept worktrees: {k['count']} totalling {human(k['bytes'])}"
                    + (f" (+{k['unmeasured']} not measured within {SIZE_BUDGET_S}s)" if k["unmeasured"] else ""))
+    if sg.get("guards_off"):
+        out.append("  guards off >" + str(GUARDS_STALE_DAYS) + " days: " + ", ".join(
+            f"{g['name']} ({str(g['days']) + 'd' if g['days'] is not None else 'date unknown'})" for g in sg["guards_off"])
+            + "  -> `/guards on NAME --persist` if no longer needed")
     out += ["", "== summary =="] + [f"  {x}" for x in build_summary_lines(rep)]
     out.append(f"  runtime: {rep['runtime_s']:.1f}s   exit: {rep['exit']}")
     return "\n".join(out)
@@ -1857,6 +1894,8 @@ def main(argv=None):
             left = [r for r in wt_rows if r["action"] in ("keep", "failed") and os.path.isdir(r["path"])]
             sg["kept_worktrees"] = {"count": len(left), "bytes": sum(r["size"] or 0 for r in left),
                                     "unmeasured": sum(1 for r in left if r["size"] is None)}
+
+        sg["guards_off"] = stale_guards_off()
 
         # failures → exit code
         failures += sum(1 for r in build_rows for d in r["dirs"] if d.get("result", "").startswith("failed"))
