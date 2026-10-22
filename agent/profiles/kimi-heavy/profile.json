@@ -1,0 +1,14 @@
+{
+  "summary": "Moves more roles to Kimi K3; needs Claude, ChatGPT and Kimi.",
+  "requires": [
+    "anthropic",
+    "openai-codex",
+    "kimi-coding"
+  ],
+  "uses": [
+    "anthropic",
+    "openai-codex",
+    "kimi-coding"
+  ],
+  "rank": 40
+}

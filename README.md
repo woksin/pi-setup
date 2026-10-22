@@ -10,10 +10,11 @@ Auth, sessions, caches and machine identity are never included.
 git clone https://github.com/woksin/pi-setup && cd pi-setup
 ./install.sh --dry-run   # show what would change
 ./install.sh             # differing files are backed up to <file>.bak-<timestamp>
-(cd ~/.pi/agent/npm && npm install --legacy-peer-deps)
 ```
 
-Install requires Python 3. Flags may be given in any order: `--user <login>`, `--repos-root <dir>` and `--dry-run` (writes nothing). The operator settings are saved in `~/.pi/agent/user.json` as `{"githubUser": "<login>", "reposRoot": "<dir>"}` and reused on later installs unless flags override them. Without a saved login, the installer uses the authenticated `gh api user --jq .login`, then prompts in a terminal; noninteractive installs must supply `--user` if gh cannot identify you. Without a saved repositories root, it prompts with `$HOME/repos` as the default, or uses that default noninteractively. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. Pass `--repos-root` on the first install: without it (and without a saved `user.json`) the root silently defaults to `$HOME/repos` when there is no terminal to prompt in.
+Install needs Node.js 22.19 or newer (pi needs it too) and Python 3. `install.sh` is a thin shim around the committed bundle `installer/dist/pi-setup.mjs`; it detects your setup first and asks only what it could not find out. In a terminal it runs a short wizard; with `--yes`, `CI` set or no terminal it never prompts. It detects your GitHub login (saved, then `gh`), your repositories root (saved, then the best match among the usual places such as `~/repos` and the parent of this checkout, then `$HOME/repos`), which providers you are logged in to, and picks a profile from `agent/profiles/<name>/profile.json` (an already active profile is kept on re-runs; `--profile <name>` switches). It then runs `npm install --legacy-peer-deps` in `~/.pi/agent/npm` itself, only when the packages changed.
+
+Flags, in any order: `--user <login>`, `--repos-root <dir>`, `--profile <name|auto>`, `--yes` (never prompt), `--skip-npm`, `--dry-run` (writes nothing), `--plan` (print detection, profile and actions, write nothing) and `--json` (one JSON object on stdout). The operator settings are saved in `~/.pi/agent/user.json` (`githubUser` and `reposRoot`; other keys are kept) and reused on later installs unless flags override them. Without a login from any source, install fails and asks for `--user`. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. A re-run that has nothing to change prints no `install` lines and creates no backups.
 
 `--legacy-peer-deps` is needed: the packages declare conflicting peer ranges for `@earendil-works/pi-*` (for example `@vigolium/piolium` wants `^0.74`, `@tintinweb/pi-subagents` wants `>=1.1.0`), so a plain `npm install` fails with ERESOLVE.
 
@@ -28,7 +29,6 @@ Optional, macOS only: `agent/launchd/*.plist` are templates for the `docker-guar
 ```sh
 git clone https://github.com/woksin/pi-setup && cd pi-setup
 ./install.sh --user <your-github-login> --repos-root <where-your-repos-live>
-cd ~/.pi/agent/npm && npm install --legacy-peer-deps
 ```
 
 Restart pi. Agents assign issues and PRs to you and request you as reviewer (skipping the review request when you are the PR author). They merge Cratis PRs themselves once required CI is green and the final review passes, but never PRs that trigger major releases.

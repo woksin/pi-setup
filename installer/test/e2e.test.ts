@@ -1,0 +1,184 @@
+import { strict as assert } from "node:assert";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { join } from "node:path";
+import { after, describe, test } from "node:test";
+import { REPO, findBackups, homeEntries, install, installLines, piPath, sandbox, stubLog } from "./helpers/home.ts";
+import type { Sandbox } from "./helpers/home.ts";
+
+const boxes: Sandbox[] = [];
+function fresh(): Sandbox {
+  const box = sandbox();
+  boxes.push(box);
+  return box;
+}
+after(() => {
+  for (const box of boxes) rmSync(box.root, { recursive: true, force: true });
+});
+
+const ARGS = (box: Sandbox) => ["--yes", "--user", "einari", "--repos-root", join(box.root, "repos")];
+const profileCalls = (box: Sandbox) => stubLog(box).filter((l) => l.startsWith("python3") && l.includes("pi-profile"));
+
+describe("install (e2e)", () => {
+  test("(a) clean-HOME install through install.sh", () => {
+    const box = fresh();
+    const run = install(box, ARGS(box));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    const user = JSON.parse(readFileSync(piPath(box, "user.json"), "utf8"));
+    assert.deepEqual(user, { githubUser: "einari", reposRoot: join(box.root, "repos") });
+    assert.match(readFileSync(piPath(box, "AGENTS.md"), "utf8"), /--add-assignee einari/);
+    assert.equal(readFileSync(piPath(box, "profiles/ACTIVE"), "utf8"), "balanced\n");
+    assert.ok(readdirSync(join(box.home, ".agents/skills")).includes("github-issue-hygiene"));
+    const npm = stubLog(box).filter((l) => l.startsWith("npm install"));
+    assert.equal(npm.length, 1);
+    assert.match(npm[0], /^npm install --legacy-peer-deps cwd=/);
+    assert.equal(realpathSync(npm[0].split("cwd=")[1]), realpathSync(piPath(box, "npm")));
+    const checks = stubLog(box).filter((l) => l.startsWith("pi auth check"));
+    assert.equal(checks.length, 3);
+    for (const c of checks) {
+      assert.ok(c.includes("--no-refresh"), c);
+      assert.ok(!c.includes("--credentials"), c);
+    }
+    assert.ok(!/Kimi is not logged in/.test(run.stdout));
+  });
+
+  test("(b) no-TTY --yes run completes without a prompt, also via node directly", () => {
+    const box = fresh();
+    const run = install(box, ARGS(box), { entry: "node", env: { CI: "" } });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /Done\. Restart pi/);
+  });
+
+  test("(c) a re-run is a no-op", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const before = stubLog(box).length;
+    const again = install(box, []);
+    assert.equal(again.status, 0, again.stdout + again.stderr);
+    assert.deepEqual(installLines(again.stdout), []);
+    assert.deepEqual(findBackups(piPath(box)), []);
+    const newCalls = stubLog(box).slice(before);
+    assert.ok(!newCalls.some((l) => l.startsWith("npm install")), newCalls.join("\n"));
+    assert.deepEqual(profileCalls(box), []);
+    assert.match(again.stdout, /npm packages up to date/);
+  });
+
+  test("(d) --dry-run writes nothing and runs neither npm nor pi-profile", () => {
+    const box = fresh();
+    const run = install(box, [...ARGS(box), "--dry-run"]);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.deepEqual(homeEntries(box), []);
+    assert.ok(installLines(run.stdout).length > 50);
+    assert.deepEqual(stubLog(box).filter((l) => l.startsWith("npm install")), []);
+    assert.deepEqual(profileCalls(box), []);
+  });
+
+  test("(e) argument errors exit 1 and write nothing", () => {
+    for (const args of [["--user"], ["--repos-root", "--dry-run"], ["--unknown"], ["--user", ""]]) {
+      const box = fresh();
+      const run = install(box, args);
+      assert.equal(run.status, 1, args.join(" "));
+      assert.ok(run.stderr.length > 0);
+      assert.deepEqual(homeEntries(box), [], args.join(" "));
+    }
+  });
+
+  test("(f) node missing or too old: one line, exit 1, nothing written", () => {
+    const box = fresh();
+    const fake = join(box.root, "fakenode");
+    mkdirSync(fake);
+    writeFileSync(join(fake, "node"), '#!/bin/sh\ncase "$1" in -e) exit 1 ;; -p) echo 20.0.0 ;; esac\n');
+    chmodSync(join(fake, "node"), 0o755);
+    const old = install(box, ARGS(box), { path: `${fake}:/usr/bin:/bin` });
+    assert.equal(old.status, 1);
+    assert.equal(old.stderr.trim().split("\n").length, 1);
+    assert.match(old.stderr, /Node\.js >= 22\.19.*found 20\.0\.0/);
+    const empty = join(box.root, "empty");
+    mkdirSync(empty);
+    const missing = install(box, ARGS(box), { path: empty });
+    assert.equal(missing.status, 1);
+    assert.equal(missing.stderr.trim().split("\n").length, 1);
+    assert.deepEqual(homeEntries(box), []);
+  });
+
+  test("(g) user.json keeps unknown keys and is written atomically", () => {
+    const box = fresh();
+    mkdirSync(piPath(box), { recursive: true });
+    writeFileSync(piPath(box, "user.json"), JSON.stringify({ orchRepoRoot: "/keep", githubUser: "old", reposRoot: "/old" }));
+    const run = install(box, ARGS(box), { env: { STUB_READY: "" } });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    const text = readFileSync(piPath(box, "user.json"), "utf8");
+    assert.deepEqual(Object.keys(JSON.parse(text)), ["orchRepoRoot", "githubUser", "reposRoot"]);
+    assert.equal(JSON.parse(text).orchRepoRoot, "/keep");
+    assert.equal(JSON.parse(text).githubUser, "einari");
+    const backups = findBackups(piPath(box)).filter((p) => p.includes("user.json"));
+    assert.equal(backups.length, 1);
+    assert.ok(backups[0].includes("user.json.bak-"));
+    assert.equal(JSON.parse(readFileSync(backups[0], "utf8")).githubUser, "old");
+    assert.deepEqual(readdirSync(piPath(box)).filter((n) => n.includes(".tmp-")), []);
+    const again = install(box, []);
+    assert.deepEqual(installLines(again.stdout), []);
+    assert.equal(readFileSync(piPath(box, "user.json"), "utf8"), text);
+  });
+
+  test("openai-only login picks openai-only, applies it live and re-runs quietly", () => {
+    const box = fresh();
+    const run = install(box, ARGS(box), { ready: "openai-codex" });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.equal(readFileSync(piPath(box, "profiles/ACTIVE"), "utf8"), "openai-only\n");
+    const dir = join(REPO, "agent/profiles/openai-only/agents");
+    for (const f of readdirSync(dir)) {
+      assert.equal(readFileSync(piPath(box, "agents", f), "utf8"), readFileSync(join(dir, f), "utf8"), f);
+    }
+    assert.match(run.stdout, /Kimi is not logged in|openai-only/);
+    const again = install(box, [], { ready: "openai-codex" });
+    assert.deepEqual(installLines(again.stdout), []);
+    assert.deepEqual(profileCalls(box), []);
+  });
+
+  test("an existing ACTIVE plus --profile runs pi-profile once (Q2)", () => {
+    const box = fresh();
+    assert.equal(install(box, ARGS(box)).status, 0);
+    const run = install(box, ["--yes", "--profile", "openai-only"]);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    const calls = profileCalls(box);
+    assert.equal(calls.length, 1, calls.join("\n"));
+    assert.match(calls[0], /pi-profile use openai-only --force$/);
+    assert.equal(readFileSync(piPath(box, "profiles/ACTIVE"), "utf8"), "openai-only\n");
+    const again = install(box, ["--yes"]);
+    assert.deepEqual(installLines(again.stdout), []);
+    assert.equal(profileCalls(box).length, 1);
+  });
+
+  test("Kimi missing is said once in the summary", () => {
+    const box = fresh();
+    const run = install(box, ARGS(box), { ready: "anthropic,openai-codex" });
+    assert.equal(run.stdout.split("\n").filter((l) => /Kimi roles fall back to GPT/.test(l)).length, 1, run.stdout);
+  });
+
+  test("an unknown --profile fails before any write", () => {
+    const box = fresh();
+    const run = install(box, [...ARGS(box), "--profile", "nope"]);
+    assert.equal(run.status, 1);
+    assert.deepEqual(homeEntries(box), []);
+  });
+
+  test("auth.json content never reaches the output", () => {
+    const box = fresh();
+    mkdirSync(piPath(box), { recursive: true });
+    writeFileSync(piPath(box, "auth.json"), '{"anthropic":{"key":"SENTINEL-SECRET-123"}}');
+    const run = install(box, ARGS(box));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.ok(!(run.stdout + run.stderr).includes("SENTINEL-SECRET-123"));
+  });
+
+  test("--plan --json prints one JSON object and writes nothing", () => {
+    const box = fresh();
+    const run = install(box, [...ARGS(box), "--plan", "--json"]);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    const data = JSON.parse(run.stdout);
+    assert.deepEqual(Object.keys(data), ["settings", "detection", "profile", "actions", "warnings", "exitCode"]);
+    assert.equal(data.settings.githubUser, "einari");
+    assert.ok(data.actions.length > 50);
+    assert.deepEqual(homeEntries(box), []);
+  });
+});

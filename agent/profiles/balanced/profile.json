@@ -1,0 +1,13 @@
+{
+  "summary": "Default. Each role goes where its provider is strongest; Claude is the constrained quota, so low-risk roles run on GPT.",
+  "requires": [
+    "anthropic",
+    "openai-codex"
+  ],
+  "uses": [
+    "anthropic",
+    "openai-codex",
+    "kimi-coding"
+  ],
+  "rank": 100
+}

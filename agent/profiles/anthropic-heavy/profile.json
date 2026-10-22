@@ -1,0 +1,12 @@
+{
+  "summary": "Most roles on Claude, GPT for review and the heaviest reasoning.",
+  "requires": [
+    "anthropic",
+    "openai-codex"
+  ],
+  "uses": [
+    "anthropic",
+    "openai-codex"
+  ],
+  "rank": 30
+}

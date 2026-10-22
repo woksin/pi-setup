@@ -1,0 +1,10 @@
+{
+  "summary": "Everything on GPT; needs only a ChatGPT login.",
+  "requires": [
+    "openai-codex"
+  ],
+  "uses": [
+    "openai-codex"
+  ],
+  "rank": 10
+}
