@@ -1,19 +1,35 @@
 #!/usr/bin/env bash
-# Usage: inbox-watch LANE [GROUP]
+# Usage: inbox-watch [--alias NAME]... LANE [GROUP]
 # Use with one job_watch: until=success, interval=120. Exit 0: filenames printed;
-# 1: no inbound changes; 2: usage/I/O error. L0 also receives *-to-L0 messages.
+# 1: no inbound changes; 2: usage/I/O error.
+# Names: SENDER-to-RCPT[-RCPT...]-topic.md or RCPT-from-SENDER-topic.md.
+# Recipient/sender ids are the run of tokens starting with a capital
+# (L15, L18b, R-AI, R-Studio); the topic starts at the first lowercase or digit token.
+# Inbound: a recipient is LANE, an alias, ALL or GROUP (or the name starts
+# with GROUP-/ALL-); messages the lane or an alias sent are skipped.
+# Aliases: --alias NAME (repeatable) or INBOX_ALIASES=R-AI,R-Studio.
 # INBOX_DIR overrides the default directory (including for isolated tests).
 # Marker advances to scan START only after output, so concurrent edits stay new.
 set -eu
+aliases=()
+while (( $# > 0 )) && [[ $1 == --alias ]]; do
+    (( $# >= 2 )) || { printf 'Usage: inbox-watch [--alias NAME]... LANE [GROUP]\n' >&2; exit 2; }
+    aliases+=("$2")
+    shift 2
+done
+if [[ -n ${INBOX_ALIASES:-} ]]; then
+    IFS=',' read -r -a env_aliases <<< "$INBOX_ALIASES"
+    for a in "${env_aliases[@]}"; do [[ -n $a ]] && aliases+=("$a"); done
+fi
 if (( $# < 1 || $# > 2 )); then
-    printf 'Usage: inbox-watch LANE [GROUP]\n' >&2
+    printf 'Usage: inbox-watch [--alias NAME]... LANE [GROUP]\n' >&2
     exit 2
 fi
 lane=$1
 group=${2:-}
-for name in "$lane" ${group:+"$group"}; do
+for name in "$lane" ${group:+"$group"} ${aliases[@]+"${aliases[@]}"}; do
     if [[ ! $name =~ ^[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*$ ]]; then
-        printf 'inbox-watch: invalid lane/group: %s\n' "$name" >&2
+        printf 'inbox-watch: invalid lane/group/alias: %s\n' "$name" >&2
         exit 2
     fi
 done
@@ -35,21 +51,53 @@ if [[ -e $mark ]]; then
     args+=(-newer "$mark")
 fi
 find "${args[@]}" -print > "$listing" || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
-# Canonical inbound match: lane token, ALL- broadcast, or optional GROUP-.
-inbound="(^|-)${lane}([-.]|$)|^ALL-"
-if [[ -n $group ]]; then
-    inbound+="|^${group}-"
-fi
+me=("$lane" ${aliases[@]+"${aliases[@]}"})
+# has LIST ID: LIST is "-a-b-c-"; ID may itself contain dashes (R-AI).
+has() { [[ $1 == *"-$2-"* ]]; }
+is_id() {
+    local tok=$1 id
+    for id in "${me[@]}" ALL ${group:+"$group"}; do [[ $tok == "$id" ]] && return 0; done
+    [[ $tok =~ ^[A-Z] || $tok =~ ^ttys[0-9]+$ ]]
+}
+# Prints "kind|senders|recipients" with dash-wrapped lists, kind = to|from|none.
+parse() {
+    local base=${1%.md} i=0 k=-1 kind=none left='' right=''
+    local -a t
+    IFS='-' read -r -a t <<< "$base"
+    for (( i = 1; i < ${#t[@]}; i++ )); do
+        if [[ ${t[i]} == to || ${t[i]} == from ]]; then k=$i; kind=${t[i]}; break; fi
+    done
+    if (( k < 0 )); then
+        printf 'none||-%s-\n' "$base"
+        return
+    fi
+    for (( i = 0; i < k; i++ )); do left+="-${t[i]}"; done
+    for (( i = k + 1; i < ${#t[@]}; i++ )); do
+        is_id "${t[i]}" || break
+        right+="-${t[i]}"
+    done
+    if [[ $kind == to ]]; then
+        printf 'to|%s-|%s-\n' "$left" "$right"
+    else
+        printf 'from|%s-|%s-\n' "$right" "$left"
+    fi
+}
+inbound() {
+    local name=$1 parsed senders rcpts id
+    parsed=$(parse "$name")
+    parsed=${parsed#*|}
+    senders=${parsed%%|*}; rcpts=${parsed#*|}
+    for id in "${me[@]}"; do has "$senders" "$id" && return 1; done
+    [[ $name == ALL-* ]] && return 0
+    [[ -n $group && $name == "$group"-* ]] && return 0
+    for id in "${me[@]}" ALL ${group:+"$group"}; do has "$rcpts" "$id" && return 0; done
+    return 1
+}
 found=0
 while IFS= read -r path; do
     name=${path#./}
-    [[ $name =~ $inbound ]] || continue
-    case "$name" in
-        "$lane"-to-*|*-from-*) continue ;;
-    esac
-    if [[ $lane != L0 && $name =~ (^|-)to-L0([-.]|$) ]]; then
-        continue
-    fi
+    [[ $name == *-inbox.marker ]] && continue
+    inbound "$name" || continue
     printf '%s\n' "$name"
     found=1
 done < "$listing"
