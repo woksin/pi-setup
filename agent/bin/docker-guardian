@@ -1,7 +1,7 @@
 #!/bin/bash
 # docker-guardian — keeps local Docker Desktop usable for agents without a human.
 # Runs every 2 minutes from launchd (com.example.docker-guardian).
-#  - Health: `docker info` with a 20 s deadline. 3 consecutive failures (~6 min) => restart
+#  - Health: engine /info over the Docker socket (curl, 20 s deadline) plus `docker ps`. 3 consecutive failures (~6 min) => restart
 #    Docker Desktop (quit, kill lingering backend, open), announce to lanes, verify.
 #    Budget: at most 1 restart per 20 min and 3 per 2 h; beyond that it alerts instead.
 #  - Not running at all => start it.
@@ -29,7 +29,11 @@ dl(){ local t=$1; shift; "$@" & local p=$!; local end=$((SECONDS+t))
 # `docker info` alone is not enough: on 2026-10-20 17:30 info answered while `docker ps`/`images` hung
 # for >10 min (containerd/engine wedged), so health also requires a container listing.
 # INFO_OK records whether the engine API answered, so the load deferral can tell a slow listing from an outage.
-healthy(){ INFO_OK=0; dl 20 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || return 1; INFO_OK=1; dl 25 docker ps -q >/dev/null 2>&1; }
+# Engine API probe straight on the socket (2026-10-22 20:53): `docker info` (the CLI) first runs every CLI plugin's
+# metadata command; under load it hung 20 s+ and never reached the engine while Testcontainers was served through the
+# same socket, so three false "unhealthy" checks restarted a working Docker. curl /info has no plugin scan.
+DOCKER_SOCK=${DOCKER_SOCK:-$HOME/.docker/run/docker.sock}; [ -S "$DOCKER_SOCK" ] || DOCKER_SOCK=/var/run/docker.sock
+healthy(){ INFO_OK=0; dl 20 curl -sf --max-time 20 --unix-socket "$DOCKER_SOCK" -o /dev/null http://localhost/info || return 1; INFO_OK=1; dl 25 docker ps -q >/dev/null 2>&1; }
 load1(){ sysctl -n vm.loadavg | awk '{print int($2)}'; }
 # Diagnostic snapshot on every unhealthy check (2026-10-22): what used the CPU, the Docker VM's share, memory and
 # running pi-phase phases, so hangs can be attributed afterwards. Read-only, bounded; never affects the decision.

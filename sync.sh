@@ -29,9 +29,11 @@ for n in docker-guardian pi-cleanup; do
   sed -e "s#$HOME#__HOME__#g" -e "s#com\.[A-Za-z0-9]*\.$n#com.example.$n#" \
     -e '/DOCKER_GUARDIAN_MESSAGES/d' "$HOME/Library/LaunchAgents/com.$(id -un).$n.plist" > "agent/launchd/com.example.$n.plist"
 done
-for f in AGENTS.md AGENTS.subagent.md models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json; do
+for f in AGENTS.md AGENTS.subagent.md models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json ; do
   cp "$PI/$f" "agent/$f"
 done
+# per-session resume checks point at local scripts: not shared
+jq 'del(.resumeChecks)' "$PI/context-budget.json" > agent/context-budget.json
 # local packages -> their public npm packages; deduplicated, order kept
 jq 'del(.deviceId, .lastChangelogVersion)
   | .packages |= (map(if test("^\\./local-packages/pi-(jobs|recover|orch)$") then "npm:@woksin/" + ltrimstr("./local-packages/")
