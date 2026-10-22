@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Run every lib/*.test.ts of a pi agent dir with node:test (type stripping).
+# Usage: pi-setup-tests [AGENT_DIR]   (default: ~/.pi/agent)
+# The tests import ../extensions/*.ts, ../early-extensions/*.ts and @earendil-works/pi-coding-agent, so the
+# lib/extensions/early-extensions trees are copied into a temp overlay that has a node_modules symlink. Tests run
+# with an isolated HOME / PI_CODING_AGENT_DIR so they never touch the real ~/.pi/agent/*.json. Exits non-zero on any failure.
+set -euo pipefail
+
+agent="${1:-$HOME/.pi/agent}"
+agent="$(cd "$agent" && pwd)"
+
+modules=""
+for candidate in "$agent/npm/node_modules" "$agent/node_modules" "$HOME/.pi/agent/npm/node_modules"; do
+	if [ -d "$candidate/@earendil-works/pi-coding-agent" ]; then modules="$candidate"; break; fi
+done
+if [ -z "$modules" ]; then
+	echo "pi-setup-tests: cannot find node_modules with @earendil-works/pi-coding-agent under $agent" >&2
+	exit 2
+fi
+
+shopt -s nullglob
+tests=("$agent"/lib/*.test.ts)
+if [ "${#tests[@]}" -eq 0 ]; then
+	echo "pi-setup-tests: no lib/*.test.ts in $agent" >&2
+	exit 2
+fi
+
+# Some suites address files as $HOME/.pi/agent/lib/*, so the overlay is laid out as a fake home.
+overlay="$(mktemp -d "${TMPDIR:-/tmp}/pi-setup-tests.XXXXXX")"
+trap 'rm -rf "$overlay"' EXIT
+fakeagent="$overlay/home/.pi/agent"
+mkdir -p "$fakeagent"
+for tree in lib extensions early-extensions; do
+	if [ -d "$agent/$tree" ]; then cp -R "$agent/$tree" "$fakeagent/$tree"; fi
+done
+ln -s "$modules" "$fakeagent/node_modules"
+# observation-mask / output-cap suites expect the efficiency config (observationMask enabled) to exist; copy it read-only.
+if [ -f "$agent/efficiency.json" ]; then cp "$agent/efficiency.json" "$fakeagent/efficiency.json"; fi
+
+cd "$fakeagent"
+files=()
+for t in "${tests[@]}"; do files+=("lib/$(basename "$t")"); done
+echo "pi-setup-tests: ${#files[@]} suites from $agent"
+env HOME="$overlay/home" PI_CODING_AGENT_DIR="$fakeagent" \
+	node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --disable-warning=ExperimentalWarning \
+	--test --test-reporter=spec "${files[@]}"
