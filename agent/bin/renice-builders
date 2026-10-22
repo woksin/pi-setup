@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Lower the CPU priority of shared .NET build servers to nice 10.
+
+The Roslyn compiler server (VBCSCompiler) and reusable MSBuild nodes are shared by every build of
+the user, whoever started them. When an interactive `dotnet run` starts them at nice 0, every
+pi-phase build compiles through them at nice 0 too, and `phase_nice` no longer protects Docker and
+agents. docker-guardian runs this on every pass.
+
+Never raises a priority, never kills, needs no sudo; only processes of the current user are touched
+(setpriority refuses others). Prints one summary line when something changed. Exit status is always 0.
+"""
+import os
+import subprocess
+import sys
+
+TARGET_NICE = 10
+
+
+def is_build_server(args: str) -> bool:
+    if "VBCSCompiler" in args:
+        return True
+    return "MSBuild.dll" in args and "/nodemode:" in args.lower()
+
+
+def candidates(listing: str, target: int = TARGET_NICE):
+    for line in listing.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, nice = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if nice < target and is_build_server(parts[2]):
+            yield pid, nice
+
+
+def main(run=subprocess.run, setpriority=os.setpriority, target: int = TARGET_NICE) -> int:
+    try:
+        listing = run(["ps", "-x", "-o", "pid=,ni=,args="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    changed = []
+    for pid, nice in candidates(listing, target):
+        try:
+            setpriority(os.PRIO_PROCESS, pid, target)
+            changed.append(f"{pid}:{nice}->{target}")
+        except OSError:
+            pass
+    if changed:
+        print(f"renice-builders: {len(changed)} build server(s) lowered: {' '.join(changed)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -8,7 +8,7 @@
     "@vigolium/piolium": "^0.0.13",
     "donsetch": "^4.10.1",
     "pi-browser-use": "^0.12.13",
-    "pi-mcp-adapter": "^5.3.2",
-    "pi-web-access": "^0.42.0"
+    "pi-mcp-adapter": "^5.4.0",
+    "pi-web-access": "^0.44.0"
   }
 }

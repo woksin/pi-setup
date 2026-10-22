@@ -241,6 +241,9 @@ if ! mkdir "$S/lock.d" 2>/dev/null; then
   rm -rf "$S/lock.d"; mkdir "$S/lock.d" 2>/dev/null || exit 0
 fi
 echo $$ > "$S/lock.d/pid"; trap 'rm -rf "$S/lock.d"' EXIT
+# Shared .NET build servers (VBCSCompiler, MSBuild nodes) to nice 10 whoever started them, so phase_nice
+# also covers compiles and the Docker VM keeps CPU (L0, 2026-10-22). Never raises priority, never kills.
+r=$(dl 10 "$HOME/.pi/agent/bin/renice-builders" 2>/dev/null); [ -n "$r" ] && log "$r"
 
 if ! pgrep -qf '/Applications/Docker.app/Contents/MacOS/Docker' && ! pgrep -qf 'com.docker.backend'; then
   [ -f "$S/paused" ] && exit 0      # `touch ~/.pi/agent/docker-guardian/paused` to stop auto-start/restarts
