@@ -9,10 +9,10 @@ import { parseArgs } from "node:util";
 import * as actions from "./actions.js";
 import { possibleDuplicates } from "./dedup.js";
 import { renderCandidates, renderItem, renderList, renderRecord } from "./format.js";
-import { repoOf } from "./identity.js";
+import { cliSession, laneOf, repoOf } from "./identity.js";
 import { validateDraft,            } from "./model.js";
 import { selectItems } from "./query.js";
-import { listItems, resolveHome } from "./store.js";
+import { agentDir, listItems, resolveHome } from "./store.js";
 
                                                                   
 
@@ -28,8 +28,9 @@ const USAGE = `usage: pi-questions <command>
 export function main(argv          , env                                    , io    , cwd = process.cwd())         {
 	const [cmd, ...rest] = argv;
 	const home = resolveHome(env);
-	const sessionId = env.PI_SESSION_ID || `cli-${process.pid}`;
-	const lane = env.PI_ORCH_ID || undefined;
+	const session = cliSession(env, cwd, agentDir(env));
+	const sessionId = session.sessionId || `cli-${process.pid}`;
+	const lane = laneOf(env, sessionId, session.name);
 	try {
 		switch (cmd) {
 			case "list": {

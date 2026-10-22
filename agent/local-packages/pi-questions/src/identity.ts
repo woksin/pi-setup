@@ -96,3 +96,29 @@ export function userName(env: Record<string, string | undefined> = process.env):
 		return env.USER || env.USERNAME || "user";
 	}
 }
+
+
+/** CLI equivalent of getSessionName(): latest session_info, including explicit clears.
+ * Only the explicit file or this cwd's session directory is consulted. */
+export function cliSession(env: Record<string, string | undefined>, cwd: string, agentDirectory: string): { sessionId?: string; name?: string } {
+	const sessionId = env.PI_SESSION_ID;
+	let file = env.PI_SESSION_FILE;
+	if (!file && sessionId) {
+		const encoded = `--${resolve(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+		const directory = join(agentDirectory, "sessions", encoded);
+		try { file = readdirSync(directory).sort().reverse().filter(f => f.endsWith(`_${sessionId}.jsonl`)).map(f => join(directory, f))[0]; } catch { /* unavailable */ }
+	}
+	if (!file) return { sessionId };
+	try {
+		let id: string | undefined, name: string | undefined;
+		for (const line of readFileSync(file, "utf8").split("\n")) {
+			try {
+				const entry = JSON.parse(line);
+				if (entry.type === "session" && typeof entry.id === "string") id = entry.id;
+				if (entry.type === "session_info" && typeof entry.name === "string") name = entry.name || undefined;
+			} catch { /* a truncated final entry must not hide the last valid name */ }
+		}
+		if (sessionId && id && sessionId !== id) return { sessionId };
+		return { sessionId: sessionId || id, name };
+	} catch { return { sessionId }; }
+}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { readItem } from "../src/store.ts";
@@ -101,4 +101,30 @@ test("the real executable honours PI_QUESTIONS_HOME and exits with wait's status
 	assert.ok(!existsSync(join(root, "agent", "user-questions")));
 	assert.equal(run("wait", "Q-1").status, 1);
 	assert.match(run("list").stdout, /Process level notice/);
+});
+
+
+test("CLI ask resolves the session name without env mutation, with env and heartbeat precedence", t => {
+	const root = tempDir(t), home = join(root, "questions"), agent = join(root, "agent"), orch = join(root, "orch");
+	const repo = gitRepo(join(root, "repo"));
+	const encoded = `--${repo.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	const directory = join(agent, "sessions", encoded);
+	mkdirSync(directory, { recursive: true });
+	const file = join(directory, "2026-01-01_s1.jsonl");
+	writeFileSync(file, '{"type":"session","id":"s1"}\n{"type":"session_info","name":"OLD"}\n{"type":"session_info","name":"L0"}\n');
+	const env = { PI_SESSION_ID: "s1", PI_CODING_AGENT_DIR: agent, PI_QUESTIONS_HOME: home, ORCH_HOME: orch };
+	const snapshot = { ...process.env };
+	assert.equal(cli(env, repo)("ask", "--kind", "question", "--title", "Named lane request").code, 0);
+	assert.equal(readItem(home, "Q-1")!.asker.lane, "L0");
+	assert.equal(readItem(home, "Q-1")!.asker.sessionId, "s1");
+	mkdirSync(join(orch, "heartbeats"), { recursive: true });
+	writeFileSync(join(orch, "heartbeats", "lane.json"), JSON.stringify({ sessionId: "s1", id: "HEARTBEAT" }));
+	assert.equal(cli(env, repo)("ask", "--kind", "fyi", "--title", "Heartbeat identity update").code, 0);
+	assert.equal(readItem(home, "Q-2")!.asker.lane, "HEARTBEAT");
+	assert.equal(cli({ ...env, PI_ORCH_ID: "EXPLICIT" }, repo)("ask", "--kind", "fyi", "--title", "Explicit environmental choice").code, 0);
+	assert.equal(readItem(home, "Q-3")!.asker.lane, "EXPLICIT");
+	const unnamed = { ...env, PI_SESSION_ID: "s2", PI_SESSION_FILE: file };
+	assert.equal(cli(unnamed, repo)("ask", "--kind", "fyi", "--title", "Other session cannot borrow lane").code, 0);
+	assert.equal(readItem(home, "Q-4")!.asker.lane, undefined);
+	assert.deepEqual({ ...process.env }, snapshot);
 });

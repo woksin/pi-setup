@@ -9,10 +9,10 @@ import { parseArgs } from "node:util";
 import * as actions from "./actions.ts";
 import { possibleDuplicates } from "./dedup.ts";
 import { renderCandidates, renderItem, renderList, renderRecord } from "./format.ts";
-import { repoOf } from "./identity.ts";
+import { cliSession, laneOf, repoOf } from "./identity.ts";
 import { validateDraft, type Asker } from "./model.ts";
 import { selectItems } from "./query.ts";
-import { listItems, resolveHome } from "./store.ts";
+import { agentDir, listItems, resolveHome } from "./store.ts";
 
 export interface Io { out(s: string): void; err(s: string): void }
 
@@ -28,8 +28,9 @@ const USAGE = `usage: pi-questions <command>
 export function main(argv: string[], env: Record<string, string | undefined>, io: Io, cwd = process.cwd()): number {
 	const [cmd, ...rest] = argv;
 	const home = resolveHome(env);
-	const sessionId = env.PI_SESSION_ID || `cli-${process.pid}`;
-	const lane = env.PI_ORCH_ID || undefined;
+	const session = cliSession(env, cwd, agentDir(env));
+	const sessionId = session.sessionId || `cli-${process.pid}`;
+	const lane = laneOf(env, sessionId, session.name);
 	try {
 		switch (cmd) {
 			case "list": {

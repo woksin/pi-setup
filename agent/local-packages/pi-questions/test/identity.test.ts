@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { laneOf, liveness, LIVE_MS, parseRemote, repoOf, userName } from "../src/identity.ts";
+import { cliSession, laneOf, liveness, LIVE_MS, parseRemote, repoOf, userName } from "../src/identity.ts";
 import { gitRepo, tempDir, writeUser } from "./helpers.ts";
 
 test("origin URL parsing: ssh, scp-style and https", () => {
@@ -59,4 +59,17 @@ test("userName: githubUser from user.json, else the OS user", t => {
 	assert.ok(os.length > 0);
 	writeUser(root, "someone-else");
 	assert.equal(userName(env), "someone-else");
+});
+
+
+test("CLI reads latest persisted session_info name, explicit clears and partial files safely", t => {
+	const dir = tempDir(t), file = join(dir, "session.jsonl");
+	const env = { PI_SESSION_ID: "s1", PI_SESSION_FILE: file };
+	writeFileSync(file, '{"type":"session","id":"s1"}\n{"type":"session_info","name":"OLD"}\n{"type":"session_info","name":"L0"}\n{"partial":');
+	assert.deepEqual(cliSession(env, dir, dir), { sessionId: "s1", name: "L0" });
+	assert.deepEqual(cliSession({ PI_SESSION_FILE: file }, dir, dir), { sessionId: "s1", name: "L0" });
+	assert.deepEqual(cliSession({ ...env, PI_SESSION_ID: "other" }, dir, dir), { sessionId: "other" });
+	writeFileSync(file, '{"type":"session","id":"s1"}\n{"type":"session_info","name":"L0"}\n{"type":"session_info","name":""}\n');
+	assert.equal(cliSession(env, dir, dir).name, undefined);
+	assert.deepEqual(cliSession({ PI_SESSION_ID: "missing" }, dir, dir), { sessionId: "missing" });
 });
