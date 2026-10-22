@@ -138,7 +138,15 @@ class InstallTests(unittest.TestCase):
         self.home = Path(self.directory.name)
         self.temp = tempfile.TemporaryDirectory(prefix="pisetup-einari.", dir="/tmp")
         self.addCleanup(self.temp.cleanup)
-        self.env = dict(os.environ, HOME=str(self.home), TMPDIR=self.temp.name, PYTHONDONTWRITEBYTECODE="1")
+        # Stub pi, gh and npm so the installer neither touches a real pi nor downloads packages.
+        self.stubs = tempfile.TemporaryDirectory(prefix="pisetup-stubs.", dir="/tmp")
+        self.addCleanup(self.stubs.cleanup)
+        for name, code in (("pi", 1), ("gh", 1), ("npm", 0)):
+            stub = Path(self.stubs.name) / name
+            stub.write_text(f"#!/bin/sh\nexit {code}\n")
+            stub.chmod(0o755)
+        self.env = dict(os.environ, HOME=str(self.home), TMPDIR=self.temp.name, PYTHONDONTWRITEBYTECODE="1",
+                        PATH=self.stubs.name + os.pathsep + os.environ["PATH"])
 
     def run_command(self, *args, cwd=REPO, success=True):
         result = subprocess.run(args, cwd=cwd, env=self.env, input="", text=True, capture_output=True, timeout=60)

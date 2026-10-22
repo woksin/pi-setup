@@ -1,86 +1,13 @@
 #!/usr/bin/env bash
-# Copy this setup into ~/.pi/agent (and ~/.agents/skills, ~/.local).
+# Copy this setup into ~/.pi/agent (and ~/.agents/skills, ~/.local). A thin shim around installer/dist/pi-setup.mjs.
+# Flags: --dry-run  --plan  --json  --user <login>  --repos-root <dir>  --profile <name|auto>  --yes  --skip-npm  --help
 # Existing files that differ are backed up to <file>.bak-<timestamp> first.
 # settings.json, models.json and the other JSON configs are only written when absent.
+# npm install in ~/.pi/agent/npm runs automatically (--skip-npm to skip).
 # agent/launchd/*.plist are templates and are not installed; see README.
 set -euo pipefail
-PI="$HOME/.pi/agent"
-TS=$(date +%Y%m%d-%H%M%S)
-DRY=
-GITHUB_USER=
-REPOS_ROOT=
-while (( $# )); do
-  case $1 in
-    --dry-run) DRY=--dry-run; shift ;;
-    --user|--repos-root)
-      [[ $# -ge 2 && -n $2 && $2 != --* ]] || { echo "Missing value for $1" >&2; exit 1; }
-      if [[ $1 == --user ]]; then GITHUB_USER=$2
-      else REPOS_ROOT=$2; [[ $REPOS_ROOT == /* || $REPOS_ROOT == "~"* ]] || REPOS_ROOT="$PWD/$REPOS_ROOT"; fi
-      shift 2 ;;
-    *) echo "Unknown argument: $1" >&2; exit 1 ;;
-  esac
-done
-cd "$(dirname "$0")"
-SETTINGS=$(python3 setup-user.py config "$PI/user.json" "$GITHUB_USER" "$REPOS_ROOT")
-TMP=
-trap '[[ -z $TMP ]] || rm -rf "$TMP"' EXIT
-
-put() { # src dest
-  local src=$1 dest=$2 rendered
-  if grep -qE '\{\{(GITHUB_USER|REPOS_ROOT)\}\}' "$src"; then
-    if [[ $DRY == --dry-run ]]; then
-      if [[ -e $dest ]] && cmp -s <(python3 setup-user.py render "$src" "$SETTINGS") "$dest"; then return; fi
-      echo "install $dest"
-      return
-    fi
-    [[ -n $TMP ]] || TMP=$(mktemp -d)
-    rendered=$TMP/rendered
-    cp -p "$src" "$rendered"
-    python3 setup-user.py render "$src" "$SETTINGS" > "$rendered"
-    src=$rendered
-  fi
-  if [[ -e $dest ]] && cmp -s "$src" "$dest"; then return; fi
-  echo "install $dest"
-  [[ $DRY == --dry-run ]] && return
-  mkdir -p "$(dirname "$dest")"
-  [[ -e $dest ]] && cp -p "$dest" "$dest.bak-$TS"
-  cp -p "$src" "$dest"
-}
-tree() { # srcdir destdir
-  (cd "$1" && find . -type f) | while read -r f; do put "$1/$f" "$2/${f#./}"; done
-}
-
-if [[ $DRY != --dry-run ]]; then
-  TMP=$(mktemp -d)
-  printf '%s\n' "$SETTINGS" > "$TMP/user.json"
-  put "$TMP/user.json" "$PI/user.json"
-fi
-
-for d in agents extensions early-extensions lib workflows templates profiles loose-threads bin pi-phase lane-policy; do
-  tree "agent/$d" "$PI/$d"
-done
-tree agent/local-packages/pi-questions "$PI/local-packages/pi-questions"
-[[ $DRY == --dry-run ]] || chmod +x "$PI/local-packages/pi-questions/dist/cli.js"
-put agent/AGENTS.md "$PI/AGENTS.md"
-put agent/AGENTS.subagent.md "$PI/AGENTS.subagent.md"
-for f in settings.json models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json; do
-  [[ -e $PI/$f ]] || put "agent/$f" "$PI/$f"
-done
-# existing installs: register the bundled pi-questions package once (backup first)
-if [[ -e $PI/settings.json ]] && ! jq -e '.packages // [] | index("./local-packages/pi-questions")' "$PI/settings.json" >/dev/null; then
-  echo "register ./local-packages/pi-questions in $PI/settings.json"
-  if [[ $DRY != --dry-run ]]; then
-    cp -p "$PI/settings.json" "$PI/settings.json.bak-$TS"
-    jq '.packages = ((.packages // []) + ["./local-packages/pi-questions"])' "$PI/settings.json" > "$PI/settings.json.tmp-$TS"
-    mv "$PI/settings.json.tmp-$TS" "$PI/settings.json"
-  fi
-fi
-[[ -e $PI/docker-guardian/pinned.txt ]] || put agent/docker-guardian/pinned.example.txt "$PI/docker-guardian/pinned.txt"
-[[ -e $PI/dev-doctor.json ]] || put agent/dev-doctor.example.json "$PI/dev-doctor.json"
-[[ -e $PI/npm/package.json ]] || put agent/npm-package.json "$PI/npm/package.json"
-for s in skills/*/; do tree "$s" "$HOME/.agents/$s"; done
-[[ $DRY == --dry-run ]] || mkdir -p "$PI/skills"
-[[ -e $PI/skills/ai-work-lifecycle || $DRY == --dry-run ]] || ln -s "$HOME/.agents/skills/ai-work-lifecycle" "$PI/skills/ai-work-lifecycle"
-tree tools/ai-work-lifecycle "$HOME/.local/share/ai-work-lifecycle"
-put tools/bin/ai-work-lifecycle "$HOME/.local/bin/ai-work-lifecycle"
-echo "Done. Install the npm packages: (cd $PI/npm && npm install --legacy-peer-deps), then restart pi."
+need="pi-setup needs Node.js >= 22.19 (pi needs it too): install it from https://nodejs.org, with brew install node, or with nvm."
+command -v node >/dev/null 2>&1 || { echo "$need" >&2; exit 1; }
+node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)' \
+  || { echo "$need (found $(node -p process.versions.node))" >&2; exit 1; }
+exec node "$(cd "$(dirname "$0")" && pwd)/installer/dist/pi-setup.mjs" install "$@"

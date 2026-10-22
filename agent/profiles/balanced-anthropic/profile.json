@@ -1,0 +1,13 @@
+{
+  "summary": "Balanced, leaning on Claude for more roles.",
+  "requires": [
+    "anthropic",
+    "openai-codex"
+  ],
+  "uses": [
+    "anthropic",
+    "openai-codex",
+    "kimi-coding"
+  ],
+  "rank": 60
+}

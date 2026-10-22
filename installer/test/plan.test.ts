@@ -1,0 +1,80 @@
+import { strict as assert } from "node:assert";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import { apply } from "../src/apply.ts";
+import { buildPlan } from "../src/plan.ts";
+import { overlayFor } from "../src/profiles.ts";
+import type { Ctx } from "../src/types.ts";
+import { assertTempHome, REPO } from "./helpers/home.ts";
+
+const roots: string[] = [];
+after(() => roots.forEach((r) => rmSync(r, { recursive: true, force: true })));
+const settings = { githubUser: "einari", reposRoot: "/tmp/r" };
+
+function home(): string {
+  const root = mkdtempSync(join(tmpdir(), "pisetup-plan."));
+  roots.push(root);
+  return assertTempHome(root);
+}
+const plan = (h: string, profile = "balanced") =>
+  buildPlan({ repoDir: REPO, home: h, settings, overlay: overlayFor(REPO, profile, settings) });
+const ctxFor = (h: string, lines: string[] = []): Ctx => ({
+  env: {}, platform: "linux", home: h, cwd: REPO, repoDir: REPO, now: () => new Date(2026, 0, 2, 3, 4, 5),
+  run: async () => ({ code: 0, stdout: "", stderr: "", timedOut: false }), which: () => undefined,
+  stdinTTY: false, stdoutTTY: false, nodeVersion: "v22.19.0", out: (l) => lines.push(l), err: () => {},
+});
+const opts = { dryRun: false, skipNpm: true, inheritNpm: false, profile: "balanced", activeBefore: undefined };
+
+test("a clean plan starts with user.json and installs rendered files; applying it leaves an empty re-plan", async () => {
+  const h = home();
+  const actions = plan(h);
+  assert.equal(actions[0].path, join(h, ".pi/agent/user.json"));
+  assert.equal(await apply(ctxFor(h), actions, opts), 0);
+  assert.deepEqual(plan(h).map((a) => a.op), ["chmod-x"]);
+  assert.match(readFileSync(join(h, ".pi/agent/AGENTS.md"), "utf8"), /--add-assignee einari/);
+  assert.ok(statSync(join(h, ".pi/agent/local-packages/pi-questions/dist/cli.js")).mode & 0o100);
+  assert.ok(lstatSync(join(h, ".pi/agent/skills/ai-work-lifecycle")).isSymbolicLink());
+});
+
+test("the overlay puts the chosen profile's agents live; other profile files stay in profiles/", async () => {
+  const h = home();
+  await apply(ctxFor(h), plan(h, "openai-only"), { ...opts, profile: "openai-only" });
+  const dir = join(REPO, "agent/profiles/openai-only/agents");
+  for (const f of readdirSync(dir)) assert.equal(readFileSync(join(h, ".pi/agent/agents", f), "utf8"), readFileSync(join(dir, f), "utf8"));
+  assert.ok(existsSync(join(h, ".pi/agent/profiles/balanced/profile.json")));
+  assert.equal(readFileSync(join(h, ".pi/agent/profiles/ACTIVE"), "utf8"), "openai-only\n");
+});
+
+test("changed files are backed up with one timestamp; dry-run prints and writes nothing", async () => {
+  const h = home();
+  mkdirSync(join(h, ".pi/agent"), { recursive: true });
+  writeFileSync(join(h, ".pi/agent/AGENTS.subagent.md"), "old");
+  const lines: string[] = [];
+  await apply(ctxFor(h, lines), plan(h), { ...opts, dryRun: true });
+  assert.ok(lines.includes(`install ${join(h, ".pi/agent/AGENTS.subagent.md")}`));
+  assert.equal(readFileSync(join(h, ".pi/agent/AGENTS.subagent.md"), "utf8"), "old");
+  await apply(ctxFor(h), plan(h), opts);
+  assert.equal(readFileSync(join(h, ".pi/agent/AGENTS.subagent.md.bak-20260102-030405"), "utf8"), "old");
+});
+
+test("only-if-absent files are not overwritten and settings.json gets pi-questions registered once", async () => {
+  const h = home();
+  mkdirSync(join(h, ".pi/agent"), { recursive: true });
+  writeFileSync(join(h, ".pi/agent/settings.json"), '{"keep":true,"packages":["a"]}');
+  const actions = plan(h);
+  assert.equal(actions.filter((a) => a.op === "register").length, 1);
+  assert.ok(!actions.some((a) => a.op === "install" && a.path.endsWith("/settings.json")));
+  await apply(ctxFor(h), actions, opts);
+  const settingsJson = JSON.parse(readFileSync(join(h, ".pi/agent/settings.json"), "utf8"));
+  assert.deepEqual(settingsJson, { keep: true, packages: ["a", "./local-packages/pi-questions"] });
+  assert.equal(plan(h).filter((a) => a.op === "register").length, 0);
+});
+
+test("a dangling skills symlink does not crash the plan", () => {
+  const h = home();
+  mkdirSync(join(h, ".pi/agent/skills"), { recursive: true });
+  symlinkSync("/nonexistent-target", join(h, ".pi/agent/skills/ai-work-lifecycle"));
+  assert.ok(!plan(h).some((a) => a.op === "symlink"));
+});

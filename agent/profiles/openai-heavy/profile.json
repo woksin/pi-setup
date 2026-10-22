@@ -1,0 +1,12 @@
+{
+  "summary": "Most roles on GPT, Claude for a single role.",
+  "requires": [
+    "openai-codex",
+    "anthropic"
+  ],
+  "uses": [
+    "openai-codex",
+    "anthropic"
+  ],
+  "rank": 20
+}
