@@ -22,7 +22,8 @@ const USAGE = `usage: pi-questions <command>
   ask --kind question|decision|approval|fyi --title T [--body B] [--option key=text]... [--recommended key]
       [--urgency high|normal|low] [--blocking X] [--cc ID]... [--link L]... [--tag T]... [--global]
       [--project P] [--distinct-from Q-n]...
-  wait <id>     exit 0 once answered, decided or closed; exit 1 otherwise`;
+  wait <id>...  exit 0 once any given item is answered, decided or closed; exit 1 while all are open.
+                Checks once and returns: run it as the job_watch check (until=success), alone, not chained.`;
 
 export function main(argv          , env                                    , io    , cwd = process.cwd())         {
 	const [cmd, ...rest] = argv;
@@ -48,10 +49,15 @@ export function main(argv          , env                                    , io
 			}
 			case "wait": {
 				if (!rest[0]) throw new Error("wait needs an id");
-				const item = actions.getItem(home, rest[0]);
-				const done = item.status === "answered" || item.status === "decided" || item.status === "closed";
-				io.out(`${item.id} is ${item.status}${item.answer ? `: ${item.answer.text}` : ""}`);
-				return done ? 0 : 1;
+				let anyDone = false;
+				for (const id of rest) {
+					const item = actions.getItem(home, id);
+					const done = item.status === "answered" || item.status === "decided" || item.status === "closed";
+					anyDone ||= done;
+					io.out(`${item.id} is ${item.status}${item.answer ? `: ${item.answer.text}` : ""}`);
+				}
+				if (!anyDone) io.out("not answered yet (exit 1)");
+				return anyDone ? 0 : 1;
 			}
 			case "ask": {
 				const { values } = parseArgs({

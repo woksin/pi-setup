@@ -81,10 +81,10 @@ pi-questions get <id> [--record]
 pi-questions ask --kind question --title T [--body B] [--option key=text]... [--recommended key]
                  [--urgency high|normal|low] [--blocking X] [--cc ID]... [--link L]... [--tag T]...
                  [--global] [--project P] [--distinct-from Q-n]...
-pi-questions wait <id>
+pi-questions wait <id>...
 ```
 
-`wait` checks once: exit 0 if the item is answered, decided or closed, else 1. To be woken without a reload, use pi-jobs: `job_watch "pi-questions wait Q-42" until=success interval=120`. The installed `bin` is plain JavaScript (`dist/cli.js`, built by `prepack`), because Node does not strip types under `node_modules`. From a checkout, run `node src/cli.ts ...`.
+`wait` checks once and returns: exit 0 if any given item is answered, decided or closed, else 1 (several ids are allowed). Use it alone as the watch check; chaining other commands after it (`wait Q-1; list`) makes the check exit 0 at once. To be woken without a reload, use pi-jobs: `job_watch "pi-questions wait Q-42" until=success interval=120`. The installed `bin` is plain JavaScript (`dist/cli.js`, built by `prepack`), because Node does not strip types under `node_modules`. From a checkout, run `node src/cli.ts ...`.
 
 ## Development
 

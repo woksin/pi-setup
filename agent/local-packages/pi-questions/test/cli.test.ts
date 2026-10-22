@@ -46,11 +46,16 @@ test("wait exits 1 while open, then 0 once answered", t => {
 	assert.equal(run("ask", "--kind", "question", "--title", "Wait for me").code, 0);
 	const open = run("wait", "Q-1");
 	assert.equal(open.code, 1);
-	assert.match(open.out, /^Q-1 is open$/);
+	assert.equal(open.out, "Q-1 is open\nnot answered yet (exit 1)");
+	assert.equal(run("ask", "--kind", "question", "--title", "Something entirely unrelated about deploys").code, 0);
+	assert.equal(run("wait", "Q-1", "Q-2").code, 1);
 	answerItem(home, "Q-1", { kind: "user", sessionId: "u" }, { text: "done now", by: "u", via: "command" });
 	const done = run("wait", "q1");
 	assert.equal(done.code, 0);
 	assert.equal(done.out, "Q-1 is answered: done now");
+	const many = run("wait", "Q-2", "Q-1");
+	assert.equal(many.code, 0);
+	assert.equal(many.out, "Q-2 is open\nQ-1 is answered: done now");
 	assert.equal(run("wait", "Q-9").code, 2);
 });
 
