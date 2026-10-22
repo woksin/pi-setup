@@ -31,6 +31,15 @@ dl(){ local t=$1; shift; "$@" & local p=$!; local end=$((SECONDS+t))
 # INFO_OK records whether the engine API answered, so the load deferral can tell a slow listing from an outage.
 healthy(){ INFO_OK=0; dl 20 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || return 1; INFO_OK=1; dl 25 docker ps -q >/dev/null 2>&1; }
 load1(){ sysctl -n vm.loadavg | awk '{print int($2)}'; }
+# Diagnostic snapshot on every unhealthy check (2026-10-22): what used the CPU, the Docker VM's share, memory and
+# running pi-phase phases, so hangs can be attributed afterwards. Read-only, bounded; never affects the decision.
+snapshot(){ local f="${LOG%/*}/docker-guardian-snapshots.log"
+  { echo "=== $(date '+%Y-%m-%d %H:%M:%S') $1 info_ok=${INFO_OK:-?} load=$(sysctl -n vm.loadavg)"
+    dl 5 ps -Ao pid=,ni=,pcpu=,rss=,comm= -r | head -12
+    dl 5 ps -Ao pcpu=,rss=,comm= | awk '/Virtualization|com.docker/ {c+=$1; m+=$2} END {printf "docker-vm+backend cpu=%.0f%% rss=%.1fGB\n", c, m/1048576}'
+    dl 5 memory_pressure -Q 2>/dev/null | tail -1; sysctl -n vm.swapusage
+    dl 5 "$HOME/.pi/agent/bin/pi-phase" status 2>&1 | grep -E ' running$' | cut -c1-160
+  } >> "$f" 2>&1; }
 
 # Narrow image cleanup: no force/prune, fail closed on missing inventory or phase state.
 prune_superseded_images(){ python3 - "$S/pinned.txt" "$HOME/.pi/agent/bin/pi-phase" <<'PY'
@@ -288,7 +297,7 @@ fi
 [ -f "$S/paused" ] && { log "unhealthy but paused"; exit 0; }
 if [ "${PLANNED:-0}" = 1 ]; then fails=3; else
 fails=$(( $(cat "$S/fails" 2>/dev/null || echo 0) + 1 )); echo $fails > "$S/fails"
-log "unhealthy x$fails"; fi
+log "unhealthy x$fails"; snapshot "unhealthy x$fails"; fi
 [ $fails -lt 3 ] && exit 0
 # Load deferral (L0, 2026-10-20 22:05): at 21:58 a restart at host load ~90 killed a running integration
 # phase although the engine API still answered. When `docker info` answers, `docker ps` does not and load1 > 48,
