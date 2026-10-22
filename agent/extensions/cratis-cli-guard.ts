@@ -18,9 +18,19 @@
  * newlines, ( ), $( ) and backticks), after environment assignments and wrappers (sudo, env, time,
  * rtk proxy, …), and inside `bash -c '…'` / `sh -c` / `eval`. Arguments and quoted text — search
  * terms, commit messages, PR titles, paths — are never treated as a call.
+ *
+ * Production (orchestration: state-changing commands only; read-only commands are allowed and logged):
+ * besides the prod/production name heuristic, ~/.pi/agent/cratis-production.json (re-read at every check;
+ * missing/invalid → built-in defaults, logged) lists production `contexts` (glob `*`, case-insensitive),
+ * `clientIds`, `hosts` (substring of a server/connection string) and `portForwardIsProduction` (the localhost
+ * port of the effective server is the local port of a running `kubectl port-forward`; a failing `ps` is
+ * "unknown" and never denies by itself). A match is denied at once in orchestration; elsewhere the prompt shows it.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { isGuardOff } from "../lib/guards.ts";
 import { guardSelect, isOrchestrated, orchLog } from "../lib/orchestration.ts";
 
@@ -53,6 +63,12 @@ const CHRONICLE_READ_ONLY = new Set<string>([
 	"subscriptions list",
 	"users list",
 ]);
+
+const normalizePath = (path: string) => path.trim().toLowerCase().split(/\s+/).join(" ");
+/** The read-only paths (after `chronicle`): built-in list plus the extraReadOnly list of cratis-production.json. */
+export function readOnlyList(extraReadOnly: readonly string[] = []): string[] {
+	return [...new Set([...CHRONICLE_READ_ONLY, ...extraReadOnly.map(normalizePath).filter(Boolean)])];
+}
 
 const HELP_FLAGS = new Set(["--help", "-h", "--version", "-v"]);
 const SHELLS = new Set(["bash", "sh", "zsh", "dash"]);
@@ -302,7 +318,7 @@ function commandWords(words: string[]): string[] {
 	return words.slice(k);
 }
 
-function classify(args: string[]): { path: string; readOnly: boolean } | null {
+function classify(args: string[], extraReadOnly: ReadonlySet<string>): { path: string; readOnly: boolean } | null {
 	if (args.length === 0 || args.some(a => HELP_FLAGS.has(a))) return null;
 	const positional = args.filter(a => !a.startsWith("-"));
 	if (positional[0] === "prologue" && positional.length > 1 && positional[1] !== "interpret") {
@@ -313,13 +329,15 @@ function classify(args: string[]): { path: string; readOnly: boolean } | null {
 	if (at !== 0) return { path: positional.join(" "), readOnly: false }; // options before the path: fail closed
 	const sub = positional.slice(1);
 	for (let n = 1; n <= Math.min(sub.length, 2); n++) {
-		if (CHRONICLE_READ_ONLY.has(sub.slice(0, n).join(" "))) return { path: `chronicle ${sub.slice(0, n).join(" ")}`, readOnly: true };
+		const path = sub.slice(0, n).join(" ").toLowerCase();
+		if (CHRONICLE_READ_ONLY.has(path) || extraReadOnly.has(path)) return { path: `chronicle ${sub.slice(0, n).join(" ")}`, readOnly: true };
 	}
 	return { path: `chronicle ${sub.slice(0, 2).join(" ")}`.trim(), readOnly: false };
 }
 
 /** Find every `cratis chronicle` invocation in command position and classify it. */
-export function classifyCratisInvocations(command: string, depth = 0): CratisInvocation[] {
+export function classifyCratisInvocations(command: string, depth = 0, extraReadOnly: readonly string[] = []): CratisInvocation[] {
+	const extra = new Set(extraReadOnly.map(normalizePath));
 	const found: CratisInvocation[] = [];
 	if (depth > 4 || !/cratis/i.test(command)) return found;
 	// Shell -c/eval strings are another execution context, not standalone file writes.
@@ -328,11 +346,11 @@ export function classifyCratisInvocations(command: string, depth = 0): CratisInv
 		const head = (cmd[0] ?? "").split("/").pop() ?? "";
 		if (SHELLS.has(head)) {
 			const c = cmd.indexOf("-c");
-			if (c !== -1 && cmd[c + 1]) found.push(...classifyCratisInvocations(cmd[c + 1], depth + 1));
+			if (c !== -1 && cmd[c + 1]) found.push(...classifyCratisInvocations(cmd[c + 1], depth + 1, extraReadOnly));
 		} else if (head === "eval") {
-			found.push(...classifyCratisInvocations(cmd.slice(1).join(" "), depth + 1));
+			found.push(...classifyCratisInvocations(cmd.slice(1).join(" "), depth + 1, extraReadOnly));
 		} else if (head === "cratis") {
-			const verdict = classify(cmd.slice(1));
+			const verdict = classify(cmd.slice(1), extra);
 			if (verdict) found.push({ text: cmd.join(" "), ...verdict });
 		}
 	}
@@ -350,19 +368,133 @@ function activeContext(): Promise<string> {
 }
 
 const UNREADABLE_CONTEXT = "(could not read the active context)";
+
+export interface ProductionConfig {
+	contexts: string[];
+	clientIds: string[];
+	hosts: string[];
+	portForwardIsProduction: boolean;
+	/** Extra read-only `chronicle` paths (first 1-2 words, case-insensitive), merged with the built-in list. */
+	extraReadOnly: string[];
+}
+export const DEFAULT_PRODUCTION_CONFIG: ProductionConfig = {
+	contexts: ["prod-studio", "post-deploy-check-*", "ro-verify-*", "ro-diag-*", "ro-check-*", "ro-survey-*", "ro-hierarchy-*", "ro-s677", "l3c-*", "l31-ro-*", "diag-*"],
+	clientIds: ["cratis-studio"],
+	hosts: ["upcloudlb.com", "studio-production"],
+	portForwardIsProduction: true,
+	extraReadOnly: [],
+};
+
+/** Readers for the production rules; tests replace these. */
+export const productionSources = {
+	/** Raw text of the production list; throws when it cannot be read. */
+	readConfig: (env: NodeJS.ProcessEnv = process.env): string =>
+		readFileSync(env.PI_CRATIS_PRODUCTION_FILE ?? join(homedir(), ".pi", "agent", "cratis-production.json"), "utf8"),
+	/** Raw text of ~/.cratis/config.json; throws when it cannot be read. */
+	readCratisConfig: (env: NodeJS.ProcessEnv = process.env): string =>
+		readFileSync(env.PI_CRATIS_CONFIG_FILE ?? join(homedir(), ".cratis", "config.json"), "utf8"),
+	/** `ps -Ao args`, bounded to 3 s; throws/rejects on failure. */
+	readProcessList: (): Promise<string> => new Promise((resolve, reject) => {
+		execFile("ps", ["-Ao", "args"], { timeout: 3000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => error ? reject(error) : resolve(String(stdout)));
+	}),
+};
+
+const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every(v => typeof v === "string");
+
+/** Read the production list at every check (no cache); fall back to the defaults, logging one line. */
+export function loadProductionConfig(): ProductionConfig {
+	try {
+		const parsed = JSON.parse(productionSources.readConfig());
+		if (isStrings(parsed?.contexts) && isStrings(parsed?.clientIds) && isStrings(parsed?.hosts) && typeof parsed?.portForwardIsProduction === "boolean"
+			&& (parsed.extraReadOnly === undefined || isStrings(parsed.extraReadOnly))) {
+			return { contexts: parsed.contexts, clientIds: parsed.clientIds, hosts: parsed.hosts, portForwardIsProduction: parsed.portForwardIsProduction, extraReadOnly: parsed.extraReadOnly ?? [] };
+		}
+		orchLog("cratis", "config", "cratis-production.json has an invalid shape; using built-in production defaults");
+	} catch {
+		orchLog("cratis", "config", "cratis-production.json is missing or invalid; using built-in production defaults");
+	}
+	return DEFAULT_PRODUCTION_CONFIG;
+}
+
+/** Local ports of running `kubectl port-forward` processes, or undefined when they cannot be listed. */
+export async function forwardedPorts(): Promise<number[] | undefined> {
+	let list: string;
+	try { list = await productionSources.readProcessList(); } catch { return undefined; }
+	const ports: number[] = [];
+	for (const line of list.split("\n")) {
+		if (!/(?:^|[\s/])kubectl\s/.test(line) || !/\sport-forward(?:\s|$)/.test(line)) continue;
+		for (const word of line.split(/\s+/).slice(1)) {
+			const match = /^(\d+)(?::\d+)?$/.exec(word);
+			if (match) ports.push(Number(match[1]));
+		}
+	}
+	return ports;
+}
+
+export interface NamedContext { server?: string; clientId?: string }
+/** `contexts[name]` of ~/.cratis/config.json; null when the file or the context cannot be read. */
+export function lookupCratisContext(name: string): NamedContext | null {
+	try {
+		const contexts = JSON.parse(productionSources.readCratisConfig())?.contexts;
+		const key = contexts && typeof contexts === "object" ? Object.keys(contexts).find(k => k === name) ?? Object.keys(contexts).find(k => k.toLowerCase() === name.toLowerCase()) : undefined;
+		const entry = key === undefined ? undefined : contexts[key];
+		if (!entry || typeof entry !== "object") return null;
+		return { server: typeof entry.server === "string" ? entry.server : undefined, clientId: typeof entry.clientId === "string" ? entry.clientId : undefined };
+	} catch { return null; }
+}
+
+function globMatches(patterns: string[], value: string): string | undefined {
+	return patterns.find(p => new RegExp(`^${p.split("*").map(x => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i").test(value));
+}
+
 /**
- * Orchestration only: the guard has no production classification of its own, so a state-changing
- * command is treated as a production write when its target (the invocation incl. --server, an inline
- * CHRONICLE_CONNECTION_STRING, the process environment, or the active context) names production.
+ * Production check for a state-changing command (callers never ask for read-only ones). The target is the
+ * invocation text (incl. --server / --context, inline CHRONICLE_CONNECTION_STRING), the process environment
+ * and the active context. `named` is the looked-up `--context` (null = not defined, cannot be ruled out). `ports` are the local kubectl port-forward ports (undefined = unknown).
  * An unreadable context cannot be checked and is denied (immediately, never prompted).
  */
-export function productionTarget(target: string, context: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+export function productionTarget(
+	target: string, context: string, env: NodeJS.ProcessEnv = process.env,
+	config: ProductionConfig = DEFAULT_PRODUCTION_CONFIG, ports?: number[], named?: NamedContext | null,
+): string | undefined {
 	if (context === UNREADABLE_CONTEXT) return "the active cratis context could not be read, so a production target cannot be ruled out";
 	const production = /(?:^|[^a-z0-9])prod(?:uction)?(?:[^a-z0-9]|$)/i;
 	if (production.test(target)) return "the command names a production target";
 	if (production.test(env.CHRONICLE_CONNECTION_STRING ?? "")) return "CHRONICLE_CONNECTION_STRING names a production target";
 	if (production.test(context)) return "the active cratis context is a production context";
+
+	const word = (re: RegExp, text: string) => re.exec(text)?.[1];
+	const explicitContext = word(/--context(?:=|\s+)["']?([^\s"']+)/, target);
+	const activeName = word(/^\s*context:\s*(\S+)/im, context);
+	const contextName = explicitContext ?? activeName;
+	const listed = contextName === undefined ? undefined : globMatches(config.contexts, contextName);
+	if (listed !== undefined) return `context ${contextName} is listed in cratis-production.json`;
+
+	if (explicitContext !== undefined && named === null) return `context ${explicitContext} is not defined in ~/.cratis/config.json, so a production target cannot be ruled out`;
+
+	const clientId = word(/--client-id(?:=|\s+)["']?([^\s"']+)/, target) ?? named?.clientId ?? (explicitContext === undefined ? word(/^\s*client id:\s*(\S+)/im, context) : undefined);
+	if (clientId !== undefined && config.clientIds.some(c => c.toLowerCase() === clientId.toLowerCase())) return `client id ${clientId} is listed in cratis-production.json`;
+
+	const flagServer = word(/--server(?:=|\s+)["']?([^\s"']+)/, target);
+	const inlineServer = word(/(chronicle:\/\/[^\s"']+)/, target);
+	const envServer = env.CHRONICLE_CONNECTION_STRING || undefined;
+	const activeServer = explicitContext === undefined ? word(/^\s*server:\s*(\S+)/im, context) : named?.server;
+	const servers = [target, envServer ?? "", activeServer ?? ""].join("\n").toLowerCase();
+	const host = config.hosts.find(h => h && servers.includes(h.toLowerCase()));
+	if (host !== undefined) return `host ${host} (cratis-production.json) appears in the target server`;
+
+	if (config.portForwardIsProduction && ports && ports.length > 0) {
+		const effective = flagServer ?? inlineServer ?? envServer ?? activeServer;
+		const port = effective === undefined ? undefined : /(?:localhost|127\.0\.0\.1|\[::1\]):(\d+)/i.exec(effective)?.[1];
+		if (port !== undefined && ports.includes(Number(port))) return `localhost:${port} is the local port of a running kubectl port-forward (production via cratis-production.json)`;
+	}
 	return undefined;
+}
+
+async function productionCheck(target: string, context: string, config: ProductionConfig): Promise<string | undefined> {
+	const ports = config.portForwardIsProduction ? await forwardedPorts() : undefined;
+	const explicit = /--context(?:=|\s+)["']?([^\s"']+)/.exec(target)?.[1];
+	return productionTarget(target, context, process.env, config, ports, explicit === undefined ? undefined : lookupCratisContext(explicit));
 }
 
 export default function (pi: ExtensionAPI) {
@@ -371,8 +503,14 @@ export default function (pi: ExtensionAPI) {
 		const command = String((event.input as { command?: unknown }).command ?? "");
 		if (!/cratis/.test(command)) return undefined;
 
-		const risky = classifyCratisInvocations(command).filter(i => !i.readOnly);
-		if (risky.length === 0) return undefined;
+		const config = /chronicle/.test(command) ? loadProductionConfig() : DEFAULT_PRODUCTION_CONFIG;
+		const invocations = classifyCratisInvocations(command, 0, config.extraReadOnly);
+		const risky = invocations.filter(i => !i.readOnly);
+		if (risky.length === 0) {
+			// Read-only commands are never production-checked or prompted; in orchestration they are logged.
+			if (invocations.length > 0 && isOrchestrated(process.env, ctx.cwd)) orchLog("cratis", "allow", `read-only: ${invocations.map(i => i.text).join("; ")}`);
+			return undefined;
+		}
 		if (isGuardOff("cratis")) {
 			if (ctx.hasUI) ctx.ui.notify(`cratis-cli-guard off: allowed '${risky.map(i => i.text).join("; ").replace(/\s+/g, " ").slice(0, 180)}'`, "info");
 			return undefined;
@@ -383,14 +521,14 @@ export default function (pi: ExtensionAPI) {
 			// Orchestration: never prompt. Allow and log, except production writes (denied at once).
 			const context = await activeContext();
 			const target = [...risky.map(i => i.text), ...(command.match(/CHRONICLE_CONNECTION_STRING=\S+/g) ?? [])].join(" ");
-			const production = productionTarget(target, context);
+			const production = await productionCheck(target, context, config);
 			const detail = `${risky.map(i => i.text).join("; ")} | context: ${context.replace(/\s+/g, " ").slice(0, 300)}`;
 			if (production) {
 				orchLog("cratis", "deny", detail);
 				return {
 					block: true,
 					reason:
-						`cratis-cli-guard: state-changing cratis command(s) denied in orchestration because ${production}:\n${list}\n` +
+						`cratis-cli-guard: state-changing cratis command(s) denied on production (read-only list: ${readOnlyList(config.extraReadOnly).join(", ")}); ask L0. Matched rule: ${production}.\n${list}\n` +
 						"Do not retry or work around this. Report the exact command, the target server/context, what it will change " +
 						"and why to the user (or L0), who can run it; non-production targets run without a prompt.",
 				};
@@ -410,8 +548,10 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const context = await activeContext();
+		const target = [...risky.map(i => i.text), ...(command.match(/CHRONICLE_CONNECTION_STRING=\S+/g) ?? [])].join(" ");
+		const production = context === UNREADABLE_CONTEXT ? undefined : await productionCheck(target, context, config);
 		const { choice, timedOut } = await guardSelect(ctx.ui, "cratis",
-			`⚠️ cratis command that may change state:\n\n${list}\n\nActive context:\n${context}\n\n` +
+			`⚠️ cratis command that may change state:\n\n${list}\n\n` + (production ? `🚨 PRODUCTION: ${production}\n\n` : "") + `Active context:\n${context}\n\n` +
 				"Check the target (--server / CHRONICLE_CONNECTION_STRING override the context). Run it?",
 			["No", "Yes, run it"], "deny", { cwd: ctx.cwd },
 		);
