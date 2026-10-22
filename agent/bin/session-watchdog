@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""session-watchdog: external stuck-session detector for pi (woksin/pi-setup#3).
+
+Invoked once per docker-guardian pass (every 2 min). Notify-only: never kills anything.
+
+Usage: session-watchdog [--once] [--dry-run]     (--once is the only mode; accepted for clarity)
+
+Detection (per live pi session, from the tail of ~/.pi/agent/sessions/*/*.jsonl):
+  a) the last assistant message ended with tool calls (stopReason toolUse) and a call has no toolResult yet,
+     older than 10 min (hanging tool or a blocking UI prompt inside a tool hook). A `bash` call that
+     recorded a `timeout` is stuck only after max(10 min, timeout + 2 min).
+  b) the last message is a user message or toolResult with no assistant reply for > 10 min (in-flight request).
+  An assistant message that ended its turn is idle, not stuck.
+
+Live-session mapping (positive association only): a pi-orch heartbeat (~/.pi/orch/heartbeats/*.json: pid, sessionId;
+file younger than 5 min, pid a live `pi` process) maps pid -> sessionId -> `sessions/*/*_<sessionId>.jsonl`.
+Only such sessions may produce ALL- "stuck" notices. In a cwd that has live pi processes without a heartbeat
+mapping (found with `ps` + `lsof -d cwd`), a stuck-looking log modified after the youngest unmapped process
+started (ps lstart) is reported only to PISETUP-to-L0 as "possibly-stuck / unconfirmed". Dead logs are ignored.
+"""
+import argparse, glob, json, os, re, subprocess, sys, time
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+SESSIONS = os.path.join(HOME, ".pi/agent/sessions")
+STATE_DIR = os.path.join(HOME, ".pi/agent/session-watchdog")
+LOG = os.path.join(HOME, ".pi/agent/logs/session-watchdog.log")
+HEARTBEATS = os.path.join(HOME, ".pi/orch/heartbeats")
+HEARTBEAT_FRESH = 300     # heartbeat file must be younger than 5 min
+
+STUCK_AFTER = 600          # 10 min
+BASH_TIMEOUT_GRACE = 120   # bash with timeout > 10 min: stuck after timeout + 2 min
+SILENT_AFTER = 900         # 15 min
+SILENT_MIN_SESSIONS = 3
+RENOTIFY = 3600            # same notice at most every 60 min
+RECENT = 86400             # only files modified in last 24 h
+# macOS grows swap on demand, so "free swap" is always small and says nothing; use real pressure instead:
+# kern.memorystatus_level (percent of memory available) low AND swap heavily used, or the level critically low.
+SWAP_USED_MAX_MB = 12 * 1024
+LEVEL_LOW_PERCENT = 15
+LEVEL_CRITICAL_PERCENT = 8
+FSEVENTSD_RSS_MAX_MB = 4 * 1024
+TAIL_STEPS = (256 * 1024, 1024 * 1024, 4 * 1024 * 1024)
+HEAD_BYTES = 16 * 1024
+
+
+def log(msg):
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    except OSError:
+        pass
+
+
+def parse_ts(s):
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+def read_tail_records(path, nbytes):
+    """Complete JSON records from the last nbytes of path; returns (records, whole_file_read)."""
+    with open(path, "rb") as f:
+        size = f.seek(0, os.SEEK_END)
+        start = max(0, size - nbytes)
+        f.seek(start)
+        data = f.read()
+    lines = data.split(b"\n")
+    if start > 0:
+        lines = lines[1:]  # first line is probably partial
+    recs = []
+    for ln in lines:
+        if not ln.strip():
+            continue
+        try:
+            recs.append(json.loads(ln))
+        except ValueError:
+            continue  # partial/garbled line
+    return recs, start == 0
+
+
+def read_head_info(path):
+    cwd = name = sid = None
+    try:
+        with open(path, "rb") as f:
+            data = f.read(HEAD_BYTES)
+    except OSError:
+        return sid, cwd, name
+    for ln in data.split(b"\n")[:-1]:
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if r.get("type") == "session":
+            sid, cwd = r.get("id"), r.get("cwd")
+        elif r.get("type") == "session_info" and r.get("name"):
+            name = r["name"]
+    return sid, cwd, name
+
+
+def _msgs(recs):
+    return [r for r in recs if r.get("type") == "message" and isinstance(r.get("message"), dict)]
+
+
+def _calls(msg):
+    c = msg["message"].get("content")
+    return [b for b in c if isinstance(b, dict) and b.get("type") == "toolCall"] if isinstance(c, list) else []
+
+
+def analyse(path):
+    """Return None (idle/unknown) or dict(kind, record_id, since, tool, args, timeout, last_ts)."""
+    for nbytes in TAIL_STEPS:
+        recs, whole = read_tail_records(path, nbytes)
+        msgs = _msgs(recs)
+        if not msgs:
+            if whole:
+                return None
+            continue
+        last = msgs[-1]
+        role = last["message"].get("role")
+        if role == "assistant":
+            calls = _calls(last)
+            if last["message"].get("stopReason") != "toolUse" or not calls:
+                return None  # turn ended (or errored/aborted): idle
+            return _pending(last, calls)
+        if role not in ("user", "toolResult"):
+            return None
+        if role == "toolResult":
+            # parallel calls: some may still be unanswered although the last record is a result
+            asst = next((m for m in reversed(msgs) if m["message"].get("role") == "assistant"), None)
+            if asst is None and not whole and nbytes != TAIL_STEPS[-1]:
+                continue  # read more of the file
+            if asst is not None:
+                done = {m["message"].get("toolCallId") for m in msgs if m["message"].get("role") == "toolResult"}
+                pending = [c for c in _calls(asst) if c.get("id") not in done]
+                if pending:
+                    return _pending(asst, pending)
+        ts = parse_ts(last.get("timestamp"))
+        if ts is None:
+            return None
+        return {"kind": "no-reply", "record_id": last.get("id"), "since": ts, "tool": None,
+                "args": "", "timeout": None, "last_ts": ts}
+    return None
+
+
+def _pending(asst, pending):
+    ts = parse_ts(asst.get("timestamp"))
+    if ts is None:
+        return None
+    c = pending[0]
+    args = c.get("arguments")
+    timeout = None
+    if c.get("name") == "bash" and isinstance(args, dict) and isinstance(args.get("timeout"), (int, float)):
+        timeout = float(args["timeout"])
+    try:
+        args_s = json.dumps(args, ensure_ascii=False)
+    except (TypeError, ValueError):
+        args_s = str(args)
+    return {"kind": "tool", "record_id": c.get("id") or asst.get("id"), "since": ts, "tool": c.get("name"),
+            "args": args_s[:200], "timeout": timeout, "last_ts": ts}
+
+
+def threshold(info):
+    if info["kind"] == "tool" and info["timeout"] is not None and info["timeout"] > STUCK_AFTER:
+        return info["timeout"] + BASH_TIMEOUT_GRACE
+    return STUCK_AFTER
+
+
+def live_pi_procs():
+    """{pid: (cwd, start_epoch)} for every live process named `pi`. Empty dict if the probe fails."""
+    env = dict(os.environ, LC_ALL="C")
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,lstart=,comm="], capture_output=True, text=True, timeout=20, env=env).stdout
+        procs = {}
+        for l in out.splitlines():
+            parts = l.split(None, 6)
+            if len(parts) == 7 and os.path.basename(parts[6].strip()) == "pi":
+                try:
+                    procs[int(parts[0])] = ["", time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))]
+                except ValueError:
+                    continue
+        if not procs:
+            return {}
+        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(map(str, procs))],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        log(f"live-process probe failed: {e}")
+        return {}
+    pid = None
+    for l in out.splitlines():
+        if l.startswith("p") and l[1:].isdigit():
+            pid = int(l[1:])
+        elif l.startswith("n") and pid in procs:
+            procs[pid][0] = l[1:]
+    return {p: (c, st) for p, (c, st) in procs.items() if c}
+
+
+def heartbeat_sessions(procs, now, hb_dir=HEARTBEATS, sessions=SESSIONS):
+    """Positive mapping via pi-orch heartbeats: {session file: pid}. A heartbeat counts when its file is younger
+    than 5 min, its pid is a live pi process, and `*_<sessionId>.jsonl` exists."""
+    mapped = {}
+    for hb in glob.glob(os.path.join(hb_dir, "*.json")):
+        try:
+            if now - os.stat(hb).st_mtime > HEARTBEAT_FRESH:
+                continue
+            with open(hb) as f:
+                d = json.load(f)
+            pid, sid = d.get("pid"), d.get("sessionId")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if pid not in procs or not isinstance(sid, str) or not re.fullmatch(r"[0-9A-Za-z-]+", sid):
+            continue
+        # PID reuse: a heartbeat last written before this process started belongs to an earlier process.
+        if os.stat(hb).st_mtime < procs[pid][1]:
+            continue
+        for p in glob.glob(os.path.join(sessions, "*", f"*_{sid}.jsonl")):
+            mapped[p] = pid
+    return mapped
+
+
+def session_dir_for(cwd, sessions=SESSIONS):
+    return os.path.join(sessions, "--" + cwd.lstrip("/").replace("/", "-") + "--")
+
+
+def unmapped_candidates(procs, mapped_pids, mapped_files, now, sessions=SESSIONS):
+    """[(path, mtime, cwd)] stuck-capable files in cwds that have live pi processes without a heartbeat mapping,
+    modified after the youngest such process started (a file older than that cannot belong to it)."""
+    youngest = {}
+    for pid, (cwd, start) in procs.items():
+        if pid not in mapped_pids:
+            youngest[cwd] = max(youngest.get(cwd, 0), start)
+    files = []
+    for cwd, start in youngest.items():
+        for p in glob.glob(os.path.join(session_dir_for(cwd, sessions), "*.jsonl")):
+            try:
+                m = os.stat(p).st_mtime
+            except OSError:
+                continue
+            if p not in mapped_files and now - m <= RECENT and m > start:
+                files.append((p, m, cwd))
+    return files
+
+
+def human(sec):
+    sec = int(sec)
+    return f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec >= 3600 else f"{sec // 60}m{sec % 60:02d}s"
+
+
+def swap_usage_mb():
+    try:
+        out = subprocess.run(["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=10).stdout
+        vals = dict(re.findall(r"(total|used|free) = ([\d.]+)M", out))
+        return float(vals["used"]), float(vals["free"])
+    except (OSError, subprocess.SubprocessError, KeyError, ValueError):
+        return None
+
+
+def memory_level():
+    """kern.memorystatus_level (percent available), or None."""
+    try:
+        return float(subprocess.run(["sysctl", "-n", "kern.memorystatus_level"], capture_output=True,
+                                    text=True, timeout=10).stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def memory_pressure(level, swap_used_mb):
+    if level is None:
+        return False
+    return level < LEVEL_CRITICAL_PERCENT or (level < LEVEL_LOW_PERCENT and swap_used_mb is not None
+                                              and swap_used_mb > SWAP_USED_MAX_MB)
+
+
+def fseventsd_rss_mb():
+    try:
+        out = subprocess.run(["ps", "-axo", "rss=,comm="], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0.0
+    best = 0.0
+    for l in out.splitlines():
+        parts = l.strip().split(None, 1)
+        if len(parts) == 2 and os.path.basename(parts[1]) == "fseventsd" and parts[0].isdigit():
+            best = max(best, int(parts[0]) / 1024)
+    return best
+
+
+def load_state():
+    try:
+        with open(os.path.join(STATE_DIR, "state.json")) as f:
+            s = json.load(f)
+        return s if isinstance(s, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = os.path.join(STATE_DIR, f"state.json.tmp.{os.getpid()}")
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=1)
+    os.replace(tmp, os.path.join(STATE_DIR, "state.json"))
+
+
+def due(state, key, now):
+    return now - state.get(key, 0) >= RENOTIFY
+
+
+def notify(suffix, title, text, messages_dir, dry_run):
+    if dry_run:
+        print(f"[dry-run] WOULD NOTIFY ({suffix}): {title}\n{text}\n")
+        return
+    if messages_dir and os.path.isdir(messages_dir):
+        # Only stuck-session notices go to every lane; host-level notices go to L0 through PISETUP.
+        prefix = "ALL" if suffix == "stuck" else "PISETUP-to-L0"
+        try:
+            with open(os.path.join(messages_dir, f"{prefix}-session-watchdog-{time.strftime('%H%M')}-{suffix}.md"), "w") as f:
+                f.write(text + "\n")
+        except OSError as e:
+            log(f"message file failed: {e}")
+    short = text.replace("\\", " ").replace('"', "'")[:230]
+    try:
+        subprocess.run(["osascript", "-e", f'display notification "{short}" with title "session-watchdog"'],
+                       capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    log(f"notified {suffix}: {text.splitlines()[0] if text else ''}")
+
+
+def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS, messages_dir=None, swap=None, level=-1, fsevents_mb=None, sessions=SESSIONS):
+    now = time.time() if now is None else now
+    if messages_dir is None:
+        messages_dir = os.environ.get("SESSION_WATCHDOG_MESSAGES") or os.environ.get("DOCKER_GUARDIAN_MESSAGES", "")
+    state = load_state()
+    notified = state.setdefault("notified", {})
+    procs = live_pi_procs() if procs is None else procs
+    mapped = heartbeat_sessions(procs, now, hb_dir, sessions)
+    unmapped = unmapped_candidates(procs, set(mapped.values()), set(mapped), now, sessions)
+    files = []
+    for p in mapped:
+        try:
+            files.append((p, os.stat(p).st_mtime, procs[mapped[p]][0]))
+        except OSError:
+            pass
+    stuck, possible = [], []
+    for confirmed, group in ((True, list(files)), (False, unmapped)):
+        for path, mtime, cwd in group:
+            try:
+                info = analyse(path)
+            except OSError as e:
+                log(f"{path}: {e}")
+                continue
+            if not info or now - info["since"] <= threshold(info):
+                continue
+            sid, hcwd, name = read_head_info(path)
+            sid = sid or os.path.basename(path)
+            key = f"{sid}|{info['record_id']}" + ("" if confirmed else "|unmapped")
+            if now - notified.get(key, 0) < RENOTIFY:
+                continue
+            (stuck if confirmed else possible).append((key, sid, name, hcwd or cwd, info, now - info["since"]))
+
+    def describe(items):
+        lines = []
+        for key, sid, name, cwd, info, age in items:
+            what = (f"tool call `{info['tool']}` {info['args']} has no result" if info["kind"] == "tool"
+                    else "no assistant response to the last user message/tool result (in-flight request?)")
+            lines.append(f"- session {sid}" + (f" ({name})" if name else "") + f"\n  cwd: {cwd}\n  pending: {what}\n  for: {human(age)}")
+            notified[key] = now
+        return lines
+
+    if stuck:
+        lines = describe(stuck)
+        notify("stuck", "session-watchdog",
+               f"session-watchdog ({time.strftime('%H:%M')}): {len(stuck)} pi session(s) look stuck. "
+               "Likely a hanging tool, a blocking prompt (guard/priority grant) or a stalled provider request. "
+               "Check the terminal.\n" + "\n".join(lines), messages_dir, dry_run)
+    if possible:
+        lines = describe(possible)
+        notify("possibly-stuck", "session-watchdog",
+               f"session-watchdog ({time.strftime('%H:%M')}): {len(possible)} stuck-looking session log(s), "
+               "unconfirmed: session not positively mapped to a live process (no pi-orch heartbeat; a live pi "
+               "process in the same cwd started before the log was last written).\n" + "\n".join(lines),
+               messages_dir, dry_run)
+    files = files + unmapped
+    # all sessions silent
+    if len(procs) >= SILENT_MIN_SESSIONS and files and all(now - m > SILENT_AFTER for _, m, _ in files) and due(state, "silent", now):
+        quiet = human(now - max(m for _, m, _ in files))
+        notify("silent", "session-watchdog",
+               f"session-watchdog ({time.strftime('%H:%M')}): {len(procs)} live pi sessions and none has written a record for {quiet} (>15 min). "
+               "Possible host-wide stall (memory, network or provider).", messages_dir, dry_run)
+        state["silent"] = now
+    # memory notices (notify-only)
+    sw = None if no_memory else (swap_usage_mb() if swap is None else swap)
+    lv = None if no_memory else (memory_level() if level == -1 else level)
+    if memory_pressure(lv, sw[0] if sw else None) and due(state, "swap", now):
+        notify("memory", "session-watchdog",
+               f"session-watchdog ({time.strftime('%H:%M')}): memory pressure: {lv:g}% available"
+               + (f", swap used {sw[0]/1024:.1f} GB" if sw else "")
+               + f" (notice when < {LEVEL_LOW_PERCENT}% with swap used > 12 GB, or < {LEVEL_CRITICAL_PERCENT}%). "
+               "Shed heavy phases/Docker load.", messages_dir, dry_run)
+        state["swap"] = now
+    fs = 0.0 if no_memory else (fseventsd_rss_mb() if fsevents_mb is None else fsevents_mb)
+    if fs > FSEVENTSD_RSS_MAX_MB and due(state, "fseventsd", now):
+        notify("fseventsd", "session-watchdog",
+               f"session-watchdog ({time.strftime('%H:%M')}): fseventsd RSS is {fs/1024:.1f} GB (> 4 GB). "
+               "Restarting it needs root: `sudo killall fseventsd` (run by a human; the watchdog never does).", messages_dir, dry_run)
+        state["fseventsd"] = now
+    for k in [k for k, v in notified.items() if now - v > 2 * RECENT]:
+        del notified[k]
+    if not dry_run:
+        save_state(state)
+    else:
+        print(f"[dry-run] live pi procs={len(procs)} positively mapped={len(mapped)} ambiguous candidate files={len(unmapped)} stuck={len(stuck)} possibly-stuck={len(possible)} "
+              f"level={'n/a' if lv is None else f'{lv:g}%'} swap={'n/a' if not sw else f'used {sw[0]:.0f}M free {sw[1]:.0f}M'} fseventsd={fs:.0f}M")
+    return stuck
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="pi stuck-session detector (notify-only)")
+    ap.add_argument("--dry-run", action="store_true", help="print what would be notified; no notification, no state write")
+    ap.add_argument("--once", action="store_true", help="single pass (default and only mode)")
+    ap.add_argument("--no-memory", action="store_true", help="skip the memory notices")
+    a = ap.parse_args(argv)
+    try:
+        run(dry_run=a.dry_run, no_memory=a.no_memory)
+    except Exception as e:  # never break the caller
+        log(f"watchdog error: {type(e).__name__}: {e}")
+        print(f"session-watchdog: error: {e}", file=sys.stderr)
+        return 0 if not a.dry_run else 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

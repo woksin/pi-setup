@@ -59,6 +59,14 @@ On queue-timeout exit 75, the command did not start: it is not a failed code/tes
 
 The executable `bin/pi-phase` is only a Python launcher; cleanup lives in `pi-phase/pi_phase.py`. It already handles missing groups and ignores EPERM only when no live group members remain. A reported EPERM alone does not establish that cleanup was safe, so do not swallow all permission errors. Changes to that implementation require separate scope and descendant-cleanup tests.
 
+## Memory ceilings (pi-setup#3)
+
+Config keys (defaults in code; `config.json` overrides, `0` turns a key off):
+
+- `rss_cap_mb` (default **12288**; no `DOTNET_GCHeapHardLimit` is set, because it would leak into MSBuild nodes and build servers): while a build/test/integration phase runs, the RSS of its whole process tree (process group plus all descendants) is sampled every ~15 s. If any single process stays above the cap for 3 consecutive samples (~45 s; same pid and start time, a dip or new pid resets it), the phase's process group is stopped and pi-phase exits with the distinct status **76**, printing `rss cap exceeded: pid=… rss=…MB > rss_cap_mb=…MB command=…`. A failed sample never kills. 76 is a pi-phase status like 124/75; it is not a test failure. Statuses: 124 timeout, 125 wrapper/cleanup, 126/127 not executable, 130/143 cancelled, 75 queue timeout/duplicate watcher, **76 RSS cap**.
+- `memory_admission.min_swap_free_mb` code default is now **2048** (was 500; the live `config.json` value is unchanged and still wins). **macOS ignores free swap**: swap files grow on demand, so free swap is always small and produced false alarms (2026-10-22). On macOS admission is decided by `min_free_percent` (`memory_pressure -Q`, the same figure as `kern.memorystatus_level`); the swap floor is enforced on Linux only. The key stays valid on both.
+- Memory re-check while running: every ~15 s a low-memory condition prints `warning: … while phase is running (no action taken)` on the runner output (at most every 5 min; no kill). macOS: `kern.memorystatus_level` below 15 %; Linux: swap free below the floor.
+
 ## Waiting in the queue
 
 A queued phase is time to use, not to sit in. Run `pi-phase status` once before a heavy phase; when several phases are running or ahead of you, start the phase in the background (`job_start` or a background subagent) and do independent work meanwhile: read code for the next step, write specs, draft PR notes, check issue and PR comments, scope the next issue. Do not start a second heavy phase in the same worktree, do not edit files the queued phase builds (or rerun it afterwards), and never shorten or skip a gate to avoid the queue. With nothing independent to do, end the turn and let the completion notification wake you.

@@ -239,6 +239,12 @@ main()
 PY
 }
 
+# Stuck-session detector (woksin/pi-setup#3): notify-only, bounded, and must never affect the guardian.
+# Placed before the single-instance lock and the early exits so it runs on every pass, healthy or not.
+if [ -x "$HOME/.pi/agent/bin/session-watchdog" ]; then
+  dl 45 "$HOME/.pi/agent/bin/session-watchdog" --once >/dev/null 2>&1 || log "session-watchdog: exit=$? (guardian continues)"
+fi
+
 # single instance (a restart can take ~4 min, longer than the launchd interval)
 if ! mkdir "$S/lock.d" 2>/dev/null; then
   op=$(cat "$S/lock.d/pid" 2>/dev/null); if [ -n "$op" ] && kill -0 "$op" 2>/dev/null; then exit 0; fi

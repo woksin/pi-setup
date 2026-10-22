@@ -31,6 +31,20 @@ TICK = 0.2
 # Queued waiters re-scan less often: each scan runs `ps -A`, and dozens of waiters at TICK
 # saturated the CPU with system time (2026-10-19: 45 waiters, 47% sys).
 QUEUE_TICK = 2.0
+# Memory ceilings while a phase runs (woksin/pi-setup#3): sample the whole process tree this often.
+MEMORY_SAMPLE_INTERVAL = 15.0
+SWAP_WARN_INTERVAL = 300.0
+DEFAULT_MIN_SWAP_FREE_MB = 2048
+# macOS grows swap on demand, so "free swap" is always small and never signals pressure (false alarms,
+# 2026-10-22). There the swap floor is not enforced; memory pressure is judged by min_free_percent
+# (memory_pressure -Q, the same figure as kern.memorystatus_level). Elsewhere (Linux) the floor applies.
+SWAP_FLOOR_ENFORCED = sys.platform != "darwin"
+LEVEL_WARN_PERCENT = 15
+# Distinct exit status: a descendant exceeded rss_cap_mb and the phase's process group was killed.
+EXIT_RSS_CAP = 76
+# Consecutive over-cap samples (same pid + start time) before the kill: ~45 s at the 15 s interval, so a
+# transient spike never kills a phase.
+OVER_CAP_SAMPLES = 3
 
 
 def note(message):
@@ -60,7 +74,7 @@ def config(path, *, notes=None):
 
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
-                    phase_nice=0)
+                    phase_nice=0, rss_cap_mb=12288)
     try:
         data = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(data, dict):
@@ -77,6 +91,8 @@ def config(path, *, notes=None):
             valid = type(value) is int and 1 <= value <= 32
         elif key == "msbuild_max_cpu":
             valid = value == "auto" or type(value) is int and value >= 0
+        elif key == "rss_cap_mb":
+            valid = type(value) is int and value >= 0  # 0 = off
         elif key == "phase_nice":
             valid = type(value) is int and 0 <= value <= 19
         elif key == "memory_admission":
@@ -97,7 +113,7 @@ def config(path, *, notes=None):
 
 def memory_admission_config(value, warn=None):
     warn = warn or note
-    defaults = dict(min_free_percent=30, min_swap_free_mb=500)
+    defaults = dict(min_free_percent=30, min_swap_free_mb=DEFAULT_MIN_SWAP_FREE_MB)
     if value is False:
         return False
     if value is True:
@@ -208,7 +224,7 @@ class MemoryAdmission:
         if free < minimum:
             return f"memory free {free:g}% < {minimum:g}%"
         minimum = self.thresholds["min_swap_free_mb"]
-        if swap_free is not None and swap_free < minimum:
+        if SWAP_FLOOR_ENFORCED and swap_free is not None and swap_free < minimum:
             return f"swap free {swap_free:g} MB < {minimum:g} MB"
         return None
 
@@ -289,6 +305,78 @@ def phases_running(state, available, prior, live):
     """Caller holds the coordinator; do not mistake our tentative locks for owners."""
     return any(lease_running(path, prior, live) for path in state.glob("*.lock")
                if path.name.startswith(("heavy-", "integration-", "ci-")) and path not in available)
+
+
+def sample_tree(root_pid):
+    """[(pid, rss_mb, command, start_time)] for the phase's whole process tree: its process group plus every descendant."""
+    out = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,rss=,lstart=,command="], capture_output=True, text=True,
+                         timeout=5, check=True).stdout
+    rows = {}
+    for line in out.splitlines():
+        parts = line.split(None, 9)  # lstart is five tokens ("Thu Oct 22 21:10:00 2026")
+        if len(parts) >= 9 and all(p.isdigit() for p in parts[:4]):
+            rows[int(parts[0])] = (int(parts[1]), int(parts[2]), int(parts[3]) / 1024,
+                                   (" ".join(parts[4:9]), parts[9] if len(parts) > 9 else ""))
+    members = {pid for pid, (_, pgid, _, _) in rows.items() if pgid == root_pid} | ({root_pid} & rows.keys())
+    grew = True
+    while grew:
+        grew = False
+        for pid, (ppid, _, _, _) in rows.items():
+            if pid not in members and ppid in members:
+                members.add(pid)
+                grew = True
+    return [(pid, rows[pid][2], rows[pid][3][1], rows[pid][3][0]) for pid in sorted(members)]
+
+
+def low_memory_reason(swap_floor_mb):
+    """Why memory is low right now, or None (also None when it cannot be measured: fail-open, warning only).
+
+    macOS: kern.memorystatus_level below LEVEL_WARN_PERCENT (free swap is meaningless there). Elsewhere: swap free
+    below the floor."""
+    try:
+        if sys.platform == "darwin":
+            level = float(subprocess.run(["sysctl", "-n", "kern.memorystatus_level"], capture_output=True,
+                                         text=True, timeout=2, check=True).stdout.strip())
+            return f"memory available {level:g}% < {LEVEL_WARN_PERCENT}%" if level < LEVEL_WARN_PERCENT else None
+        if sys.platform.startswith("linux") and swap_floor_mb:
+            with open("/proc/meminfo") as stream:
+                swap_free = parse_linux_memory(stream.read(65536))[1]
+            return f"swap free {swap_free:g} MB < {swap_floor_mb:g} MB" if swap_free < swap_floor_mb else None
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+class RunningMemory:
+    """Re-checks memory while a phase runs: RSS cap kill (descendant above rss_cap_mb) and a swap warning."""
+    def __init__(self, rss_cap_mb, swap_floor_mb, warn=True):
+        self.cap = rss_cap_mb
+        self.floor = swap_floor_mb
+        self.warn = warn
+        self.last_warning = None
+        self.streaks = {}  # (pid, start time) -> consecutive over-cap samples
+
+    def offender(self, root_pid):
+        """(pid, rss_mb, command) of the largest process that was above the cap in OVER_CAP_SAMPLES consecutive
+        samples (same pid and start time), else None. A dip below the cap or a changed pid resets its streak.
+        Also warns on low memory."""
+        now = time.monotonic()
+        if self.warn and (self.last_warning is None or now - self.last_warning >= SWAP_WARN_INTERVAL):
+            reason = low_memory_reason(self.floor)
+            if reason:
+                self.last_warning = now
+                note(f"warning: {reason} while phase is running (no action taken)")
+        if not self.cap:
+            return None
+        try:
+            samples = sample_tree(root_pid)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            self.streaks = {}  # a failed measurement breaks every streak: "consecutive" means consecutive samples
+            return None  # fail-open: never kill on a failed measurement
+        over = {(item[0], item[3] if len(item) > 3 else None): item for item in samples if item[1] > self.cap}
+        self.streaks = {identity: self.streaks.get(identity, 0) + 1 for identity in over}
+        sustained = [over[identity] for identity, count in self.streaks.items() if count >= OVER_CAP_SAMPLES]
+        return max(sustained, key=lambda item: item[1]) if sustained else None
 
 
 def msbuild_cap(value, heavy):
@@ -1007,6 +1095,10 @@ def run(args, state, configuration, output=None):
                              args=(state, fingerprint, detection_started, detector_stopped, attribution),
                              daemon=True).start()
         next_heartbeat = started + HEARTBEAT
+        running_memory = RunningMemory(options["rss_cap_mb"] if args.kind in ("build", "test", "integration") else 0,
+                                       (options["memory_admission"] or {}).get("min_swap_free_mb", DEFAULT_MIN_SWAP_FREE_MB),
+                                       args.kind in ("build", "test", "integration"))
+        next_memory = started + MEMORY_SAMPLE_INTERVAL
         while True:
             if cancelled[0]:
                 note("cancelled; stopping owned process group")
@@ -1019,6 +1111,14 @@ def run(args, state, configuration, output=None):
                 note(f"phase timed out ({args.timeout:g}s); stopping owned process group")
                 return_code = 124
                 break
+            if now >= next_memory:
+                next_memory = now + MEMORY_SAMPLE_INTERVAL
+                offender = running_memory.offender(proc.pid)
+                if offender:
+                    note(f"rss cap exceeded: pid={offender[0]} rss={offender[1]:.0f}MB > rss_cap_mb={running_memory.cap}MB "
+                         f"command={offender[2][:200]}; stopping owned process group (exit {EXIT_RSS_CAP})")
+                    return_code = EXIT_RSS_CAP
+                    break
             if now >= next_heartbeat:
                 note(f"running kind={args.kind} label={args.label} elapsed={int(now-started)}s")
                 next_heartbeat = now + HEARTBEAT

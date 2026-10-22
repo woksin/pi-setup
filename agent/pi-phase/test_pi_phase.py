@@ -32,6 +32,10 @@ class PhaseTests(unittest.TestCase):
         self.fake_bin = self.root / "fake-bin"
         self.fake_bin.mkdir()
         self.executable(self.fake_bin / "docker", "#!/bin/sh\nexit 1\n")
+        # Existing admission tests assume the swap floor is enforced (it is skipped on macOS by design).
+        swap_floor = patch.object(pi_phase, "SWAP_FLOOR_ENFORCED", True)
+        swap_floor.start()
+        self.addCleanup(swap_floor.stop)
         environment = patch.dict(os.environ, PATH=str(self.fake_bin) + os.pathsep + os.environ["PATH"])
         environment.start()
         self.addCleanup(environment.stop)
@@ -141,7 +145,8 @@ class PhaseTests(unittest.TestCase):
         settings = pi_phase.config(self.config)
         self.assertEqual(settings, (2, 1))
         self.assertEqual(settings.options, dict(msbuild_max_cpu=0, container_test_detection="hint",
-                                                cold_worktree_hint=True, memory_admission=False, phase_nice=0))
+                                                cold_worktree_hint=True, memory_admission=False, phase_nice=0,
+                                                rss_cap_mb=12288))
         for cores, slots, expected in ((12, 2, 6), (12, 4, 3), (1, 4, 2), (None, 2, 2)):
             with self.subTest(cores=cores, slots=slots), patch.object(pi_phase.os, "cpu_count", return_value=cores):
                 self.assertEqual(pi_phase.msbuild_cap("auto", slots), expected)
@@ -167,7 +172,8 @@ class PhaseTests(unittest.TestCase):
                 note.assert_called_once()
         self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
         self.assertEqual(pi_phase.config(self.config).options,
-                         dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0))
+                         dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0,
+                              rss_cap_mb=12288))
 
     def test_dotnet_shim_insertion_and_passthrough(self):
         # Real shell execution, including spaces, empty arguments and a shim PATH alias.
@@ -211,6 +217,135 @@ class PhaseTests(unittest.TestCase):
         result = subprocess.run([str(shim / "dotnet"), "build"], env=env,
                                 capture_output=True, text=True, timeout=3)
         self.assertEqual(result.returncode, 127, result.stderr)
+
+    def test_memory_ceiling_config_defaults_and_validation(self):
+        options = pi_phase.config(self.config).options
+        self.assertEqual(options["rss_cap_mb"], 12288)
+        self.assertNotIn("dotnet_gc_heap_hard_limit_mb", options)
+        for key in ("rss_cap_mb",):
+            for value, expected in ((0, 0), (500, 500)):
+                self.configure(**{key: value})
+                self.assertEqual(pi_phase.config(self.config).options[key], expected)
+            for value in (-1, True, "10", 1.5, None):
+                self.configure(**{key: value})
+                with patch.object(pi_phase, "note"):
+                    self.assertEqual(pi_phase.config(self.config).options[key], pi_phase.config(self.root / "none").options[key])
+
+    def test_admission_swap_floor_defaults_to_2gb_and_refuses_below(self):
+        self.configure(memory_admission=True)
+        admission = pi_phase.MemoryAdmission(pi_phase.config(self.config).options["memory_admission"])
+        with patch.object(pi_phase, "SWAP_FLOOR_ENFORCED", True), \
+                patch.object(pi_phase, "read_host_memory", return_value=(80, 2047)):
+            self.assertEqual(admission.reason(time.monotonic() + 1), "swap free 2047 MB < 2048 MB")
+        admission = pi_phase.MemoryAdmission(pi_phase.config(self.config).options["memory_admission"])
+        with patch.object(pi_phase, "SWAP_FLOOR_ENFORCED", True), \
+                patch.object(pi_phase, "read_host_memory", return_value=(80, 2048)):
+            self.assertIsNone(admission.reason(time.monotonic() + 1))
+
+    def test_admission_ignores_free_swap_on_macos_but_still_uses_memory_percent(self):
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=2048))
+        with patch.object(pi_phase, "SWAP_FLOOR_ENFORCED", False), \
+                patch.object(pi_phase, "read_host_memory", return_value=(72, 1200)):
+            self.assertIsNone(admission.reason(time.monotonic() + 1))
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=2048))
+        with patch.object(pi_phase, "SWAP_FLOOR_ENFORCED", False), \
+                patch.object(pi_phase, "read_host_memory", return_value=(20, 1200)):
+            self.assertEqual(admission.reason(time.monotonic() + 1), "memory free 20% < 30%")
+
+    def test_sample_tree_includes_group_and_descendants(self):
+        child = subprocess.Popen([sys.executable, "-c", "import subprocess,sys,time;"
+                                  "subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)']);time.sleep(5)"],
+                                 start_new_session=True)
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        self.wait_for(lambda: len(pi_phase.sample_tree(child.pid)) >= 2)
+        pids = [item[0] for item in pi_phase.sample_tree(child.pid)]
+        self.assertIn(child.pid, pids)
+        self.assertNotIn(os.getpid(), pids)
+
+    def test_running_memory_offender_needs_sustained_samples_of_same_process(self):
+        running = pi_phase.RunningMemory(1000, 0, False)
+        big = [(1, 900.0, "a", "t1"), (3, 2500.0, "c", "t3")]
+        with patch.object(pi_phase, "sample_tree", return_value=big):
+            self.assertIsNone(running.offender(1))
+            self.assertIsNone(running.offender(1))
+            self.assertEqual(running.offender(1)[:3], (3, 2500.0, "c"))
+        # transient spike: over, over, under (reset), over, over -> no kill
+        running = pi_phase.RunningMemory(1000, 0, False)
+        for rss in (2000.0, 2000.0, 500.0, 2000.0, 2000.0):
+            with patch.object(pi_phase, "sample_tree", return_value=[(3, rss, "c", "t3")]):
+                self.assertIsNone(running.offender(1))
+        # a failed sample breaks the streak: over, error, over, error, over -> no kill
+        running = pi_phase.RunningMemory(1000, 0, False)
+        for outcome in ("over", "err", "over", "err", "over"):
+            effect = OSError("ps failed") if outcome == "err" else None
+            with patch.object(pi_phase, "sample_tree", return_value=[(3, 2000.0, "c", "t3")], side_effect=effect):
+                self.assertIsNone(running.offender(1))
+        # pid reuse / different start time resets the streak
+        running = pi_phase.RunningMemory(1000, 0, False)
+        for start in ("t1", "t1", "t2", "t2"):
+            with patch.object(pi_phase, "sample_tree", return_value=[(3, 2000.0, "c", start)]):
+                self.assertIsNone(running.offender(1))
+        with patch.object(pi_phase, "sample_tree", return_value=[(3, 2000.0, "c", "t2")]):
+            self.assertIsNotNone(running.offender(1))
+        with patch.object(pi_phase, "sample_tree", return_value=[(1, 1000.0, "a", "t")]):
+            self.assertIsNone(pi_phase.RunningMemory(1000, 0, False).offender(1))
+        with patch.object(pi_phase, "sample_tree", side_effect=subprocess.TimeoutExpired("ps", 5)):
+            self.assertIsNone(pi_phase.RunningMemory(1000, 0, False).offender(1))
+        with patch.object(pi_phase, "sample_tree", return_value=[(1, 99999.0, "a", "t")]):
+            running = pi_phase.RunningMemory(0, 0, False)
+            for _ in range(4):
+                self.assertIsNone(running.offender(1))
+
+    def sampled_phase(self, patch_code, command, kind="test"):
+        entry = ("import sys; sys.path.insert(0, sys.argv[1]); import pi_phase\n"
+                 + patch_code + "\nsys.exit(pi_phase.main(sys.argv[4:], state=sys.argv[2], configuration=sys.argv[3]))")
+        child = subprocess.Popen([sys.executable, "-B", "-c", entry, str(HERE), str(self.state), str(self.config),
+                                  "run", "--kind", kind, "--label", "sampled", "--timeout", "20",
+                                  "--queue-timeout", "5", "--", *command],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.children.append(child)
+        return child
+
+    def test_rss_cap_kills_phase_with_distinct_status(self):
+        self.configure(container_test_detection="off", rss_cap_mb=12288)
+        marker = self.root / "survived"
+        command = [sys.executable, "-c", "import time,pathlib,sys;time.sleep(8);pathlib.Path(sys.argv[1]).touch()", str(marker)]
+        child = self.sampled_phase("pi_phase.MEMORY_SAMPLE_INTERVAL = 0.3\n"
+                                   "pi_phase.sample_tree = lambda pid: [(pid, 100.0, 'small', 'T'), (pid + 1, 20000.0, 'fake-giant --flag', 'T')]",
+                                   command)
+        started = time.monotonic()
+        code, out = self.done(child, timeout=15)
+        self.assertEqual(code, pi_phase.EXIT_RSS_CAP, out)
+        self.assertEqual(pi_phase.EXIT_RSS_CAP, 76)
+        self.assertLess(time.monotonic() - started, 7)
+        self.assertRegex(out, r"rss cap exceeded: pid=\d+ rss=20000MB > rss_cap_mb=12288MB command=fake-giant --flag")
+        self.assertIn("exit=76", out)
+        self.assertFalse(marker.exists())
+
+    def test_rss_below_cap_or_disabled_is_not_killed(self):
+        for cap, rss in ((12288, 1000.0), (0, 99999.0)):
+            with self.subTest(cap=cap):
+                self.configure(container_test_detection="off", rss_cap_mb=cap)
+                child = self.sampled_phase("pi_phase.MEMORY_SAMPLE_INTERVAL = 0.2\n"
+                                           f"pi_phase.sample_tree = lambda pid: [(pid, {rss}, 'x', 'T')]",
+                                           [sys.executable, "-c", "import time;time.sleep(1)"])
+                code, out = self.done(child, timeout=15)
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("rss cap", out)
+
+    def test_low_swap_while_running_warns_without_killing(self):
+        self.configure(container_test_detection="off", rss_cap_mb=0, memory_admission=dict(min_free_percent=0))
+        child = self.sampled_phase("pi_phase.MEMORY_SAMPLE_INTERVAL = 0.2\n"
+                                   "pi_phase.low_memory_reason = lambda floor: 'memory available 5% < 15%'",
+                                   [sys.executable, "-c", "import time;time.sleep(1)"])
+        code, out = self.done(child, timeout=15)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("warning: memory available 5% < 15% while phase is running (no action taken)"), 1, out)
+
+    def test_shim_never_exports_gc_heap_limit(self):
+        self.assertNotIn("GCHeapHardLimit", (HERE / "dotnet-shim.sh").read_text())
+        env = pi_phase.shim_environment(self.root, 3)
+        self.assertFalse([k for k in env if "GC_HEAP" in k])
 
     def test_phase_nice_lowers_producer_priority_for_heavy_kinds_only(self):
         probe = [sys.executable, "-c", "import os; print('prio=%d env=%s' % (os.getpriority(os.PRIO_PROCESS, 0), 'PI_PHASE_NICE' in os.environ))"]
@@ -379,9 +514,9 @@ class PhaseTests(unittest.TestCase):
 
     def test_memory_admission_config_defaults_validation_and_overrides(self):
         self.assertIs(pi_phase.config(self.config).options["memory_admission"], False)
-        for value, expected in ((True, dict(min_free_percent=30, min_swap_free_mb=500)),
-                ({}, dict(min_free_percent=30, min_swap_free_mb=500)),
-                (dict(min_free_percent=20), dict(min_free_percent=20, min_swap_free_mb=500)),
+        for value, expected in ((True, dict(min_free_percent=30, min_swap_free_mb=2048)),
+                ({}, dict(min_free_percent=30, min_swap_free_mb=2048)),
+                (dict(min_free_percent=20), dict(min_free_percent=20, min_swap_free_mb=2048)),
                 (dict(min_free_percent=0, min_swap_free_mb=0), dict(min_free_percent=0, min_swap_free_mb=0))):
             with self.subTest(value=value):
                 self.configure(memory_admission=value)

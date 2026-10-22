@@ -99,6 +99,10 @@ The pi-phase config flags `msbuild_max_cpu` (default off),
 (default on, hint-only) provide opt-in caps and advisory performance guidance.
 Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your version.
 
+**Stuck-session watchdog:** `bin/session-watchdog` runs every 2 min from docker-guardian and only notifies, never kills. It flags live pi sessions (positively mapped to a running pi process through pi-orch heartbeats) with an unanswered tool call or an unanswered user/tool-result message older than 10 min, and raises an all-sessions-silent alarm (3+ sessions, none writing for over 15 min). Stuck notices go to `ALL-session-watchdog-*-stuck.md` and a macOS notification; sessions it cannot map, memory pressure (`kern.memorystatus_level` below 15% with swap used over 12 GB, or below 8%) and `fseventsd` above 4 GB go to the coordinator only. State is in `~/.pi/agent/session-watchdog/`, the log in `logs/session-watchdog.log`.
+
+**pi-phase memory ceilings:** `rss_cap_mb` (default 12288) kills a phase when one process in its tree stays above the cap for 3 consecutive samples (about 45 s; exit 76). On macOS, admission uses free memory percent; the swap-free floor (`memory_admission.min_swap_free_mb`, default 2048) applies on Linux only, since macOS grows swap on demand.
+
 Guardian image hygiene is **active once `~/.pi/agent/docker-guardian/pinned.txt`
 exists**: install seeds it only when absent from
 `agent/docker-guardian/pinned.example.txt` (Mongo, Keycloak, Vault, Playwright, Ryuk).
