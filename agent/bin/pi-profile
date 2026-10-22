@@ -49,11 +49,12 @@ def managed_files(name):
     """(profile file, live file) pairs for a profile."""
     base = PROFILES / name
     pairs = []
-    for sub in ("agents", "workflows"):
+    # Only real agent/workflow files: backups (*.bak-*) and stray files are never copied live.
+    for sub, ext in (("agents", ".md"), ("workflows", ".js")):
         d = base / sub
         if d.is_dir():
             for f in sorted(d.iterdir()):
-                if f.is_file():
+                if f.is_file() and f.suffix == ext:
                     pairs.append((f, ROOT / sub / f.name))
     return pairs
 
