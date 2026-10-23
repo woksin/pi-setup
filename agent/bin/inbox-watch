@@ -2,7 +2,8 @@
 # Usage: inbox-watch [--alias NAME]... LANE [GROUP]
 # Use with one job_watch: until=success, interval=120. Exit 0: filenames printed;
 # 1: no inbound changes; 2: usage/I/O error.
-# Names: SENDER-to-RCPT[-RCPT...]-topic.md or RCPT-from-SENDER-topic.md.
+# Names: SENDER-to-RCPT[-RCPT...]-topic.md or RCPT-from-SENDER-topic.md, optionally
+# prefixed with a numeric timestamp (20261023-074001-L0-to-L15-x.md).
 # Recipient/sender ids are the run of tokens starting with a capital
 # (L15, L18b, R-AI, R-Studio); the topic starts at the first lowercase or digit token.
 # Inbound: a recipient is LANE, an alias, ALL or GROUP (or the name starts

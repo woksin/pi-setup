@@ -198,7 +198,14 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 In Cratis repositories (and any repository whose local rules opt in), shipping is the default end of a task — do not end a session asking "May I push and open the PRs?". When the ship bar is met, push, open the PR(s), wait for CI, run the final review, and merge, all without asking.
 
-- **Repo-owner mode (multi-session setups).** When the coordination rules in force (the L0 rules file, or `PI_ORCH_ID` with pi-orch) name a repo owner, only that owner pushes, opens PRs and merges in that repository, in batched candidates (several issues per PR, one release). Every other session or lane delivers its finished branch to the owner (branch, SHA, gate evidence, release-note bullets) and moves on to its next task instead of opening a PR. The rest of this section then applies to the owner's candidate PR, not to individual changes.
+- **Repo orchestrator (multi-lane setups).** When two or more lanes or workers are active in one repository, that repository has one **repo orchestrator**, a session specialised on that repository. It sits between the global coordinator (L0) and those lanes; the coordination rules in force (the L0 rules file, `lanes status`, or `PI_ORCH_ID` with pi-orch) name it. Brief it from `~/.pi/agent/templates/repo-orchestrator-brief.md`. It owns:
+  - **Work split:** which lane takes which issue, file ownership between lanes, and the merge and dependency order of branches.
+  - **Builds and tests:** one gate per candidate code state, a schedule for the heavy phases, and an attribution of every failure to the delivery that caused it.
+  - **PRs and releases:** only the repo orchestrator pushes, opens PRs and merges in that repository, in batched candidates (several issues per PR, one release). It labels them, writes the release note, merges and watches Publish.
+  - **Decisions:** it makes repository-local design and scope decisions and records them, escalating to L0 or the user only what crosses repositories or needs a product decision.
+  - **Inbox SLA:** it acknowledges every delivery or redelivery within one wake cycle, replying with the candidate SHA or a reasoned rejection.
+
+  Lanes in that repository report to their repo orchestrator, not to L0: they deliver the finished branch (branch, SHA, gate evidence, release-note bullets) and move on instead of opening a PR. L0 talks to repo orchestrators. A repository with one lane needs none, because that lane is its own orchestrator. The rest of this section then applies to the repo orchestrator's candidate PR, not to individual changes.
 
 - **Ship bar** — all must hold; otherwise stop and report what is missing instead of shipping:
   - You are confident the change solves the issue(s): the root cause is understood, the design was researched against the existing code and conventions, and open questions are resolved rather than guessed.
