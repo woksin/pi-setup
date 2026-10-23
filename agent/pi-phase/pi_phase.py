@@ -536,7 +536,8 @@ def wait_eta(state, configuration, kind, request=None):
             waiters = all_waiters(state, readonly=True, now=now)
         finally:
             os.close(coordinator)
-    waiters = [w for w in waiters if PRIORITIES[w["priority"]] >= PRIORITIES["normal"]]
+    # Unpromoted low waiters stay behind the caller; promoted ones compete as aged normal.
+    waiters = [w for w in waiters if PRIORITIES[w["priority"]] >= PRIORITIES["normal"] or low_promoted(w, now)]
     # The caller joins at its comparator position, as a real registration would rank.
     order = settings.options["queue_order"]
     history, identity, caller_basis = PhaseHistory(records), None, "default"
@@ -550,7 +551,7 @@ def wait_eta(state, configuration, kind, request=None):
                   basis=caller_basis, caller=True, fast=eta_fast(state, fast, request, history, identity),
                   ageAt=now + (min(order["aging_s"], 0.5 * getattr(request, "queue_timeout", 1200))
                                if order["mode"] == "shortest-first" else 0))
-    ordered = sorted([*waiters, caller], key=lambda w: queue_key(w, now))
+    ordered = ranked_waiters([*waiters, caller], now)
     ahead = ordered.index(caller)
     pending = [(w["kind"], w.get("fast", False), w.get("caller", False),
                 w["expected"] if w.get("basis", "default") != "default" else medians[w["kind"]])
@@ -1274,6 +1275,9 @@ def work_identity(cwd, command, kind):
         project = strip_target(target)
     elif tool_stack(Path(argv[0]).name) is None:
         project = Path(argv[0]).name
+    elif Path(argv[0]).name == "dotnet" and rel not in ("", "."):
+        # Projectless dotnet test/build in a project directory: same identity as the project's executable.
+        project = Path(rel).name
     else:
         project = rel or "."
     shape = work_shape(argv)
@@ -1702,12 +1706,33 @@ def waiter_age_at(waiter):
     return waiter.get("ageAt", waiter["enqueued"] + LEGACY_AGE_S)
 
 
+def low_promoted(waiter, now):
+    return waiter["priority"] == "low" and now >= waiter.get("promoteAt", math.inf)
+
+
+def is_legacy_waiter(waiter):
+    return "ageAt" not in waiter
+
+
+def legacy_key(waiter):
+    """Ranking of old-code processes: strict priority, then FIFO."""
+    return (-PRIORITIES[waiter["priority"]], waiter["enqueued"], waiter["seq"])
+
+
+def ranked_waiters(waiters, now):
+    """With any legacy waiter present every process must agree with the old FIFO ranking, otherwise
+    old and new reserve the free slot for each other and it idles."""
+    if any(is_legacy_waiter(w) for w in waiters):
+        return sorted(waiters, key=legacy_key)
+    return sorted(waiters, key=lambda w: queue_key(w, now))
+
+
 def queue_key(waiter, now):
     """Total order from waiter-file fields and the clock only, never the scanner's config.
 
     Priority first; then aged waiters FIFO; then the rest shortest-expected first."""
     rank = -PRIORITIES[waiter["priority"]]
-    if waiter["priority"] == "low" and now >= waiter.get("promoteAt", math.inf):
+    if low_promoted(waiter, now):
         # Bounded cross-class aging: a long-waiting low waiter competes as aged normal, FIFO by enqueue time.
         return (-PRIORITIES["normal"], 0, waiter["enqueued"], waiter["seq"])
     if now >= waiter_age_at(waiter):
@@ -1727,7 +1752,7 @@ def all_waiters(state, cancelled=lambda: False, *, readonly=False, now=None):
     now = time.time() if now is None else now
     waiters = live_waiters(state, cancelled, readonly=readonly, now=now)
     waiters += live_waiters(state, cancelled, readonly=readonly, directory="fast-waiters", now=now)
-    return sorted(waiters, key=lambda w: queue_key(w, now))
+    return ranked_waiters(waiters, now)
 
 
 def live_waiters(state, cancelled=lambda: False, *, readonly=False, directory="waiters", now=None):
@@ -1763,7 +1788,7 @@ def live_waiters(state, cancelled=lambda: False, *, readonly=False, directory="w
         finally:
             os.close(fd)
     now = time.time() if now is None else now
-    return sorted(waiters, key=lambda w: queue_key(w, now))
+    return ranked_waiters(waiters, now)
 
 
 def waiter_resources(waiter, pools):
@@ -2039,9 +2064,9 @@ def prepare_policy(state, args, options, fingerprint, history=None, identity=Non
         args.expected, args.basis = history.estimate(identity, fingerprint, args.kind, order["default_expected_s"])
         # A long job with a short queue timeout must age before it can time out.
         shortest = order["mode"] == "shortest-first"
-        args.age_after = min(order["aging_s"], max(30, 0.5 * args.queue_timeout)) if shortest else None
+        args.age_after = min(order["aging_s"], 0.5 * args.queue_timeout) if shortest else None
         # fifo mode: no promotion, i.e. the old strict priority classes.
-        args.promote_after = (min(order["low_promote_after_s"], max(30, 0.5 * args.queue_timeout))
+        args.promote_after = (min(order["low_promote_after_s"], 0.5 * args.queue_timeout)
                               if shortest else None)
     if getattr(args, "ledger", None):
         args.ledger.record.update(fingerprint=fingerprint, fast=args.fast, policy=args.policy, source=args.source)

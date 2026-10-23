@@ -94,6 +94,18 @@ class WorkIdentityTests(unittest.TestCase):
         self.assertTrue(all(i.filtered for i in filtered))
         self.assertFalse(plain.filtered)
 
+    def test_projectless_dotnet_test_in_project_dir_matches_the_executable_identity(self):
+        sub = self.repo / "src" / "X.Specs"
+        sub.mkdir(parents=True)
+        for cwd, command in ((sub, ["dotnet", "test", "--no-build"]), (self.repo, ["./bin/Release/net10.0/X.Specs"]),
+                             (self.repo, ["dotnet", "bin/Release/net10.0/X.Specs.dll"]),
+                             (sub, ["dotnet", "test", "--no-build", "--filter", "A"])):
+            identity = self.identity(command, cwd)
+            self.assertEqual((identity.project, identity.family_key),
+                             ("X.Specs", self.identity(["dotnet", "bin/X.Specs.dll"]).family_key), command)
+        self.assertEqual(self.identity(["dotnet", "test", "--no-build"], sub).work_key,
+                         self.identity(["./bin/X.Specs"]).work_key)
+
     def test_other_project_repo_kind_and_shape_differ(self):
         base = self.identity(["dotnet", "bin/X.Specs.dll"])
         self.assertNotEqual(base.family_key, self.identity(["dotnet", "bin/Y.Specs.dll"]).family_key)
@@ -449,10 +461,27 @@ class OrderTests(Harness):
             self.waiter("legacy")
         self.at(101, self.ranked, "fast-job", 1)
         self.at(102, self.ranked, "slow-job", 9999)
-        self.assertEqual([w["token"] for w in self.at(103, pi_phase.all_waiters, self.state)],
-                         ["fast-job", "legacy", "slow-job"])
-        self.assertEqual([w["token"] for w in self.at(10_000, pi_phase.all_waiters, self.state)],
-                         ["legacy", "fast-job", "slow-job"])
+        # A legacy waiter anywhere switches the whole scan to strict priority/FIFO (see mixed-version test).
+        for now in (103, 10_000):
+            self.assertEqual([w["token"] for w in self.at(now, pi_phase.all_waiters, self.state)],
+                             ["legacy", "fast-job", "slow-job"])
+
+    def test_mixed_old_and_new_processes_agree_on_the_head_so_a_free_slot_is_taken(self):
+        # New long waiter enqueued first, legacy (old-code) waiter later. Old processes rank by
+        # (priority, enqueued, seq); the new scan must pick the same head or both yield and the slot idles.
+        self.at(100, self.ranked, "new-long", 900)
+        with patch.object(pi_phase.time, "time", return_value=101):
+            self.waiter("legacy")
+        self.at(102, self.ranked, "new-short", 1)
+        for now in (103, 5000):
+            scan = self.at(now, pi_phase.all_waiters, self.state)
+            old_view = sorted(scan, key=pi_phase.legacy_key)  # what an old process computes
+            self.assertEqual([w["token"] for w in scan], [w["token"] for w in old_view])
+            self.assertEqual(scan[0]["token"], "new-long")
+        self.assertEqual(self.admitted_first(103, ["legacy", "new-short", "new-long"]), "new-long")
+        # Once the legacy waiter is gone the new order applies again.
+        (self.state / "waiters" / "legacy.json").unlink()
+        self.assertEqual(self.at(103, pi_phase.all_waiters, self.state)[0]["token"], "new-short")
 
     def test_malformed_rank_fields_make_the_waiter_unreadable(self):
         self.at(100, self.ranked, "ok", 5)
@@ -483,6 +512,25 @@ class OrderTests(Harness):
         self.at(100, self.ranked, "f", 1, age_after=None)
         data = pi_phase.metadata(self.state / "waiters" / "f.json")
         self.assertEqual(data["ageAt"], data["enqueued"])
+
+    def test_short_queue_timeout_bound_has_no_floor(self):
+        options = pi_phase.config(self.config).options
+        args = SimpleNamespace(kind="build", queue_timeout=20, priority="low")
+        pi_phase.prepare_policy(self.state, args, options, "fp", pi_phase.PhaseHistory([]), None)
+        self.assertEqual((args.age_after, args.promote_after), (10, 10))
+
+    def test_eta_counts_promoted_low_waiters_ahead_and_not_unpromoted_ones(self):
+        self.seed([sys.executable, "-c", "pass"], [50] * 10, kind="build")
+        self.config.write_text('{"heavy_slots": 1}')
+        fd = pi_phase.lock_file(self.state / "heavy-0.lock")
+        self.addCleanup(os.close, fd)
+        now = time.time()
+        self.at(now - 500, self.ranked, "promoted", 600, priority="low", promote_after=100)
+        self.at(now - 500, self.ranked, "waiting-low", 600, priority="low", promote_after=9999)
+        request = SimpleNamespace(command=["--", sys.executable, "-c", "pass"], queue_timeout=1200, kind="build")
+        with patch.object(sys, "stdout", new_callable=__import__("io").StringIO) as out:
+            pi_phase.wait_eta(self.state, self.config, "build", request)
+        self.assertIn("ahead=1", out.getvalue())
 
     def test_status_lists_effective_order_with_new_fields(self):
         self.at(time.time() - 50, self.ranked, "long", 300, basis="family")
