@@ -11,16 +11,20 @@ export function timestamp(d: Date): string {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
-/** Relative paths of regular files below dir, without following symlinks (like `find -type f`). */
+/** Local build and OS clutter that must never be installed from a checkout. */
+const isClutterFile = (name: string) => name.endsWith(".pi-setup-new") || name.endsWith(".pyc") || name === ".DS_Store";
+const isClutterDir = (name: string) => name === "__pycache__" || name === "node_modules";
+
+/** Relative paths of regular files below dir, without following symlinks (like `find -type f`), skipping local clutter. */
 export function listFiles(dir: string, base = ""): string[] {
   if (!existsSync(dir)) return [];
   const out: string[] = [];
   for (const entry of readdirSync(join(dir, base), { withFileTypes: true })) {
     const rel = base ? `${base}/${entry.name}` : entry.name;
     if (entry.isFile()) {
-      if (!entry.name.endsWith(".pi-setup-new")) out.push(rel);
+      if (!isClutterFile(entry.name)) out.push(rel);
     }
-    else if (entry.isDirectory()) out.push(...listFiles(dir, rel));
+    else if (entry.isDirectory() && !isClutterDir(entry.name)) out.push(...listFiles(dir, rel));
   }
   return out.sort();
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 525801e85a4a901042e5d03c70fd452bb0faf461ec34c531e7459149f1a5a83a
+// pi-setup-source-sha256: e892723648c0227d74d98341a0701369f004a30c153ab8179101617249a0b401
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -3937,8 +3937,8 @@ function listFiles(dir, base = "") {
   for (const entry2 of readdirSync10(join34(dir, base), { withFileTypes: true })) {
     const rel = base ? `${base}/${entry2.name}` : entry2.name;
     if (entry2.isFile()) {
-      if (!entry2.name.endsWith(".pi-setup-new")) out.push(rel);
-    } else if (entry2.isDirectory()) out.push(...listFiles(dir, rel));
+      if (!isClutterFile(entry2.name)) out.push(rel);
+    } else if (entry2.isDirectory() && !isClutterDir(entry2.name)) out.push(...listFiles(dir, rel));
   }
   return out.sort();
 }
@@ -3962,10 +3962,12 @@ function atomicWrite(link, data, mode, pid = process.pid) {
   chmodSync(tmp, mode);
   renameSync5(tmp, path2);
 }
-var pad;
+var pad, isClutterFile, isClutterDir;
 var init_fsx = __esm({
   "src/fsx.ts"() {
     pad = (n3) => String(n3).padStart(2, "0");
+    isClutterFile = (name) => name.endsWith(".pi-setup-new") || name.endsWith(".pyc") || name === ".DS_Store";
+    isClutterDir = (name) => name === "__pycache__" || name === "node_modules";
   }
 });
 
