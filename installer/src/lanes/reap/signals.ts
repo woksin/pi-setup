@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { effectiveParent, expand } from "../config.ts";
+import { effectiveParent, laneDir } from "../config.ts";
 import { optionalText } from "./files.ts";
 import { gitEvidence } from "./git.ts";
 import { absolute, processEvidence, processIds } from "./process.ts";
@@ -39,7 +39,7 @@ export async function collect(env: EvidenceContext): Promise<Signals> {
   const protectedReason = callerProtection(env);
   if (protectedReason) { s.keeps.push(protectedReason); return s; }
   try {
-    s.cwd = absolute(ctx, join(expand(c.worktreesDir, c, root, ctx.home), lane.worktree));
+    s.cwd = absolute(ctx, laneDir(lane, c, root, ctx));
     s.pids = await processIds(ctx, s.cwd);
     if (!s.pids.length) { s.keeps.push("not running"); return s; }
     if (s.pids.length !== 1) { s.asks.push("shared cwd"); return s; }

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { effectiveParent, expand, saveConfig, UsageError, validate, type Config, type Lane } from "../config.ts";
+import { effectiveParent, expand, laneDir, saveConfig, UsageError, validate, type Config, type Lane } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { slug, validId } from "../names.ts";
 import { backendFor } from "../backend.ts";
@@ -118,7 +118,7 @@ export async function createWorktree(lane: Lane, opts: Options, env: AddContext)
   const git: Git = (clone, args, timeoutMs = 10000) => ctx.run("git", ["-C", clone, ...args], { timeoutMs });
   const clone = await findClone(lane, opts, env, git);
   const base = await prepareBase({ clone, lane, opts, env }, git);
-  const wt = join(expand(c.worktreesDir, c, root, ctx.home), lane.worktree);
+  const wt = laneDir(lane, c, root, ctx);
   await addWorktree({ clone, lane, wt, base }, git);
   try {
     const lock = await git(clone, ["worktree", "lock", "--reason", `lanes ${lane.id}`, wt]);
