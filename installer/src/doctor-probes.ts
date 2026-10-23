@@ -66,7 +66,8 @@ async function update(ctx: Ctx, manifest?: Manifest): Promise<DoctorCheck> {
 }
 
 /** All external work begins together; every command has an independent deadline. */
-export async function gatherFacts(ctx: Ctx, manifest?: Manifest): Promise<{ facts: DoctorFacts; checks: DoctorCheck[] }> {
+export async function gatherFacts(baseCtx: Ctx, manifest?: Manifest): Promise<{ facts: DoctorFacts; checks: DoctorCheck[] }> {
+  const ctx: Ctx = { ...baseCtx, run: (cmd, args, options) => baseCtx.run(cmd, cmd === "git" ? ["--no-optional-locks", ...args] : args, options) };
   const hasPi = Boolean(ctx.which("pi"));
   const agents = plists(ctx);
   const guardian = agents.some(p => p.label.endsWith(".docker-guardian"));

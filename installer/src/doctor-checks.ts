@@ -91,7 +91,8 @@ function files(s: State): DoctorCheck {
   const moved = s.manifest.source.commit && s.facts.head && s.manifest.source.commit !== s.facts.head;
   let detail = `${s.missing.length} missing, ${s.changed.length} changed by you`;
   if (moved) detail += `; checkout is at ${s.facts.head!.slice(0, 7)}, installed ${s.manifest.source.commit!.slice(0, 7)}; the checkout moved since the install; this would also update`;
-  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...(s.missing.length ? { fixable: "restore" as const } : {}) };
+  const restorable = s.missing.length > 0 && s.facts.checkoutClean === true && Boolean(s.facts.head) && s.facts.head === s.manifest.source.commit;
+  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...(restorable ? { fixable: "restore" as const } : {}) };
 }
 function pending(s: State): DoctorCheck {
   const paths = [...new Set([...Object.values(s.manifest?.files ?? {}).flatMap(e => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter(p => existsSync(fromHomeRel(s.ctx.home, p)));

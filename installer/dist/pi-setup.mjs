@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: d73416c1968fe4a6cb9feb380252b04428ab85e23894bfd0a557aa5a5138641d
+// pi-setup-source-sha256: 658316c685e22aa51f5ef091e867c97774da8f92668f9f393676726f6f90d51a
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -1740,7 +1740,8 @@ function files(s) {
   const moved = s.manifest.source.commit && s.facts.head && s.manifest.source.commit !== s.facts.head;
   let detail = `${s.missing.length} missing, ${s.changed.length} changed by you`;
   if (moved) detail += `; checkout is at ${s.facts.head.slice(0, 7)}, installed ${s.manifest.source.commit.slice(0, 7)}; the checkout moved since the install; this would also update`;
-  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...s.missing.length ? { fixable: "restore" } : {} };
+  const restorable = s.missing.length > 0 && s.facts.checkoutClean === true && Boolean(s.facts.head) && s.facts.head === s.manifest.source.commit;
+  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...restorable ? { fixable: "restore" } : {} };
 }
 function pending(s) {
   const paths = [.../* @__PURE__ */ new Set([...Object.values(s.manifest?.files ?? {}).flatMap((e) => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter((p) => existsSync12(fromHomeRel(s.ctx.home, p)));
@@ -2009,7 +2010,8 @@ async function update(ctx, manifest) {
   if (!latestTag([current])) return skip("installed release unknown");
   return result("update", compareTags(latest, current) > 0 ? "warn" : "ok", compareTags(latest, current) > 0 ? `${latest} available (installed ${current})` : `up to date (${current})`, `${setupCmd(ctx)} update`);
 }
-async function gatherFacts(ctx, manifest) {
+async function gatherFacts(baseCtx, manifest) {
+  const ctx = { ...baseCtx, run: (cmd, args, options) => baseCtx.run(cmd, cmd === "git" ? ["--no-optional-locks", ...args] : args, options) };
   const hasPi = Boolean(ctx.which("pi"));
   const agents = plists(ctx);
   const guardian = agents.some((p) => p.label.endsWith(".docker-guardian"));

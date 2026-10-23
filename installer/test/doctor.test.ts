@@ -30,7 +30,7 @@ function fixture() {
   put(".pi-setup/update-check.json", JSON.stringify({ checkedAt: new Date(2026, 0, 2, 3, 4, 5).toISOString(), latest: "v1" }));
   const calls: { cmd: string; args: string[]; options?: RunOptions }[] = [];
   const out: string[] = [];
-  const facts: DoctorFacts = { providers: Object.fromEntries(["anthropic", "openai-codex", "kimi-coding"].map(p => [p, { status: "ready" }])), catalog: new Set(["anthropic/claude-opus-5-5", "kimi-coding/k3-256k", "openai-codex/gpt-6.1-sol"]), head: "abc123", summary: false };
+  const facts: DoctorFacts = { providers: Object.fromEntries(["anthropic", "openai-codex", "kimi-coding"].map(p => [p, { status: "ready" }])), catalog: new Set(["anthropic/claude-opus-5-5", "kimi-coding/k3-256k", "openai-codex/gpt-6.1-sol"]), head: "abc123", checkoutClean: true, summary: false };
   const ctx = testCtx(box.home, { env: { PATH: join(box.home, ".local/bin") }, which: () => "/stub", run: async (cmd, args, options) => {
     calls.push({ cmd, args, options });
     let stdout = "";
@@ -80,6 +80,33 @@ test("files: missing, modified, pending, modes and moved checkout", () => {
   assert.equal(f.checks().find(c => c.id === "files")?.fixable, "restore");
   f.facts.head = "moved";
   assert.match(f.checks().find(c => c.id === "files")!.detail, /checkout moved/);
+});
+
+for (const scenario of ["clean", "dirty", "unknown-status", "moved", "unknown-head", "unknown-commit"] as const) test(`missing files advertise restore only when F2 can run: ${scenario}`, () => {
+  const f = fixture(); unlinkSync(f.file);
+  if (scenario === "dirty") f.facts.checkoutClean = false;
+  if (scenario === "unknown-status") f.facts.checkoutClean = undefined;
+  if (scenario === "moved") f.facts.head = "moved";
+  if (scenario === "unknown-head") f.facts.head = undefined;
+  if (scenario === "unknown-commit") { delete f.manifest.source.commit; f.save(); }
+  const files = f.checks().find(c => c.id === "files")!;
+  assert.equal(files.fixable, scenario === "clean" ? "restore" : undefined);
+  assert.equal(files.fix, scenario === "dirty" ? "commit or stash local changes, then rerun" : "pi-setup");
+});
+
+test("doctor git reads disable optional locks, including release probes", async () => {
+  const f = fixture();
+  delete f.manifest.source.release; f.save();
+  unlinkSync(join(f.pi, ".pi-setup/update-check.json"));
+  await main(["doctor", "--json"], f.ctx);
+  const gitArgs = f.calls.filter(c => c.cmd === "git").map(c => c.args);
+  for (const args of [
+    ["rev-parse", "HEAD"],
+    ["status", "--porcelain"],
+    ["ls-remote", "--tags", "--refs", "origin", "v*"],
+    ["describe", "--tags", "--abbrev=0"],
+  ]) assert.ok(gitArgs.some(actual => JSON.stringify(actual) === JSON.stringify(["--no-optional-locks", "-C", f.ctx.repoDir, ...args])));
+  assert.ok(gitArgs.every(args => args[0] === "--no-optional-locks"));
 });
 
 test("missing install, missing and invalid manifest", () => {
@@ -173,7 +200,7 @@ for (const scenario of ["dirty", "untracked", "timeout", "error"] as const) test
   f.ctx.run = async (cmd, args, opts) => {
     const r = await run(cmd, args, opts);
     if (cmd !== "git" || !args.includes("status")) return r;
-    assert.deepEqual(args, ["-C", f.ctx.repoDir, "status", "--porcelain"]);
+    assert.deepEqual(args, ["--no-optional-locks", "-C", f.ctx.repoDir, "status", "--porcelain"]);
     return { ...r, stdout: scenario === "dirty" ? " M installer/src/doctor.ts\n" : scenario === "untracked" ? "?? local.txt\n" : "", code: scenario === "error" ? 1 : 0, timedOut: scenario === "timeout" };
   };
   assert.equal(await main(["doctor", "--fix"], f.ctx), 2);
