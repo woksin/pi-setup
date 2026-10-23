@@ -11,7 +11,7 @@ import type { Manifest } from "./manifest.ts";
 import { applyTakes, diffText, reconcile } from "./reconcile.ts";
 import type { KeepAction } from "./reconcile.ts";
 import { runUninstall } from "./uninstall.ts";
-import { available, codesceneNotes, COMPONENTS, currentState, detectDefaults, hintFor, resolveComponents } from "./components.ts";
+import { available, codesceneNotes, COMPONENTS, currentState, WEB_PACKAGES, detectDefaults, hintFor, resolveComponents } from "./components.ts";
 import type { ComponentChoice } from "./components.ts";
 import { retire, wasOn } from "./retire.ts";
 import { isService, planServices, syncServices } from "./services.ts";
@@ -137,6 +137,7 @@ function resolveAll(
     buildPlan({
       repoDir: ctx.repoDir, home: ctx.home, settings, overlay: overlayFor(ctx.repoDir, choice.name, settings),
       components: on, which: ctx.which, notes,
+      drop: on.web === false ? (manifest?.json[".pi/agent/settings.json"]?.ops ?? []).flatMap((o) => (o.op === "array-add" && o.key === "packages" && WEB_PACKAGES.includes(o.value as string) ? [o.value as string] : [])) : [],
       activate: COMPONENTS.map((c) => c.id).filter((id) => on[id] && !wasOn(manifest, currentState(ctx), id)),
     }),
     manifest, ctx.home,

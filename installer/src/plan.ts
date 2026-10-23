@@ -21,6 +21,8 @@ export interface PlanInput {
   components?: Record<string, boolean>;
   /** Components being turned on by this run; only these are added to a settings file that already exists. */
   activate?: string[];
+  /** Packages pi-setup added earlier for a component that is being turned off; they are dropped from the content planned for settings.json, which is read before the component is retired. */
+  drop?: string[];
   /** Looks a tool up on PATH (the cs-mcp command). */
   which?: (name: string) => string | undefined;
   /** Receives notes for the summary (for example missing AGENTS.md markers). */
@@ -149,12 +151,13 @@ function addPackage(data: Record<string, unknown>, value: string, fresh: boolean
   ops.push({ op: "array-add", key: "packages", value, keyCreated: !list });
 }
 
-function settingsEdit(web: boolean | undefined, activate: boolean): (data: Record<string, unknown>, fresh: boolean) => JsonOp[] {
+function settingsEdit(web: boolean | undefined, activate: boolean, drop: string[]): (data: Record<string, unknown>, fresh: boolean) => JsonOp[] {
   return (data, fresh) => {
     const ops: JsonOp[] = [];
     if (fresh && web !== true && Array.isArray(data.packages)) {
       if (web === false) data.packages = (data.packages as unknown[]).filter((p) => !WEB_PACKAGES.includes(p as string));
     }
+    if (web === false && drop.length && Array.isArray(data.packages)) data.packages = (data.packages as unknown[]).filter((p) => !drop.includes(p as string));
     // the first package pi-setup adds to a fresh template is not template-provided, the rest are
     addPackage(data, PACKAGE, false, ops, true);
     if (web === true) for (const p of WEB_PACKAGES) addPackage(data, p, fresh, ops, fresh || activate);
@@ -205,7 +208,7 @@ export function buildPlan(input: PlanInput): Action[] {
   for (const name of ONLY_IF_ABSENT) {
     if (!existsSync(join(piDir, name))) putSource(actions, join(agent, name), join(piDir, name), settings);
   }
-  registerJson(actions, join(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web"))));
+  registerJson(actions, join(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web")), input.drop ?? []));
   registerJson(actions, join(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => undefined)));
   const absent: [string, string][] = [
     ["docker-guardian/pinned.example.txt", "docker-guardian/pinned.txt"],

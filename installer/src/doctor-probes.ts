@@ -69,7 +69,9 @@ async function update(ctx: Ctx, manifest?: Manifest): Promise<DoctorCheck> {
 export async function gatherFacts(baseCtx: Ctx, manifest?: Manifest): Promise<{ facts: DoctorFacts; checks: DoctorCheck[] }> {
   const ctx: Ctx = { ...baseCtx, run: (cmd, args, options) => baseCtx.run(cmd, cmd === "git" ? ["--no-optional-locks", ...args] : args, options) };
   const hasPi = Boolean(ctx.which("pi"));
-  const agents = plists(ctx);
+  // units recorded in the manifest are reported by componentChecks
+  const recorded = new Set(Object.values(manifest?.components ?? {}).flatMap((c) => (c.service?.kind === "launchd" ? [c.service.label] : [])));
+  const agents = plists(ctx).filter((p) => !recorded.has(p.label));
   const guardian = agents.some(p => p.label.endsWith(".docker-guardian"));
   const [providers, models, version, gh, head, checkout, disks, launchd, docker, updates] = await Promise.all([
     Promise.all(PROVIDER_IDS.map(id => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" as const })) : Promise.resolve({ status: "unknown" as const }))),

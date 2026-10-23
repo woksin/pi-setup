@@ -46,6 +46,16 @@ function launchdUnit(ctx: Pick<Ctx, "home" | "env" | "repoDir">, id: string): { 
   return { unit: { path: join(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text) }, label: `com.${user}.${name}` };
 }
 
+/** Where a service component's unit would live on this platform, and its label. */
+export function expectedUnit(ctx: Pick<Ctx, "home" | "env" | "platform">, id: string): { kind: "launchd" | "systemd"; label: string; file: string } | undefined {
+  if (ctx.platform === "darwin") {
+    const name = LAUNCHD_NAME[id];
+    const label = `com.${serviceUser(ctx.env)}.${name}`;
+    return name ? { kind: "launchd", label, file: join(ctx.home, "Library/LaunchAgents", `${label}.plist`) } : undefined;
+  }
+  return id === "cleanup" ? { kind: "systemd", label: TIMER, file: join(ctx.home, ".config/systemd/user", TIMER) } : undefined;
+}
+
 export interface ServicePlan {
   actions: Action[];
   /** manifest.components entries for every service component. */
@@ -98,7 +108,7 @@ export function planServices(
   return out;
 }
 
-const uid = (): number => (typeof process.getuid === "function" ? process.getuid() : 0);
+export const uid = (): number => (typeof process.getuid === "function" ? process.getuid() : 0);
 
 async function sh(ctx: Ctx, cmd: string, args: string[]): Promise<{ ok: boolean; text: string }> {
   try {

@@ -23,7 +23,7 @@ function box(platform = "darwin", tools = ["python3", "npm", "cs-mcp", "systemct
     run: async (cmd, args) => {
       if (cmd === "launchctl" || cmd === "systemctl") {
         b.calls.push(`${cmd} ${args.join(" ")}`);
-        return { code: args[0] === "print" ? 1 : 0, stdout: "", stderr: "", timedOut: false };
+        return { code: args[0] === "print" || args.includes("is-active") ? 1 : 0, stdout: "", stderr: "", timedOut: false };
       }
       return { code: 1, stdout: "", stderr: "", timedOut: false };
     },
@@ -71,6 +71,20 @@ describe("non-service components", () => {
     writeFileSync(join(b.pi, "settings.json"), '{"packages":["./local-packages/pi-questions"]}\n');
     assert.equal(await run(b), 0, b.err.join("\n"));
     assert.ok(!read(b, "settings.json").includes("pi-web-access"));
+  });
+
+  test("web off stays off even when pi-questions is missing and the register content would be stale", async () => {
+    const b = box();
+    assert.equal(await run(b, "--with", "web"), 0, b.err.join("\n"));
+    const settings = JSON.parse(read(b, "settings.json"));
+    settings.packages = settings.packages.filter((p: string) => !p.includes("pi-questions"));
+    writeFileSync(join(b.pi, "settings.json"), `${JSON.stringify(settings, null, 2)}\n`);
+    for (const args of [["--without", "web"], [], []]) {
+      assert.equal(await run(b, ...args), 0, b.err.join("\n"));
+      const text = read(b, "settings.json");
+      assert.ok(!text.includes("pi-web-access") && !text.includes("pi-browser-use"), text);
+      assert.ok(text.includes("pi-questions"));
+    }
   });
 
   test("turning an extra off later retires what pi-setup added and leaves what you changed", async () => {
@@ -169,5 +183,66 @@ describe("services", () => {
     assert.equal(await main(["uninstall", "--yes"], b.ctx), 0, b.err.join("\n"));
     assert.ok(b.calls.some((c) => c.startsWith("launchctl bootout gui/") && c.endsWith("com.tester.docker-guardian")), b.calls.join("\n"));
     assert.ok(!existsSync(unit(b, "com.tester.docker-guardian.plist")));
+  });
+});
+
+describe("doctor", () => {
+  const doctor = async (b: Box) => {
+    b.out.length = 0;
+    const code = await main(["doctor"], b.ctx);
+    return { code, text: b.out.join("\n") };
+  };
+
+  test("a service that is not loaded is a warning with the exact command; doctor never loads anything", async () => {
+    const b = box();
+    assert.equal(await run(b, "--with", "docker-guardian"), 0, b.err.join("\n"));
+    const uid = process.getuid?.() ?? 0;
+    const plist = unit(b, "com.tester.docker-guardian.plist");
+    b.calls.length = 0;
+    const { text } = await doctor(b);
+    assert.ok(text.includes("service:docker-guardian: com.tester.docker-guardian is not loaded"), text);
+    assert.ok(text.includes(`fix: launchctl bootstrap gui/${uid} ${plist}`), text);
+    assert.deepEqual(b.calls, [`launchctl print gui/${uid}/com.tester.docker-guardian`]);
+    const run0 = b.ctx.run;
+    b.ctx.run = async (cmd, args, o) => (cmd === "launchctl" ? { code: 0, stdout: "", stderr: "", timedOut: false } : run0(cmd, args, o));
+    assert.ok((await doctor(b)).text.includes("com.tester.docker-guardian is loaded"));
+  });
+
+  test("a foreign unit and a turned-off service with a unit are only reported", async () => {
+    const b = box();
+    mkdirSync(join(b.home, "Library/LaunchAgents"), { recursive: true });
+    writeFileSync(unit(b, "com.tester.secret-sweep.plist"), "mine\n");
+    writeFileSync(unit(b, "com.tester.pi-cleanup.plist"), "mine\n");
+    assert.equal(await run(b, "--with", "secret-sweep", "--without", "cleanup"), 0, b.err.join("\n"));
+    b.calls.length = 0;
+    const { text } = await doctor(b);
+    assert.ok(text.includes("is not managed by pi-setup; left alone"), text);
+    assert.ok(text.includes("cleanup is turned off but a unit exists"), text);
+    assert.deepEqual(b.calls, []);
+  });
+
+  test("systemd uses is-active", async () => {
+    const b = box("linux");
+    assert.equal(await run(b, "--with", "cleanup"), 0, b.err.join("\n"));
+    b.calls.length = 0;
+    const { text } = await doctor(b);
+    assert.deepEqual(b.calls, ["systemctl --user is-active pi-cleanup.timer"]);
+    assert.ok(text.includes("fix: systemctl --user enable --now pi-cleanup.timer"), text);
+  });
+
+  test("CodeScene readiness: cs-mcp, token presence and skills each get a fix line; the value is never printed", async () => {
+    const b = box("darwin", ["python3", "npm"]);
+    assert.equal(await run(b, "--with", "codescene"), 0, b.err.join("\n"));
+    let { text } = await doctor(b);
+    for (const id of ["codescene-mcp", "codescene-token", "codescene-skills"]) assert.ok(text.includes(`⚠ ${id}:`), text);
+    assert.ok(text.includes("fix: install cs-mcp") && text.includes("fix: export CS_ACCESS_TOKEN="));
+    b.ctx.which = (n) => `/stub/${n}`;
+    b.ctx.env.CS_ACCESS_TOKEN = "SECRET-VALUE";
+    for (const n of ["explaining-code-health", "guiding-refactoring-with-code-health", "making-the-business-case-for-code-health", "prioritizing-technical-debt", "risk-based-testing-with-code-health", "routing-work-with-code-ownership", "safeguarding-ai-generated-code"]) {
+      mkdirSync(join(b.home, ".agents/skills", n), { recursive: true });
+    }
+    text = (await doctor(b)).text;
+    assert.ok(text.includes("✔ codescene-mcp") && text.includes("✔ codescene-token") && text.includes("✔ codescene-skills"), text);
+    assert.ok(!text.includes("SECRET-VALUE"));
   });
 });

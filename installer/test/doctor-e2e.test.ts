@@ -19,7 +19,7 @@ function ready(cleanCheckout = false) {
     git("-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture");
   }
   mkdirSync(join(box.root, "repos"));
-  const run = install(box, ["--yes", "--skip-npm", "--user", "tester", "--repos-root", join(box.root, "repos")], { repo, entry: repo ? "node" : "shim" });
+  const run = install(box, ["--yes", "--skip-npm", "--without", "codescene", "--user", "tester", "--repos-root", join(box.root, "repos")], { repo, entry: repo ? "node" : "shim" });
   assert.equal(run.status, 0, run.stdout + run.stderr);
   writeFileSync(piPath(box, "dev-doctor.json"), '{"disk":{"build_floor_gib":0,"cleanup_trigger_gib":0}}');
   const bin = join(box.home, ".local/bin"); mkdirSync(bin, { recursive: true });

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 12d8af6084f0b0a22683ed52850d1e5d453a865121ac9c2834837a53bd3684f2
+// pi-setup-source-sha256: a3a9275252b1b2c3d816125df30deaee7f60e02d2b85f26c9f6f1bc8fd566b71
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -1486,12 +1486,13 @@ function addPackage(data, value, fresh, ops, allow) {
   if (!has) data.packages = [...list ?? [], value];
   ops.push({ op: "array-add", key: "packages", value, keyCreated: !list });
 }
-function settingsEdit(web, activate) {
+function settingsEdit(web, activate, drop) {
   return (data, fresh) => {
     const ops = [];
     if (fresh && web !== true && Array.isArray(data.packages)) {
       if (web === false) data.packages = data.packages.filter((p) => !WEB_PACKAGES.includes(p));
     }
+    if (web === false && drop.length && Array.isArray(data.packages)) data.packages = data.packages.filter((p) => !drop.includes(p));
     addPackage(data, PACKAGE, false, ops, true);
     if (web === true) for (const p of WEB_PACKAGES) addPackage(data, p, fresh, ops, fresh || activate);
     return ops;
@@ -1539,7 +1540,7 @@ function buildPlan(input) {
   for (const name of ONLY_IF_ABSENT) {
     if (!existsSync10(join10(piDir, name))) putSource(actions, join10(agent, name), join10(piDir, name), settings2);
   }
-  registerJson(actions, join10(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web"))));
+  registerJson(actions, join10(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web")), input.drop ?? []));
   registerJson(actions, join10(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => void 0)));
   const absent = [
     ["docker-guardian/pinned.example.txt", "docker-guardian/pinned.txt"],
@@ -1674,6 +1675,14 @@ function launchdUnit(ctx, id) {
   const user = serviceUser(ctx.env);
   const text3 = readFileSync9(src, "utf8").split("__HOME__").join(xml(ctx.home)).split("com.example.").join(`com.${user}.`);
   return { unit: { path: join12(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text3) }, label: `com.${user}.${name}` };
+}
+function expectedUnit(ctx, id) {
+  if (ctx.platform === "darwin") {
+    const name = LAUNCHD_NAME[id];
+    const label = `com.${serviceUser(ctx.env)}.${name}`;
+    return name ? { kind: "launchd", label, file: join12(ctx.home, "Library/LaunchAgents", `${label}.plist`) } : void 0;
+  }
+  return id === "cleanup" ? { kind: "systemd", label: TIMER, file: join12(ctx.home, ".config/systemd/user", TIMER) } : void 0;
 }
 function planServices(ctx, manifest, on) {
   const out = { actions: [], records: {}, notes: [] };
@@ -2508,7 +2517,8 @@ async function update(ctx, manifest) {
 async function gatherFacts(baseCtx, manifest) {
   const ctx = { ...baseCtx, run: (cmd, args, options) => baseCtx.run(cmd, cmd === "git" ? ["--no-optional-locks", ...args] : args, options) };
   const hasPi = Boolean(ctx.which("pi"));
-  const agents = plists(ctx);
+  const recorded = new Set(Object.values(manifest?.components ?? {}).flatMap((c2) => c2.service?.kind === "launchd" ? [c2.service.label] : []));
+  const agents = plists(ctx).filter((p) => !recorded.has(p.label));
   const guardian = agents.some((p) => p.label.endsWith(".docker-guardian"));
   const [providers2, models2, version, gh, head, checkout, disks, launchd, docker, updates] = await Promise.all([
     Promise.all(PROVIDER_IDS.map((id) => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" })) : Promise.resolve({ status: "unknown" }))),
@@ -2550,9 +2560,65 @@ var init_doctor_probes = __esm({
   }
 });
 
+// src/doctor-components.ts
+import { existsSync as existsSync18, statSync as statSync10 } from "node:fs";
+import { join as join18 } from "node:path";
+async function isLoaded(ctx, kind, label) {
+  try {
+    const r2 = kind === "launchd" ? await ctx.run("launchctl", ["print", `gui/${uid()}/${label}`], { timeoutMs: 5e3 }) : await ctx.run("systemctl", ["--user", "is-active", label], { timeoutMs: 5e3 });
+    return r2.code === 0 && !r2.timedOut;
+  } catch {
+    return false;
+  }
+}
+async function componentChecks(ctx, manifest) {
+  const comps = manifest?.components;
+  if (!comps) return [];
+  const checks = [];
+  for (const def of COMPONENTS.filter((c2) => c2.service)) {
+    const unit = expectedUnit(ctx, def.id);
+    if (!unit) continue;
+    const id = `service:${def.id}`;
+    const rec = comps[def.id];
+    const exists = existsSync18(unit.file);
+    if (rec?.on && rec.service?.managed) {
+      const manual = unit.kind === "launchd" ? `launchctl bootstrap gui/${uid()} ${unit.file}` : `systemctl --user enable --now ${unit.label}`;
+      checks.push(await isLoaded(ctx, unit.kind, unit.label) ? check2(id, "ok", `${unit.label} is loaded`) : check2(id, "warn", `${unit.label} is not loaded`, manual));
+    } else if (rec?.on && !rec.service?.managed) {
+      checks.push(check2(id, "ok", `${unit.file.replace(`${ctx.home}/`, "~/")} is not managed by pi-setup; left alone`));
+    } else if (exists) {
+      checks.push(check2(id, "ok", `${def.id} is turned off but a unit exists at ${unit.file.replace(`${ctx.home}/`, "~/")}; left alone`));
+    }
+  }
+  if (comps.codescene?.on) {
+    const dir = join18(ctx.home, ".agents/skills");
+    const missing = CS_SKILLS.filter((n3) => {
+      try {
+        return !statSync10(join18(dir, n3)).isDirectory();
+      } catch {
+        return true;
+      }
+    });
+    checks.push(
+      ctx.which("cs-mcp") ? check2("codescene-mcp", "ok", "cs-mcp is on PATH") : check2("codescene-mcp", "warn", "cs-mcp not found on PATH", "install cs-mcp: https://github.com/codescene-oss/codescene-mcp-server#readme"),
+      ctx.env.CS_ACCESS_TOKEN ? check2("codescene-token", "ok", "CS_ACCESS_TOKEN is set") : check2("codescene-token", "warn", "CS_ACCESS_TOKEN is not set", "export CS_ACCESS_TOKEN=<your token> in your shell profile (pi-setup never stores it)"),
+      missing.length === 0 ? check2("codescene-skills", "ok", "CodeScene skills are present") : check2("codescene-skills", "warn", `CodeScene skills missing: ${missing.join(", ")}`, "copy skills/<name> from https://github.com/codescene-oss/codescene-mcp-server/tree/main/skills to ~/.agents/skills/")
+    );
+  }
+  return checks;
+}
+var check2;
+var init_doctor_components = __esm({
+  "src/doctor-components.ts"() {
+    init_components();
+    init_services();
+    check2 = (id, status, detail, fix) => ({ id, title: id, status, detail, ...fix ? { fix } : {} });
+  }
+});
+
 // src/doctor.ts
 import { chmodSync as chmodSync3 } from "node:fs";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 function doctorExitCode(checks) {
   return checks.some((c2) => c2.status === "fail") ? 2 : checks.some((c2) => c2.status === "warn") ? 1 : 0;
 }
@@ -2566,14 +2632,15 @@ function render2(checks) {
 async function inspect(ctx) {
   let manifest;
   try {
-    manifest = readManifest(join18(ctx.home, ".pi/agent"));
+    manifest = readManifest(join19(ctx.home, ".pi/agent"));
     if (manifest) validateManifest(ctx.home, manifest);
   } catch {
     manifest = void 0;
   }
   const gathered = await gatherFacts(ctx, manifest);
   const local = localChecks(ctx, gathered.facts);
-  return { ...local, facts: gathered.facts, checks: [...local.checks, ...gathered.checks] };
+  const extras = await componentChecks(ctx, local.manifest);
+  return { ...local, facts: gathered.facts, checks: [...local.checks, ...gathered.checks, ...extras] };
 }
 async function runDoctor(ctx, options, baseCtx) {
   let report = await inspect(ctx);
@@ -2581,11 +2648,11 @@ async function runDoctor(ctx, options, baseCtx) {
   if (options.fix) {
     const fixable = new Set(report.checks.map((c2) => c2.fixable));
     if (fixable.has("npm")) {
-      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join18(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
+      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join19(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("npm");
     }
     if (fixable.has("restore") && report.facts.checkoutClean === true && report.facts.head && report.facts.head === report.manifest?.source.commit) {
-      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join18(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
+      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join19(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("restore");
     }
     if (fixable.has("chmod") && report.manifest) {
@@ -2625,6 +2692,7 @@ var init_doctor = __esm({
     init_doctor_checks();
     init_doctor_probes();
     init_manifest();
+    init_doctor_components();
     init_doctor_checks();
     counts = (checks) => {
       const count = (status) => checks.filter((c2) => c2.status === status).length;
@@ -4302,7 +4370,7 @@ var run_exports = {};
 __export(run_exports, {
   main: () => main
 });
-import { join as join19 } from "node:path";
+import { join as join20 } from "node:path";
 function pickProfile(options, activeBefore, ready2, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
     if (!names.includes(options.profile)) {
@@ -4341,7 +4409,7 @@ function extraRows(ctx, options, saved, detection, manifest) {
   };
 }
 function resolveAll(ctx, options, detection, saved, answers, manifest) {
-  const piDir = join19(ctx.home, ".pi", "agent");
+  const piDir = join20(ctx.home, ".pi", "agent");
   const settings2 = resolveSettings({
     flagUser: answers.user ?? options.user,
     flagRoot: answers.root ?? options.reposRoot,
@@ -4385,6 +4453,7 @@ function resolveAll(ctx, options, detection, saved, answers, manifest) {
       components: on,
       which: ctx.which,
       notes,
+      drop: on.web === false ? (manifest?.json[".pi/agent/settings.json"]?.ops ?? []).flatMap((o) => o.op === "array-add" && o.key === "packages" && WEB_PACKAGES.includes(o.value) ? [o.value] : []) : [],
       activate: COMPONENTS.map((c2) => c2.id).filter((id) => on[id] && !wasOn(manifest, currentState(ctx), id))
     }),
     manifest,
@@ -4403,7 +4472,7 @@ function resolveAll(ctx, options, detection, saved, answers, manifest) {
     ...settings2.warnings,
     ...componentNotes.filter((n3) => n3.startsWith("warning:")).map((n3) => n3.slice(9)),
     ...detection.warnings,
-    ...pinWarnings(pinnedModels(join19(profilesDir(ctx.repoDir), choice.name)), ready2, detection.catalog),
+    ...pinWarnings(pinnedModels(join20(profilesDir(ctx.repoDir), choice.name)), ready2, detection.catalog),
     ...kimi ? [kimi] : []
   ];
   return { settings: settings2, choice, actions, warnings, profile: profile2, ready: ready2, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
@@ -4449,8 +4518,8 @@ async function runCommand(ctx, options, prompter, baseCtx) {
   return backupsCommand(ctx, options.sub, options.keep, options.dryRun);
 }
 async function execute(ctx, options, prompter, baseCtx) {
-  const piDir = join19(ctx.home, ".pi", "agent");
-  const saved = readSettings(join19(piDir, "user.json"));
+  const piDir = join20(ctx.home, ".pi", "agent");
+  const saved = readSettings(join20(piDir, "user.json"));
   const manifest = readManifest(piDir);
   const readOnly = options.dryRun || options.plan;
   const names = profileNames(ctx.repoDir);
@@ -4574,7 +4643,7 @@ var init_run = __esm({
 });
 
 // src/cli.ts
-import { dirname as dirname7, join as join20 } from "node:path";
+import { dirname as dirname7, join as join21 } from "node:path";
 import { fileURLToPath } from "node:url";
 var MIN = [22, 19, 0];
 function nodeTooOld(version) {
@@ -4589,7 +4658,7 @@ if (nodeTooOld(process.version)) {
 `);
   process.exit(1);
 }
-var repoDir = join20(dirname7(fileURLToPath(import.meta.url)), "..", "..");
+var repoDir = join21(dirname7(fileURLToPath(import.meta.url)), "..", "..");
 var { realContext: realContext2 } = await Promise.resolve().then(() => (init_context(), context_exports));
 var { main: main2 } = await Promise.resolve().then(() => (init_run(), run_exports));
 process.exitCode = await main2(process.argv.slice(2), realContext2(repoDir));
