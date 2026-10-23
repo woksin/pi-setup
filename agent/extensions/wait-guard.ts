@@ -39,8 +39,9 @@ const PHASE_SLACK_SECONDS = 60;
 /**
  * Outer timeout a pi-phase command legitimately needs: Σ(--timeout + --queue-timeout) per `run`,
  * plus slack. Queue time is not execution time, and pi-phase itself enforces the 600 s execution
- * cap (`--approved-long-timeout`), so the guard should not double-charge it. Returns undefined when
- * the command is not a pi-phase run or a budget exceeds the limit without pi-phase's own approval.
+ * cap (`--approved-long-timeout`), so the guard should not double-charge it. Queue budgets up to
+ * 7200 s need no pi-phase approval, but foreground waits over 600 s still use the normal long-timeout
+ * rules (return undefined); long queue waits belong in background jobs (`job_start`).
  */
 export function piPhaseBudget(command: string): number | undefined {
 	if (!/\bpi-phase\b/.test(command)) return undefined;

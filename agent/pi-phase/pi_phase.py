@@ -53,7 +53,7 @@ def note(message):
 
 
 KINDS = ("build", "test", "integration", "ci")
-OUTCOMES = ("passed", "failed", "queue-timeout", "timeout", "cancelled", "rejected", "error")
+OUTCOMES = ("passed", "failed", "queue-timeout", "timeout", "cancelled", "rejected", "error", "skipped")
 
 
 def stack_name(value):
@@ -124,30 +124,46 @@ def utc_stamp():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def git_state(cwd):
+def git_state(cwd, timeout=None):
     """Capture queued code without optional index writes, filenames or diffs in the ledger."""
     head = dirty = None
     if cwd is None:
         return head, dirty
     environment = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def budget(default):
+        remaining = default if deadline is None else min(default, deadline - time.monotonic())
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("git", timeout)
+        return remaining
+
     try:
         head = subprocess.run(["git", "--no-optional-locks", "rev-parse", "HEAD"], cwd=cwd, env=environment, capture_output=True,
-                              text=True, check=True, timeout=2).stdout.strip()
+                              text=True, check=True, timeout=budget(2)).stdout.strip()
+    except subprocess.TimeoutExpired:
+        if timeout is not None:
+            raise
     except (OSError, subprocess.SubprocessError):
         pass
-    deadline = time.monotonic() + 5
+    dirty_deadline = time.monotonic() + 5
     try:
         status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
-                                cwd=cwd, env=environment, capture_output=True, check=True, timeout=5).stdout
+                                cwd=cwd, env=environment, capture_output=True, check=True, timeout=budget(5)).stdout
         if not status:
             dirty = "clean"
         else:
-            remaining = deadline - time.monotonic()
+            remaining = dirty_deadline - time.monotonic()
             if remaining <= 0:
+                if timeout is not None:
+                    raise subprocess.TimeoutExpired("git", timeout)
                 return head, None
             diff = subprocess.run(["git", "--no-optional-locks", "diff", "HEAD", "--binary"], cwd=cwd,
-                                  env=environment, capture_output=True, check=True, timeout=remaining).stdout
+                                  env=environment, capture_output=True, check=True, timeout=budget(remaining)).stdout
             dirty = hashlib.sha256(status + diff).hexdigest()
+    except subprocess.TimeoutExpired:
+        if timeout is not None:
+            raise
     except (OSError, subprocess.SubprocessError):
         pass
     return head, dirty
@@ -192,7 +208,7 @@ class PhaseLedger:
     def __init__(self, args):
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
         try:
-            cwd = os.getcwd()
+            cwd = os.path.realpath(os.getcwd())
         except OSError:
             cwd = None
         self.record = dict(v=1, ts=None, session=os.environ.get("PI_SESSION_ID") or None,
@@ -207,11 +223,34 @@ class PhaseLedger:
         self.enqueued = False
         self.snapshot_thread = None
         self.git_result = (None, None)
+        self.snapshot_ready = False
+
+    def prepare_snapshot(self):
+        try:
+            result = git_state(self.record["cwd"], timeout=3)
+            if result[0] is not None:
+                self.record["head"], self.record["dirty"] = self.git_result = result
+                self.snapshot_ready = True
+        except Exception:
+            pass  # Timeout/non-Git cwd retains the post-registration best-effort snapshot.
+
+    def passed_state(self, state):
+        if not self.snapshot_ready or self.record["dirty"] is None:
+            return None
+        try:
+            records, _ = read_ledger(state, days=14)
+        except (OSError, ValueError):
+            return None  # Unreadable history must not prevent execution.
+        keys = ("cwd", "kind", "label", "argvHash", "head", "dirty", "stack")
+        return next((r for r in reversed(records) if r["outcome"] == "passed"
+                     and all(r.get(k) == self.record[k] for k in keys)), None)
 
     def enqueue(self):
         self.record["queuedAt"] = utc_stamp()
         self.queued = time.monotonic()
         self.enqueued = True
+        if self.snapshot_ready:
+            return
         self.snapshot_thread = threading.Thread(target=self.snapshot, daemon=True)
         try:
             self.snapshot_thread.start()
@@ -236,7 +275,9 @@ class PhaseLedger:
     def finish(self, state, code):
         self.record["ts"] = self.record["endedAt"] = utc_stamp()
         self.record["exit"] = code
-        if self.started is None:
+        if self.record["outcome"] == "skipped":
+            self.record["waitS"] = self.record["runS"] = 0
+        elif self.started is None:
             self.record["waitS"] = max(0, time.monotonic() - self.queued)
         else:
             self.record["runS"] = max(0, time.monotonic() - self.started)
@@ -339,16 +380,17 @@ def stats(state, days, kind, as_json, stack=None):
         rows.append(dict(day=day, kind=kind, stack=stack, count=len(entries), started=len(started),
                          waitS={f"p{p}": percentile([r["waitS"] for r in entries], p) for p in (50, 90)},
                          runS={f"p{p}": percentile([r["runS"] for r in started], p) for p in (50, 90)},
+                         skipped=sum(r["outcome"] == "skipped" for r in entries),
                          queueTimeouts=sum(r["outcome"] == "queue-timeout" for r in entries),
                          failures=sum(r["outcome"] in ("failed", "timeout", "error") for r in entries)))
     if as_json:
         print(json.dumps(dict(days=days, skipped=skipped, rows=rows)))
     else:
-        print("day kind stack count started waitS.p50 waitS.p90 runS.p50 runS.p90 queue-timeouts failures")
+        print("day kind stack count started waitS.p50 waitS.p90 runS.p50 runS.p90 queue-timeouts failures skipped")
         for row in rows:
             print(row["day"], row["kind"], row["stack"], row["count"], row["started"],
                   *("-" if v is None else f"{v:g}" for v in (*row["waitS"].values(), *row["runS"].values())),
-                  row["queueTimeouts"], row["failures"])
+                  row["queueTimeouts"], row["failures"], row["skipped"])
         print(f"skipped {skipped} malformed ledger lines")
     return 0
 
@@ -461,7 +503,7 @@ def config(path, *, notes=None):
 
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
-                    phase_nice=0, rss_cap_mb=12288)
+                    phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3)
     try:
         data = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(data, dict):
@@ -476,6 +518,8 @@ def config(path, *, notes=None):
         value = data.get(key, default)
         if key in ("heavy_slots", "integration_slots"):
             valid = type(value) is int and 1 <= value <= 32
+        elif key == "max_high":
+            valid = type(value) is int and 1 <= value <= 10
         elif key == "msbuild_max_cpu":
             valid = value == "auto" or type(value) is int and value >= 0
         elif key == "rss_cap_mb":
@@ -1031,6 +1075,27 @@ def revoke_priority(state):
     return 0
 
 
+def high_count(state):
+    """Caller holds the coordinator; count queued and leased HIGH tokens only once."""
+    tokens = {w["token"] for w in live_waiters(state) if w["priority"] == "high"}
+    for path in state.glob("heavy-*.lock"):
+        data = metadata(path.with_suffix(".json"))
+        if data.get("priority") != "high":
+            continue
+        busy = readonly_busy(path)
+        if not busy and data.get("pgid"):
+            try:
+                os.killpg(data["pgid"], 0)
+                busy = True
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                busy = True
+        if busy:
+            tokens.add(data.get("token", path.name))
+    return len(tokens)
+
+
 def register_waiter(state, args, token):
     """Nonblocking registration, including atomic grant consumption and FIFO sequence."""
     coordinator = lock_file(state / "coordinator.lock")
@@ -1040,7 +1105,14 @@ def register_waiter(state, args, token):
     fd = None
     try:
         if args.priority == "high":
-            consume_priority(state)
+            cap = getattr(args, "max_high", 3)
+            if high_count(state) >= cap:
+                if priority_grant(state) is None:
+                    raise ValueError(APPROVAL_REQUIRED)
+                args.priority = "normal"
+                note(f"high-priority cap ({cap}) reached; queued as normal")
+            else:
+                consume_priority(state)
         if args.kind == "ci":
             return True, None
         path.parent.mkdir(mode=0o700, exist_ok=True)
@@ -1177,7 +1249,12 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             candidate = next((c for c in candidates if all(p in eligible for p in c)), [])
         if candidate and not cancelled() and time.monotonic() < deadline:
             if waiter is not None:
-                (state / "waiters" / f"{waiter}.json").unlink(missing_ok=True)
+                waiter_path = state / "waiters" / f"{waiter}.json"
+                info = metadata(waiter_path)
+                if info.get("priority") == "high":
+                    # Reserve the HIGH count before unlinking; launcher publication happens later.
+                    publish([(path, available[path]) for path in candidate], info)
+                waiter_path.unlink(missing_ok=True)
             return [(path, available.pop(path)) for path in candidate]
     finally:
         for fd in available.values():
@@ -1207,9 +1284,11 @@ def release(state, held, token, safe):
             os.close(fd)
 
 
-def status(state):
+def status(state, configuration=CONFIG):
+    cap = config(configuration).options["max_high"]
     if not state.exists():
         note("no active phases")
+        note(f"high=0/{cap}")
         return 0
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
@@ -1225,6 +1304,7 @@ def status(state):
             owners.append((path, data, busy))
         waiters = live_waiters(state)
         grant = priority_grant(state)
+        high = high_count(state)
     # No slow ps probe or terminal write while holding the shared coordinator.
     live = live_groups(2) if any(not busy and data.get("pgid") for _, data, busy in owners) else set()
     seen = set()
@@ -1246,6 +1326,7 @@ def status(state):
         age = max(0, int(time.time() - waiter["enqueued"]))
         note(f"queued priority={waiter['priority']} kind={waiter['kind']} "
              f"label={waiter.get('label', '?')} waited={age}s rank={rank}")
+    note(f"high={high}/{cap}")
     if grant:
         remaining = "unlimited uses" if grant["uses"] is None else f"{grant['uses']} use(s) remaining"
         seconds = max(0, math.ceil(grant["expires"] - time.time()))
@@ -1303,6 +1384,10 @@ def stop_group(pgid):
 
 
 def bounded(value, name, approved):
+    if name == "queue-timeout":
+        if not math.isfinite(value) or not 0 < value <= 7200:
+            raise ValueError("queue-timeout must be positive and at most 7200s")
+        return value
     if not math.isfinite(value) or value <= 0 or (value > 600 and not approved):
         raise ValueError(f"{name} must be positive and at most 600s without --approved-long-timeout")
     return value
@@ -1361,6 +1446,20 @@ def run(args, state, configuration, output=None):
     ledger = getattr(args, "ledger", None)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     ci_key = (args.repo, args.pr, args.commit)
+    config_notes = set()
+    settings = config(configuration, notes=config_notes)
+    options = settings.options
+    if ledger:
+        ledger.prepare_snapshot()
+        if (not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1" and args.kind != "ci"
+                and (args.kind != "integration" or options["skip_passed_integration"])):
+            passed = ledger.passed_state(state)
+            if passed:
+                note(f"skipped: this exact state already passed at {passed['ts']} "
+                     f"(kind={args.kind} label={args.label} head={passed['head'][:7]} "
+                     f"run={passed['runS']:g}s); pass --rerun to run again")
+                ledger.outcome("skipped")
+                return 0
     queued = time.monotonic()
     deadline = queued + args.queue_timeout
     long_queue_hint = False
@@ -1383,11 +1482,8 @@ def run(args, state, configuration, output=None):
     shim_dir = None
     detector_stopped = threading.Event()
     fingerprint = test_fingerprint(os.getcwd(), command)
-    admission_args = argparse.Namespace(**vars(args))
+    admission_args = argparse.Namespace(**vars(args), max_high=options["max_high"])
     try:
-        config_notes = set()
-        settings = config(configuration, notes=config_notes)
-        options = settings.options
         admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
         burst_settings = options["memory_admission"].get("integration_burst") if admission else None
         burst = IntegrationBurst(admission, burst_settings) if burst_settings else None
@@ -1412,6 +1508,7 @@ def run(args, state, configuration, output=None):
             if not registered:
                 registered, waiter_fd = register_waiter(state, admission_args, token)
                 if registered and ledger:
+                    ledger.record["priority"] = admission_args.priority
                     ledger.enqueue()
                 if not registered:
                     time.sleep(min(TICK, max(0, deadline - time.monotonic())))
@@ -1482,7 +1579,7 @@ def run(args, state, configuration, output=None):
             os.close(read_gate)
             read_gate = -1
             publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, cwd=os.getcwd(),
-                               label=args.label, kind=args.kind, started=time.time()))
+                               label=args.label, kind=args.kind, priority=admission_args.priority, started=time.time()))
             if cancelled[0]:
                 note("cancelled before execution; command not started")
                 if ledger:
@@ -1599,7 +1696,8 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--priority", choices=tuple(PRIORITIES), default="normal")
     runner.add_argument("--timeout", type=float, default=None, help="execution seconds (default 300 build/test/integration, 120 ci)")
     runner.add_argument("--queue-timeout", type=float, default=120, help="separate permit wait in seconds")
-    runner.add_argument("--approved-long-timeout", action="store_true", help="declare explicit user approval for >600 seconds")
+    runner.add_argument("--approved-long-timeout", action="store_true", help="declare explicit user approval for execution >600 seconds")
+    runner.add_argument("--rerun", action="store_true", help="run even if this exact state already passed")
     runner.add_argument("--repo", help="ci watcher repo identity")
     runner.add_argument("--pr", help="ci watcher PR identity")
     runner.add_argument("--commit", help="ci watcher commit identity")
@@ -1644,7 +1742,7 @@ def main(argv=None, *, state=None, configuration=None):
         if args.action == "wait":
             return wait_eta(state, configuration, args.kind)
         if args.action == "status":
-            return status(state)
+            return status(state, configuration)
         if args.action == "grant-priority":
             return grant_priority(state, args.uses, args.minutes)
         if args.action == "revoke-priority":
