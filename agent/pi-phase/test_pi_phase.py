@@ -519,7 +519,8 @@ class PhaseTests(unittest.TestCase):
         record = records[0]
         self.assertEqual(set(record), {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
-                                      "head", "dirty", "argvHash", "stack", "envHash", "verified", "fingerprint", "fast", "policy", "source"})
+                                      "head", "dirty", "argvHash", "stack", "envHash", "verified", "fingerprint", "fast", "policy", "source",
+                                  "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
@@ -982,7 +983,8 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(settings.options, dict(policy=[], msbuild_max_cpu=0, container_test_detection="hint",
                                                 cold_worktree_hint=True, memory_admission=False, phase_nice=0,
                                                 rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
-                                                fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"])))
+                                                fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
+    queue_order=dict(mode="shortest-first", aging_s=600, default_expected_s=180, low_promote_after_s=900)))
         for cores, slots, expected in ((12, 2, 6), (12, 4, 3), (1, 4, 2), (None, 2, 2)):
             with self.subTest(cores=cores, slots=slots), patch.object(pi_phase.os, "cpu_count", return_value=cores):
                 self.assertEqual(pi_phase.msbuild_cap("auto", slots), expected)
@@ -1010,7 +1012,8 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(pi_phase.config(self.config).options,
                          dict(policy=[], msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0,
                               rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
-                              fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"])))
+                              fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
+    queue_order=dict(mode="shortest-first", aging_s=600, default_expected_s=180, low_promote_after_s=900)))
 
     def test_dotnet_shim_insertion_and_passthrough(self):
         # Real shell execution, including spaces, empty arguments and a shim PATH alias.
@@ -1250,7 +1253,9 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(out.count("hint: this test phase started Testcontainers containers"), 1)
         fingerprint = pi_phase.test_fingerprint(os.getcwd(), command)
-        self.assertEqual(json.loads((self.state / "container-tests.json").read_text()), {fingerprint: True})
+        family = pi_phase.work_identity(os.getcwd(), command, "test").family_key
+        self.assertEqual(json.loads((self.state / "container-tests.json").read_text()),
+                         {fingerprint: True, f"family:{family}": True})
         alias = self.root / "cwd-alias"
         alias.symlink_to(Path.cwd(), target_is_directory=True)
         self.assertEqual(pi_phase.test_fingerprint(alias, command), fingerprint)
@@ -1877,14 +1882,14 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(candidates, pi_phase.slot_paths(self.state, "ci", 2, 1, "key"))
 
     def test_fast_config_defaults_overrides_disabled_invalid(self):
-        self.assertEqual(self.fast_settings(), dict(slots=2, max_expected_s=90, kinds=["build", "test"]))
+        self.assertEqual(self.fast_settings(), dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True))
         self.configure(fast_lane=dict(slots=1, max_expected_s=12.5, kinds=["test"]))
-        self.assertEqual(self.fast_settings(), dict(slots=1, max_expected_s=12.5, kinds=["test"]))
+        self.assertEqual(self.fast_settings(), dict(slots=1, max_expected_s=12.5, kinds=["test"], shape=True))
         self.configure(fast_lane=False)
         self.assertIs(self.fast_settings(), False)
         self.configure(fast_lane=dict(slots=True, max_expected_s=float("inf"), kinds=["integration"], typo=1))
         with patch.object(pi_phase, "note") as note:
-            self.assertEqual(self.fast_settings(), dict(slots=2, max_expected_s=90, kinds=["build", "test"]))
+            self.assertEqual(self.fast_settings(), dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True))
             self.assertEqual(note.call_count, 4)
         self.configure(fast_lane=None)
         with patch.object(pi_phase, "note"):
@@ -2109,7 +2114,7 @@ class PhaseTests(unittest.TestCase):
             code = pi_phase.main(["run", "--kind", "build", "--label", "overrun", "--expect-fast",
                                   "--timeout", "2", "--", *command], state=self.state, configuration=self.config)
         self.assertEqual(code, 124)
-        self.assertTrue(any("rerun without --expect-fast" in call.args[0] for call in note.call_args_list))
+        self.assertTrue(any("rerun normally; this command family now queues" in call.args[0] for call in note.call_args_list))
         record = self.ledger_records()[0]
         self.assertTrue(record["fastBudgetExceeded"])
         self.assertEqual(record["outcome"], "timeout")

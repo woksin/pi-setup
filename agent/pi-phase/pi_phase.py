@@ -4,7 +4,7 @@ Only the child's own process group is signalled. The producer inherits the lease
 metadata guards against a dead supervisor whose descendant closed inherited FDs.
 """
 import argparse
-from collections import deque
+from collections import deque, namedtuple
 from datetime import datetime, timezone, timedelta
 import errno
 import fcntl
@@ -65,12 +65,14 @@ def stack_name(value):
     return value
 
 
-def command_stack(command):
-    """Best effort only: unwrap simple invocations, never evaluate shell code."""
+def unwrap_command(command):
+    """Best effort only: strip env/nice/bash -c wrappers, never evaluate shell code.
+
+    Returns the inner argv, or None when the invocation cannot be unwrapped safely."""
     command = list(command)
     for _ in range(20):
         if not command:
-            return "other"
+            return None
         name = Path(command[0]).name
         if name == "env":
             index = 1
@@ -86,7 +88,7 @@ def command_stack(command):
                 elif arg.startswith("--unset="):
                     index += 1
                 elif arg.startswith("-"):
-                    return "other"
+                    return None
                 else:
                     break
             command = command[index:]
@@ -106,21 +108,42 @@ def command_stack(command):
                 lexer.whitespace_split = True
                 command = list(lexer)
             except ValueError:
-                return "other"
+                return None
             if any(arg and all(c in ";&|<>()" for c in arg) for arg in command):
-                return "other"
+                return None
         else:
-            if name == "dotnet":
-                return "dotnet"
-            if name in ("node", "npm", "npx", "yarn", "pnpm", "corepack", "tsc", "tsgo", "vite",
-                        "vitest", "jest", "playwright", "eslint", "prettier", "turbo", "nx"):
-                return "node"
-            if name in ("python", "python3", "pytest"):
-                return "python"
-            if name in ("docker", "docker-compose"):
-                return "docker"
-            return {"cargo": "rust", "go": "go"}.get(name, "other")
-    return "other"
+            return command
+    return None
+
+
+SPEC_EXECUTABLE = re.compile(r".+\.(Specs|Tests)(\.exe)?$")
+
+
+def is_spec_executable(argument):
+    return SPEC_EXECUTABLE.fullmatch(Path(argument).name) is not None
+
+
+def tool_stack(name):
+    """Stack of a known tool name, or None."""
+    if name == "dotnet":
+        return "dotnet"
+    if name in ("node", "npm", "npx", "yarn", "pnpm", "corepack", "tsc", "tsgo", "vite",
+                "vitest", "jest", "playwright", "eslint", "prettier", "turbo", "nx"):
+        return "node"
+    if name in ("python", "python3", "pytest"):
+        return "python"
+    if name in ("docker", "docker-compose"):
+        return "docker"
+    return {"cargo": "rust", "go": "go"}.get(name)
+
+
+def command_stack(command):
+    """Best effort only: unwrap simple invocations, never evaluate shell code."""
+    command = unwrap_command(command)
+    if not command:
+        return "other"
+    # Built xUnit v3 / Specifications executables run as their own process; they are dotnet work.
+    return tool_stack(Path(command[0]).name) or ("dotnet" if is_spec_executable(command[0]) else "other")
 
 
 def utc_stamp():
@@ -464,13 +487,14 @@ def readonly_busy(path):
         os.close(fd)
 
 
-def eta_fast(state, settings, request):
+def eta_fast(state, settings, request, history=None, identity=None):
     if request is None or not request.command:
         return False
     command = request.command[1:] if request.command[0] == "--" else request.command
     if not command:
         return False
-    return fast_phase(state, request, settings, test_fingerprint(os.getcwd(), command))
+    return fast_phase(state, request, settings, test_fingerprint(os.getcwd(), command),
+                      history=history, identity=identity)
 
 
 def wait_eta(state, configuration, kind, request=None):
@@ -509,29 +533,44 @@ def wait_eta(state, configuration, kind, request=None):
                 running.add(data.get("token", path.stem))
                 remaining = max(0, medians.get(data.get("kind"), median) - max(0, now - data.get("started", now)))
                 events.append((remaining, resource))
-            waiters = all_waiters(state, readonly=True)
+            waiters = all_waiters(state, readonly=True, now=now)
         finally:
             os.close(coordinator)
     waiters = [w for w in waiters if PRIORITIES[w["priority"]] >= PRIORITIES["normal"]]
-    ahead = len(waiters)
-    pending = [(w["kind"], w.get("fast", False)) for w in waiters] + [(kind, eta_fast(state, fast, request))]
+    # The caller joins at its comparator position, as a real registration would rank.
+    order = settings.options["queue_order"]
+    history, identity, caller_basis = PhaseHistory(records), None, "default"
+    expected = order["default_expected_s"]
+    command = [c for c in (request.command if request else []) if c != "--"]
+    if command:
+        identity = work_identity(os.getcwd(), command, kind)
+        expected, caller_basis = history.estimate(identity, test_fingerprint(os.getcwd(), command), kind,
+                                                  order["default_expected_s"])
+    caller = dict(priority="normal", enqueued=now, seq=float("inf"), kind=kind, expected=expected,
+                  basis=caller_basis, caller=True, fast=eta_fast(state, fast, request, history, identity),
+                  ageAt=now + (min(order["aging_s"], 0.5 * getattr(request, "queue_timeout", 1200))
+                               if order["mode"] == "shortest-first" else 0))
+    ordered = sorted([*waiters, caller], key=lambda w: queue_key(w, now))
+    ahead = ordered.index(caller)
+    pending = [(w["kind"], w.get("fast", False), w.get("caller", False),
+                w["expected"] if w.get("basis", "default") != "default" else medians[w["kind"]])
+               for w in ordered]
     elapsed = 0
     if kind == "ci":
-        pending, ahead = [(kind, False)], 0
+        pending, ahead = [(kind, False, True, medians[kind])], 0
     while pending:
-        for entry in list(enumerate(pending)):
-            index, (candidate, is_fast) = entry
+        for index, (candidate, is_fast, caller, seconds) in list(enumerate(pending)):
             needs = eta_resources(candidate, is_fast, free)
             if not all(free[r] > 0 for r in needs):
                 continue
-            if index == len(pending) - 1:
+            if caller:
                 print(f"eta ~{math.ceil(elapsed / 60)}m (ahead={ahead} running={len(running)} "
                       f"p50run={median:g}s, basis={basis} runs)")
                 return 0
             pending[index] = None
             for resource in needs:
                 free[resource] -= 1
-                events.append((elapsed + medians[candidate], resource))
+                events.append((elapsed + seconds, resource))
         pending = [k for k in pending if k is not None]
         if not events:
             print("eta unknown (live capacity unavailable)")
@@ -576,7 +615,8 @@ def config(path, *, notes=None):
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
-                    fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"]), policy=[])
+                    fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
+                    queue_order=dict(QUEUE_ORDER_DEFAULTS), policy=[])
     try:
         data = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(data, dict):
@@ -605,6 +645,9 @@ def config(path, *, notes=None):
         elif key == "memory_admission":
             values[key] = memory_admission_config(value, warn)
             continue
+        elif key == "queue_order":
+            values[key] = queue_order_config(value, warn)
+            continue
         elif key == "container_test_detection":
             valid = value in ("off", "hint", "promote")
         else:
@@ -616,6 +659,28 @@ def config(path, *, notes=None):
     heavy = values.pop("heavy_slots")
     integration = values.pop("integration_slots")
     return PhaseConfig(heavy, integration, values)
+
+
+QUEUE_ORDER_DEFAULTS = dict(mode="shortest-first", aging_s=600, default_expected_s=180, low_promote_after_s=900)
+
+
+def queue_order_config(value, warn):
+    settings = dict(QUEUE_ORDER_DEFAULTS)
+    if not isinstance(value, dict):
+        warn("invalid queue_order; using defaults")
+        return settings
+    validators = dict(mode=lambda v: v in ("fifo", "shortest-first"),
+                      aging_s=lambda v: type(v) in (int, float) and 30 <= v <= 3600,
+                      default_expected_s=lambda v: type(v) in (int, float) and 1 <= v <= 7200,
+                      low_promote_after_s=lambda v: type(v) in (int, float) and 30 <= v <= 7200)
+    for key, item in value.items():
+        if key not in validators:
+            warn(f"unknown queue_order key {key}; ignored")
+        elif validators[key](item):
+            settings[key] = item
+        else:
+            warn(f"invalid queue_order.{key}; using default {QUEUE_ORDER_DEFAULTS[key]!r}")
+    return settings
 
 
 def configure_policy(defaults, values, data, warn):
@@ -668,21 +733,28 @@ def requested_policy(args):
     return None, "default"
 
 
-def configured_policy(state, args, options, fingerprint):
+def configured_policy(state, args, options, fingerprint, *, history=None, identity=None):
     cwd = os.path.realpath(os.getcwd())
     for rule in options["policy"]:
         if args.kind not in rule["kinds"] or not fnmatch.fnmatchcase(cwd, os.path.expanduser(rule["path"])):
             continue
-        return rule_policy(state, rule, fingerprint), "config"
-    fast = fast_phase(state, args, options["fast_lane"], fingerprint)
-    return ("fast", "history") if fast else ("queued", "default")
+        return rule_policy(state, rule, fingerprint, history=history, identity=identity), "config"
+    fast, source = fast_decision(state, args, options["fast_lane"], fingerprint, history=history, identity=identity)
+    return ("fast", source) if fast else ("queued", "default")
 
 
-def rule_policy(state, rule, fingerprint):
+def rule_policy(state, rule, fingerprint, *, history=None, identity=None):
     if rule["policy"] != "direct":
         return rule["policy"]
-    history = policy_history(state, fingerprint)
-    if not history or slow_fast_history(history, rule.get("max_expected_s", 90)):
+    limit = rule.get("max_expected_s", 90)
+    if history is not None:
+        # Work/family history, so a new filter or executable path cannot bypass a slow record.
+        records = history.scoped(fingerprint, identity)
+        if not records or slow_fast_history(records, limit) or history.family_overran(identity):
+            return "fast"
+        return "direct"
+    records = policy_history(state, fingerprint)
+    if not records or slow_fast_history(records, limit):
         return "fast"
     return "direct"
 
@@ -695,41 +767,46 @@ def policy_history(state, fingerprint):
         return []
 
 
-def select_policy(state, args, options, fingerprint):
+def select_policy(state, args, options, fingerprint, *, history=None, identity=None):
     policy, source = requested_policy(args)
     if policy is None:
-        policy, source = configured_policy(state, args, options, fingerprint)
+        policy, source = configured_policy(state, args, options, fingerprint, history=history, identity=identity)
     if policy == "direct":
-        policy = safe_direct_policy(state, args.kind, fingerprint)
+        policy = safe_direct_policy(state, args.kind, fingerprint, identity)
     if policy == "fast":
-        policy = hinted_fast_policy(state, args, options["fast_lane"], fingerprint)
+        policy = hinted_fast_policy(state, args, options["fast_lane"], fingerprint, history=history, identity=identity)
     return policy, source
 
 
-def safe_direct_policy(state, kind, fingerprint):
-    refusal = direct_refusal(state, kind, fingerprint)
+def safe_direct_policy(state, kind, fingerprint, identity=None):
+    refusal = direct_refusal(state, kind, fingerprint, identity)
     if refusal:
         note(f"direct policy ignored: {refusal}; queued")
         return "queued"
     return "direct"
 
 
-def hinted_fast_policy(state, args, settings, fingerprint):
+def hinted_fast_policy(state, args, settings, fingerprint, *, history=None, identity=None):
     fast_args = argparse.Namespace(**vars(args))
     fast_args.expect_fast = True
-    return "fast" if fast_phase(state, fast_args, settings, fingerprint) else "queued"
+    return "fast" if fast_phase(state, fast_args, settings, fingerprint, history=history, identity=identity) else "queued"
 
 
-def direct_refusal(state, kind, fingerprint):
+def container_test_known(state, fingerprint, identity=None):
+    known = metadata(state / "container-tests.json")
+    return known.get(fingerprint) is True or (identity is not None and known.get(f"family:{identity.family_key}") is True)
+
+
+def direct_refusal(state, kind, fingerprint, identity=None):
     if kind == "integration":
         return "integration phase"
-    if metadata(state / "container-tests.json").get(fingerprint) is True:
+    if container_test_known(state, fingerprint, identity):
         return "recorded container test"
     return None
 
 
 def fast_lane_config(value, warn):
-    defaults = dict(slots=2, max_expected_s=90, kinds=["build", "test"])
+    defaults = dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True)
     if value is False:
         return False
     if not isinstance(value, dict):
@@ -750,7 +827,8 @@ def fast_lane_config(value, warn):
 def fast_lane_fields():
     return dict(slots=lambda v: type(v) is int and 1 <= v <= 32,
                 max_expected_s=lambda v: type(v) in (int, float) and 0 < v <= sys.float_info.max / 3,
-                kinds=lambda v: isinstance(v, list) and all(k in ("build", "test") for k in v))
+                kinds=lambda v: isinstance(v, list) and all(k in ("build", "test") for k in v),
+                shape=lambda v: type(v) is bool)
 
 
 def fast_history(state, fingerprint):
@@ -772,27 +850,62 @@ def slow_fast_history(history, threshold):
     return any(r.get("fastBudgetExceeded") is True for r in history) or (p90 is not None and p90 > threshold)
 
 
-def fast_refusal(state, fingerprint, history, threshold):
-    if metadata(state / "container-tests.json").get(fingerprint) is True:
+def fast_refusal(state, fingerprint, history, threshold, *, phase_history=None, identity=None):
+    if container_test_known(state, fingerprint, identity):
         return "recorded container test"
     if slow_fast_history(history, threshold):
         return "history says this phase is slow"
+    if phase_history is not None and identity is not None:
+        if phase_history.family_overran(identity):
+            return "this command family overran the fast budget"
+        scope = phase_history.work.get(identity.work_key) or phase_history.family.get(identity.family_key)
+        if scope and percentile([r["runS"] for r in scope], 90) > threshold:
+            return "history says this phase is slow"
     return None
 
 
-def fast_phase(state, args, settings, fingerprint):
-    if not settings or args.kind not in settings["kinds"]:
+def shape_fast(phase_history, identity, args, settings):
+    """First-ever short spec run: no history for the family, a run (no compile) shape."""
+    if not settings.get("shape", True) or args.kind != "test" or identity.shape != "run":
         return False
-    try:
-        history = fast_history(state, fingerprint)
-    except (OSError, ValueError):
-        history = []
-    refusal = fast_refusal(state, fingerprint, history, settings["max_expected_s"])
+    if phase_history.family.get(identity.family_key):
+        return False
+    if phase_history.shape_breaker(identity):
+        note("shape-based fast lane off for this repository (3 shape overruns in 24h)")
+        return False
+    return True
+
+
+def fast_decision(state, args, settings, fingerprint, *, history=None, identity=None):
+    """(fast, source); source is history or shape."""
+    if not settings or args.kind not in settings["kinds"]:
+        return False, None
+    if history is None:
+        try:
+            runs = fast_history(state, fingerprint)
+        except (OSError, ValueError):
+            runs = []
+    else:
+        runs = history.exact_runs(fingerprint)
+    refusal = fast_refusal(state, fingerprint, runs, settings["max_expected_s"],
+                           phase_history=history, identity=identity)
     if refusal:
         if getattr(args, "expect_fast", False):
             note(f"--expect-fast ignored: {refusal}")
-        return False
-    return getattr(args, "expect_fast", False) or len(history) >= 3
+        return False, None
+    if getattr(args, "expect_fast", False) or len(runs) >= 3:
+        return True, "history"
+    if history is not None and identity is not None:
+        work = history.work.get(identity.work_key, [])
+        if len(work) >= 2 and percentile([r["runS"] for r in work], 90) <= settings["max_expected_s"]:
+            return True, "history"
+        if shape_fast(history, identity, args, settings):
+            return True, "shape"
+    return False, None
+
+
+def fast_phase(state, args, settings, fingerprint, *, history=None, identity=None):
+    return fast_decision(state, args, settings, fingerprint, history=history, identity=identity)[0]
 
 
 def fast_budget(settings):
@@ -1094,6 +1207,156 @@ def test_fingerprint(cwd, command):
     return hashlib.sha1("\0".join([os.path.realpath(cwd), *command]).encode()).hexdigest()
 
 
+WorkIdentity = namedtuple("WorkIdentity", "repo_key work_key family_key project shape filtered")
+TARGET_SUFFIXES = (".dll", ".exe", ".csproj", ".fsproj", ".sln", ".slnx")
+FILTER_ARGUMENT = re.compile(r"^--?(filter|treenode-filter|filter-[a-z-]+|class|method|namespace|trait|query)\b",
+                             re.IGNORECASE)
+
+
+def digest(*parts):
+    return hashlib.sha1("\0".join(parts).encode()).hexdigest()
+
+
+def repository_location(cwd):
+    """(common git dir without .git, path of cwd relative to the checkout), one bounded git call."""
+    try:
+        real = os.path.realpath(cwd)
+    except OSError:
+        real = str(cwd)
+    try:
+        lines = subprocess.run(["git", "--no-optional-locks", "rev-parse", "--path-format=absolute",
+                                "--git-common-dir", "--show-toplevel"], cwd=cwd, capture_output=True,
+                               text=True, check=True, timeout=1,
+                               env=dict(os.environ, GIT_OPTIONAL_LOCKS="0")).stdout.splitlines()
+        common, top = os.path.realpath(lines[0]), os.path.realpath(lines[1])
+        if Path(common).name == ".git":
+            common = str(Path(common).parent)
+        return common, os.path.relpath(real, top)
+    except (OSError, IndexError, subprocess.SubprocessError):
+        return real, ""
+
+
+def strip_target(argument):
+    name = Path(argument).name
+    for suffix in TARGET_SUFFIXES:
+        if name.lower().endswith(suffix):
+            return name[:-len(suffix)] or name
+    return name
+
+
+def work_shape(argv):
+    """How the command works: run (no compile), build+run, build, or tool:<name>:<first operand>."""
+    name = Path(argv[0]).name
+    rest = argv[1:]
+    if name == "dotnet" and rest:
+        if rest[0] == "test":
+            return "run" if "--no-build" in rest else "build+run"
+        if rest[0] in ("build", "publish", "pack"):
+            return "build"
+        if any(arg.lower().endswith(".dll") for arg in rest) and rest[0] != "test":
+            return "run"
+    if is_spec_executable(argv[0]):
+        return "run"
+    operand = next((arg for arg in rest if not arg.startswith("-")), "")
+    return f"tool:{name}:{operand}"
+
+
+def work_identity(cwd, command, kind):
+    """Stable identity of the work, independent of raw argv, filter values, bin paths and worktrees."""
+    common, rel = repository_location(cwd)
+    repo_key = digest(common)
+    argv = unwrap_command(command)
+    if not argv:
+        return WorkIdentity(repo_key, digest(kind, repo_key, rel or ".", "other", "0"),
+                            digest(kind, repo_key, rel or "."), rel or ".", "other", False)
+    target = next((arg for arg in argv if arg.lower().endswith(TARGET_SUFFIXES)), None)
+    if target is not None:
+        project = strip_target(target)
+    elif tool_stack(Path(argv[0]).name) is None:
+        project = Path(argv[0]).name
+    else:
+        project = rel or "."
+    shape = work_shape(argv)
+    filtered = any(FILTER_ARGUMENT.match(arg) for arg in argv[1:])
+    return WorkIdentity(repo_key, digest(kind, repo_key, project, shape, str(int(filtered))),
+                        digest(kind, repo_key, project), project, shape, filtered)
+
+
+HISTORY_WINDOW = 20
+
+
+class PhaseHistory:
+    """One ledger read per phase start; admission scans never touch the ledger."""
+
+    def __init__(self, records=(), now=None):
+        self.now = now or datetime.now(timezone.utc)
+        self.exact, self.work, self.family, self.repo, self.shape_overruns = {}, {}, {}, {}, {}
+        since = self.now - timedelta(days=7)
+        for record in records:
+            try:
+                if self.relevant(record, since):
+                    self.add(record)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                continue
+
+    @staticmethod
+    def relevant(record, since):
+        return (record["startedAt"] is not None and record["outcome"] in ("passed", "failed", "timeout")
+                and datetime.fromisoformat(record["ts"].replace("Z", "+00:00")) >= since)
+
+    def add(self, record):
+        for index, key in ((self.exact, record.get("fingerprint")), (self.work, record.get("workKey")),
+                           (self.family, record.get("familyKey")),
+                           (self.repo, (record["kind"], record["repoKey"]) if record.get("repoKey") else None)):
+            if key is not None:
+                index.setdefault(key, []).append(record)
+        if record.get("fastBudgetExceeded") is True and record.get("source") == "shape" and record.get("repoKey"):
+            self.shape_overruns.setdefault(record["repoKey"], []).append(record["ts"])
+
+    def exact_runs(self, fingerprint):
+        return self.exact.get(fingerprint, [])
+
+    def scoped(self, fingerprint, identity):
+        """Most specific non-empty history: exact command, then work, then family."""
+        candidates = [self.exact_runs(fingerprint)]
+        if identity is not None:
+            candidates += [self.work.get(identity.work_key, []), self.family.get(identity.family_key, [])]
+        return next((c for c in candidates if c), [])
+
+    def family_overran(self, identity):
+        return identity is not None and any(r.get("fastBudgetExceeded") is True
+                                            for r in self.family.get(identity.family_key, []))
+
+    def shape_breaker(self, identity):
+        since = (self.now - timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+        stamps = self.shape_overruns.get(identity.repo_key, [])
+        return sum(1 for ts in stamps if self.parsed(ts) >= self.parsed(since)) >= 3
+
+    @staticmethod
+    def parsed(stamp):
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+
+    def estimate(self, identity, fingerprint, kind, default):
+        """(seconds, basis): exact (>=2 runs), work, family, repo (>=3 runs), else default."""
+        tiers = [(self.exact.get(fingerprint), 2, "exact")]
+        if identity is not None:
+            tiers += [(self.work.get(identity.work_key), 1, "work"), (self.family.get(identity.family_key), 1, "family"),
+                      (self.repo.get((kind, identity.repo_key)), 3, "repo")]
+        for runs, needed, basis in tiers:
+            if runs and len(runs) >= needed:
+                return float(percentile([r["runS"] for r in runs[-HISTORY_WINDOW:]], 50)), basis
+        return float(default), "default"
+
+
+def load_history(state):
+    try:
+        records, _ = read_ledger(state, days=8)
+    except (OSError, ValueError) as exc:
+        note(f"fast history unavailable: {exc}")
+        records = []
+    return PhaseHistory(records)
+
+
 def begin_test_attribution(state, token):
     """A generation change remembers even a peer that exits between Docker polls."""
     paths = [p for p in state.glob("*.lock")
@@ -1122,7 +1385,7 @@ def begin_test_attribution(state, token):
     return token if solo else None
 
 
-def record_container_test(state, fingerprint, attribution=None):
+def record_container_test(state, fingerprint, attribution=None, family_key=None):
     # A later peer invalidates attribution even after its lease has disappeared.
     if attribution is None or metadata(state / "test-generation.json").get("token") != attribution:
         return
@@ -1131,10 +1394,12 @@ def record_container_test(state, fingerprint, attribution=None):
         fcntl.flock(guard, fcntl.LOCK_EX)
         known = metadata(state / "container-tests.json")
         known[fingerprint] = True
+        if family_key:
+            known[f"family:{family_key}"] = True
         save(state / "container-tests.json", known)
 
 
-def container_test_poller(state, fingerprint, started, stopped, attribution=None):
+def container_test_poller(state, fingerprint, started, stopped, attribution=None, family_key=None):
     """Read-only Docker probe in a daemon; neither join nor delay the phase."""
     while not stopped.is_set():
         try:
@@ -1151,7 +1416,7 @@ def container_test_poller(state, fingerprint, started, stopped, attribution=None
                 if created > started and not stopped.is_set():
                     note("hint: this test phase started Testcontainers containers; CI usually "
                          "runs these as integration — use --kind integration or CI's filter")
-                    record_container_test(state, fingerprint, attribution)
+                    record_container_test(state, fingerprint, attribution, family_key)
                     return
         except (OSError, ValueError, subprocess.SubprocessError):
             pass  # Detection is best effort, including missing/unavailable Docker.
@@ -1389,6 +1654,12 @@ def register_waiter(state, args, token):
                     policy=getattr(args, "policy", "queued"), source=getattr(args, "source", "default"))
         if getattr(args, "fast", False):
             data["fast"] = True
+        if getattr(args, "expected", None) is not None:
+            # Rank fields are written once, here, so every scan computes one total order.
+            data.update(expected=float(args.expected), basis=getattr(args, "basis", "default"),
+                        ageAt=data["enqueued"] + (getattr(args, "age_after", None) or 0))
+            if args.priority == "low" and getattr(args, "promote_after", None) is not None:
+                data["promoteAt"] = data["enqueued"] + args.promote_after
         os.write(fd, json.dumps(data).encode())
         return True, fd
     except BaseException:
@@ -1423,13 +1694,43 @@ def waiter_path(state, token):
     return fast if fast.exists() else state / "waiters" / f"{token}.json"
 
 
-def all_waiters(state, cancelled=lambda: False, *, readonly=False):
-    waiters = live_waiters(state, cancelled, readonly=readonly)
-    waiters += live_waiters(state, cancelled, readonly=readonly, directory="fast-waiters")
-    return sorted(waiters, key=lambda w: (-PRIORITIES[w["priority"]], w["enqueued"], w["seq"]))
+LEGACY_AGE_S = 600
+LEGACY_EXPECTED_S = QUEUE_ORDER_DEFAULTS["default_expected_s"]
 
 
-def live_waiters(state, cancelled=lambda: False, *, readonly=False, directory="waiters"):
+def waiter_age_at(waiter):
+    return waiter.get("ageAt", waiter["enqueued"] + LEGACY_AGE_S)
+
+
+def queue_key(waiter, now):
+    """Total order from waiter-file fields and the clock only, never the scanner's config.
+
+    Priority first; then aged waiters FIFO; then the rest shortest-expected first."""
+    rank = -PRIORITIES[waiter["priority"]]
+    if waiter["priority"] == "low" and now >= waiter.get("promoteAt", math.inf):
+        # Bounded cross-class aging: a long-waiting low waiter competes as aged normal, FIFO by enqueue time.
+        return (-PRIORITIES["normal"], 0, waiter["enqueued"], waiter["seq"])
+    if now >= waiter_age_at(waiter):
+        return (rank, 0, waiter["enqueued"], waiter["seq"])
+    return (rank, 1, waiter.get("expected", LEGACY_EXPECTED_S), waiter["enqueued"], waiter["seq"])
+
+
+def waiter_order(waiter, now):
+    if "ageAt" in waiter and waiter["ageAt"] <= waiter["enqueued"]:
+        return "fifo"
+    if waiter["priority"] == "low" and now >= waiter.get("promoteAt", math.inf):
+        return "aged"
+    return "aged" if now >= waiter_age_at(waiter) else "short"
+
+
+def all_waiters(state, cancelled=lambda: False, *, readonly=False, now=None):
+    now = time.time() if now is None else now
+    waiters = live_waiters(state, cancelled, readonly=readonly, now=now)
+    waiters += live_waiters(state, cancelled, readonly=readonly, directory="fast-waiters", now=now)
+    return sorted(waiters, key=lambda w: queue_key(w, now))
+
+
+def live_waiters(state, cancelled=lambda: False, *, readonly=False, directory="waiters", now=None):
     """Kernel locks, not PIDs, define liveness. Caller holds the coordinator."""
     waiters = []
     for path in (state / directory).glob("*.json"):
@@ -1450,7 +1751,10 @@ def live_waiters(state, cancelled=lambda: False, *, readonly=False, directory="w
                         or data.get("kind") not in ("build", "test", "integration")
                         or type(data.get("seq")) is not int
                         or type(data.get("enqueued")) not in (int, float)
-                        or not math.isfinite(data["enqueued"])):
+                        or not math.isfinite(data["enqueued"])
+                        or any(key in data and (type(data[key]) not in (int, float)
+                                                or not math.isfinite(data[key]) or data[key] < 0)
+                               for key in ("expected", "ageAt", "promoteAt"))):
                     raise ValueError("unreadable live waiter")
                 waiters.append(data)
             else:
@@ -1458,7 +1762,8 @@ def live_waiters(state, cancelled=lambda: False, *, readonly=False, directory="w
                     path.unlink(missing_ok=True)
         finally:
             os.close(fd)
-    return sorted(waiters, key=lambda w: (-PRIORITIES[w["priority"]], w["enqueued"], w["seq"]))
+    now = time.time() if now is None else now
+    return sorted(waiters, key=lambda w: queue_key(w, now))
 
 
 def waiter_resources(waiter, pools):
@@ -1607,7 +1912,7 @@ def status(state, configuration=CONFIG):
             if fd is not None:
                 unlock(fd)
             owners.append((path, data, busy))
-        waiters = all_waiters(state)
+        waiters = all_waiters(state, now=time.time())
         grant = priority_grant(state)
         high = high_count(state)
     # No slow ps probe or terminal write while holding the shared coordinator.
@@ -1631,10 +1936,13 @@ def status(state, configuration=CONFIG):
              f" policy={data.get('policy', 'queued')} source={data.get('source', 'default')}")
     if not seen:
         note("no active phases")
+    now = time.time()
     for rank, waiter in enumerate(waiters, 1):
-        age = max(0, int(time.time() - waiter["enqueued"]))
+        age = max(0, int(now - waiter["enqueued"]))
         note(f"queued priority={waiter['priority']} kind={waiter['kind']} "
-             f"label={waiter.get('label', '?')} waited={age}s rank={rank}"
+             f"label={waiter.get('label', '?')} waited={age}s rank={rank} "
+             f"expected={int(waiter.get('expected', LEGACY_EXPECTED_S))}s basis={waiter.get('basis', 'legacy')} "
+             f"order={waiter_order(waiter, now)}"
              f"{' fast' if waiter.get('fast') else ''}"
              f" policy={waiter.get('policy', 'queued')} source={waiter.get('source', 'default')}")
     note(f"fast={fast_running}/{fast_slots} queued={sum(bool(w.get('fast')) for w in waiters)}")
@@ -1722,12 +2030,26 @@ def report_log(path, tail, return_code):
     note(f"log={path} exit={return_code} lines={lines}")
 
 
-def prepare_policy(state, args, options, fingerprint):
-    args.policy, args.source = select_policy(state, args, options, fingerprint)
+def prepare_policy(state, args, options, fingerprint, history=None, identity=None):
+    args.policy, args.source = select_policy(state, args, options, fingerprint, history=history, identity=identity)
     args.fast = args.policy == "fast"
     note(f"policy={args.policy} source={args.source}")
+    order = options["queue_order"]
+    if history is not None:
+        args.expected, args.basis = history.estimate(identity, fingerprint, args.kind, order["default_expected_s"])
+        # A long job with a short queue timeout must age before it can time out.
+        shortest = order["mode"] == "shortest-first"
+        args.age_after = min(order["aging_s"], max(30, 0.5 * args.queue_timeout)) if shortest else None
+        # fifo mode: no promotion, i.e. the old strict priority classes.
+        args.promote_after = (min(order["low_promote_after_s"], max(30, 0.5 * args.queue_timeout))
+                              if shortest else None)
     if getattr(args, "ledger", None):
         args.ledger.record.update(fingerprint=fingerprint, fast=args.fast, policy=args.policy, source=args.source)
+        if identity is not None:
+            args.ledger.record.update(workKey=identity.work_key, familyKey=identity.family_key,
+                                      repoKey=identity.repo_key)
+        if history is not None:
+            args.ledger.record.update(expectedS=round(args.expected, 1), expectedBasis=args.basis)
 
 
 def phase_candidates(state, args, context):
@@ -1750,7 +2072,7 @@ def apply_fast_budget(args, settings, held):
 def fast_timeout(args, budget):
     if budget is None or args.timeout < budget:
         return
-    note("fast-lane phase exceeded its budget; rerun without --expect-fast")
+    note("fast-lane phase exceeded its budget; rerun normally; this command family now queues")
     if getattr(args, "ledger", None):
         args.ledger.record["fastBudgetExceeded"] = True
 
@@ -1816,7 +2138,8 @@ def run(args, state, configuration, output=None):
         config_notes = set()
         settings = config(configuration, notes=config_notes)
         options = settings.options
-        prepare_policy(state, admission_args, options, fingerprint)
+        identity = work_identity(os.getcwd(), command, args.kind)
+        prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity)
         if ledger:
             ledger.prepare_snapshot()
             if (not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1" and args.kind != "ci"
@@ -1835,7 +2158,7 @@ def run(args, state, configuration, output=None):
         burst_settings = options["memory_admission"].get("integration_burst") if admission else None
         burst = IntegrationBurst(admission, burst_settings) if burst_settings else None
         if (args.kind == "test" and options["container_test_detection"] == "promote"
-                and metadata(state / "container-tests.json").get(fingerprint) is True):
+                and container_test_known(state, fingerprint, identity)):
             admission_args.kind = "integration"
             note("recorded container test: also claiming an integration permit (container_test_detection)")
         while True:
@@ -1947,7 +2270,7 @@ def run(args, state, configuration, output=None):
         note(f"running kind={args.kind} label={args.label} pid={proc.pid} timeout={args.timeout:g}s")
         if args.kind == "test" and options["container_test_detection"] != "off":
             threading.Thread(target=container_test_poller,
-                             args=(state, fingerprint, detection_started, detector_stopped, attribution),
+                             args=(state, fingerprint, detection_started, detector_stopped, attribution, identity.family_key),
                              daemon=True).start()
         next_heartbeat = started + HEARTBEAT
         running_memory = RunningMemory(options["rss_cap_mb"] if args.kind in ("build", "test", "integration") else 0,
