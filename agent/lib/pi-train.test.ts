@@ -8,6 +8,7 @@ import { main, realContext } from './pi-train.mjs';
 import { cancellable, isBot, RUN_FIELDS } from './train-gh.mjs';
 import { loadManifest, manifestPath, repoKey, saveManifest, withManifestLock } from './train-manifest.mjs';
 import { copyBullets, extractBullets, renderNotes } from './train-notes.mjs';
+import { shipLabel } from './train-ship-pr.mjs';
 
 const BASE = 'a'.repeat(40), SHA = 'b'.repeat(40), MERGE = 'c'.repeat(40);
 const REPO = 'acme/widget', TRAIN = 'train/test';
@@ -27,7 +28,7 @@ async function setup(t: any, init = true) {
   const state = { pr: prFixture() as any, runs: [runFixture()] as any[], branchExists: init, head: BASE,
     fetched: SHA, ancestor: false, conflict: false, dirty: false, onBranch: TRAIN, defaultBranch: 'main',
     openPRs: [] as any[], failBefore: '', failAfter: '', closed: 0, comments: 0, merges: 0, aborts: 0,
-    branchPR: true, unknownAncestor: false };
+    branchPR: true, unknownAncestor: false, checkedOut: true, trainPR: null as any, creates: 0, edits: 0, pushes: 0, remoteHead: '' };
   const env = { HOME: root, USER: 'me', PI_TRAIN_DIR: join(root, 'store') };
   const path = manifestPath(env, REPO, TRAIN);
   const manifest = { v: 1, repo: REPO, train: TRAIN, base: { ref: 'origin/main', sha: BASE },
@@ -40,14 +41,31 @@ async function setup(t: any, init = true) {
     'pr view': () => ok(JSON.stringify(state.pr)),
     'pr list': (args: string[]) => {
       const matching = state.branchPR ? [{ number: 7 }] : [];
-      return ok(JSON.stringify(args.includes('--head') ? matching : state.openPRs));
+      const head = args[args.indexOf('--head') + 1];
+      return ok(JSON.stringify(args.includes('--head') ? (head === TRAIN ? (state.trainPR ? [state.trainPR] : []) : matching) : state.openPRs));
     },
     'pr close': (args: string[]) => {
       state.closed++; state.pr.state = 'CLOSED';
       state.pr.comments.push({ body: args[args.indexOf('--comment') + 1] }); return ok();
     },
-    'pr comment': (args: string[]) => {
-      state.comments++; state.pr.comments.push({ body: args[args.indexOf('--body') + 1] }); return ok();
+    'pr comment': async (args: string[]) => {
+      state.comments++;
+      const body = args.includes('--body-file') ? await readFile(args[args.indexOf('--body-file') + 1], 'utf8') : args[args.indexOf('--body') + 1];
+      (args[2] === '42' ? state.trainPR : state.pr).comments.push({ body }); return ok();
+    },
+    'pr create': async (args: string[]) => {
+      state.creates++;
+      state.trainPR = { number: 42, body: await readFile(args[args.indexOf('--body-file') + 1], 'utf8'),
+        labels: [{ name: args[args.indexOf('--label') + 1] }], comments: [] };
+      return ok('https://github.com/acme/widget/pull/42\n');
+    },
+    'pr edit': async (args: string[]) => {
+      state.edits++;
+      if (args.includes('--body-file')) state.trainPR.body = await readFile(args[args.indexOf('--body-file') + 1], 'utf8');
+      if (args.includes('--add-label')) state.trainPR.labels.push({ name: args[args.indexOf('--add-label') + 1] });
+      const remove = args[args.indexOf('--remove-label') + 1];
+      if (args.includes('--remove-label')) state.trainPR.labels = state.trainPR.labels.filter((label: any) => label.name !== remove);
+      return ok();
     },
     'run list': () => ok(JSON.stringify(state.runs)),
     'run cancel': (args: string[]) => { state.runs.find(run => String(run.databaseId) === args[2]).status = 'completed'; return ok(); },
@@ -56,15 +74,20 @@ async function setup(t: any, init = true) {
     remote: () => ok('git@github.com:acme/widget.git\n'),
     'check-ref-format': () => ok(),
     'show-ref': () => state.branchExists ? ok() : bad(),
-    fetch: () => ok(), worktree: () => ok(),
+    fetch: () => ok(),
+    worktree: (args: string[]) => ok(args[1] === 'list' && state.checkedOut ? `worktree ${manifest.worktree}\nHEAD ${state.head}\nbranch refs/heads/${TRAIN}\n\n` : ''),
+    log: () => ok('abcd Fold widgets\n'),
+    push: () => { state.pushes++; state.remoteHead = state.head; return ok(); },
     branch: (args: string[]) => {
       if (args[1] === '--show-current') return ok(state.onBranch);
       state.branchExists = true; return ok();
     },
     'rev-parse': (args: string[]) => ok(args[1] === 'FETCH_HEAD' ? state.fetched : state.head),
-    'ls-remote': () => ok(`${state.fetched}\trefs/heads/fix/widget\n`),
+    'ls-remote': (args: string[]) => args.at(-1) === `refs/heads/${TRAIN}`
+      ? ok(state.remoteHead ? `${state.remoteHead}\trefs/heads/${TRAIN}\n` : '') : ok(`${state.fetched}\trefs/heads/fix/widget\n`),
     status: () => ok(state.dirty ? ' M dirty' : ''),
-    'merge-base': () => {
+    'merge-base': (args: string[]) => {
+      if (args[1] !== '--is-ancestor') return ok(BASE);
       if (state.unknownAncestor) return bad('unknown object', 128);
       return state.ancestor ? ok() : bad();
     },
@@ -516,6 +539,131 @@ test('real local bare origin: init, merge, ancestor rerun and conflict abort kee
   assert.equal(await f.invoke('fold', '8'), 1);
   assert.equal(f.state.pr.state, 'OPEN'); assert.equal(git(wt, 'status', '--porcelain'), '');
   assert.equal(git(wt, 'rev-parse', 'HEAD'), foldedHead);
+});
+
+test('adopt lists first-parent and ancestor PR candidates without folding; fold closes and cancels without merge', async t => {
+  const f = await setup(t, false);
+  f.state.branchExists = true; f.state.head = MERGE; f.state.ancestor = true;
+  f.state.openPRs = [f.state.pr, { ...f.state.pr, number: 8, headRefName: TRAIN }];
+  assert.equal(await f.invoke('init', '--adopt', '.', TRAIN), 0, f.errors.join('\n'));
+  const adopted = await f.read();
+  assert.equal(adopted.base.sha, BASE); assert.equal(adopted.head, MERGE); assert.equal(adopted.items.length, 0);
+  assert.match(f.output.join('\n'), /abcd Fold widgets/); assert.match(f.output.join('\n'), /pi-train fold 7/);
+  assert.equal(f.state.closed, 0); assert.equal(f.state.merges, 0);
+  assert.equal(await f.invoke('fold', '7'), 0, f.errors.join('\n'));
+  assert.equal(f.state.merges, 0); assert.equal(f.state.closed, 1); assert.equal(f.state.runs[0].status, 'completed');
+  assert.equal(await f.invoke('init', '--adopt', '.', TRAIN), 1);
+  assert.equal(await f.invoke('init', '--adopt', '.', 'main'), 1);
+});
+
+test('adopt attaches an unchecked-out branch without recreating it; dry run creates nothing', async t => {
+  const f = await setup(t, false);
+  f.state.branchExists = true; f.state.checkedOut = false;
+  assert.equal(await f.invoke('init', '--adopt', '.', TRAIN, '--dry-run'), 0, f.errors.join('\n'));
+  await assert.rejects(readFile(f.path), { code: 'ENOENT' });
+  assert.equal(f.calls.some(call => call.args.includes('add')), false);
+  assert.equal(await f.invoke('init', '--adopt', '.', TRAIN), 0, f.errors.join('\n'));
+  assert.equal(f.calls.filter(call => call.args.includes('add')).length, 1);
+  assert.equal(f.calls.some(call => call.args.includes('branch') && call.args.includes(TRAIN)), false);
+});
+
+async function readyToShip(t: any) {
+  const f = await setup(t);
+  f.state.pr.labels = [{ name: 'patch' }, { name: 'minor' }];
+  assert.equal(await f.invoke('fold', '7'), 0, f.errors.join('\n'));
+  return f;
+}
+
+test('ship creates a PR, aggregates notes, warns without gate evidence, links items and is idempotent', async t => {
+  const f = await readyToShip(t);
+  assert.equal(await f.invoke('ship'), 0, f.errors.join('\n'));
+  const shipped = await f.read();
+  assert.equal(shipped.pr, 42); assert.equal(shipped.shippedHead, MERGE); assert.equal(shipped.label, 'minor');
+  assert.match(f.state.trainPR.body, /## Fixed\n\n- Fix widgets/);
+  assert.match(f.errors.join('\n'), /no verified Tier 1 for ccccccc/);
+  assert.equal(f.state.pushes, 1); assert.equal(f.state.creates, 1);
+  const comments = f.state.comments;
+  assert.equal(await f.invoke('ship'), 0, f.errors.join('\n'));
+  assert.equal(f.state.pushes, 1); assert.equal(f.state.creates, 1); assert.equal(f.state.edits, 0);
+  assert.equal(f.state.comments, comments);
+  const summary = join(f.root, 'summary.md'); await writeFile(summary, '## Summary\n\nA train.\n');
+  assert.equal(await f.invoke('ship', '--summary-file', summary, '--label', 'major'), 0);
+  assert.equal(f.state.edits, 1); assert.match(f.state.trainPR.body, /A train/);
+  assert.deepEqual(f.state.trainPR.labels, [{ name: 'major' }]);
+});
+
+test('ship updates an existing train PR rather than creating and does not repeat recovery comments', async t => {
+  const f = await readyToShip(t);
+  f.state.trainPR = { number: 42, body: 'old', labels: [], comments: [] };
+  assert.equal(await f.invoke('ship'), 0, f.errors.join('\n'));
+  assert.equal(f.state.creates, 0); assert.equal(f.state.edits, 1);
+  const manifest = await f.read(); delete manifest.shipComment; delete manifest.items[0].trainPR;
+  await saveManifest(f.path, manifest); const comments = f.state.comments;
+  assert.equal(await f.invoke('ship'), 0);
+  assert.equal(f.state.comments, comments);
+});
+
+test('ship checks PR body before pushing; Cratis check takes precedence over configured hook', async t => {
+  const f = await readyToShip(t), scripts = join(f.manifest.worktree, '.cratis/ai/hooks/scripts');
+  await mkdir(scripts, { recursive: true }); await writeFile(join(scripts, 'cratis-check-pr.mjs'), '');
+  await writeFile(join(f.root, 'store/config.json'), JSON.stringify({ checkPr: ['other-check'] }));
+  const original = f.ctx.run; let checkArgs: string[] = [];
+  f.ctx.run = async (command, args) => {
+    if (command === 'node') { checkArgs = args; return bad('invalid release notes'); }
+    return original(command, args);
+  };
+  assert.equal(await f.invoke('ship'), 1); assert.equal(f.state.pushes, 0); assert.equal(f.state.creates, 0);
+  assert.match(f.errors.join('\n'), /invalid release notes/); assert.ok(checkArgs.includes('--body-file'));
+});
+
+test('ship refuses behind main, reopened PRs, pending steps, dirty worktree and missing labels', async t => {
+  const f = await readyToShip(t);
+  f.state.ancestor = false;
+  assert.equal(await f.invoke('ship'), 1); assert.match(f.errors.at(-1)!, /merge origin\/main/);
+  f.state.ancestor = true; f.state.pr.state = 'OPEN';
+  assert.equal(await f.invoke('ship'), 1); assert.match(f.errors.at(-1)!, /reopened/);
+  f.state.pr.state = 'CLOSED'; f.state.dirty = true;
+  assert.equal(await f.invoke('ship'), 1); f.state.dirty = false;
+  const m = await f.read(); delete m.items[0].cancelledAt; await saveManifest(f.path, m);
+  assert.equal(await f.invoke('ship'), 1); m.items[0].cancelledAt = f.ctx.now(); await saveManifest(f.path, m);
+  f.state.pr.labels = [];
+  assert.equal(await f.invoke('ship'), 1); assert.match(f.errors.at(-1)!, /provide --label/);
+  assert.equal(f.state.pushes, 0);
+  f.state.ancestor = false;
+  assert.equal(await f.invoke('ship', '--label', 'no-release', '--allow-behind'), 0);
+});
+
+test('no-release fallback requires every folded PR to opt out; mixed or missing labels require --label', () => {
+  const prs = (...groups: string[][]) => groups.map(names => ({ labels: names.map(name => ({ name })) }));
+  for (const groups of [[['no-release'], []], [['no-release'], ['docs']], [[], []], [['docs']], []]) {
+    assert.throws(() => shipLabel({}, prs(...groups)), /provide --label/);
+  }
+  assert.equal(shipLabel({}, prs(['no-release'], ['docs', 'no-release'])), 'no-release');
+  assert.equal(shipLabel({}, prs(['no-release'], ['patch'])), 'patch');
+  assert.equal(shipLabel({ label: 'no-release' }, prs(['no-release'], [])), 'no-release');
+});
+
+test('ship gate requirement accepts only verified clean build/test records for the train head', async t => {
+  const f = await readyToShip(t);
+  await writeFile(join(f.root, 'store/config.json'), JSON.stringify({ requireGate: true, checkPr: ['body-check', '{bodyFile}', '{label}'] }));
+  assert.equal(await f.invoke('ship'), 1); assert.equal(f.state.pushes, 0);
+  const ledger = join(f.root, '.pi/agent/pi-phase/state/ledger'); await mkdir(ledger, { recursive: true });
+  const record = { outcome: 'passed', verified: true, head: MERGE, dirty: 'clean', kind: 'test', label: 'Tier 1' };
+  await writeFile(join(ledger, '2026-10-23.jsonl'), JSON.stringify({ ...record, verified: false }) + '\ninvalid\n');
+  assert.equal(await f.invoke('ship'), 1);
+  await writeFile(join(ledger, '2026-10-23.jsonl'), JSON.stringify(record) + '\n');
+  const original = f.ctx.run; let checked = false;
+  f.ctx.run = async (command, args) => { if (command === 'body-check') { checked = true; assert.equal(args[1], 'minor'); return ok(); } return original(command, args); };
+  assert.equal(await f.invoke('ship'), 0, f.errors.join('\n')); assert.equal(checked, true);
+  assert.match(f.state.trainPR.comments[0].body, /test: Tier 1/);
+});
+
+test('ship dry run leaves manifests, artifacts and network unchanged', async t => {
+  const f = await readyToShip(t), before = await readFile(f.path, 'utf8');
+  const count = f.state.comments;
+  assert.equal(await f.invoke('ship', '--dry-run'), 0, f.errors.join('\n'));
+  assert.equal(await readFile(f.path, 'utf8'), before); assert.equal(f.state.pushes, 0); assert.equal(f.state.comments, count);
+  await assert.rejects(readFile(join(f.manifest.worktree, '.ai-work/trains/train_test/pr-body.md')), { code: 'ENOENT' });
 });
 
 test('realContext executes an injected PATH shim, never GitHub', async t => {
