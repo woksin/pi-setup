@@ -288,6 +288,7 @@ has been deleted. Shared layers mean modest savings: about 1 GB on a 13.7 GB
 | `extensions/subagent-result-guard.ts` | Stops agents from re-reading a subagent result that was already delivered in full. |
 | `extensions/output-cap.ts`, `extensions/observation-mask.ts` | Cap large tool output (full text goes to `.ai-work/tool-out/`) and mask old tool output in subagent context. Tuned in `efficiency.json`. |
 | `extensions/cache-retention.ts` | Defaults Anthropic prompt caching to the 1-hour tier. |
+| `extensions/cratis-cleanup-env.ts` | Sets `CRATIS_CLEANUP_NO_GH=1` so the Cratis worktree cleanup hook stops querying GitHub once per worktree; git-ancestry cleanup still runs. |
 | `extensions/ai-work-lifecycle.ts` | Integrates the `ai-work-lifecycle` task-output tool. |
 | `early-extensions/mcp-project-trust.ts` | Only loads project MCP configs from trusted folders. |
 | `workflows/review.js` | Cross-provider code review with adversarial verification; gates only on confirmed blocking findings. |
