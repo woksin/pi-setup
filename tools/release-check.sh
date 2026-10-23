@@ -4,4 +4,5 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 agent/bin/pi-setup-tests "${PI_AGENT_DIR:-$HOME/.pi/agent}"
 python3 -m unittest discover -s tests
+(cd agent/local-packages/pi-questions && node --test --test-timeout=30000 'test/*.test.ts')
 gitleaks git . --no-banner --redact

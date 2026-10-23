@@ -19,7 +19,7 @@ test("the packed tarball installs and its CLI runs from node_modules/.bin", t =>
 	const packed = spawnSync("npm", ["pack", "--pack-destination", dest, "--silent"], { cwd: pkg, encoding: "utf8" });
 	assert.equal(packed.status, 0, packed.stderr);
 	const tgz = join(dest, readdirSync(dest).find(f => f.endsWith(".tgz"))!);
-	const installed = spawnSync("npm", ["install", tgz, "--prefix", prefix, "--omit=peer", "--ignore-scripts", "--no-audit", "--no-fund", "--offline"], { encoding: "utf8" });
+	const installed = spawnSync("npm", ["install", tgz, "--prefix", prefix, "--omit=peer", "--legacy-peer-deps", "--ignore-scripts", "--no-audit", "--no-fund", "--offline"], { encoding: "utf8" });
 	assert.equal(installed.status, 0, installed.stderr);
 	const bin = join(prefix, "node_modules", ".bin", "pi-questions");
 	assert.ok(existsSync(bin));

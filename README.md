@@ -204,7 +204,7 @@ Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subage
 ## What is deliberately not included
 
 - Auth, accounts, sessions, jobs, logs, backups, caches, trust and approval files, and any per-machine runtime state (`pi-phase/state`, `issue-work/` registry, `docker-guardian` state, `lane-policy/policy.json`, the active profile marker).
-- `local-packages/` other than `pi-questions`: published separately (see above). The unloaded `model-safety-*` and `pi-subagents-reliability-*` packages are not part of the setup.
+- `local-packages/` other than `pi-questions`: published separately (see above). `pi-questions` is bundled here and its tests run in `tools/release-check.sh`.
 - Retired profiles, `*.bak*` files, and the `fd` and `rg` binaries in `bin/`.
 - The CodeScene skills (see above).
 - `user.json`: operator identity and repositories root are local install settings, never synced into this repo.
