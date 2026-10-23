@@ -103,16 +103,25 @@ test("REGRESSION 2026-10-22: `cratis` inside heredoc text / commit message / ech
 	for (const [name, command] of rows) assert.deepEqual(found(command), [], name);
 });
 
-// FINDING (reported, not fixed): the heredoc skip only covers `cat`/`tee` writing a file. A heredoc consumed by git/gh
-// (the usual commit-message / PR-body form) or `cat` to stdout takes the legacy full scan, so prose naming a cratis
-// command is still classified as a call. Fails safe (prompt / headless block) but is the 2026-10-22 false-positive class.
-test("KNOWN GAP: prose in a heredoc consumed by git/gh or cat-to-stdout is not a command", { todo: "false positive: only cat/tee file-writing heredocs are skipped" }, () => {
+test("prose in a heredoc consumed by git/gh or cat-to-stdout is not a command", () => {
 	for (const c of [
 		"git commit -m \"$(cat <<'EOF'\nfix\n\ncratis chronicle observers replay x\nEOF\n)\"",
 		"git commit -F - <<'EOF'\ncratis chronicle observers replay x\nEOF",
 		"gh pr create --body-file - <<'EOF'\ncratis chronicle observers replay x\nEOF",
 		"cat <<'EOF'\ncratis chronicle observers replay x\nEOF",
+		"cat <<EOF\ncratis chronicle observers replay x\nEOF",
 	]) assert.deepEqual(found(c), [], c);
+});
+
+test("heredocs fed to a shell/interpreter (directly, piped, or via substitution) are still classified", () => {
+	for (const c of [
+		"bash <<EOF\ncratis chronicle observers replay x\nEOF",
+		"cat <<EOF | sh\ncratis chronicle observers replay x\nEOF",
+		"python3 - <<EOF\ncratis chronicle observers replay x\nEOF",
+		"eval \"$(cat <<EOF\ncratis chronicle observers replay x\nEOF\n)\"",
+		"sh -c \"$(cat <<EOF\ncratis chronicle observers replay x\nEOF\n)\"",
+		"git -c alias.x=foo commit -F - <<EOF\n$(cratis chronicle observers replay x)\nEOF",
+	]) assert.ok(found(c).length > 0, c);
 });
 
 test("heredoc skip is not a bypass: executed or expanded heredoc content is still classified", () => {
