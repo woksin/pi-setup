@@ -28,7 +28,7 @@ function fixture() {
       if (cmd === "pgrep") return result(running ? "101\n" : "", running ? 0 : 1);
       if (cmd === "lsof") return result(`p101\nn${cwd}\n`);
       if (cmd === "ps" && args[0] === "-o") return result("ttys003\n");
-      if (cmd === "ps" && args[0] === "-t") return result(foreground ? "S+ pi\n" : "S+ bash\n");
+      if (cmd === "ps" && args[0] === "-t") return result(foreground ? "101 S+ pi\n" : "101 S+ bash\n");
       if (cmd === "ps" && args[0] === "-A") return result(`101 1 pi\n${busy}`);
       if (cmd === "ps") return result("", 1);
       if (cmd === "git") return result(join(home, "repos/alpha/.git"));
@@ -209,4 +209,68 @@ test("close removal hint quotes hostile clone and worktree paths", async () => {
   const wt = join(f.c.worktreesDir, "l1");
   assert.equal(f.out.at(-1), `when merged, remove the worktree: git -C ${shellQuote(clone)} worktree unlock ${shellQuote(wt)} && git -C ${shellQuote(clone)} worktree remove ${shellQuote(wt)}`);
   assert.equal(existsSync(join(f.home, "INJECTED")), false);
+});
+
+test("close validation failure leaves status, broadcast and running session untouched", async () => {
+  for (const failure of ["exit", "empty", "timeout", "throw"]) {
+    const f = fixture(); const backend = new FileBackend(f.messages, "ALL", () => f.now);
+    await backend.setStatus("L1", "working on security review");
+    const path = join(f.messages, "status/L1.status"); const before = readFileSync(path, "utf8");
+    const time = statSync(path).mtimeMs; const run = f.ctx.run;
+    f.ctx.run = async (cmd, args, opts) => {
+      if (cmd !== "git") return run(cmd, args, opts);
+      if (failure === "throw") throw new Error("git unavailable");
+      return { ...f.result(failure === "empty" ? "" : join(f.home, "repos/alpha/.git"), failure === "exit" ? 1 : 0), timedOut: failure === "timeout" };
+    };
+    assert.equal(await f.invoke("close", "L1", "--quit"), 2, failure);
+    assert.equal(readFileSync(path, "utf8"), before); assert.equal(statSync(path).mtimeMs, time);
+    assert.deepEqual(readdirSync(f.messages), ["status"]);
+    assert.equal(f.out.length, 0);
+    assert.ok(!f.calls.some((c) => ["pgrep", "osascript", "tmux"].includes(c.cmd)));
+  }
+});
+test("nudge removes every C0 control and DEL before sending to any terminal", async () => {
+  const controls = Array.from({ length: 32 }, (_, n) => String.fromCharCode(n)).join("") + "\x7f";
+  const text = `before${controls}after`; const expected = `before${" ".repeat(33)}after`;
+  for (const backend of ["terminal-app", "iterm", "tmux"]) {
+    const f = fixture(); const run = f.ctx.run;
+    f.ctx.run = async (cmd, args, opts) => {
+      if (cmd === "osascript" || cmd === "tmux") {
+        f.calls.push({ cmd, args }); return f.result(cmd === "osascript" ? "sent\n" : args[0] === "list-panes" ? "/dev/ttys003 %9\n" : "");
+      }
+      return run(cmd, args, opts);
+    };
+    assert.equal(await f.invoke("nudge", "L1", text, "--terminal", backend), 0);
+    if (backend === "tmux") {
+      const payload = f.calls.find((c) => c.cmd === "tmux" && c.args.includes("-l"))!.args.at(-1)!;
+      assert.equal(payload, expected); assert.doesNotMatch(payload, /[\x00-\x1f\x7f]/);
+    } else {
+      const script = f.calls.find((c) => c.cmd === "osascript")!.args[1];
+      assert.ok(script.includes(appleScriptString(expected))); assert.doesNotMatch(script, /[\x00-\x09\x0b-\x1f\x7f]/);
+    }
+    const sent = f.calls.length;
+    assert.equal(await f.invoke("nudge", "L1", controls, "--terminal", backend), 2);
+    assert.equal(f.calls.length, sent);
+  }
+});
+test("nudge refuses a different foreground pi or an unverified lane cwd", async () => {
+  for (const platform of ["darwin", "linux"]) for (const failure of ["other-pid", "unknown-pid", "other-cwd", "unknown-cwd", "cwd-error"]) {
+    const f = fixture(); f.ctx.platform = platform; const run = f.ctx.run; let cwdReads = 0;
+    f.ctx.run = async (cmd, args, opts) => {
+      if (cmd === "ps" && args[0] === "-t") {
+        assert.deepEqual(args, ["-t", "ttys003", "-o", "pid=,stat=,comm="]);
+        return f.result(failure === "other-pid" ? "101 S pi\n202 S+ pi\n" : failure === "unknown-pid" ? "S+ pi\n" : "101 S+ pi\n");
+      }
+      if (cmd === "lsof" || cmd === "readlink") {
+        cwdReads++;
+        if (cwdReads > 1 && failure === "cwd-error") throw new Error("cwd unavailable");
+        if (cwdReads > 1 && failure === "unknown-cwd") return f.result("", 1);
+        const cwd = cwdReads > 1 && failure === "other-cwd" ? join(f.home, "another-session") : f.cwd;
+        return f.result(platform === "darwin" ? `p101\nn${cwd}\n` : `${cwd}\n`);
+      }
+      return run(cmd, args, opts);
+    };
+    assert.equal(await f.invoke("nudge", "L1", "hello", "--terminal", "tmux"), 3, `${platform} ${failure}`);
+    assert.ok(!f.calls.some((c) => ["tmux", "osascript"].includes(c.cmd)));
+  }
 });

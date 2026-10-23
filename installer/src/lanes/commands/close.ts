@@ -34,18 +34,19 @@ export async function close(id: string, opts: Record<string, string>, c: Config,
   if (to && (!validId(to) || to === id)) throw new UsageError("--reassign-to must be a valid id different from the closed lane");
   if (!validId(from)) throw new UsageError("invalid sender id");
   if (to && to !== c.coordinator.id && !c.lanes.some((l) => l.id === to)) ctx.err(`unknown reassignment target: ${to}`);
-  const target = laneTarget(id, c, root, ctx); const pid = await piIn(target.cwd, ctx);
-  if (pid && opts.quit && !await quit(id, pid, target.cwd, c, root, ctx)) return 1;
-  if (pid && !opts.quit) ctx.err(`${id} is still running; type /quit in its session or use --quit`);
+  const target = laneTarget(id, c, root, ctx);
+  const common = await ctx.run("git", ["-C", target.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 10000 });
+  if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
+  const clone = shellQuote(dirname(common.stdout.trim())); const wt = shellQuote(target.cwd);
   const backend = backendFor(c, ctx, root);
   const unread = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
+  const pid = await piIn(target.cwd, ctx);
+  if (pid && opts.quit && !await quit(id, pid, target.cwd, c, root, ctx)) return 1;
+  if (pid && !opts.quit) ctx.err(`${id} is still running; type /quit in its session or use --quit`);
   const line = closedLine(to, opts.reason, ctx.now());
   await backend.setStatus(id, line);
   const message = await backend.send({ from, to: c.messages.broadcast, topic: `lane-closed-${id.toLowerCase()}`, body: closeBody(id, to, opts.reason, unread) });
   ctx.out(`${id}: ${line}`); ctx.out(message.path);
-  const common = await ctx.run("git", ["-C", target.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 10000 });
-  if (common.code !== 0 || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
-  const clone = shellQuote(dirname(common.stdout.trim())); const wt = shellQuote(target.cwd);
   ctx.out(`when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`);
   return 0;
 }

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { collectLanes, type LanesInput } from "../src/lanes-wizard.ts";
 import { parseArgs } from "../src/args.ts";
@@ -87,4 +87,24 @@ test("post-install lanes offer is separate, default-no and gated on a real inter
     if (offers.length) assert.equal(offers[0].initial, false);
     if (mode !== "existing") assert.equal(existsSync(join(repos, ".lanes/lanes.json")), false, mode);
   }
+});
+
+test("guided flow preserves an option-looking goal as data", async () => {
+  const { input, ctx, home, err } = fixture(); const repos = input.reposRoot; const clone = join(repos, "alpha");
+  mkdirSync(join(clone, ".git"), { recursive: true }); writeFileSync(join(clone, ".git/config"), '[remote "origin"]\n url = https://example.invalid/example/alpha.git\n');
+  const installed = join(home, ".local/share/pi-setup/lanes"); mkdirSync(installed, { recursive: true }); writeFileSync(join(installed, "lanes.mjs"), "");
+  cpSync(join(REPO, "installer/lanes/templates"), join(installed, "templates"), { recursive: true });
+  mkdirSync(join(home, ".pi/agent"), { recursive: true }); writeFileSync(join(home, ".pi/agent/user.json"), JSON.stringify({ reposRoot: repos }));
+  const calls: string[][] = [];
+  ctx.run = async (cmd, args) => {
+    assert.equal(cmd, "git"); calls.push(args);
+    return { code: args.includes("show-ref") ? 1 : 0, stdout: args.includes("get-url") ? "https://example.invalid/example/alpha.git\n" : "1\n", stderr: "", timedOut: false };
+  };
+  const goal = "--help=still a goal"; const root = join(repos, ".lanes");
+  const s = scripted([[clone], goal, true, false]);
+  assert.equal(await main(["lanes", "--dir", root], ctx, s.p), 0, err.join("\n"));
+  const c = JSON.parse(readFileSync(join(root, "lanes.json"), "utf8"));
+  assert.equal(c.lanes.length, 1); assert.equal(c.lanes[0].goal, goal);
+  assert.match(readFileSync(join(root, "prompts/L1.md"), "utf8"), /--help=still a goal/);
+  assert.ok(calls.some((args) => args.includes("worktree") && args.includes("add")));
 });

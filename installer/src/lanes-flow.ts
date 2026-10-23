@@ -57,7 +57,7 @@ export async function runLanesFlow(ctx: Ctx, options: Options, p?: Prompter, nes
   const laneCtx = lanesCtxFrom(ctx); const created: string[] = [];
   if (!existsSync(join(choice.dir, "lanes.json")) && await main(["init", choice.dir, "--repos-root", reposRoot], laneCtx) !== 0) return 1;
   for (const lane of choice.lanes) {
-    const argv = ["--dir", choice.dir, "add", lane.id, "--repo", lane.repo, "--path", lane.path, ...(lane.issue ? ["--issue", String(lane.issue)] : ["--goal", lane.goal!])];
+    const argv = ["--dir", choice.dir, "add", lane.id, "--repo", lane.repo, "--path", lane.path, ...(lane.issue ? ["--issue", String(lane.issue)] : [`--goal=${lane.goal!}`])];
     if (await main(argv, laneCtx) !== 0) { ctx.err(`Could not create ${lane.id}; created lanes: ${created.join(", ") || "none"}`); return 1; }
     created.push(lane.id);
   }

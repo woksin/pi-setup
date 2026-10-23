@@ -28,6 +28,9 @@ test("installed lanes guides two locked worktrees and runs the ops in a throwawa
     }
     const installed = install(box, ["--yes", "--user", "tester", "--repos-root", repos, "--profile", "balanced", "--skip-npm", "--with", "lanes"], { entry: "node" });
     assert.equal(installed.status, 0, installed.stderr); assert.ok(lstatSync(join(box.home, ".local/bin/lanes")).isSymbolicLink());
+    const installLog = readFileSync(box.log, "utf8");
+    assert.match(installLog, /^pi /m);
+    const installLogLength = installLog.length;
     stub("gh", `case "$1 $2" in
   "issue list") echo '[{"number":1,"title":"First","assignees":[{"login":"tester"}]}]' ;;
   "pr list") case "$*" in *example/alpha*) echo '[{"number":7,"isDraft":false,"labels":[],"statusCheckRollup":[{"conclusion":"SUCCESS"}]},{"number":8,"isDraft":true,"labels":[],"statusCheckRollup":[{"conclusion":"SUCCESS"}]},{"number":9,"isDraft":false,"labels":[],"statusCheckRollup":[{"conclusion":"FAILURE"}]}]' ;; *) echo '[]' ;; esac ;;
@@ -63,6 +66,6 @@ esac`);
     assert.ok(readdirSync(join(root, "messages")).some((n) => n.includes("L0-to-ALL-lane-closed-l2-")));
     assert.equal(readFileSync(path, "utf8"), before); assert.ok(existsSync(join(repos, ".worktrees", c.lanes[1].worktree)));
     assert.equal(readFileSync(join(root, "lanes.json"), "utf8"), configBefore);
-    assert.doesNotMatch(readFileSync(box.log, "utf8"), /^(?:osascript|tmux|pi|pi-session) /m);
+    assert.doesNotMatch(readFileSync(box.log, "utf8").slice(installLogLength), /^(?:osascript|tmux|pi|pi-session) /m);
   } finally { rmSync(box.root, { recursive: true, force: true }); }
 });

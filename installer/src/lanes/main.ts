@@ -36,11 +36,15 @@ export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
       const token = argv[i];
       if (token === "--") { positional.push(...argv.slice(i + 1)); break; }
       if (token.startsWith("--") || token === "-m") {
-        const key = token === "-m" ? "m" : token.slice(2);
-        if (["preapprove-mcp", "new", "ack", "quit"].includes(key)) { opts[key] = "true"; continue; }
-        if (argv[i + 1] === undefined || argv[i + 1].startsWith("--")) throw new UsageError(`missing value for ${token}`);
+        const equals = token.startsWith("--") ? token.indexOf("=") : -1;
+        const key = token === "-m" ? "m" : token.slice(2, equals < 0 ? undefined : equals);
+        if (["preapprove-mcp", "new", "ack", "quit"].includes(key)) {
+          if (equals >= 0) throw new UsageError(`unknown option ${token}`);
+          opts[key] = "true"; continue;
+        }
+        if (equals < 0 && (argv[i + 1] === undefined || argv[i + 1].startsWith("--"))) throw new UsageError(`missing value for ${token}`);
         if (Object.hasOwn(opts, key)) throw new UsageError(`duplicate option ${token}`);
-        opts[key] = argv[++i];
+        opts[key] = equals < 0 ? argv[++i] : token.slice(equals + 1);
       } else if (token.startsWith("-") && token !== "-") throw new UsageError(`unknown option ${token}`);
       else positional.push(token);
     }

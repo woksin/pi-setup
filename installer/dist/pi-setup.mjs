@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 47a5ed41f84322cd948c95d36f9c42df7cda2b08b36028af8be2994d2bfe16dd
+// pi-setup-source-sha256: 94eca5b1dc8d8674aed71a8db662b9a5252670ff7f0e305543ca32c4af63f06a
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -866,12 +866,7 @@ async function runningPi(ctx) {
   for (const token of result2.stdout.trim().split(/\s+/)) {
     if (!/^\d+$/.test(token)) continue;
     const pid = Number(token);
-    let cwd = await ctx.readCwd?.(pid);
-    if (!ctx.readCwd) {
-      const r2 = ctx.platform === "darwin" ? await ctx.run("lsof", ["-a", "-p", token, "-d", "cwd", "-Fn"], { timeoutMs: 1e4 }) : await ctx.run("readlink", [`/proc/${pid}/cwd`], { timeoutMs: 1e4 });
-      if (r2.code !== 0) continue;
-      cwd = ctx.platform === "darwin" ? r2.stdout.split("\n").find((s) => s.startsWith("n"))?.slice(1) : r2.stdout.trim();
-    }
+    const cwd = await processCwd(ctx, pid);
     if (cwd) {
       try {
         found.push({ pid, cwd: ctx.realpath(cwd) });
@@ -886,13 +881,26 @@ async function ttyOf(ctx, pid) {
   const tty = r2.stdout.trim();
   return r2.code === 0 && /^[A-Za-z0-9/]+$/.test(tty) ? tty : void 0;
 }
-async function foregroundPi(ctx, tty) {
+async function processCwd(ctx, pid) {
+  if (ctx.readCwd) return ctx.readCwd(pid);
+  const r2 = ctx.platform === "darwin" ? await ctx.run("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeoutMs: 1e4 }) : await ctx.run("readlink", [`/proc/${pid}/cwd`], { timeoutMs: 1e4 });
+  if (r2.code !== 0 || r2.timedOut) return void 0;
+  return ctx.platform === "darwin" ? r2.stdout.split("\n").find((s) => s.startsWith("n"))?.slice(1) : r2.stdout.trim();
+}
+async function foregroundPi(ctx, tty, pid, cwd) {
   if (!/^[A-Za-z0-9/]+$/.test(tty)) return false;
-  const r2 = await ctx.run("ps", ["-t", tty, "-o", "stat=,comm="], { timeoutMs: 1e4 });
-  return r2.code === 0 && r2.stdout.split("\n").some((line) => {
-    const m2 = /^\s*(\S+)\s+(.+?)\s*$/.exec(line);
-    return m2?.[1].includes("+") && m2[2].split("/").at(-1) === "pi";
+  const r2 = await ctx.run("ps", ["-t", tty, "-o", "pid=,stat=,comm="], { timeoutMs: 1e4 });
+  const matches = r2.code === 0 && !r2.timedOut && r2.stdout.split("\n").some((line) => {
+    const m2 = /^\s*(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
+    return m2 && Number(m2[1]) === pid && m2[2].includes("+") && m2[3].split("/").at(-1) === "pi";
   });
+  if (!matches) return false;
+  try {
+    const current = await processCwd(ctx, pid);
+    return Boolean(current && ctx.realpath(current) === ctx.realpath(cwd));
+  } catch {
+    return false;
+  }
 }
 async function descendants(ctx, rootPid) {
   const r2 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,command="], { timeoutMs: 1e4 });
@@ -1160,7 +1168,7 @@ var init_idle_check = __esm({
 
 // src/lanes/commands/nudge.ts
 async function nudge(id, text3, opts, c2, root, ctx) {
-  text3 = text3.trim().replace(/[\r\n]/g, " ");
+  text3 = text3.replace(/[\x00-\x1f\x7f]/g, " ").trim();
   if (!text3 || text3.length > 2e3) throw new UsageError("nudge text must be between 1 and 2000 characters");
   const target = laneTarget(id, c2, root, ctx);
   const refuse = (why) => {
@@ -1172,7 +1180,7 @@ async function nudge(id, text3, opts, c2, root, ctx) {
   if (!pid) return refuse(`no pi running in ${target.cwd}`);
   const tty = await ttyOf(ctx, pid);
   if (!tty) return refuse(`${target.id} has no tty`);
-  if (!await foregroundPi(ctx, tty)) return refuse(`no foreground pi on ${tty} (lane stopped or busy in a subshell)`);
+  if (!await foregroundPi(ctx, tty, pid, target.cwd)) return refuse(`no foreground pi on ${tty} (lane stopped or busy in a subshell)`);
   const backend = detectBackend(opts.terminal || c2.terminal.backend, ctx);
   if (backend === "print") {
     ctx.out(`nudge ${target.id} (tty ${tty}): type this into its pi session: ${text3}`);
@@ -1410,20 +1418,20 @@ async function close(id, opts, c2, root, ctx) {
   if (!validId(from)) throw new UsageError("invalid sender id");
   if (to && to !== c2.coordinator.id && !c2.lanes.some((l2) => l2.id === to)) ctx.err(`unknown reassignment target: ${to}`);
   const target = laneTarget(id, c2, root, ctx);
+  const common = await ctx.run("git", ["-C", target.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 });
+  if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
+  const clone = shellQuote(dirname5(common.stdout.trim()));
+  const wt = shellQuote(target.cwd);
+  const backend = backendFor(c2, ctx, root);
+  const unread = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
   const pid = await piIn(target.cwd, ctx);
   if (pid && opts.quit && !await quit(id, pid, target.cwd, c2, root, ctx)) return 1;
   if (pid && !opts.quit) ctx.err(`${id} is still running; type /quit in its session or use --quit`);
-  const backend = backendFor(c2, ctx, root);
-  const unread = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
   const line = closedLine(to, opts.reason, ctx.now());
   await backend.setStatus(id, line);
   const message = await backend.send({ from, to: c2.messages.broadcast, topic: `lane-closed-${id.toLowerCase()}`, body: closeBody(id, to, opts.reason, unread) });
   ctx.out(`${id}: ${line}`);
   ctx.out(message.path);
-  const common = await ctx.run("git", ["-C", target.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 });
-  if (common.code !== 0 || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
-  const clone = shellQuote(dirname5(common.stdout.trim()));
-  const wt = shellQuote(target.cwd);
   ctx.out(`when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`);
   return 0;
 }
@@ -1490,14 +1498,16 @@ async function main(argv, ctx) {
         break;
       }
       if (token.startsWith("--") || token === "-m") {
-        const key = token === "-m" ? "m" : token.slice(2);
+        const equals = token.startsWith("--") ? token.indexOf("=") : -1;
+        const key = token === "-m" ? "m" : token.slice(2, equals < 0 ? void 0 : equals);
         if (["preapprove-mcp", "new", "ack", "quit"].includes(key)) {
+          if (equals >= 0) throw new UsageError(`unknown option ${token}`);
           opts[key] = "true";
           continue;
         }
-        if (argv[i2 + 1] === void 0 || argv[i2 + 1].startsWith("--")) throw new UsageError(`missing value for ${token}`);
+        if (equals < 0 && (argv[i2 + 1] === void 0 || argv[i2 + 1].startsWith("--"))) throw new UsageError(`missing value for ${token}`);
         if (Object.hasOwn(opts, key)) throw new UsageError(`duplicate option ${token}`);
-        opts[key] = argv[++i2];
+        opts[key] = equals < 0 ? argv[++i2] : token.slice(equals + 1);
       } else if (token.startsWith("-") && token !== "-") throw new UsageError(`unknown option ${token}`);
       else positional.push(token);
     }
@@ -1634,7 +1644,7 @@ async function runLanesFlow(ctx, options, p, nested = false) {
   const created = [];
   if (!existsSync12(join17(choice.dir, "lanes.json")) && await main(["init", choice.dir, "--repos-root", reposRoot], laneCtx) !== 0) return 1;
   for (const lane of choice.lanes) {
-    const argv = ["--dir", choice.dir, "add", lane.id, "--repo", lane.repo, "--path", lane.path, ...lane.issue ? ["--issue", String(lane.issue)] : ["--goal", lane.goal]];
+    const argv = ["--dir", choice.dir, "add", lane.id, "--repo", lane.repo, "--path", lane.path, ...lane.issue ? ["--issue", String(lane.issue)] : [`--goal=${lane.goal}`]];
     if (await main(argv, laneCtx) !== 0) {
       ctx.err(`Could not create ${lane.id}; created lanes: ${created.join(", ") || "none"}`);
       return 1;
