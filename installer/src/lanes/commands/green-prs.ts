@@ -9,7 +9,7 @@ function green(pr: PullRequest, excluded: string[]): boolean {
 }
 export async function greenPrs(opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx): Promise<number> {
   if (opts.new && opts.ack) throw new UsageError("--new and --ack are mutually exclusive");
-  const repos = c.github?.repos.length ? c.github.repos : [...new Set([...c.lanes.map((l) => l.repo), ...Object.keys(c.repos)])];
+  const repos = c.github?.repos.length ? c.github.repos : [...new Set([...c.lanes.map((l) => l.repo).filter((repo): repo is string => typeof repo === "string"), ...Object.keys(c.repos)])];
   if (!repos.length) { ctx.err("no repositories configured (lanes.json github.repos)"); return 1; }
   if (!ctx.which("gh")) { ctx.err("gh not found"); return 2; }
   const refs: string[] = [];

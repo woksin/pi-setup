@@ -5,6 +5,9 @@ import { dirname, join } from "node:path";
 import { defaults, saveConfig } from "../src/lanes/config.ts";
 import { main } from "../src/lanes/main.ts";
 import { treeDigest } from "../src/lanes/reap/tree.ts";
+import { processEvidence } from "../src/lanes/reap/process.ts";
+import type { Signals } from "../src/lanes/reap/signals.ts";
+import { expectedSnapshot, readContext, validateContext } from "../src/lanes/reap/context-format.ts";
 import { verdict } from "../src/lanes/reap/verdict.ts";
 import { sessionDirFor } from "../src/lanes/names.ts";
 import { tempDir, REPO } from "./helpers/home.ts";
@@ -23,8 +26,11 @@ export function fixture() {
     run: async (cmd, args) => { calls.push({ cmd, args });
       if (cmd === "pgrep") { const pids = processList({ running, shared, receiver }); return result(pids.join("\n"), pids.length ? 0 : 1); }
       if (cmd === "lsof") return result(args.includes("cwd") ? `p101\nn${args.includes("201") ? root : cwd}\n` : files);
+      if (cmd === "ps") {
+        const probe = foregroundProbe({ args, foreground, busy });
+        if (probe !== undefined) return result(probe);
+      }
       if (cmd === "ps" && args[0] === "-A") return result(`101 1 pi\n${busy}`);
-      if (cmd === "ps" && args[0] === "-t") return result(foreground ? "101 S+ pi\n" : "101 S+ bash\n");
       if (cmd === "ps" && args.includes("lstart=")) return result("Fri Oct 23 09:00:00 2026");
       if (cmd === "ps" && args[0] === "-o") return result("ttys003\n");
       if (cmd === "ps") return result("", running ? 0 : 1);
@@ -41,6 +47,45 @@ export function fixture() {
     getDirty: () => dirty, setReceiver: () => receiver = true, setRunning: (v: boolean) => running = v, setShared: () => shared = true, setBusy: (v: string) => busy = v, setFiles: (v: string) => files = v, setDirty: (v: string) => dirty = v, setMerged: () => merged = true, setForeground: (v: boolean) => foreground = v,
     invoke: (...args: string[]) => main(["--dir", root, ...args], ctx),
     rows: () => JSON.parse(out.at(-1)!) as { id: string; verdict: string; reason: string }[] };
+}
+function foregroundProbe({ args, foreground, busy }: { args: string[]; foreground: boolean; busy: string }): string | undefined {
+  if (args.includes("pgid=,tpgid=")) return "101 101\n";
+  if (args.includes("pid=,ppid=,pgid=,command=")) return `101 1 101 ${foreground ? "pi" : "bash"}\n${busy.replace(/^(\d+) (\d+) /gm, "$1 $2 102 ")}`;
+  if (args[0] === "-t") return foreground ? "101 S+ pi\n" : "101 S+ bash\n";
+}
+const liveTty = `41515 Ss   login -pf sindrewilting
+41516 S    -zsh
+43656 S+   bash /Users/sindrewilting/.local/bin/pi-session --name L49 @/Volumes/work
+43835 S+   pi
+44484 S+   chrome-devtools-mcp
+44502 S+   /Users/bin/donsetch mcp --supervised
+44504 S+   /Users/bin/donsetch mcp`;
+const liveTree = `41515 1 41515 login -pf sindrewilting
+41516 41515 41516 -zsh
+43656 41516 43656 bash /Users/sindrewilting/.local/bin/pi-session --name L49 @/Volumes/work
+43835 43656 43656 pi
+44484 43835 43656 chrome-devtools-mcp
+44502 43835 43656 /Users/bin/donsetch mcp --supervised
+44504 44502 43656 /Users/bin/donsetch mcp`;
+for (const variant of ["wrapper and MCP", "vim", "foreign", "background pi", "wrong command", "missing pi", "malformed group"]) {
+  test(`foreground process group: ${variant}`, async () => {
+    const f = fixture(); const run = f.ctx.run;
+    const extra = variant === "vim" ? "50000 43656 43656 vim" : variant === "foreign" ? "50000 1 43656 foreign" : "";
+    let tree = liveTree + (extra ? `\n${extra}` : "");
+    if (variant === "wrong command") tree = tree.replace("43835 43656 43656 pi", "43835 43656 43656 not-pi");
+    if (variant === "missing pi") tree = tree.split("\n").filter(line => !line.startsWith("43835 ")).join("\n");
+    const probes = new Map([
+      ["pgid=,tpgid=", variant === "background pi" ? "43656 50000" : variant === "malformed group" ? "? ?" : "43656 43656"],
+      ["pid=,ppid=,pgid=,command=", tree], ["-t", liveTty + (extra ? `\n50000 S+ ${variant}` : "")],
+    ]);
+    f.ctx.run = async (cmd, args, opts) => {
+      const output = probes.get(args.find(arg => probes.has(arg)) ?? "");
+      return cmd === "ps" && output !== undefined ? f.result(output) : run(cmd, args, opts);
+    };
+    const signals = { pid: 43835, keeps: [] } as unknown as Signals;
+    if (variant === "wrapper and MCP") await processEvidence(signals, f.ctx);
+    else await assert.rejects(processEvidence(signals, f.ctx), /foreground not the expected pi/);
+  });
 }
 test("dry run is read-only except plan, explains takeover and threshold fallback", async () => {
   const f = fixture(); assert.equal(await f.invoke("reap", "--json"), 0); assert.equal(f.rows()[0].verdict, "handoff");
@@ -75,6 +120,24 @@ const askCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["cannot read", f => f.put(join(f.ctx.piAgentDir, "context-budget/status/bad.json"), "{")],
 ];
 for (const [reason, setup] of askCases) test(`ask ${reason}`, async () => { const f = fixture(); setup(f); await f.invoke("reap", "--json"); assert.equal(f.rows()[0].verdict, "ask"); assert.match(f.rows()[0].reason, new RegExp(reason.replaceAll(".", "\\."))); });
+for (const identity of ["detached", "non-git"]) test(`reap tolerates ${identity} cwd lanes without invalid gh probes`, async () => {
+  const f = fixture(); f.c.lanes[0].cwd = f.cwd; delete f.c.lanes[0].branch;
+  if (identity === "non-git") delete f.c.lanes[0].repo;
+  saveConfig(f.root, f.c); f.claim("done");
+  const run = f.ctx.run;
+  f.ctx.run = async (cmd, args, opts) => cmd === "git" && identity === "non-git" ? f.result("", 128) : run(cmd, args, opts);
+  assert.equal(await f.invoke("reap", "--json"), 0, f.err.join("\n"));
+  assert.ok(!f.calls.some(call => call.cmd === "gh"));
+  assert.ok(!/toLowerCase|undefined/.test(f.rows()[0].reason));
+  assert.equal(f.rows()[0].verdict, identity === "non-git" ? "ask" : "handoff");
+});
+test("detached cwd handoff snapshots round trip without a fabricated branch", () => {
+  const f = fixture(); delete f.c.lanes[0].branch;
+  const snapshot = expectedSnapshot({ lane: f.c.lanes[0] } as any, { cwd: f.cwd, git: { head: f.head, paths: [], unpushed: [] } } as any);
+  const headings = ["Goal", "Repository", "Worktree", "Branch", "HEAD", "Dirty files", "Issue claims", "Open PRs or candidates", "External work", "Next step", "User constraints", "Open items", "Launch prompt"];
+  const path = f.put(join(f.root, "context.md"), headings.map(heading => `## ${heading}\nnone`).join("\n") + `\n## Snapshot\n\`\`\`json\n${JSON.stringify(snapshot)}\n\`\`\`\n`);
+  validateContext(readContext(path), snapshot);
+});
 test("verdict never mistakes unknown ownership or acknowledgements for finished", () => {
   assert.equal(verdict({ asks: [], keeps: [], finished: false, takeover: false }).verdict, "handoff");
   assert.equal(verdict({ asks: [], keeps: [], finished: true, takeover: false }).ground, "finished");

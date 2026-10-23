@@ -7,9 +7,9 @@ import type { LanesCtx } from "./ctx.ts";
 
 export const BACKENDS = ["auto", "terminal-app", "iterm", "tmux", "print"];
 export interface Lane {
-  id: string; repo: string; issue?: number; goal?: string; group: string | null;
+  id: string; repo?: string; issue?: number; goal?: string; group: string | null;
   role?: "lane" | "repo-orch" | "sub-orch"; parent?: string; retired?: boolean; stateFile?: string;
-  worktree: string; cwd?: string; branch: string; prompt: string; [key: string]: unknown;
+  worktree: string; cwd?: string; branch?: string; prompt: string; [key: string]: unknown;
 }
 export interface Retention {
   mode: "keep" | "archive" | "delete"; maxAgeDays: number; archiveDir?: string;
@@ -89,8 +89,9 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
   for (const [i, lane] of c.lanes.entries()) {
     const key = `lanes.${i}`;
     require(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id), `${key}.id`); ids.add(lane.id);
-    require(typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo), `${key}.repo`);
-    for (const k of ["branch", "prompt"] as const) require(text(lane[k]), `${key}.${k}`);
+    require(absentCwdIdentity(lane, lane.repo) || (typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo)), `${key}.repo`);
+    require(absentCwdIdentity(lane, lane.branch) || text(lane.branch), `${key}.branch`);
+    require(text(lane.prompt), `${key}.prompt`);
     require(text(lane.worktree) && !/[\\/]/.test(lane.worktree) && ![".", ".."].includes(lane.worktree), `${key}.worktree`);
     require(lane.group === null || (typeof lane.group === "string" && validId(lane.group) && !["ALL", c.messages.broadcast].includes(lane.group)), `${key}.group`);
     require(lane.issue === undefined || (Number.isInteger(lane.issue) && lane.issue > 0), `${key}.issue`);
@@ -101,6 +102,9 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
 }
 function requireField(ok: unknown, key: string): void {
   if (!ok) throw new UsageError(`invalid ${key}`);
+}
+function absentCwdIdentity(lane: Lane, value: unknown): boolean {
+  return lane.cwd !== undefined && value === undefined;
 }
 function validParent(lane: Lane, c: Config): boolean {
   if (lane.parent === undefined || lane.parent === c.coordinator.id) return true;
@@ -124,7 +128,7 @@ function validStateFile(value: string | undefined): boolean {
 function validateHierarchy(c: Config, root: string, home: string): void {
   const active = c.lanes.filter(l => !l.retired);
   requireField(new Set(active.map(l => laneDir(l, c, root, { home }))).size === active.length, "duplicate worktree");
-  const orchs = active.filter(l => l.role === "repo-orch");
+  const orchs = active.filter(l => l.role === "repo-orch" && l.repo);
   requireField(new Set(orchs.map(l => l.repo)).size === orchs.length, "duplicate repo-orch");
   for (const lane of active) validateParentChain(lane, c);
 }
@@ -196,7 +200,7 @@ export function saveConfig(root: string, c: Config): void {
 }
 
 export function effectiveParent(lane: Lane, c: Config): string {
-  return lane.parent ?? (lane.role === "repo-orch" ? c.coordinator.id : c.lanes.find(l => !l.retired && l.role === "repo-orch" && l.repo === lane.repo)?.id ?? c.coordinator.id);
+  return lane.parent ?? (lane.role === "repo-orch" || !lane.repo ? c.coordinator.id : c.lanes.find(l => !l.retired && l.role === "repo-orch" && l.repo === lane.repo)?.id ?? c.coordinator.id);
 }
 export function laneTree(c: Config, all = false): { lane: Lane; depth: number }[] {
   const lanes = c.lanes.filter(l => all || !l.retired); const rows: { lane: Lane; depth: number }[] = [];

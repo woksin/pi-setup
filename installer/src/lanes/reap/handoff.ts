@@ -46,7 +46,7 @@ export async function prepare(env: EvidenceContext, to: string, s: Signals): Pro
   writeFileSync(join(dir, "HANDOFF.md"), [
     `# Handoff ${pack.id}`,
     `Recipient: ${to}`,
-    `Branch: ${lane.branch}`,
+    `Branch: ${lane.branch ?? "unknown"}`,
     `SHA: ${s.git.head || "unknown"}`,
     `Dirty: ${s.git.dirty}`,
     `Ahead: ${s.git.ahead ?? "unknown"}`,

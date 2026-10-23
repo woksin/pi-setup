@@ -36,7 +36,9 @@ function orchestration(s: Signals, env: EvidenceContext): void {
 }
 export function claimsAndOwnership(s: Signals, env: EvidenceContext): void {
   const text = optionalText(join(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
-  const claims = registry(text || "").filter(claim => claim.repo.toLowerCase() === env.lane.repo.toLowerCase());
+  const claims = registry(text || "").filter(claim => env.lane.repo
+    ? claim.repo.toLowerCase() === env.lane.repo.toLowerCase()
+    : claim.sessionId === s.sessionId);
   for (const claim of claims) classifyClaim(claim, s);
   namedNotes(s, env); orchestration(s, env);
 }

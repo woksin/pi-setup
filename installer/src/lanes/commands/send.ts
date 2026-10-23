@@ -30,7 +30,8 @@ function route(input: { to: string; from: string; direct?: string }, c: Config, 
   if (!routeToParent(input, sender, c)) return input.to;
   const parent = effectiveParent(sender!, c);
   if (parent !== input.to) {
-    ctx.err(`routed to ${parent} (repo orchestrator of ${sender!.repo}); --direct to bypass`);
+    const relationship = sender!.repo ? `repo orchestrator of ${sender!.repo}` : `parent of ${sender!.id}`;
+    ctx.err(`routed to ${parent} (${relationship}); --direct to bypass`);
     return parent;
   }
   return input.to;

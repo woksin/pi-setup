@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { LanesCtx } from "../ctx.ts";
 import type { Signals } from "./signals.ts";
+import { expectedForeground } from "./foreground.ts";
 export function absolute(ctx: LanesCtx, path: string): string { return normalize(ctx.realpath(path)); }
 export function requireProbe(result: { code: number; timedOut: boolean }, message: string): void { if (result.code !== 0 || result.timedOut) throw new Error(message); }
 export async function processCwd(ctx: LanesCtx, pid: number): Promise<string> {
@@ -36,10 +37,11 @@ async function openJobs(s: Signals, ctx: LanesCtx): Promise<void> {
 async function foreground(s: Signals, ctx: LanesCtx): Promise<void> {
   const tty = await ctx.run("ps", ["-o", "tty=", "-p", String(s.pid)], { timeoutMs: 4000 }); requireProbe(tty, "TTY unknown");
   s.tty = tty.stdout.trim(); if (!/^[A-Za-z0-9/]+$/.test(s.tty)) throw new Error("foreground not the expected pi (no TTY)");
-  const fg = await ctx.run("ps", ["-t", s.tty, "-o", "pid=,stat=,command="], { timeoutMs: 4000 }); requireProbe(fg, "foreground unknown");
-  const rows = fg.stdout.split("\n").filter(l => /^\s*\d+\s+\S*\+/.test(l));
-  const expected = new RegExp(`^\\s*${s.pid}\\s+\\S*\\+\\s+(?:\\S*/)?pi(?:\\s|$)`);
-  if (rows.length !== 1 || !expected.test(rows[0])) throw new Error("foreground not the expected pi");
+  const group = await ctx.run("ps", ["-o", "pgid=,tpgid=", "-p", String(s.pid)], { timeoutMs: 4000 }); requireProbe(group, "foreground unknown");
+  const ids = /^\s*([1-9]\d*)\s+([1-9]\d*)\s*$/.exec(group.stdout);
+  if (!ids || ids[1] !== ids[2]) throw new Error("foreground not the expected pi");
+  const fg = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,pgid=,command="], { timeoutMs: 4000 }); requireProbe(fg, "foreground unknown");
+  if (!expectedForeground(s.pid!, Number(ids[1]), fg.stdout)) throw new Error("foreground not the expected pi");
 }
 export async function processEvidence(s: Signals, ctx: LanesCtx): Promise<void> {
   await busyChildren(s, ctx); await openJobs(s, ctx);

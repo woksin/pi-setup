@@ -4,7 +4,7 @@ import type { EvidenceContext, Signals } from "./signals.ts";
 
 export const HEADINGS = ["Goal", "Repository", "Worktree", "Branch", "HEAD", "Dirty files", "Issue claims",
   "Open PRs or candidates", "External work", "Next step", "User constraints", "Open items", "Launch prompt"];
-export interface Snapshot { head: string; paths: string[]; digest?: string; unpushed: string[]; repo: string; worktree: string; branch: string }
+export interface Snapshot { head: string; paths: string[]; digest?: string; unpushed: string[]; repo?: string; worktree: string; branch?: string }
 export interface ContextFile { text: string; snapshot: Snapshot; mtime: number; digest: string }
 function sections(text: string): Map<string, string> {
   const matches = [...text.matchAll(/^##\s+([^\r\n]+)\r?$/gm)]; const result = new Map<string, string>();
@@ -23,10 +23,14 @@ function snapshotSection(section: string | undefined): Snapshot {
 function strings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(s => typeof s === "string");
 }
+function optionalIdentity(value: unknown): boolean {
+  return value === undefined || (typeof value === "string" && Boolean(value));
+}
 function validSnapshot(s: Snapshot): boolean {
   if (!s || !/^[a-f0-9]{40,64}$/.test(s.head)) return false;
   if (!strings(s.paths) || !strings(s.unpushed)) return false;
-  return [s.repo, s.worktree, s.branch].every(value => typeof value === "string" && Boolean(value));
+  return typeof s.worktree === "string" && Boolean(s.worktree)
+    && [s.repo, s.branch].every(optionalIdentity);
 }
 export function readContext(path: string): ContextFile {
   const stat = lstatSync(path); if (!stat.isFile()) throw new Error("lane handoff must be a regular file");

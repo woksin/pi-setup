@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 525801e85a4a901042e5d03c70fd452bb0faf461ec34c531e7459149f1a5a83a
+// pi-setup-source-sha256: 72a127f79a0a8eedcc3c56099b690fd2cce30e165e4693bb9b3f05c221617eae
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -533,8 +533,9 @@ function validate(value, root = process.cwd(), home = homedir3()) {
     const key = `lanes.${i2}`;
     require2(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id), `${key}.id`);
     ids.add(lane.id);
-    require2(typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo), `${key}.repo`);
-    for (const k of ["branch", "prompt"]) require2(text3(lane[k]), `${key}.${k}`);
+    require2(absentCwdIdentity(lane, lane.repo) || typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo), `${key}.repo`);
+    require2(absentCwdIdentity(lane, lane.branch) || text3(lane.branch), `${key}.branch`);
+    require2(text3(lane.prompt), `${key}.prompt`);
     require2(text3(lane.worktree) && !/[\\/]/.test(lane.worktree) && ![".", ".."].includes(lane.worktree), `${key}.worktree`);
     require2(lane.group === null || typeof lane.group === "string" && validId(lane.group) && !["ALL", c2.messages.broadcast].includes(lane.group), `${key}.group`);
     require2(lane.issue === void 0 || Number.isInteger(lane.issue) && lane.issue > 0, `${key}.issue`);
@@ -545,6 +546,9 @@ function validate(value, root = process.cwd(), home = homedir3()) {
 }
 function requireField(ok, key) {
   if (!ok) throw new UsageError(`invalid ${key}`);
+}
+function absentCwdIdentity(lane, value) {
+  return lane.cwd !== void 0 && value === void 0;
 }
 function validParent(lane, c2) {
   if (lane.parent === void 0 || lane.parent === c2.coordinator.id) return true;
@@ -568,7 +572,7 @@ function validStateFile(value) {
 function validateHierarchy(c2, root, home) {
   const active = c2.lanes.filter((l2) => !l2.retired);
   requireField(new Set(active.map((l2) => laneDir(l2, c2, root, { home }))).size === active.length, "duplicate worktree");
-  const orchs = active.filter((l2) => l2.role === "repo-orch");
+  const orchs = active.filter((l2) => l2.role === "repo-orch" && l2.repo);
   requireField(new Set(orchs.map((l2) => l2.repo)).size === orchs.length, "duplicate repo-orch");
   for (const lane of active) validateParentChain(lane, c2);
 }
@@ -647,7 +651,7 @@ function saveConfig(root, c2) {
   renameSync(tmp, join5(root, "lanes.json"));
 }
 function effectiveParent(lane, c2) {
-  return lane.parent ?? (lane.role === "repo-orch" ? c2.coordinator.id : c2.lanes.find((l2) => !l2.retired && l2.role === "repo-orch" && l2.repo === lane.repo)?.id ?? c2.coordinator.id);
+  return lane.parent ?? (lane.role === "repo-orch" || !lane.repo ? c2.coordinator.id : c2.lanes.find((l2) => !l2.retired && l2.role === "repo-orch" && l2.repo === lane.repo)?.id ?? c2.coordinator.id);
 }
 function laneTree(c2, all = false) {
   const lanes = c2.lanes.filter((l2) => all || !l2.retired);
@@ -797,7 +801,7 @@ async function gitEvidence(ctx, lane, cwd) {
   const unpushed = commitList(ahead.stdout);
   const paths = changedPaths(status2.stdout);
   const digest = treeDigest({ cwd, paths, status: status2.stdout, diff: diff.stdout });
-  const prs = await ctx.run("gh", [
+  const prs = lane.repo && lane.branch ? await ctx.run("gh", [
     "pr",
     "list",
     "--repo",
@@ -808,11 +812,11 @@ async function gitEvidence(ctx, lane, cwd) {
     "merged",
     "--json",
     "headRefOid"
-  ], { cwd, timeoutMs: 5e3 });
+  ], { cwd, timeoutMs: 5e3 }) : void 0;
   return {
     head: head.stdout.trim(),
     dirty: Boolean(status2.stdout.trim()),
-    merged: mergedAtHead(prs, head.stdout.trim()),
+    merged: prs ? mergedAtHead(prs, head.stdout.trim()) : void 0,
     ahead: unpushed.length,
     status: status2.stdout,
     paths,
@@ -823,6 +827,41 @@ async function gitEvidence(ctx, lane, cwd) {
 var init_git = __esm({
   "src/lanes/reap/git.ts"() {
     init_tree();
+  }
+});
+
+// src/lanes/reap/foreground.ts
+function processTable(text3) {
+  const rows = [];
+  for (const line of text3.split("\n").filter((l2) => l2.trim())) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+    if (!match) return void 0;
+    rows.push({ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), command: match[4] });
+  }
+  if (new Set(rows.map((row) => row.pid)).size !== rows.length) return void 0;
+  return rows;
+}
+function ancestors(pid, table) {
+  const family = /* @__PURE__ */ new Set();
+  let current = table.get(pid);
+  while (current && !family.has(current.pid)) {
+    family.add(current.pid);
+    current = table.get(current.ppid);
+  }
+  return family;
+}
+function expectedForeground(pid, pgid, text3) {
+  const rows = processTable(text3);
+  if (!rows) return false;
+  const table = new Map(rows.map((row) => [row.pid, row]));
+  const pi = table.get(pid);
+  if (pi?.pgid !== pgid) return false;
+  if (!/^(?:\S*\/)?pi(?:\s|$)/.test(pi.command)) return false;
+  const parents = ancestors(pid, table);
+  return rows.filter((row) => row.pgid === pgid).every((row) => parents.has(row.pid) || ancestors(row.pid, table).has(pid));
+}
+var init_foreground = __esm({
+  "src/lanes/reap/foreground.ts"() {
   }
 });
 
@@ -885,11 +924,13 @@ async function foreground(s, ctx) {
   requireProbe(tty, "TTY unknown");
   s.tty = tty.stdout.trim();
   if (!/^[A-Za-z0-9/]+$/.test(s.tty)) throw new Error("foreground not the expected pi (no TTY)");
-  const fg = await ctx.run("ps", ["-t", s.tty, "-o", "pid=,stat=,command="], { timeoutMs: 4e3 });
+  const group = await ctx.run("ps", ["-o", "pgid=,tpgid=", "-p", String(s.pid)], { timeoutMs: 4e3 });
+  requireProbe(group, "foreground unknown");
+  const ids = /^\s*([1-9]\d*)\s+([1-9]\d*)\s*$/.exec(group.stdout);
+  if (!ids || ids[1] !== ids[2]) throw new Error("foreground not the expected pi");
+  const fg = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,pgid=,command="], { timeoutMs: 4e3 });
   requireProbe(fg, "foreground unknown");
-  const rows = fg.stdout.split("\n").filter((l2) => /^\s*\d+\s+\S*\+/.test(l2));
-  const expected = new RegExp(`^\\s*${s.pid}\\s+\\S*\\+\\s+(?:\\S*/)?pi(?:\\s|$)`);
-  if (rows.length !== 1 || !expected.test(rows[0])) throw new Error("foreground not the expected pi");
+  if (!expectedForeground(s.pid, Number(ids[1]), fg.stdout)) throw new Error("foreground not the expected pi");
 }
 async function processEvidence(s, ctx) {
   await busyChildren(s, ctx);
@@ -910,6 +951,7 @@ function canonicalCwd(ctx, cwd) {
 }
 var init_process = __esm({
   "src/lanes/reap/process.ts"() {
+    init_foreground();
   }
 });
 
@@ -1133,7 +1175,7 @@ function orchestration(s, env) {
 }
 function claimsAndOwnership(s, env) {
   const text3 = optionalText(join10(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
-  const claims = registry(text3 || "").filter((claim) => claim.repo.toLowerCase() === env.lane.repo.toLowerCase());
+  const claims = registry(text3 || "").filter((claim) => env.lane.repo ? claim.repo.toLowerCase() === env.lane.repo.toLowerCase() : claim.sessionId === s.sessionId);
   for (const claim of claims) classifyClaim(claim, s);
   namedNotes(s, env);
   orchestration(s, env);
@@ -1375,7 +1417,7 @@ ${optionalText(join13(root, "coordinator", n3)) || "unknown/not present"}`).join
   writeFileSync4(join13(dir, "HANDOFF.md"), [
     `# Handoff ${pack.id}`,
     `Recipient: ${to}`,
-    `Branch: ${lane.branch}`,
+    `Branch: ${lane.branch ?? "unknown"}`,
     `SHA: ${s.git.head || "unknown"}`,
     `Dirty: ${s.git.dirty}`,
     `Ahead: ${s.git.ahead ?? "unknown"}`,
@@ -1626,10 +1668,13 @@ function snapshotSection(section) {
 function strings(value) {
   return Array.isArray(value) && value.every((s) => typeof s === "string");
 }
+function optionalIdentity(value) {
+  return value === void 0 || typeof value === "string" && Boolean(value);
+}
 function validSnapshot(s) {
   if (!s || !/^[a-f0-9]{40,64}$/.test(s.head)) return false;
   if (!strings(s.paths) || !strings(s.unpushed)) return false;
-  return [s.repo, s.worktree, s.branch].every((value) => typeof value === "string" && Boolean(value));
+  return typeof s.worktree === "string" && Boolean(s.worktree) && [s.repo, s.branch].every(optionalIdentity);
 }
 function readContext(path2) {
   const stat2 = lstatSync2(path2);
@@ -2402,6 +2447,7 @@ import { basename as basename3, dirname as dirname6, relative as relative6 } fro
 function mergeDiscovered(c2, rows, options) {
   for (const row of rows) {
     if (row.id && !row.excluded) mergeLane(row, { c: c2, ...options });
+    row.skipped = blockingWarnings(row).join("; ") || void 0;
   }
 }
 function mergeLane(row, env) {
@@ -2416,7 +2462,7 @@ function mergeLane(row, env) {
     return;
   }
   if (!validNewId(row.id)) row.warnings.push("unsupported id, rename the lane");
-  if (row.warnings.length) return;
+  if (blockingWarnings(row).length) return;
   insertLane(row, env);
 }
 function mergeCoordinator(row, { c: c2, root, ctx, existingConfig }) {
@@ -2425,7 +2471,7 @@ function mergeCoordinator(row, { c: c2, root, ctx, existingConfig }) {
     compareValue(row, "cwd", stored, row.cwd);
     return;
   }
-  if (row.warnings.length) return;
+  if (blockingWarnings(row).length) return;
   Object.assign(c2.coordinator, { cwd: row.cwd, tty: row.tty, sessionId: row.sessionId });
 }
 function compareStored(row, lane, env) {
@@ -2434,6 +2480,9 @@ function compareStored(row, lane, env) {
   compareValue(row, "repo", lane.repo, row.repo);
   compareValue(row, "branch", lane.branch, row.branch);
   compareValue(row, "role", lane.role ?? "lane", env.roles.get(lane.id));
+}
+function blockingWarnings(row) {
+  return row.warnings.filter((w) => !["not a git repo", "detached HEAD", "origin repo unknown"].includes(w));
 }
 function compareValue(row, field, stored, found) {
   if (found !== void 0 && stored !== found) row.warnings.push(`conflict: stored ${field} ${stored}, found ${found}`);
@@ -2456,7 +2505,7 @@ function discoveredRole(row, env) {
   return env.roles.get(row.id) ?? (row.id.startsWith("R-") ? "repo-orch" : "lane");
 }
 function orchestratorConflict(row, env) {
-  if (discoveredRole(row, env) !== "repo-orch") return false;
+  if (discoveredRole(row, env) !== "repo-orch" || !row.repo) return false;
   const others = env.c.lanes.filter((l2) => !l2.retired && l2.id !== row.id);
   return others.some((l2) => l2.role === "repo-orch" && l2.repo === row.repo);
 }
@@ -2464,14 +2513,15 @@ function adoptedLane(row, env) {
   const { c: c2, root, ctx } = env;
   const lane = {
     id: row.id,
-    repo: row.repo,
-    branch: row.branch,
     role: discoveredRole(row, env),
+    ...row.repo ? { repo: row.repo } : {},
+    ...row.branch ? { branch: row.branch } : {},
     worktree: basename3(row.cwd),
     group: null,
     prompt: `prompts/${row.id}.md`
   };
   const managed = configuredDirectory(expand(c2.worktreesDir, c2, root, ctx.home), ctx);
+  if (!row.repo || !row.branch) return { ...lane, cwd: row.cwd };
   if (dirname6(row.cwd) === managed) {
     lane.worktree = relative6(managed, row.cwd);
     delete lane.cwd;
@@ -2490,9 +2540,10 @@ function printProposal({ rows, missing, before, after }, ctx) {
   for (const r2 of rows) ctx.out([r2.id ?? "?", r2.tty, r2.cwd, r2.sessionId ?? "?", r2.source ?? "?", r2.warnings.join("; ")].join("	"));
   for (const id of missing) ctx.out(`${id}	?	?	?	?	missing (preserved)`);
   const active = rows.filter((r2) => !r2.excluded);
-  const mapped = active.filter((r2) => r2.id && !r2.warnings.length).length;
+  const mapped = active.filter((r2) => r2.id && !r2.skipped).length;
   const unmapped = active.filter((r2) => !r2.id).length;
   ctx.out(`found=${active.length} mapped=${mapped} unmapped=${unmapped} conflicts=${active.length - mapped - unmapped} excluded=${rows.length - active.length}`);
+  for (const row of rows.filter((r2) => r2.skipped)) ctx.out(`${row.id ?? "?"}	${row.tty}	skipped: ${row.skipped}`);
   if (before === after) {
     ctx.out("lanes.json: no changes");
     return;
@@ -3153,7 +3204,8 @@ function route(input, c2, ctx) {
   if (!routeToParent(input, sender, c2)) return input.to;
   const parent = effectiveParent(sender, c2);
   if (parent !== input.to) {
-    ctx.err(`routed to ${parent} (repo orchestrator of ${sender.repo}); --direct to bypass`);
+    const relationship = sender.repo ? `repo orchestrator of ${sender.repo}` : `parent of ${sender.id}`;
+    ctx.err(`routed to ${parent} (${relationship}); --direct to bypass`);
     return parent;
   }
   return input.to;
@@ -3362,7 +3414,7 @@ function green(pr, excluded) {
 }
 async function greenPrs(opts, c2, root, ctx) {
   if (opts.new && opts.ack) throw new UsageError("--new and --ack are mutually exclusive");
-  const repos = c2.github?.repos.length ? c2.github.repos : [.../* @__PURE__ */ new Set([...c2.lanes.map((l2) => l2.repo), ...Object.keys(c2.repos)])];
+  const repos = c2.github?.repos.length ? c2.github.repos : [.../* @__PURE__ */ new Set([...c2.lanes.map((l2) => l2.repo).filter((repo) => typeof repo === "string"), ...Object.keys(c2.repos)])];
   if (!repos.length) {
     ctx.err("no repositories configured (lanes.json github.repos)");
     return 1;
@@ -3494,8 +3546,8 @@ async function status(c2, root, ctx, all = false) {
       lane.label,
       lane.role,
       lane.parent,
-      lane.repo,
-      lane.branch,
+      lane.repo ?? "-",
+      lane.branch ?? "-",
       pid,
       String(idleMinutes2(lane.cwd, ctx) ?? "-"),
       await backend.status(lane.id) || "-",
@@ -3543,7 +3595,7 @@ function lastMessage(last, ctx) {
   return last ? `${last.name} (${Math.max(0, Math.floor((ctx.now().getTime() - last.at.getTime()) / 6e4))}m)` : "-";
 }
 function warnMissingOrchestrators(c2, ctx) {
-  for (const repo of new Set(c2.lanes.filter((l2) => !l2.retired).map((l2) => l2.repo))) {
+  for (const repo of new Set(c2.lanes.filter((l2) => !l2.retired && l2.repo).map((l2) => l2.repo))) {
     const lanes = c2.lanes.filter((l2) => !l2.retired && l2.repo === repo);
     if (lanes.length > 1 && !lanes.some((l2) => l2.role === "repo-orch")) {
       ctx.err(`warning: ${repo}: ${lanes.length} lanes, no repo-orch`);
@@ -3937,8 +3989,8 @@ function listFiles(dir, base = "") {
   for (const entry2 of readdirSync10(join34(dir, base), { withFileTypes: true })) {
     const rel = base ? `${base}/${entry2.name}` : entry2.name;
     if (entry2.isFile()) {
-      if (!entry2.name.endsWith(".pi-setup-new")) out.push(rel);
-    } else if (entry2.isDirectory()) out.push(...listFiles(dir, rel));
+      if (!isClutterFile(entry2.name)) out.push(rel);
+    } else if (entry2.isDirectory() && !isClutterDir(entry2.name)) out.push(...listFiles(dir, rel));
   }
   return out.sort();
 }
@@ -3962,10 +4014,12 @@ function atomicWrite(link, data, mode, pid = process.pid) {
   chmodSync(tmp, mode);
   renameSync5(tmp, path2);
 }
-var pad;
+var pad, isClutterFile, isClutterDir;
 var init_fsx = __esm({
   "src/fsx.ts"() {
     pad = (n3) => String(n3).padStart(2, "0");
+    isClutterFile = (name) => name.endsWith(".pi-setup-new") || name.endsWith(".pyc") || name === ".DS_Store";
+    isClutterDir = (name) => name === "__pycache__" || name === "node_modules";
   }
 });
 

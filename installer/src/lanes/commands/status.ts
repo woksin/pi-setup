@@ -5,7 +5,7 @@ import type { LanesCtx } from "../ctx.ts";
 import { idleMinutes } from "../sessions.ts";
 import { runningPi } from "../processes.ts";
 
-interface StatusLane { id: string; repo: string; branch: string; group: string | null;
+interface StatusLane { id: string; repo?: string; branch?: string; group: string | null;
   role: string; parent: string; label: string; cwd: string }
 export async function status(c: Config, root: string, ctx: LanesCtx, all = false): Promise<number> {
   const backend = backendFor(c, ctx, root); const processes = await runningPi(ctx);
@@ -17,7 +17,7 @@ export async function status(c: Config, root: string, ctx: LanesCtx, all = false
       ...await backend.list({ from: lane.id, limit: 1 }),
     ].sort((a, b) => b.at.getTime() - a.at.getTime());
     rows.push([
-      lane.label, lane.role, lane.parent, lane.repo, lane.branch, pid,
+      lane.label, lane.role, lane.parent, lane.repo ?? "-", lane.branch ?? "-", pid,
       String(idleMinutes(lane.cwd, ctx) ?? "-"), await backend.status(lane.id) || "-",
       lastMessage(messages[0], ctx),
     ]);
@@ -50,7 +50,7 @@ function lastMessage(last: MessageRef | undefined, ctx: LanesCtx): string {
   return last ? `${last.name} (${Math.max(0, Math.floor((ctx.now().getTime() - last.at.getTime()) / 60000))}m)` : "-";
 }
 function warnMissingOrchestrators(c: Config, ctx: LanesCtx): void {
-  for (const repo of new Set(c.lanes.filter(l => !l.retired).map(l => l.repo))) {
+  for (const repo of new Set(c.lanes.filter(l => !l.retired && l.repo).map(l => l.repo))) {
     const lanes = c.lanes.filter(l => !l.retired && l.repo === repo);
     if (lanes.length > 1 && !lanes.some(l => l.role === "repo-orch")) {
       ctx.err(`warning: ${repo}: ${lanes.length} lanes, no repo-orch`);

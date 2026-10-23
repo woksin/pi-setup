@@ -11,7 +11,8 @@ import { readTemplate, renderTemplate, templateVars } from "../templates.ts";
 interface AddContext { c: Config; root: string; ctx: LanesCtx }
 type Options = Record<string, string>;
 type Git = (clone: string, args: string[], timeoutMs?: number) => ReturnType<LanesCtx["run"]>;
-interface Orchestration { siblings: Lane[]; orchestrator?: Lane; candidate?: Lane }
+type NewLane = Lane & { repo: string; branch: string };
+interface Orchestration { siblings: Lane[]; orchestrator?: Lane; candidate?: NewLane }
 
 export async function add(
   id: string, opts: Options, c: Config, root: string, ctx: LanesCtx,
@@ -53,7 +54,7 @@ function validateIssueAndGoal(opts: Options): void {
   }
   if (opts.goal !== undefined && !opts.goal.trim()) throw new UsageError("invalid goal");
 }
-function newLane(id: string, opts: Options): Lane {
+function newLane(id: string, opts: Options): NewLane {
   const repo = opts.repo; const name = repo.split("/")[1]; const lower = id.toLowerCase();
   const worktree = `${lower}-${name.toLowerCase()}`;
   const branch = opts.branch || defaultBranch(lower, worktree, opts);
@@ -67,7 +68,7 @@ function defaultBranch(lower: string, worktree: string, opts: Options): string {
   if (opts.issue) return `${lower}-issue-${Number(opts.issue)}`;
   return opts.goal ? `${lower}-${slug(opts.goal)}` : worktree;
 }
-function planOrchestration(lane: Lane, opts: Options, c: Config): Orchestration {
+function planOrchestration(lane: NewLane, opts: Options, c: Config): Orchestration {
   const siblings = c.lanes.filter(l => !l.retired && l.repo === lane.repo);
   const current = siblings.find(l => l.role === "repo-orch");
   if (opts.orchestrator && opts["no-orchestrator"]) {
@@ -86,7 +87,7 @@ function promotedOrchestrator(siblings: Lane[], id: string): Lane {
   }
   return orchestrator;
 }
-function newOrchestrator(lane: Lane, opts: Options, c: Config): Lane {
+function newOrchestrator(lane: NewLane, opts: Options, c: Config): NewLane {
   const name = lane.repo.split("/")[1];
   const id = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
   const reserved = [lane.id, c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.map(l => l.id)];
@@ -113,7 +114,7 @@ async function assignOrchestrator(plan: Orchestration, { c, root, ctx }: AddCont
   }
   ctx.out(`next: lanes start ${orchestrator.id}`);
 }
-export async function createWorktree(lane: Lane, opts: Options, env: AddContext): Promise<number> {
+export async function createWorktree(lane: NewLane, opts: Options, env: AddContext): Promise<number> {
   const { c, root, ctx } = env;
   const git: Git = (clone, args, timeoutMs = 10000) => ctx.run("git", ["-C", clone, ...args], { timeoutMs });
   const clone = await findClone(lane, opts, env, git);
@@ -135,7 +136,7 @@ export async function createWorktree(lane: Lane, opts: Options, env: AddContext)
   }
   return 0;
 }
-async function findClone(lane: Lane, opts: Options, { c, root, ctx }: AddContext, git: Git): Promise<string> {
+async function findClone(lane: NewLane, opts: Options, { c, root, ctx }: AddContext, git: Git): Promise<string> {
   const [owner, name] = lane.repo.split("/"); const repos = expand(c.reposRoot, c, root, ctx.home);
   const candidates = [
     opts.path ? resolve(ctx.cwd, opts.path) : undefined,
@@ -146,7 +147,7 @@ async function findClone(lane: Lane, opts: Options, { c, root, ctx }: AddContext
   throw new Error(`clone it first: gh repo clone ${lane.repo} ${join(repos, name)}`);
 }
 async function prepareBase(
-  input: { clone: string; lane: Lane; opts: Options; env: AddContext }, git: Git,
+  input: { clone: string; lane: NewLane; opts: Options; env: AddContext }, git: Git,
 ): Promise<string> {
   const { clone, lane, opts, env: { c, ctx } } = input;
   const remote = await git(clone, ["remote", "get-url", "origin"]);
@@ -160,7 +161,7 @@ async function prepareBase(
   if (fetch.code !== 0) ctx.err(`warning: fetch origin failed; using local ${base}`);
   return base;
 }
-async function addWorktree(input: { clone: string; lane: Lane; wt: string; base: string }, git: Git): Promise<void> {
+async function addWorktree(input: { clone: string; lane: NewLane; wt: string; base: string }, git: Git): Promise<void> {
   const { clone, lane, wt, base } = input;
   if (existsSync(wt)) throw new Error(`worktree already exists: ${wt}`);
   if ((await git(clone, ["show-ref", "--verify", "--quiet", `refs/heads/${lane.branch}`])).code === 0) {
@@ -169,7 +170,7 @@ async function addWorktree(input: { clone: string; lane: Lane; wt: string; base:
   const created = await git(clone, ["worktree", "add", "-b", lane.branch, wt, base], 120000);
   if (created.code !== 0) throw new Error(`git worktree add failed: ${created.stderr.trim()}`);
 }
-function writePrompt(input: { lane: Lane; wt: string; base: string }, { c, root, ctx }: AddContext): void {
+function writePrompt(input: { lane: NewLane; wt: string; base: string }, { c, root, ctx }: AddContext): void {
   const { lane, wt, base } = input; const { id, repo, branch } = lane;
   const prompt = expand(lane.prompt, c, root, ctx.home);
   mkdirSync(dirname(prompt), { recursive: true });

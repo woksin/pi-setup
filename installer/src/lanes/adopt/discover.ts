@@ -10,7 +10,7 @@ import type { InventoryEntry } from "./inventory.ts";
 
 export interface Discovery {
   pid: number; tty: string; cwd: string; sessionId?: string; id?: string;
-  source?: string; repo?: string; branch?: string; warnings: string[]; excluded?: boolean;
+  source?: string; repo?: string; branch?: string; warnings: string[]; excluded?: boolean; skipped?: string;
 }
 interface Identity { lane: string; sessionId: string }
 export async function discover(ctx: LanesCtx, entries: InventoryEntry[], excluded: string[], coordinatorId?: string): Promise<Discovery[]> {

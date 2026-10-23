@@ -26,12 +26,12 @@ export async function gitEvidence(ctx: LanesCtx, lane: Lane, cwd: string): Promi
   if (!succeeded(ahead) || !succeeded(diff)) return { error: "git unpushed/tree evidence unknown" };
   const unpushed = commitList(ahead.stdout); const paths = changedPaths(status.stdout);
   const digest = treeDigest({ cwd, paths, status: status.stdout, diff: diff.stdout });
-  const prs = await ctx.run("gh", [
+  const prs = lane.repo && lane.branch ? await ctx.run("gh", [
     "pr", "list", "--repo", lane.repo, "--head", lane.branch, "--state", "merged", "--json", "headRefOid",
-  ], { cwd, timeoutMs: 5000 });
+  ], { cwd, timeoutMs: 5000 }) : undefined;
   return {
     head: head.stdout.trim(), dirty: Boolean(status.stdout.trim()),
-    merged: mergedAtHead(prs, head.stdout.trim()), ahead: unpushed.length,
+    merged: prs ? mergedAtHead(prs, head.stdout.trim()) : undefined, ahead: unpushed.length,
     status: status.stdout, paths, unpushed, digest,
   };
 }
