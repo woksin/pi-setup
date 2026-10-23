@@ -105,20 +105,41 @@ export function overlayFor(repoDir: string, name: string, settings: Settings): O
   const base = join(profilesDir(repoDir), name);
   if (!existsSync(base)) throw new SetupError(`unknown profile '${name}'. available: ${profileNames(repoDir).join(", ")}`);
   const sources = new Map<string, string>();
-  for (const sub of ["agents", "workflows"]) {
+  // The same filter as pi-profile's managed_files(): only *.md under agents/ and *.js under workflows/.
+  for (const [sub, ext] of [["agents", ".md"], ["workflows", ".js"]]) {
     for (const file of listFiles(join(base, sub))) {
-      if (!file.includes("/")) sources.set(`${sub}/${file}`, join(base, sub, file));
+      if (!file.includes("/") && file.endsWith(ext)) sources.set(`${sub}/${file}`, join(base, sub, file));
     }
   }
   const routingPath = join(base, "routing.md");
   return { sources, routing: existsSync(routingPath) ? render(readFileSync(routingPath), settings) : undefined };
 }
 
-export function spliceRouting(agentsMd: Buffer, routing: Buffer): Buffer {
-  const text = agentsMd.toString("utf8");
+function markerLines(text: string): { start: number; bodyStart: number; end: number; endLineEnd: number } | undefined {
   const start = text.indexOf(START);
   const end = text.indexOf(END);
-  if (start < 0 || end < 0 || end < start) throw new SetupError("routing markers not found in AGENTS.md");
+  if (start < 0 || end < 0 || end < start) return undefined;
   const bodyStart = text.indexOf("\n", start) + 1;
-  return Buffer.from(text.slice(0, bodyStart) + routing.toString("utf8") + text.slice(end), "utf8");
+  if (bodyStart === 0 || bodyStart > end) return undefined;
+  const nl = text.indexOf("\n", end);
+  return { start, bodyStart, end, endLineEnd: nl < 0 ? text.length : nl };
+}
+
+export function hasRoutingMarkers(content: Buffer): boolean {
+  return markerLines(content.toString("utf8")) !== undefined;
+}
+
+/**
+ * Replace only the body between the routing markers, like pi-profile. When the live file has the markers,
+ * its start and end marker lines are kept exactly (the start line carries "(managed by …)" text).
+ */
+export function spliceRouting(agentsMd: Buffer, routing: Buffer, live?: Buffer): Buffer {
+  const text = agentsMd.toString("utf8");
+  const m = markerLines(text);
+  if (!m) throw new SetupError("routing markers not found in AGENTS.md");
+  const l = live ? markerLines(live.toString("utf8")) : undefined;
+  const liveText = live?.toString("utf8") ?? "";
+  const startLine = l ? liveText.slice(l.start, l.bodyStart) : text.slice(m.start, m.bodyStart);
+  const endLine = l ? liveText.slice(l.end, l.endLineEnd) : text.slice(m.end, m.endLineEnd);
+  return Buffer.from(text.slice(0, m.start) + startLine + routing.toString("utf8") + endLine + text.slice(m.endLineEnd), "utf8");
 }

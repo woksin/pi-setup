@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Ctx } from "../../src/types.ts";
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -133,4 +135,47 @@ export function findBackups(dir: string): string[] {
   };
   if (existsSync(dir)) walk(dir);
   return found;
+}
+
+/** Every entry below dir: `d`, `f <mode> <sha256> [mtime]` or `l <target>`, keyed by relative path. */
+export function snapshot(dir: string, withMtime = false): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      const rel = p.slice(dir.length + 1);
+      const st = lstatSync(p);
+      if (st.isSymbolicLink()) out[rel] = `l ${readlinkSync(p)}`;
+      else if (st.isDirectory()) {
+        out[rel] = "d";
+        walk(p);
+      } else {
+        const sha = createHash("sha256").update(readFileSync(p)).digest("hex");
+        out[rel] = `f ${(st.mode & 0o7777).toString(8)} ${sha}${withMtime ? ` ${st.mtimeMs}` : ""}`;
+      }
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+/** Run folders under ~/.pi/agent/.pi-setup/backups, oldest first. */
+export function backupDirs(box: Sandbox): string[] {
+  const dir = piPath(box, ".pi-setup", "backups");
+  return existsSync(dir) ? readdirSync(dir).sort() : [];
+}
+
+/** An in-process Ctx rooted in a temp HOME; the Runner is a no-op unless replaced. */
+export function testCtx(home: string, over: Partial<Ctx> = {}, lines: string[] = [], errs: string[] = []): Ctx {
+  assertTempHome(home);
+  return {
+    env: {}, platform: "linux", home, cwd: REPO, repoDir: REPO, now: () => new Date(2026, 0, 2, 3, 4, 5),
+    run: async () => ({ code: 0, stdout: "", stderr: "", timedOut: false }), which: () => undefined,
+    stdinTTY: false, stdoutTTY: false, nodeVersion: "v22.19.0", out: (l) => lines.push(l), err: (l) => errs.push(l),
+    ...over,
+  };
+}
+
+export function tempDir(prefix: string): string {
+  return assertTempHome(mkdtempSync(join(tmpdir(), `${prefix}.`)));
 }

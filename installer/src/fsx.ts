@@ -17,7 +17,9 @@ export function listFiles(dir: string, base = ""): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(join(dir, base), { withFileTypes: true })) {
     const rel = base ? `${base}/${entry.name}` : entry.name;
-    if (entry.isFile()) out.push(rel);
+    if (entry.isFile()) {
+      if (!entry.name.endsWith(".pi-setup-new")) out.push(rel);
+    }
     else if (entry.isDirectory()) out.push(...listFiles(dir, rel));
   }
   return out.sort();

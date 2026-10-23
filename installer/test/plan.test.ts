@@ -31,8 +31,8 @@ test("a clean plan starts with user.json and installs rendered files; applying i
   const h = home();
   const actions = plan(h);
   assert.equal(actions[0].path, join(h, ".pi/agent/user.json"));
-  assert.equal(await apply(ctxFor(h), actions, opts), 0);
-  assert.deepEqual(plan(h).map((a) => a.op), ["chmod-x"]);
+  assert.equal((await apply(ctxFor(h), actions, opts)).code, 0);
+  assert.deepEqual([...new Set(plan(h).map((a) => a.op))].sort(), ["adopt", "chmod-x"]);
   assert.match(readFileSync(join(h, ".pi/agent/AGENTS.md"), "utf8"), /--add-assignee einari/);
   assert.ok(statSync(join(h, ".pi/agent/local-packages/pi-questions/dist/cli.js")).mode & 0o100);
   assert.ok(lstatSync(join(h, ".pi/agent/skills/ai-work-lifecycle")).isSymbolicLink());
@@ -56,7 +56,8 @@ test("changed files are backed up with one timestamp; dry-run prints and writes 
   assert.ok(lines.includes(`install ${join(h, ".pi/agent/AGENTS.subagent.md")}`));
   assert.equal(readFileSync(join(h, ".pi/agent/AGENTS.subagent.md"), "utf8"), "old");
   await apply(ctxFor(h), plan(h), opts);
-  assert.equal(readFileSync(join(h, ".pi/agent/AGENTS.subagent.md.bak-20260102-030405"), "utf8"), "old");
+  assert.equal(readFileSync(join(h, ".pi/agent/.pi-setup/backups/20260102-030405/AGENTS.subagent.md"), "utf8"), "old");
+  assert.deepEqual(readdirSync(join(h, ".pi/agent")).filter((n) => n.includes(".bak-")), []);
 });
 
 test("only-if-absent files are not overwritten and settings.json gets pi-questions registered once", async () => {

@@ -31,6 +31,8 @@ export interface Ctx {
   nodeVersion: string;
   out: (line: string) => void;
   err: (line: string) => void;
+  /** Node binary used to re-run the installer after `update` (default: process.execPath). */
+  nodePath?: string;
 }
 
 export class SetupError extends Error {}
@@ -40,9 +42,25 @@ export interface Settings {
   reposRoot: string;
 }
 
+/** One reversible change to a JSON file that pi-setup merged into rather than owns. */
+export type JsonOp =
+  | { op: "set"; key: string; before: { present: boolean; value?: unknown }; after: unknown }
+  | { op: "array-add"; key: string; value: unknown; keyCreated: boolean };
+
+export type Decision = "new" | "update" | "replace" | "take";
+
 export type Action =
-  | { op: "install"; path: string; content: Buffer; mode: number; mtimeMs?: number; existed: boolean }
-  | { op: "register"; path: string; content: Buffer; mode: number; existed: boolean }
+  | {
+      op: "install"; path: string; content: Buffer; mode: number; mtimeMs?: number; existed: boolean;
+      decision?: Decision; merge?: "user-json"; jsonOps?: JsonOp[];
+      /** AGENTS.md without routing markers on disk: never overwritten silently, reconciled as a whole file. */
+      noMarkers?: boolean;
+    }
+  | { op: "register"; path: string; content: Buffer; mode: number; existed: boolean; jsonOps?: JsonOp[] }
+  /** On disk and identical to the repo: nothing to write, only to record. */
+  | { op: "adopt"; path: string }
+  /** Changed by the user since the last install: keep it, offer the new version as <path>.pi-setup-new. */
+  | { op: "keep"; path: string; newPath: string; content: Buffer; mode: number; mtimeMs?: number; write: boolean; noMarkers?: boolean }
   | { op: "symlink"; path: string; target: string }
   | { op: "chmod-x"; path: string };
 

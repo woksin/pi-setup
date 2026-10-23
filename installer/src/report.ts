@@ -6,11 +6,12 @@ import type { ResolvedSettings } from "./settings.ts";
 const USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it" };
 const ROOT_SOURCES = { flag: "from --repos-root", saved: "saved in user.json", scan: "best match found", default: "default", prompt: "you typed it" };
 
-export function countActions(actions: Action[]): { added: number; changed: number; register: number; links: number } {
+export function countActions(actions: Action[]): { added: number; changed: number; kept: number; register: number; links: number } {
   const installs = actions.filter((a): a is Extract<Action, { op: "install" }> => a.op === "install");
   return {
     added: installs.filter((a) => !a.existed).length,
     changed: installs.filter((a) => a.existed).length,
+    kept: actions.filter((a) => a.op === "keep").length,
     register: actions.filter((a) => a.op === "register").length,
     links: actions.filter((a) => a.op === "symlink").length,
   };
@@ -33,6 +34,8 @@ function symbol(status: string | undefined): string {
   if (status === "ready") return "✓";
   return status === "not_ready" ? "✗" : "?";
 }
+
+export const KEPT_EDITS = "kept your edits; `pi-profile save` to adopt them into the profile";
 
 export function summaryLines(args: {
   settings: ResolvedSettings;
@@ -57,9 +60,16 @@ export function summaryLines(args: {
   if (args.profile?.summary) lines.push(args.profile.summary);
   if (args.kimi) lines.push(args.kimi);
   lines.push(
-    `Files: ${counts.added} new, ${counts.changed} changed${counts.register ? ", register pi-questions" : ""}`,
+    `Files: ${counts.added} new, ${counts.changed} changed${counts.kept ? `, ${counts.kept} kept (changed by you)` : ""}${counts.register ? ", register pi-questions" : ""}`,
     `npm install: ${args.skipNpm ? "skipped (--skip-npm)" : args.npm ? "yes" : "up to date"}`,
   );
+  const kept = actions.filter((a) => a.op === "keep");
+  if (kept.some((a) => /\/\.pi\/agent\/(agents\/[^/]+\.md|workflows\/[^/]+\.js)$/.test(a.path))) {
+    lines.push(KEPT_EDITS);
+  }
+  if (kept.some((a) => a.op === "keep" && a.noMarkers)) {
+    lines.push("AGENTS.md has no pi-profile routing markers, so it is reconciled as a whole file; the new version is in AGENTS.md.pi-setup-new");
+  }
   for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines.push(`warning: ${warning}`);
   return lines;
 }

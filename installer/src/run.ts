@@ -5,16 +5,23 @@ import { isInteractive, parseArgs, USAGE } from "./args.ts";
 import type { Options } from "./args.ts";
 import { detect, installHint, readyProviders, toolPath } from "./detect.ts";
 import { buildPlan } from "./plan.ts";
+import { backupsCommand } from "./backups.ts";
+import { readManifest } from "./manifest.ts";
+import type { Manifest } from "./manifest.ts";
+import { applyTakes, diffText, reconcile } from "./reconcile.ts";
+import type { KeepAction } from "./reconcile.ts";
+import { runUninstall } from "./uninstall.ts";
+import { runUpdate } from "./update.ts";
 import {
   chooseProfile, kimiNote, loadProfiles, overlayFor, pinnedModels, pinWarnings, profileNames, profilesDir,
 } from "./profiles.ts";
 import type { Choice } from "./profiles.ts";
-import { summaryLines } from "./report.ts";
+import { KEPT_EDITS, summaryLines } from "./report.ts";
 import { readSettings, resolveSettings } from "./settings.ts";
 import type { ResolvedSettings } from "./settings.ts";
 import { CANCEL, SetupError } from "./types.ts";
 import type { Action, Ctx, Detection, ProfileMeta, Prompter } from "./types.ts";
-import { collectChoices, confirmApply } from "./wizard.ts";
+import { collectChoices, confirmApply, resolveConflicts } from "./wizard.ts";
 
 const savedString = (saved: Record<string, unknown>, key: string): string =>
   typeof saved[key] === "string" ? (saved[key] as string) : "";
@@ -54,11 +61,12 @@ interface Resolved {
   activeBefore: string | undefined;
   piDir: string;
   npm: boolean;
+  conflicts: KeepAction[];
 }
 
 function resolveAll(
   ctx: Ctx, options: Options, detection: Detection,
-  saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string },
+  saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string }, manifest: Manifest | undefined,
 ): Resolved {
   const piDir = join(ctx.home, ".pi", "agent");
   const settings = resolveSettings({
@@ -78,7 +86,10 @@ function resolveAll(
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
   const choice = pickProfile(asked, activeBefore, ready, profiles, names, options.dryRun || options.plan);
   const profile = profiles.find((p) => p.name === choice.name);
-  const actions = buildPlan({ repoDir: ctx.repoDir, home: ctx.home, settings, overlay: overlayFor(ctx.repoDir, choice.name, settings) });
+  const { actions, conflicts } = reconcile(
+    buildPlan({ repoDir: ctx.repoDir, home: ctx.home, settings, overlay: overlayFor(ctx.repoDir, choice.name, settings) }),
+    manifest, ctx.home,
+  );
   const kimi = options.dryRun || options.plan ? undefined : kimiNote(profile, ready);
   const warnings = [
     ...settings.warnings,
@@ -86,7 +97,7 @@ function resolveAll(
     ...pinWarnings(pinnedModels(join(profilesDir(ctx.repoDir), choice.name)), ready, detection.catalog),
     ...(kimi ? [kimi] : []),
   ];
-  return { settings, choice, actions, warnings, profile, ready, activeBefore, piDir, npm: needsNpm(actions, piDir) };
+  return { settings, choice, actions, warnings, profile, ready, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts };
 }
 
 function jsonReport(r: Resolved, detection: Detection, exitCode: number): string {
@@ -94,7 +105,7 @@ function jsonReport(r: Resolved, detection: Detection, exitCode: number): string
     settings: { ...r.settings },
     detection: { ...detection, catalog: detection.catalog ? [...detection.catalog].sort() : null },
     profile: { name: r.choice.name, reason: r.choice.reason, provisional: r.choice.provisional, source: r.choice.source },
-    actions: r.actions.map((a) => ({ op: a.op, path: a.path })),
+    actions: r.actions.filter((a) => a.op !== "adopt").map((a) => ({ op: a.op, path: a.path })),
     warnings: r.warnings,
     exitCode,
   });
@@ -116,6 +127,7 @@ export async function main(argv: string[], baseCtx: Ctx, injected?: Prompter): P
   let prompter = injected;
   if (interactive && !prompter) prompter = (await import("./prompter-clack.ts")).clackPrompter();
   try {
+    if (options.command !== "install") return await runCommand(ctx, options, interactive ? prompter : undefined);
     return await execute(ctx, options, interactive ? prompter : undefined, baseCtx);
   } catch (error) {
     if (!(error instanceof SetupError)) throw error;
@@ -124,9 +136,16 @@ export async function main(argv: string[], baseCtx: Ctx, injected?: Prompter): P
   }
 }
 
+async function runCommand(ctx: Ctx, options: Options, prompter: Prompter | undefined): Promise<number> {
+  if (options.command === "uninstall") return runUninstall(ctx, options, prompter);
+  if (options.command === "update") return runUpdate(ctx, options, prompter);
+  return backupsCommand(ctx, options.sub, options.keep, options.dryRun);
+}
+
 async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefined, baseCtx: Ctx): Promise<number> {
   const piDir = join(ctx.home, ".pi", "agent");
   const saved = readSettings(join(piDir, "user.json"));
+  const manifest = readManifest(piDir);
   const readOnly = options.dryRun || options.plan;
   const names = profileNames(ctx.repoDir);
   if (options.profile && options.profile !== "auto" && !names.includes(options.profile)) {
@@ -157,7 +176,12 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     if (result === CANCEL) return cancelled(ctx);
     answers = result;
   }
-  const r = resolveAll(ctx, options, detection, saved, answers);
+  const r = resolveAll(ctx, options, detection, saved, answers, manifest);
+  if (prompter && r.conflicts.length) {
+    const takes = await resolveConflicts(prompter, r.conflicts, (c) => diffText(ctx, c));
+    if (takes === CANCEL) return cancelled(ctx);
+    r.actions = applyTakes(r.actions, takes);
+  }
   const better = detection.candidates[0]?.path;
   if (!prompter && r.settings.rootSource === "default" && better && better !== r.settings.reposRoot) {
     ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
@@ -171,13 +195,15 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const applyOptions: ApplyOptions = {
     dryRun: options.dryRun,
     skipNpm: options.skipNpm || options.dryRun,
+    reinstallNpm: options.reinstallNpm,
     inheritNpm: !prompter && !options.json,
     profile: r.choice.name,
     activeBefore: r.activeBefore,
     spinner: prompter?.spinner(),
   };
-  const code = await apply(ctx, r.actions, applyOptions);
-  return finish(ctx, baseCtx, options, r, detection, prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:")), code, prompter);
+  const result = await apply(ctx, r.actions, applyOptions, manifest);
+  const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no"));
+  return finish(ctx, baseCtx, options, r, detection, shown, result.code, prompter, result.wrote);
 }
 
 function cancelled(ctx: Ctx): number {
@@ -187,7 +213,7 @@ function cancelled(ctx: Ctx): number {
 
 function finish(
   ctx: Ctx, baseCtx: Ctx, options: Options, r: Resolved, detection: Detection, lines: string[], code: number,
-  prompter?: Prompter,
+  prompter?: Prompter, wrote = true,
 ): number {
   if (options.json) {
     baseCtx.out(jsonReport(r, detection, code));
@@ -195,8 +221,11 @@ function finish(
   }
   for (const line of lines) (line.startsWith("warning:") ? ctx.err : ctx.out)(line);
   if (code === 0) {
-    const done = options.plan || options.dryRun ? "Nothing was written." : "Done. Restart pi (or /reload).";
-    const hint = r.choice.provisional && !options.plan && !options.dryRun ? ` ${r.choice.reason}.` : "";
+    const readOnly = options.plan || options.dryRun;
+    const kept = r.actions.filter((a) => a.op === "keep").length;
+    const upToDate = `Everything up to date.${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
+    const done = readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate;
+    const hint = r.choice.provisional && !readOnly && wrote ? ` ${r.choice.reason}.` : "";
     if (prompter) prompter.outro(`${done}${hint}`);
     else ctx.out(`${done}${hint}`);
   }

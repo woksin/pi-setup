@@ -41,3 +41,28 @@ test("interactive needs both TTYs and no CI, --yes, --json, --plan or --dry-run"
   assert.equal(isInteractive(base, { CI: "1" }, true, true), false);
   for (const flag of ["--yes", "--json", "--plan", "--dry-run"]) assert.equal(isInteractive(ok([flag]), {}, true, true), false, flag);
 });
+
+test("subcommands are parsed after the install that install.sh prepends", () => {
+  assert.equal(ok(["install", "uninstall", "--yes"]).command, "uninstall");
+  assert.equal(ok(["uninstall", "--dry-run"]).dryRun, true);
+  const u = ok(["install", "update", "--ref", "v1.2", "--skip-npm", "--yes"]);
+  assert.deepEqual([u.command, u.ref, u.skipNpm], ["update", "v1.2", true]);
+  const b = ok(["install", "backups", "prune", "--keep", "3"]);
+  assert.deepEqual([b.command, b.sub, b.keep], ["backups", "prune", 3]);
+  assert.deepEqual([ok(["backups"]).sub, ok(["backups"]).keep, ok(["backups", "list"]).sub], ["list", 10, "list"]);
+  assert.equal(ok(["install", "--dry-run"]).command, "install");
+});
+
+test("flags that do not belong to the command are errors", () => {
+  for (const argv of [["uninstall", "--profile", "x"], ["uninstall", "--user", "a"], ["update", "--json"], ["backups", "--yes"], ["backups", "--skip-npm"]]) {
+    const r = parseArgs(argv, "/w");
+    assert.ok(!r.ok && /is not valid for/.test(r.error), argv.join(" "));
+  }
+});
+
+test("--keep needs a non-negative integer and --ref cannot look like an option", () => {
+  for (const argv of [["backups", "prune", "--keep", "-1"], ["backups", "prune", "--keep", "x"], ["backups", "prune", "--keep"], ["update", "--ref", "-x"], ["update", "--ref"]]) {
+    assert.ok(!parseArgs(argv, "/w").ok, argv.join(" "));
+  }
+  assert.ok(!parseArgs(["backups", "prune", "extra"], "/w").ok);
+});
