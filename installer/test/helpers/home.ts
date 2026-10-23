@@ -55,7 +55,7 @@ case "$1" in
       *",$4,"*) echo "{\\"status\\":\\"ready\\",\\"provider\\":\\"$4\\",\\"authType\\":\\"oauth\\"}"; exit 0 ;;
       *) echo "{\\"status\\":\\"not_ready\\",\\"provider\\":\\"$4\\",\\"reason\\":\\"credentials_not_configured\\"}"; exit 1 ;;
     esac ;;
-  --offline) echo "No models available. Use /login to log into a provider."; exit 0 ;;
+  --offline) if [ -n "$STUB_MODELS" ]; then printf 'provider  model\\n%s\\n' "$STUB_MODELS"; else echo "No models available. Use /login to log into a provider."; fi; exit 0 ;;
 esac
 exit 0`);
   script(box.stubs, "gh", `echo "gh $*" >> "$STUB_LOG"

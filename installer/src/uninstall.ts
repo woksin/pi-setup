@@ -247,6 +247,8 @@ function finalize(ctx: Ctx, piDir: string, old: Manifest, left: Manifest): void 
     left.dirs = left.dirs.filter((d) => lstatExists(fromHomeRel(ctx.home, d)));
     saveIfChanged(piDir, old, left, ctx.now());
   }
+  const cache = join(piDir, ".pi-setup/update-check.json");
+  if (existsSync(cache)) unlinkSync(cache);
   tidy(piDir);
   const rest = listBackups(piDir, pinnedBackups(empty ? undefined : left));
   for (const rel of [...left.dirs].sort((a, b) => b.split("/").length - a.split("/").length || (a < b ? 1 : -1))) {

@@ -26,6 +26,14 @@ Each install records what it wrote in `~/.pi/agent/.pi-setup/manifest.json` (HOM
 
 `~/.pi/agent/.pi-setup/` holds the uninstall data (the manifest and the pinned backups). Do not delete it by hand; use `pi-setup uninstall` or `pi-setup backups prune`. pi rewrites `settings.json` at runtime, so a `settings.json` created by install counts as "changed by you" on uninstall and is left; one that existed before is reverted key by key. npm packages (`~/.pi/agent/npm/node_modules`) and pi's runtime state are not in the manifest, so uninstall leaves `~/.pi/agent` in place when they exist.
 
+### Doctor
+
+Run `./install.sh doctor [--fix] [--json]` (or `pi-setup doctor`): exit 0 means green, 1 warnings, 2 failures or invalid arguments.
+`--fix` only reinstalls missing npm dependencies, restores missing tracked files/links when the checkout still matches the installed commit, and restores modes of unchanged files; it never changes logins, guards, profiles, PATH, services or edited files.
+Doctor runs `pi --version`, `pi auth check --provider <id> --no-refresh --json` (no token refresh), and `pi --offline --list-models` (no model call or network). pi may perform its normal one-time migrations; extension errors that do not crash pi are not visible.
+The update check is cached once a day; `PI_OFFLINE=1` skips it. Otherwise doctor is read-only, and `--json` emits one object on stdout.
+For build performance and disk cleanup, use `~/.pi/agent/bin/dev-doctor`; doctor delegates its disk check to that tool.
+
 `--legacy-peer-deps` is needed: the packages declare conflicting peer ranges for `@earendil-works/pi-*` (for example `@vigolium/piolium` wants `^0.74`, `@tintinweb/pi-subagents` wants `>=1.1.0`), so a plain `npm install` fails with ERESOLVE.
 
 `settings.json`, `models.json` and the other JSON configs are only written when they don't exist yet. `efficiency.json` and `context-budget.json` follow the same rule. Restart pi afterwards.

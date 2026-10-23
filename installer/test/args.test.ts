@@ -66,3 +66,14 @@ test("--keep needs a non-negative integer and --ref cannot look like an option",
   }
   assert.ok(!parseArgs(["backups", "prune", "extra"], "/w").ok);
 });
+
+
+test("doctor accepts fix/json through the shim and rejects other commands' flags", () => {
+  const r = parseArgs(["install", "doctor", "--fix", "--json"], "/repo");
+  assert.ok(r.ok);
+  assert.equal(r.options.command, "doctor");
+  assert.equal(r.options.fix, true);
+  assert.equal(r.options.json, true);
+  assert.equal(parseArgs(["doctor", "--yes"], "/repo").ok, false);
+  assert.equal(parseArgs(["--fix"], "/repo").ok, false);
+});
