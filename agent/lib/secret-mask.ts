@@ -17,16 +17,20 @@
  * are explicit operator controls, not guard switches.
  * Notifications require rotation: masking does not revoke a credential or erase history.
  * Only text parts <= 2 MiB are scanned; non-text parts, split/encoded/unknown secrets,
- * tool arguments, tool details, streaming updates and user_bash (!/!!) output are not covered
+ * tool details, streaming updates and user_bash (!/!!) output are not covered
  * (user_bash only exposes the command before execution). output-cap masks before offload;
  * oversized offloads are omitted. PEM/Secret sections over 64 KiB are conservatively hidden.
- * Command matching is conservative regex, not a full shell interpreter.
+ * GitHub publishing commands additionally scan body/title/notes values and body/notes files
+ * for credentials and internal paths; unreadable or oversized files are refused. This scan
+ * precedes Cratis credential-read delegation and cannot be approved by a dumper prompt.
+ * Command matching is conservative, not a full shell interpreter; computed payloads are not evaluated.
  * Logs contain counts/kinds only, never commands or credential values.
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { tokenizeShell } from "./issue-work.ts";
 import { isGuardOff } from "./guards.ts";
 import { cratisVerdict, spawnRunner } from "./cratis-hooks-detect.ts";
 import { guardSelect, isOrchestrated, orchLog } from "./orchestration.ts";
@@ -408,6 +412,57 @@ export function scan(text: string, allowlist: readonly string[] = []): Scan {
 	return result;
 }
 
+const OUTBOUND_FLAGS = new Set(["--body", "-b", "--notes", "--title", "-t", "--body-file", "-F", "--notes-file"]);
+const OUTBOUND_FILES = new Set(["--body-file", "-F", "--notes-file"]);
+const INTERNAL_PATH = /\/(?:Users|home)\/[^\s/]+|\.ai-work\/|~\/\.pi\b/;
+
+function publishes(tokens: string[]): boolean {
+	const start = tokens.findIndex((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) && !["env", "command", "exec", "rtk", "proxy", "time", "nohup"].includes(token));
+	if (basename(tokens[start] ?? "") !== "gh") return false;
+	return tokens.slice(start + 1).some((token, i, rest) => {
+		const verbs = ["gist", "release"].includes(token) ? ["create", "edit"] : ["issue", "pr"].includes(token) ? ["comment", "create", "edit"] : [];
+		return verbs.includes(rest[i + 1]);
+	});
+}
+
+function outboundFile(file: string, cwd: string): string | undefined {
+	try {
+		const path = resolve(cwd, file.startsWith("~/") ? join(homedir(), file.slice(2)) : file);
+		if (file === "-" || !statSync(path).isFile()) return "outbound-file-unreadable";
+		if (statSync(path).size > MAX_BYTES) return "outbound-payload-too-large";
+		return outboundPattern(readFileSync(path, "utf8"));
+	} catch { return "outbound-file-unreadable"; }
+}
+
+function outboundPattern(text: string): string | undefined {
+	if (INTERNAL_PATH.test(text)) return "internal-path";
+	const result = scan(text);
+	if (result.skipped) return "outbound-payload-too-large";
+	return result.kinds[0];
+}
+
+function publicationKind(tokens: string[], cwd: string): string | undefined {
+	for (let i = 0; i < tokens.length; i++) {
+		const compact = /^(-[bFt])([^=].*)$/.exec(tokens[i]);
+		const [flag, ...inline] = (compact ? `${compact[1]}=${compact[2]}` : tokens[i]).split("=");
+		if (!OUTBOUND_FLAGS.has(flag)) continue;
+		const value = inline.length ? inline.join("=") : tokens[++i];
+		if (value === undefined) return "outbound-value-missing";
+		const kind = OUTBOUND_FILES.has(flag) ? outboundFile(value, cwd) : outboundPattern(value);
+		if (kind) return kind;
+	}
+	return undefined;
+}
+
+/** No command, path or candidate value is included in a refusal. */
+export function outboundReason(command: string, cwd: string): string | undefined {
+	for (const tokens of tokenizeShell(command).filter(publishes)) {
+		const kind = publicationKind(tokens, cwd);
+		if (kind) return `secret-mask: GitHub publication blocked (${kind}). Remove credentials and internal paths from public text; file payloads must be readable and within 2 MiB.`;
+	}
+	return undefined;
+}
+
 export function summary(count: number, kinds: readonly string[]): string {
 	return `[secret-mask] ${count} value(s) redacted (${kinds.join(", ")}). Rotate them; do not try to recover them.`;
 }
@@ -464,6 +519,26 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 			catch { deps.error("notify-failed"); }
 		}
 	}
+	function publicationGuard(command: string, cwd: string) {
+		if (deps.guardOff()) return;
+		const reason = outboundReason(command, cwd);
+		return reason ? { block: true as const, reason } : undefined;
+	}
+	async function credentialCommand(command: string, ctx: ExtensionContext) {
+		const matched = commandRule(command);
+		if (!matched) return;
+		if (deps.cratisSecrets(ctx.cwd, command)) { deps.decision("secrets", "stand-down:cratis-hook", matched.name); return; }
+		if (deps.guardOff()) { deps.decision("secrets", "allow:guard-off", matched.name); return; }
+		const reason = blockReason(matched);
+		if (deps.orchestrated(ctx.cwd) || !ctx.hasUI) {
+			deps.decision("secrets", "deny", matched.name);
+			return { block: true as const, reason };
+		}
+		const { choice } = await deps.select(ctx.ui, "secrets", reason, [RUN_ANYWAY, "Block"], "deny", { cwd: ctx.cwd });
+		const allow = choice === RUN_ANYWAY;
+		deps.decision("secrets", allow ? "allow" : "deny", matched.name);
+		return allow ? undefined : { block: true as const, reason };
+	}
 	return {
 		sessionStart(event: { reason?: string }, ctx: ExtensionContext) {
 			roles.start(ctx.sessionManager.getSessionId(), event.reason);
@@ -473,19 +548,8 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 				if (event.toolName !== "bash") return;
 				const config = active(ctx);
 				if (!config?.blockCommands) return;
-				const matched = commandRule(String(event.input.command ?? ""));
-				if (!matched) return;
-				if (deps.cratisSecrets(ctx.cwd, String(event.input.command ?? ""))) { deps.decision("secrets", "stand-down:cratis-hook", matched.name); return; }
-				if (deps.guardOff()) { deps.decision("secrets", "allow:guard-off", matched.name); return; }
-				const reason = blockReason(matched);
-				if (deps.orchestrated(ctx.cwd) || !ctx.hasUI) {
-					deps.decision("secrets", "deny", matched.name);
-					return { block: true as const, reason };
-				}
-				const { choice } = await deps.select(ctx.ui, "secrets", reason, [RUN_ANYWAY, "Block"], "deny", { cwd: ctx.cwd });
-				const allow = choice === RUN_ANYWAY;
-				deps.decision("secrets", allow ? "allow" : "deny", matched.name);
-				return allow ? undefined : { block: true as const, reason };
+				const command = String(event.input.command ?? "");
+				return publicationGuard(command, ctx.cwd) ?? await credentialCommand(command, ctx);
 			} catch {
 				deps.error("tool-call-failed");
 				return undefined;
