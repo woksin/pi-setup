@@ -1,10 +1,11 @@
 import { strict as assert } from "node:assert";
-import { chmodSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readlinkSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { main } from "../src/run.ts";
-import { PINNED_PACKAGES, npmSpec, pinPackages } from "../src/packages.ts";
+import { PINNED_PACKAGES, PACKAGE_BINS, npmSpec, pinPackages } from "../src/packages.ts";
+import { emptyManifest, manifestPath } from "../src/manifest.ts";
 import { undo } from "../src/uninstall.ts";
 import { localChecks } from "../src/doctor-checks.ts";
 import { configureShellPath, shellPath } from "../src/shell-path.ts";
@@ -21,6 +22,7 @@ test("fresh install pins and fetches all four packages and links all shipped CLI
     if (cmd === "npm" && argv[0] === "install") {
       calls.push(argv);
       for (const p of PINNED_PACKAGES) put(join(pi, "npm/node_modules", p.name, "package.json"), JSON.stringify({ version: p.version }));
+      for (const [pkg, cmd] of PACKAGE_BINS) put(join(pi, "npm/node_modules/@woksin", pkg, "bin", cmd), "#!/bin/sh\n");
     }
     return { code: 0, stdout: "", stderr: "", timedOut: false };
   } });
@@ -29,6 +31,83 @@ test("fresh install pins and fetches all four packages and links all shipped CLI
   const settings = JSON.parse(readFileSync(join(pi, "settings.json"), "utf8"));
   for (const p of PINNED_PACKAGES) assert.ok(settings.packages.includes(`npm:${npmSpec(p)}`));
   for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"], ["pi-orch", "orch-poll"]]) assert.equal(readlinkSync(join(home, ".local/bin", cmd)), join(pi, "npm/node_modules/@woksin", pkg, "bin", cmd));
+});
+
+test("removing a recorded pin then rerunning leaves it removed", async () => {
+  const { home } = sandbox();
+  const path = join(home, ".pi/agent/settings.json");
+  const ctx = testCtx(home, { which: () => "/stub" });
+  assert.equal(await main([...args, "--skip-npm"], ctx), 0);
+  const data = JSON.parse(readFileSync(path, "utf8"));
+  data.packages = data.packages.filter((p: string) => p !== "npm:@woksin/pi-orch@0.1.1");
+  put(path, JSON.stringify(data));
+  assert.equal(await main([...args, "--skip-npm"], ctx), 0);
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), data);
+});
+
+for (const op of [
+  { op: "array-add" as const, key: "packages", value: "npm:@woksin/pi-orch@0.1.0", keyCreated: false },
+  { op: "array-replace" as const, key: "packages", before: "npm:@woksin/pi-orch", after: "npm:@woksin/pi-orch@0.1.0" },
+]) test(`earlier ${op.op} keeps removals and upgrades only a still-present managed pin`, () => {
+  const { home } = sandbox();
+  const pi = join(home, ".pi/agent");
+  const manifest = emptyManifest(new Date());
+  manifest.json[".pi/agent/settings.json"] = { created: false, sha256After: "", ops: [op] };
+  put(manifestPath(pi), JSON.stringify(manifest));
+  const removed = { packages: ["npm:user-choice@1"] };
+  pinPackages(removed, pi);
+  assert.ok(!removed.packages.some(p => p.includes("pi-orch")));
+  assert.ok(removed.packages.includes("npm:@woksin/pi-jobs@0.3.1"), "new packages are still adopted");
+  const present = { packages: ["npm:user-choice@1", "npm:@woksin/pi-orch@0.1.0", "npm:other@2"] };
+  const ops = pinPackages(present, pi);
+  assert.equal(present.packages[1], "npm:@woksin/pi-orch@0.1.1");
+  assert.deepEqual(ops.find(o => o.op === "array-replace"), { op: "array-replace", key: "packages", before: "npm:@woksin/pi-orch@0.1.0", after: "npm:@woksin/pi-orch@0.1.1" });
+});
+
+for (const code of [0, 1]) test(`npm exit ${code} preserves unrelated manifest entries and saves only successful selected pins`, async () => {
+  const { home } = sandbox();
+  const path = join(home, ".pi/agent/npm/package.json");
+  const original = { name: "user-store", private: true, scripts: { check: "keep" }, dependencies: { unrelated: "^1.2.3" }, optionalDependencies: { optional: "~2.0.0" } };
+  const before = JSON.stringify(original);
+  put(path, before);
+  const ctx = testCtx(home, { which: () => "/stub", run: async (cmd, argv) => {
+    if (cmd === "npm" && argv[0] === "install") {
+      put(path, JSON.stringify({ ...original, scripts: {}, dependencies: { unrelated: "1.9.0" }, extra: "npm normalization" }));
+      return { code, stdout: "", stderr: "", timedOut: false };
+    }
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  } });
+  assert.equal(await main(args, ctx), code);
+  if (code === 1) assert.equal(readFileSync(path, "utf8"), before);
+  else assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { ...original, dependencies: { ...original.dependencies, ...Object.fromEntries(PINNED_PACKAGES.map(p => [p.name, p.version])) } });
+});
+
+for (const code of [0, 1]) test(`invalid npm manifests reach npm and remain untouched by preservation (exit ${code})`, async () => {
+  const { home } = sandbox();
+  const path = join(home, ".pi/agent/npm/package.json");
+  const before = '{"name":"user-store"}\n// user edit\n';
+  put(path, before);
+  utimesSync(path, 1, 1);
+  const modified = statSync(path).mtimeMs;
+  let calls = 0;
+  const ctx = testCtx(home, { which: () => "/stub", run: async (cmd, argv) => {
+    if (cmd === "npm" && argv[0] === "install") {
+      calls++;
+      assert.equal(readFileSync(path, "utf8"), before);
+      return { code, stdout: "", stderr: "", timedOut: false };
+    }
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  } });
+  assert.equal(await main(args, ctx), code);
+  assert.equal(calls, 1);
+  assert.equal(readFileSync(path, "utf8"), before);
+  assert.equal(statSync(path).mtimeMs, modified);
+});
+
+for (const skip of [true, false]) test(`absent package CLI targets do not produce dangling launchers (skip npm: ${skip})`, async () => {
+  const { home } = sandbox();
+  assert.equal(await main([...args, ...(skip ? ["--skip-npm"] : [])], testCtx(home, { which: () => "/stub" })), 0);
+  for (const [, cmd] of PACKAGE_BINS) assert.throws(() => readlinkSync(join(home, ".local/bin", cmd)), { code: "ENOENT" });
 });
 
 test("doctor reports exact version drift, both PATH entries, prerequisites and orch-poll", async () => {

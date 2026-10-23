@@ -7,7 +7,7 @@ import type { Overlay } from "./profiles.ts";
 import { dropGuardExtension, isCratisFile, stripSections, WEB_PACKAGES } from "./components.ts";
 import { preapprovalDefault } from "./lanes/config.ts";
 import { SetupError } from "./types.ts";
-import { PACKAGE_BINS, pinPackages } from "./packages.ts";
+import { packageBinLinks, pinPackages } from "./packages.ts";
 import type { Action, JsonOp, Settings } from "./types.ts";
 
 const TREES = ["agents", "extensions", "early-extensions", "lib", "workflows", "templates", "profiles", "loose-threads", "bin", "pi-phase", "lane-policy"];
@@ -159,7 +159,7 @@ function addPackage(data: Record<string, unknown>, value: string, fresh: boolean
 
 function settingsEdit(web: boolean | undefined, activate: boolean, drop: string[], piDir: string): (data: Record<string, unknown>, fresh: boolean) => JsonOp[] {
   return (data, fresh) => {
-    const ops: JsonOp[] = pinPackages(data, piDir);
+    const ops: JsonOp[] = pinPackages(data, piDir, fresh);
     if (fresh && web !== true && Array.isArray(data.packages)) {
       if (web === false) data.packages = (data.packages as unknown[]).filter((p) => !WEB_PACKAGES.includes(p as string));
     }
@@ -248,9 +248,8 @@ export function buildPlan(input: PlanInput): Action[] {
     putTree(actions, join(repoDir, "installer/lanes/templates"), join(lanesDir, "templates"), settings);
     linkIfFree(actions, input.notes, join(home, ".local/bin/lanes"), join(lanesDir, "lanes.mjs"), home);
   }
-  for (const [pkg, cmd] of PACKAGE_BINS) {
-    const target = join(piDir, "npm/node_modules/@woksin", pkg, "bin", cmd);
-    linkIfFree(actions, input.notes, join(home, ".local/bin", cmd), target, home);
+  for (const { path, target } of packageBinLinks(piDir, home)) {
+    linkIfFree(actions, input.notes, path, target, home);
   }
   return actions;
 }

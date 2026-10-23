@@ -2,7 +2,7 @@ import {
   chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { npmSpec, selectedPins, pinsMissing } from "./packages.ts";
+import { npmSpec, selectedPins, pinsMissing, packageBinLinks, pinnedNpmManifest } from "./packages.ts";
 import { atomicWrite } from "./fsx.ts";
 import { BackupRun, prune } from "./backups.ts";
 import {
@@ -191,6 +191,10 @@ class Run {
     this.written.add(path);
   }
 
+  linkPackageBins(): void {
+    for (const link of packageBinLinks(this.piDir, this.ctx.home)) this.execute({ op: "symlink", ...link });
+  }
+
   private symlink(a: Extract<Action, { op: "symlink" }>): void {
     try {
       lstatSync(a.path);
@@ -272,7 +276,10 @@ export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, 
       const npm = await runNpm(ctx, actions, options, piDir, manifest);
       code = npm.code;
       if (npm.ran) run.wrote = true;
-      if (npm.ran && npm.code === 0) run.next.npm = npmInputs(piDir);
+      if (npm.ran && npm.code === 0) {
+        run.next.npm = npmInputs(piDir);
+        run.linkPackageBins();
+      }
     }
   } finally {
     run.finish();
@@ -301,12 +308,27 @@ async function runNpm(ctx: Ctx, actions: Action[], options: ApplyOptions, piDir:
   const args = ["install", ...selected.map(npmSpec), "--save-exact", "--legacy-peer-deps"];
   const cwd = join(piDir, "npm");
   options.spinner?.start("Installing npm packages");
-  const result = await ctx.run("npm", args, { cwd, inherit: options.inheritNpm });
+  const result = await installPinnedNpm(ctx, args, cwd, { inherit: options.inheritNpm, selected });
   options.spinner?.stop(result.code === 0 ? "npm packages installed" : "npm install failed");
   if (result.code === 0) return { code: 0, ran: true };
   if (!options.inheritNpm) ctx.err((result.stdout + result.stderr).trim().split("\n").slice(-15).join("\n"));
   ctx.err("Files installed; npm install failed: (cd ~/.pi/agent/npm && npm install --legacy-peer-deps)");
   return { code: 1, ran: true };
+}
+
+async function installPinnedNpm(ctx: Ctx, args: string[], cwd: string, options: { inherit: boolean; selected: ReturnType<typeof selectedPins> }) {
+  const path = join(cwd, "package.json");
+  const before = readFileSync(path);
+  const pinned = pinnedNpmManifest(before, options.selected);
+  if (!pinned) return ctx.run("npm", args, { cwd, inherit: options.inherit });
+  let succeeded = false;
+  try {
+    const result = await ctx.run("npm", args, { cwd, inherit: options.inherit });
+    succeeded = result.code === 0;
+    return result;
+  } finally {
+    writeFileSync(path, succeeded ? pinned : before);
+  }
 }
 
 export function readActive(piDir: string): string | undefined {

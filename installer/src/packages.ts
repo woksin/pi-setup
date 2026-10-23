@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { readManifest } from "./manifest.ts";
+import { deepEqual } from "./settings.ts";
 import type { JsonOp } from "./types.ts";
 import type { DoctorCheck } from "./doctor.ts";
 
@@ -13,6 +15,23 @@ export const PINNED_PACKAGES = [
 export const PACKAGE_BINS = [
   ["pi-context-budget", "pi-session"], ["pi-orch", "orch"], ["pi-orch", "orch-poll"],
 ];
+export function packageBinLinks(piDir: string, home: string): { path: string; target: string }[] {
+  return PACKAGE_BINS.map(([pkg, cmd]) => ({ path: join(home, ".local/bin", cmd), target: join(piDir, "npm/node_modules/@woksin", pkg, "bin", cmd) })).filter(link => existsSync(link.target));
+}
+
+/** npm may normalize unrelated dependency ranges; retain only our selected pin edits. */
+export function pinnedNpmManifest(before: Buffer, selected: typeof PINNED_PACKAGES): Buffer | undefined {
+  let data;
+  try { data = JSON.parse(before.toString("utf8")); }
+  catch { return; } // Leave invalid manifests to npm, as before preservation was added.
+  if (typeof data !== "object") return;
+  if (data === null) return;
+  if (Array.isArray(data)) return;
+  const dependencies = { ...data.dependencies, ...Object.fromEntries(selected.map(p => [p.name, p.version])) };
+  if (!selected.length || deepEqual(data.dependencies, dependencies)) return before;
+  return Buffer.from(`${JSON.stringify({ ...data, dependencies }, null, 2)}\n`);
+}
+
 export const npmSpec = (pkg: { name: string; version: string }): string => `${pkg.name}@${pkg.version}`;
 function readPackage(path: string): { name?: string; version?: string } {
   try { return JSON.parse(readFileSync(join(path, "package.json"), "utf8")); }
@@ -52,22 +71,48 @@ function refersTo(value: unknown, name: string, piDir: string): boolean {
   return readPackage(path).name === name;
 }
 
+interface PinContext {
+  piDir: string;
+  fresh: boolean;
+  recorded: unknown[];
+  keyCreated: boolean;
+}
+type PackageOp = Exclude<JsonOp, { op: "set" }>;
+
+function pinOperation(list: unknown[], pkg: typeof PINNED_PACKAGES[number], context: PinContext): PackageOp | undefined {
+  const source = `npm:${npmSpec(pkg)}`;
+  const matches = list.filter(p => refersTo(p, pkg.name, context.piDir));
+  const earlier = context.recorded.filter(value => refersTo(value, pkg.name, context.piDir));
+  const add: PackageOp = { op: "array-add", key: "packages", value: source, keyCreated: context.keyCreated };
+  if (!matches.length) return context.fresh || !earlier.length ? add : undefined;
+  if (matches.length !== 1) return;
+  const before = matches[0];
+  if (before === source) return context.fresh ? add : undefined;
+  const managed = [`npm:${pkg.name}`, ...earlier].some(value => deepEqual(value, before));
+  if (!managed) return;
+  return { op: "array-replace", key: "packages", before, after: source };
+}
+
+function recordedPackages(piDir: string): unknown[] {
+  return (readManifest(piDir)?.json[".pi/agent/settings.json"]?.ops ?? []).flatMap(op => {
+    if (op.key !== "packages") return [];
+    return op.op === "array-add" ? [op.value] : op.op === "array-replace" ? [op.after] : [];
+  });
+}
+
 /** Record individual additions/replacements so uninstall preserves unrelated user edits. */
-export function pinPackages(data: Record<string, unknown>, piDir: string): JsonOp[] {
+export function pinPackages(data: Record<string, unknown>, piDir: string, fresh = false): JsonOp[] {
+  const recorded = recordedPackages(piDir);
   const original = data.packages;
   const list = Array.isArray(original) ? [...original] : [];
   const ops: JsonOp[] = [];
+  const context = { piDir, fresh, recorded, keyCreated: original === undefined };
   for (const pkg of PINNED_PACKAGES) {
-    const source = `npm:${npmSpec(pkg)}`;
-    const matches = list.filter(p => refersTo(p, pkg.name, piDir));
-    if (!matches.length) {
-      list.push(source);
-      ops.push({ op: "array-add", key: "packages", value: source, keyCreated: original === undefined });
-    } else if (matches.length === 1 && matches[0] === `npm:${pkg.name}`) {
-      const before = matches[0];
-      list[list.indexOf(before)] = source;
-      ops.push({ op: "array-replace", key: "packages", before, after: source });
-    }
+    const op = pinOperation(list, pkg, context);
+    if (!op) continue;
+    if (op.op === "array-add" && !list.includes(op.value)) list.push(op.value);
+    if (op.op === "array-replace") list[list.indexOf(op.before)] = op.after;
+    ops.push(op);
   }
   if (ops.length) data.packages = list;
   return ops;
