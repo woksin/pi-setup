@@ -76,19 +76,21 @@ function configuredGate(ctx, manifest, override) {
 // One ledger read and one cwd -> repository cache per invocation, shared by every train in `status --all`.
 const shared = new WeakMap();
 
-function invocationCache(ctx, api, now) {
+// The clock is snapshotted with the first read so every train in one invocation uses the same window.
+function invocationCache(ctx, api) {
   if (!shared.has(ctx)) shared.set(ctx, { identity: repositoryIdentity(api), records: new Map() });
   const cache = shared.get(ctx);
   const state = phaseState(ctx.env);
-  const key = `${state}\0${now}`;
-  if (!cache.records.has(key)) cache.records.set(key, ledgerRecords(state, now));
-  return { identity: cache.identity, records: cache.records.get(key) };
+  if (!cache.records.has(state)) {
+    const now = Date.parse(ctx.now());
+    cache.records.set(state, { now, records: ledgerRecords(state, now) });
+  }
+  return { identity: cache.identity, ...cache.records.get(state) };
 }
 
 async function phaseDurations(ctx, api, manifest) {
   const groups = { build: [], test: [], integration: [] };
-  const now = Date.parse(ctx.now());
-  const { identity, records } = invocationCache(ctx, api, now);
+  const { identity, records, now } = invocationCache(ctx, api);
   const repo = await identity(manifest.worktree);
   if (repo) {
     for (const record of await records) {

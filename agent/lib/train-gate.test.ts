@@ -117,4 +117,9 @@ test('ledger files older than the window are not read, and one read serves every
   assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree: f.root }), { gateSeconds: 60, gateSource: 'ledger', gateRuns: 1 });
   await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), JSON.stringify(run(f.root, 'build', 600)));
   assert.equal((await gateEstimate(f.ctx, f.api, { worktree: f.root })).gateSeconds, 60);
+  let tick = 0;
+  const ticking = { ...f.ctx, now: () => new Date(Date.parse(NOW) + 1000 * tick++).toISOString() };
+  assert.equal((await gateEstimate(ticking, f.api, { worktree: f.root })).gateSeconds, 600);
+  await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), JSON.stringify(run(f.root, 'build', 6)));
+  assert.equal((await gateEstimate(ticking, f.api, { worktree: f.root })).gateSeconds, 600);
 });
