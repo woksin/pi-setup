@@ -47,12 +47,30 @@ export function cancellable(run, branch, train, defaultBranch) {
     && !['release', 'schedule', 'workflow_dispatch'].includes(run.event);
 }
 
-export async function activeRuns(api, manifest, branch, defaultBranch) {
-  const runs = await api.json(manifest.repo, ['run', 'list', '--branch', branch, '--limit', '100', '--json', RUN_FIELDS]);
-  return runs.filter(run => cancellable(run, branch, manifest.train, defaultBranch));
+export async function activeRuns(api, manifest, item, defaultBranch) {
+  const runs = await api.json(manifest.repo, ['run', 'list', '--branch', item.branch, '--limit', '100', '--json', RUN_FIELDS]);
+  const candidates = runs.filter(run => {
+    // Recheck a pending cancel's identity even if GitHub completed it before our checkpoint.
+    const status = run.databaseId === item.pendingRun ? 'queued' : run.status;
+    return cancellable({ ...run, status }, item.branch, manifest.train, defaultBranch);
+  });
+  if (item.pr) {
+    const pr = await api.json(manifest.repo, ['pr', 'view', String(item.pr), '--json', 'commits,headRefOid']);
+    const shas = new Set([pr.headRefOid, ...(pr.commits ?? []).map(commit => commit.oid)]);
+    return candidates.filter(run => !!run.headSha && shas.has(run.headSha));
+  }
+  const verified = [];
+  for (const run of candidates) {
+    const result = run.headSha && await api.git(manifest.worktree,
+      ['merge-base', '--is-ancestor', run.headSha, item.sha], { allowFailure: true });
+    verified.push({ ...run, manual: !result || result.status !== 0 });
+  }
+  return verified;
 }
 
-export const isBot = person => person?.type === 'Bot' || /\[bot\]$|^copilot(?:[-\[]|$)|^(?:dependabot|renovate)(?:[-\[]|$)/i.test(person?.login ?? '');
+const BOT_LOGINS = new Set(['dependabot', 'renovate', 'github-actions', 'copilot', 'copilot-pull-request-reviewer']);
+export const isBot = person => person?.__typename === 'Bot' || /\[bot\]$/i.test(person?.login ?? '')
+  || BOT_LOGINS.has(person?.login?.toLowerCase());
 
 const nonAuthorHuman = (person, author) => !isBot(person) && person?.login !== author;
 function requestBlocks(person, author) {

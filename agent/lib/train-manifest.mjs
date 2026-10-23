@@ -70,16 +70,20 @@ function dead(pid) {
   catch (error) { return error.code === 'ESRCH'; }
 }
 
+function reclaimable(lock, owner, age) {
+  if (!Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  if (dead(owner.pid)) return true;
+  if (age > 600_000) throw new TrainError(`train lock older than 10 minutes has live pid ${owner.pid}: ${lock}`);
+  return false;
+}
+
 async function staleLock(lock) {
   try {
     const age = Date.now() - (await stat(lock)).mtimeMs;
     const owner = JSON.parse(await readFile(join(lock, 'owner.json'), 'utf8'));
-    return age > 600_000 || (Number.isInteger(owner.pid) && owner.pid > 0 && dead(owner.pid));
+    return reclaimable(lock, owner, age);
   } catch (error) {
-    if (error.code === 'ENOENT' || error instanceof SyntaxError) {
-      try { return Date.now() - (await stat(lock)).mtimeMs > 600_000; }
-      catch { return false; }
-    }
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) return false;
     throw error;
   }
 }
@@ -91,6 +95,13 @@ async function reapStaleLock(lock) {
   try {
     if (await staleLock(lock)) await rm(lock, { recursive: true, force: true });
   } finally { await rm(reaper, { recursive: true, force: true }); }
+}
+
+async function releaseLock(lock, token) {
+  try {
+    const owner = JSON.parse(await readFile(join(lock, 'owner.json'), 'utf8'));
+    if (owner.token === token) await rm(lock, { recursive: true, force: true });
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 
 export async function withManifestLock(path, action) {
@@ -111,8 +122,5 @@ export async function withManifestLock(path, action) {
     try { await owner.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token })); }
     finally { await owner.close(); }
     return await action();
-  } finally {
-    const owner = JSON.parse(await readFile(ownerPath, 'utf8'));
-    if (owner.token === token) await rm(lock, { recursive: true, force: true });
-  }
+  } finally { await releaseLock(lock, token); }
 }

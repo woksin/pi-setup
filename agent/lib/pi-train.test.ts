@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile, mkdir, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { main, realContext } from './pi-train.mjs';
-import { cancellable, RUN_FIELDS } from './train-gh.mjs';
+import { cancellable, isBot, RUN_FIELDS } from './train-gh.mjs';
 import { loadManifest, manifestPath, repoKey, saveManifest, withManifestLock } from './train-manifest.mjs';
 import { copyBullets, extractBullets, renderNotes } from './train-notes.mjs';
 
@@ -239,6 +239,55 @@ test('run filter excludes every protected run and branch', async t => {
   assert.ok(f.calls.some(call => call.args.includes(RUN_FIELDS)));
 });
 
+test('PR cancellation verifies head and earlier commit SHAs, not just a shared branch name', async t => {
+  const f = await setup(t); f.state.pr.commits = [{ oid: BASE }];
+  f.state.runs = [runFixture(), runFixture(11, { headSha: BASE }), runFixture(12, { headSha: MERGE })];
+  assert.equal(await f.invoke('fold', '7'), 0);
+  assert.deepEqual((await f.read()).items[0].cancelledRuns, [10, 11]);
+  assert.equal(f.state.runs[2].status, 'in_progress');
+  assert.ok(f.calls.some(call => call.args.includes('commits,headRefOid')));
+});
+
+test('bare branch cancels only reachable run SHAs and prints others as manual items', async t => {
+  const f = await setup(t); f.state.branchPR = false;
+  f.state.runs = [runFixture(), runFixture(11, { headSha: BASE }), runFixture(12, { headSha: MERGE }), runFixture(13, { headSha: 'unknown' })];
+  const original = f.ctx.run;
+  f.ctx.run = async (command, args) => {
+    if (`${command} ${args[2]} ${args[5]}` === `git merge-base ${SHA}`) {
+      return [SHA, BASE].includes(args[4]) ? ok() : bad('not reachable or unknown', 128);
+    }
+    return original(command, args);
+  };
+  assert.equal(await f.invoke('fold', 'fix/widget'), 0, f.errors.join('\n'));
+  assert.deepEqual((await f.read()).items[0].cancelledRuns, [10, 11]);
+  assert.match(f.output.join('\n'), /manual: run 12/);
+  assert.match(f.output.join('\n'), /manual: run 13/);
+  assert.equal(f.state.closed, 0);
+  assert.equal(await f.invoke('status', '--json'), 1);
+  assert.ok(JSON.parse(f.output.at(-1)!).trains[0].activeRuns.every(run => run.manual));
+});
+
+test('pending cancellation rechecks the run SHA before retrying', async t => {
+  const f = await setup(t); f.state.failBefore = 'gh run cancel';
+  assert.equal(await f.invoke('fold', '7'), 2);
+  f.state.runs[0].headSha = MERGE;
+  assert.equal(await f.invoke('fold', '7'), 0);
+  assert.equal(f.state.runs[0].status, 'in_progress');
+  assert.deepEqual((await f.read()).items[0].cancelledRuns, []);
+  assert.match(f.output.join('\n'), /manual: pending run 10/);
+});
+
+test('bot identification uses only the typename, bot suffix or exact allow-list', async t => {
+  for (const login of ['dependabot', 'renovate', 'github-actions', 'Copilot', 'copilot-pull-request-reviewer', 'helper[bot]']) assert.equal(isBot({ login }), true);
+  for (const login of ['renovate-joe', 'dependabot-joe', 'copilot-human']) assert.equal(isBot({ login }), false);
+  assert.equal(isBot({ __typename: 'Bot', login: 'service' }), true);
+  assert.equal(isBot({ type: 'Bot', login: 'service' }), false);
+  const f = await setup(t); f.state.pr.reviewRequests = [{ login: 'renovate-joe' }];
+  assert.equal(await f.invoke('fold', '7'), 1);
+  f.state.pr.reviewRequests = []; f.state.pr.author.login = 'renovate-joe';
+  assert.equal(await f.invoke('fold', '7'), 1);
+});
+
 test('already-completed cancellation succeeds and real cancellation failure is resumable', async t => {
   const f = await setup(t); const original = f.ctx.run;
   let complete = false;
@@ -287,7 +336,12 @@ test('planned closes and cancels without merging; fold converts it', async t => 
   assert.equal(item.kind, 'planned'); assert.ok(item.planned.at); assert.equal(item.mergedAt, undefined);
   assert.equal(f.state.merges, 0);
   assert.match(f.state.pr.comments[0].body, /^Will be folded into/);
+  assert.match(f.state.pr.comments[0].body, /<!-- pi-train:planned train\/test -->/);
   assert.equal(await f.invoke('fold', '7'), 0);
+  assert.match(f.state.pr.comments[1].body, /^Folded into/);
+  assert.match(f.state.pr.comments[1].body, /<!-- pi-train:fold train\/test -->/);
+  assert.equal(await f.invoke('fold', '7'), 0);
+  assert.equal(f.state.comments, 1);
   item = (await f.read()).items[0];
   assert.equal(item.kind, 'folded'); assert.ok(item.mergedAt); assert.equal(f.state.closed, 1);
 });
@@ -398,6 +452,35 @@ test('manifest lock serialises concurrent read-modify-writes and reclaims stale 
   await mkdir(`${f.path}.lock`);
   await writeFile(join(`${f.path}.lock`, 'owner.json'), JSON.stringify({ pid: 2147483647 }));
   await withManifestLock(f.path, async () => assert.ok(await f.read()));
+});
+
+test('old lock with a live pid refuses instead of being reclaimed', async t => {
+  const f = await setup(t), lock = `${f.path}.lock`;
+  await mkdir(lock);
+  const owner = JSON.stringify({ pid: process.pid, token: 'live-owner' });
+  await writeFile(join(lock, 'owner.json'), owner);
+  const old = new Date(Date.now() - 660_000); await utimes(lock, old, old);
+  await assert.rejects(withManifestLock(f.path, async () => assert.fail('must not acquire live lock')), /older than 10 minutes has live pid/);
+  assert.equal(await readFile(join(lock, 'owner.json'), 'utf8'), owner);
+});
+
+test('lock cleanup tolerates a missing owner file or lock directory', async t => {
+  const f = await setup(t), lock = `${f.path}.lock`;
+  await withManifestLock(f.path, async () => rm(join(lock, 'owner.json')));
+  await rm(lock, { recursive: true });
+  await withManifestLock(f.path, async () => rm(lock, { recursive: true }));
+  await assert.rejects(readdir(lock), { code: 'ENOENT' });
+});
+
+test('failed merge abort does not mask the original merge error', async t => {
+  const f = await setup(t); f.state.conflict = true;
+  const original = f.ctx.run;
+  f.ctx.run = async (command, args) => command === 'git' && args[2] === 'merge' && args[3] === '--abort'
+    ? bad('abort failed: no merge in progress') : original(command, args);
+  assert.equal(await f.invoke('fold', '7'), 1);
+  assert.match(f.errors.join('\n'), /merge failed; conflicts: conflicted.txt: conflict/);
+  assert.doesNotMatch(f.errors.join('\n'), /abort failed/);
+  assert.equal(f.state.closed, 0);
 });
 
 function nativeGit(cwd: string, args: string[]) {

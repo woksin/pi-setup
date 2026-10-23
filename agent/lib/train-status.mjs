@@ -26,7 +26,7 @@ async function statusItems(api, manifest, defaultRef, anomalies) {
     if (!['folded', 'planned'].includes(item.kind)) { items.push({ ...item }); continue; }
     const pr = item.pr ? await api.json(manifest.repo, ['pr', 'view', String(item.pr), '--json', 'number,state']) : null;
     if (pr?.state === 'OPEN') anomalies.push(`open PR #${item.pr} for ${item.kind} item`);
-    runs.push(...await activeRuns(api, manifest, item.branch, defaultRef));
+    runs.push(...await activeRuns(api, manifest, item, defaultRef));
     items.push({ ...item, closed: pr ? pr.state !== 'OPEN' : null, cancelledRunCount: item.cancelledRuns?.length ?? 0,
       pending: pendingSteps(item, pr?.state), warnings: itemWarnings(item) });
   }
@@ -67,7 +67,7 @@ function display(ctx, status) {
     for (const warning of item.warnings ?? []) ctx.out(`    warning: ${warning}`);
   }
   for (const anomaly of status.anomalies) ctx.out(`  anomaly: ${anomaly}`);
-  for (const run of status.activeRuns) ctx.out(`  active run: ${run.databaseId} ${run.headBranch} (${run.workflowName}, ${run.status})`);
+  for (const run of status.activeRuns) ctx.out(`  ${run.manual ? 'manual' : 'active'} run: ${run.databaseId} ${run.headBranch} (${run.workflowName}, ${run.status})`);
 }
 
 function printStatuses(ctx, trains, json) {

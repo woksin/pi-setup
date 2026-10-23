@@ -8,6 +8,7 @@ function recorder(ctx, options, path, manifest) {
   let checkpoint = JSON.stringify(manifest);
   return {
     now: ctx.now,
+    manual: text => ctx.out(`manual: ${text}`),
     save: async (op, detail) => {
       if (options.dryRun || JSON.stringify(manifest) === checkpoint) return;
       manifest.log.push({ at: ctx.now(), op, detail });
@@ -83,8 +84,8 @@ async function finishItem(api, operation, item) {
   const { manifest, resolved, record } = operation;
   if (resolved.pr) {
     await closePR(api, operation, item);
-    await cancelRuns(api, operation, item);
   }
+  await cancelRuns(api, operation, item);
   copyNotes(manifest, item, resolved.pr);
   await record.save('notes', resolved.branch);
 }

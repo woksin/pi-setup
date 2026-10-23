@@ -24,7 +24,7 @@ async function performMerge(api, manifest, resolved) {
     { mutate: true, allowFailure: true });
   if (result.status === 0) return;
   const conflicts = (await api.git(manifest.worktree, ['diff', '--name-only', '--diff-filter=U'])).stdout.trim();
-  await api.git(manifest.worktree, ['merge', '--abort'], { mutate: true });
+  await api.git(manifest.worktree, ['merge', '--abort'], { mutate: true, allowFailure: true });
   const detail = conflicts ? `; conflicts: ${conflicts}` : '';
   throw new TrainError(`merge failed${detail}: ${result.stderr}`);
 }
