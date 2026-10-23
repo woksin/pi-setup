@@ -13,13 +13,13 @@ export interface Discovery {
   source?: string; repo?: string; branch?: string; warnings: string[]; excluded?: boolean;
 }
 interface Identity { lane: string; sessionId: string }
-export async function discover(ctx: LanesCtx, entries: InventoryEntry[], excluded: string[]): Promise<Discovery[]> {
+export async function discover(ctx: LanesCtx, entries: InventoryEntry[], excluded: string[], coordinatorId?: string): Promise<Discovery[]> {
   const rows: Discovery[] = [];
   for (const p of await runningPi(ctx)) {
     const row: Discovery = { pid: p.pid, tty: await ttyOf(ctx, p.pid) ?? "?", cwd: absolute(ctx, p.cwd), warnings: [] };
     rows.push(row);
     if (excluded.includes(row.tty)) { row.excluded = true; row.warnings.push("excluded"); continue; }
-    await inspect(row, entries, ctx);
+    await inspect(row, entries, ctx, coordinatorId);
     warnId(row);
   }
   markDuplicates(rows, "id", "duplicate id");
@@ -27,8 +27,8 @@ export async function discover(ctx: LanesCtx, entries: InventoryEntry[], exclude
   markDuplicates(rows, "sessionId", "duplicate session identity");
   return rows;
 }
-async function inspect(row: Discovery, entries: InventoryEntry[], ctx: LanesCtx): Promise<void> {
-  try { await identify(row, entries, ctx); await gitIdentity(row, ctx); }
+async function inspect(row: Discovery, entries: InventoryEntry[], ctx: LanesCtx, coordinatorId?: string): Promise<void> {
+  try { await identify(row, entries, ctx); if (row.id !== coordinatorId) await gitIdentity(row, ctx); }
   catch (e) { row.warnings.push((e as Error).message); }
 }
 function warnId(row: Discovery): void {
@@ -38,10 +38,18 @@ function warnId(row: Discovery): void {
 async function gitIdentity(row: Discovery, ctx: LanesCtx): Promise<void> {
   const remote = await ctx.run("git", ["-C", row.cwd, "remote", "get-url", "origin"], { timeoutMs: 5000 });
   const branch = await ctx.run("git", ["-C", row.cwd, "rev-parse", "--abbrev-ref", "HEAD"], { timeoutMs: 5000 });
-  row.repo = repoName(remote.stdout.trim()); row.branch = branch.stdout.trim();
-  const probeFailed = remote.code !== 0 || branch.code !== 0;
-  const incomplete = !row.repo || !row.branch || row.branch === "HEAD";
-  if (probeFailed || incomplete) row.warnings.push("git repo/branch unknown");
+  row.repo = remote.code === 0 ? repoName(remote.stdout.trim()) : undefined;
+  discoverBranch(row, branch);
+  if (row.branch && !row.repo) row.warnings.push("origin repo unknown");
+}
+function discoverBranch(row: Discovery, probe: Awaited<ReturnType<LanesCtx["run"]>>): void {
+  const branch = probe.stdout.trim();
+  if (!validGitBranch(probe)) { row.warnings.push("not a git repo"); return; }
+  if (branch === "HEAD") { row.warnings.push("detached HEAD"); return; }
+  row.branch = branch;
+}
+function validGitBranch(probe: Awaited<ReturnType<LanesCtx["run"]>>): boolean {
+  return probe.code === 0 && !probe.timedOut && !!probe.stdout.trim();
 }
 async function identify(row: Discovery, entries: InventoryEntry[], ctx: LanesCtx): Promise<void> {
   const signals = { cwd: row.cwd, pid: row.pid, procStart: await processStart(row.pid, ctx) } as Signals;

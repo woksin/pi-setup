@@ -4,35 +4,63 @@ import { expand, laneDir, type Config, type Lane } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { absolute } from "../reap/process.ts";
 import type { Discovery } from "./discover.ts";
+import { validNewId } from "../names.ts";
+import type { Role } from "./roles.ts";
 
-interface MergeEnv { c: Config; root: string; ctx: LanesCtx }
-export function mergeDiscovered(c: Config, rows: Discovery[], root: string, ctx: LanesCtx): void {
+interface MergeOptions { root: string; ctx: LanesCtx; existingConfig: boolean; roles: Map<string, Role> }
+interface MergeEnv extends MergeOptions { c: Config }
+export function mergeDiscovered(c: Config, rows: Discovery[], options: MergeOptions): void {
   for (const row of rows) {
-    if (ready(row)) mergeLane(row, { c, root, ctx });
+    if (row.id && !row.excluded) mergeLane(row, { c, ...options });
   }
 }
-function ready(row: Discovery): boolean { return !!row.id && !row.excluded && !row.warnings.length; }
 function mergeLane(row: Discovery, env: MergeEnv): void {
   const { c } = env;
-  if (row.id === c.coordinator.id) { c.coordinator.cwd = row.cwd; return; }
+  if (row.id === c.coordinator.id) { mergeCoordinator(row, env); return; }
   const existing = c.lanes.find(l => l.id === row.id);
-  if (directoryConflict(row, env) || existing?.retired) { row.warnings.push("conflict: existing lane directory or retired id"); return; }
-  if (orchestratorConflict(row, c)) { row.warnings.push("conflict: existing repository orchestrator"); return; }
-  const lane = adoptedLane(row, existing, env);
-  if (existing) c.lanes[c.lanes.indexOf(existing)] = lane; else c.lanes.push(lane);
+  if (existing) { compareStored(row, existing, env); return; }
+  if (!validNewId(row.id!)) row.warnings.push("unsupported id, rename the lane");
+  if (row.warnings.length) return;
+  insertLane(row, env);
+}
+function mergeCoordinator(row: Discovery, { c, root, ctx, existingConfig }: MergeEnv): void {
+  if (existingConfig) {
+    const stored = configuredDirectory(expand(c.coordinator.cwd, c, root, ctx.home), ctx);
+    compareValue(row, "cwd", stored, row.cwd); return;
+  }
+  if (row.warnings.length) return;
+  Object.assign(c.coordinator, { cwd: row.cwd, tty: row.tty, sessionId: row.sessionId });
+}
+function compareStored(row: Discovery, lane: Lane, env: MergeEnv): void {
+  const stored = configuredDirectory(laneDir(lane, env.c, env.root, env.ctx), env.ctx);
+  compareValue(row, "cwd", stored, row.cwd);
+  compareValue(row, "repo", lane.repo, row.repo);
+  compareValue(row, "branch", lane.branch, row.branch);
+  compareValue(row, "role", lane.role ?? "lane", env.roles.get(lane.id));
+}
+function compareValue(row: Discovery, field: string, stored: string, found: string | undefined): void {
+  if (found !== undefined && stored !== found) row.warnings.push(`conflict: stored ${field} ${stored}, found ${found}`);
+}
+function insertLane(row: Discovery, env: MergeEnv): void {
+  if (directoryConflict(row, env)) { row.warnings.push("conflict: existing lane directory or retired id"); return; }
+  if (orchestratorConflict(row, env)) { row.warnings.push("conflict: existing repository orchestrator"); return; }
+  env.c.lanes.push(adoptedLane(row, env));
 }
 function directoryConflict(row: Discovery, { c, root, ctx }: MergeEnv): boolean {
   return c.lanes.filter(l => l.id !== row.id && !l.retired).some(l => configuredDirectory(laneDir(l, c, root, ctx), ctx) === row.cwd);
 }
-function orchestratorConflict(row: Discovery, c: Config): boolean {
-  if (!row.id!.startsWith("R-")) return false;
-  const others = c.lanes.filter(l => !l.retired && l.id !== row.id);
+function discoveredRole(row: Discovery, env: MergeEnv): Role {
+  return env.roles.get(row.id!) ?? (row.id!.startsWith("R-") ? "repo-orch" : "lane");
+}
+function orchestratorConflict(row: Discovery, env: MergeEnv): boolean {
+  if (discoveredRole(row, env) !== "repo-orch") return false;
+  const others = env.c.lanes.filter(l => !l.retired && l.id !== row.id);
   return others.some(l => l.role === "repo-orch" && l.repo === row.repo);
 }
-function adoptedLane(row: Discovery, existing: Lane | undefined, { c, root, ctx }: MergeEnv): Lane {
-  const lane: Lane = { ...existing, id: row.id!, repo: row.repo!, branch: row.branch!,
-    role: row.id!.startsWith("R-") ? "repo-orch" : "lane",
-    worktree: basename(row.cwd), group: existing?.group ?? null, prompt: existing?.prompt ?? `prompts/${row.id}.md` };
+function adoptedLane(row: Discovery, env: MergeEnv): Lane {
+  const { c, root, ctx } = env;
+  const lane: Lane = { id: row.id!, repo: row.repo!, branch: row.branch!, role: discoveredRole(row, env),
+    worktree: basename(row.cwd), group: null, prompt: `prompts/${row.id}.md` };
   const managed = configuredDirectory(expand(c.worktreesDir, c, root, ctx.home), ctx);
   if (dirname(row.cwd) === managed) { lane.worktree = relative(managed, row.cwd); delete lane.cwd; }
   else lane.cwd = row.cwd;

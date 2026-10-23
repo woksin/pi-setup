@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { effectiveParent, expand, laneDir, saveConfig, UsageError, validate, type Config, type Lane } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
-import { slug, validId } from "../names.ts";
+import { slug, validNewId as validId } from "../names.ts";
 import { backendFor } from "../backend.ts";
 import { preapprove } from "../preapprove.ts";
 import { shellQuote } from "../terminal.ts";

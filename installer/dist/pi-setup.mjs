@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 37628698ef601abf7a80916dd8b20f115331ee2785e9202dedef736087229645
+// pi-setup-source-sha256: 525801e85a4a901042e5d03c70fd452bb0faf461ec34c531e7459149f1a5a83a
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -436,11 +436,12 @@ function suffixedId(id) {
 function sessionDirFor(cwd, piAgentDir) {
   return join4(piAgentDir, "sessions", `--${resolve2(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
 }
-var ID, validId, validTopic, slug;
+var ID, validNewId, validId, validTopic, slug;
 var init_names = __esm({
   "src/lanes/names.ts"() {
     ID = "(?:[A-Z][A-Z0-9]*[a-z]?|[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)+)";
-    validId = (s) => s.length <= 32 && /^(?:[A-Z][A-Z0-9]*[a-z]?|R-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)$/.test(s);
+    validNewId = (s) => s.length <= 32 && /^(?:[A-Z][A-Z0-9]*[a-z]?|R-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)$/.test(s);
+    validId = (s) => s.length <= 32 && new RegExp(`^${ID}$`).test(s);
     validTopic = (s) => /^[a-z0-9][a-z0-9-]{0,47}$/.test(s);
     slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32).replace(/-$/, "") || "task";
   }
@@ -2243,7 +2244,7 @@ var init_processes = __esm({
 
 // src/lanes/adopt/discover.ts
 import { basename as basename2, join as join23 } from "node:path";
-async function discover(ctx, entries, excluded) {
+async function discover(ctx, entries, excluded, coordinatorId) {
   const rows = [];
   for (const p of await runningPi(ctx)) {
     const row = { pid: p.pid, tty: await ttyOf(ctx, p.pid) ?? "?", cwd: absolute(ctx, p.cwd), warnings: [] };
@@ -2253,7 +2254,7 @@ async function discover(ctx, entries, excluded) {
       row.warnings.push("excluded");
       continue;
     }
-    await inspect(row, entries, ctx);
+    await inspect(row, entries, ctx, coordinatorId);
     warnId(row);
   }
   markDuplicates(rows, "id", "duplicate id");
@@ -2261,10 +2262,10 @@ async function discover(ctx, entries, excluded) {
   markDuplicates(rows, "sessionId", "duplicate session identity");
   return rows;
 }
-async function inspect(row, entries, ctx) {
+async function inspect(row, entries, ctx, coordinatorId) {
   try {
     await identify(row, entries, ctx);
-    await gitIdentity(row, ctx);
+    if (row.id !== coordinatorId) await gitIdentity(row, ctx);
   } catch (e) {
     row.warnings.push(e.message);
   }
@@ -2276,11 +2277,24 @@ function warnId(row) {
 async function gitIdentity(row, ctx) {
   const remote = await ctx.run("git", ["-C", row.cwd, "remote", "get-url", "origin"], { timeoutMs: 5e3 });
   const branch = await ctx.run("git", ["-C", row.cwd, "rev-parse", "--abbrev-ref", "HEAD"], { timeoutMs: 5e3 });
-  row.repo = repoName(remote.stdout.trim());
-  row.branch = branch.stdout.trim();
-  const probeFailed = remote.code !== 0 || branch.code !== 0;
-  const incomplete = !row.repo || !row.branch || row.branch === "HEAD";
-  if (probeFailed || incomplete) row.warnings.push("git repo/branch unknown");
+  row.repo = remote.code === 0 ? repoName(remote.stdout.trim()) : void 0;
+  discoverBranch(row, branch);
+  if (row.branch && !row.repo) row.warnings.push("origin repo unknown");
+}
+function discoverBranch(row, probe) {
+  const branch = probe.stdout.trim();
+  if (!validGitBranch(probe)) {
+    row.warnings.push("not a git repo");
+    return;
+  }
+  if (branch === "HEAD") {
+    row.warnings.push("detached HEAD");
+    return;
+  }
+  row.branch = branch;
+}
+function validGitBranch(probe) {
+  return probe.code === 0 && !probe.timedOut && !!probe.stdout.trim();
 }
 async function identify(row, entries, ctx) {
   const signals = { cwd: row.cwd, pid: row.pid, procStart: await processStart(row.pid, ctx) };
@@ -2357,54 +2371,105 @@ var init_inventory = __esm({
   }
 });
 
+// src/lanes/adopt/roles.ts
+function requestedRoles(value, coordinatorId) {
+  const roles = /* @__PURE__ */ new Map();
+  if (value === void 0) return roles;
+  for (const assignment of value.split(",")) {
+    const [id, role] = roleAssignment(assignment);
+    if (id === coordinatorId) throw new UsageError("--role cannot target the coordinator");
+    if (roles.has(id) && roles.get(id) !== role) throw new UsageError(`conflicting --role for ${id}`);
+    roles.set(id, role);
+  }
+  return roles;
+}
+function roleAssignment(value) {
+  const [id, role, extra] = value.split("=");
+  if (!validId(id) || extra !== void 0) throw new UsageError("invalid --role; expected ID=role");
+  if (!["lane", "repo-orch", "sub-orch"].includes(role)) throw new UsageError("invalid --role; expected lane, repo-orch or sub-orch");
+  return [id, role];
+}
+var init_roles = __esm({
+  "src/lanes/adopt/roles.ts"() {
+    init_config();
+    init_names();
+  }
+});
+
 // src/lanes/adopt/proposal.ts
 import { existsSync as existsSync7 } from "node:fs";
 import { basename as basename3, dirname as dirname6, relative as relative6 } from "node:path";
-function mergeDiscovered(c2, rows, root, ctx) {
+function mergeDiscovered(c2, rows, options) {
   for (const row of rows) {
-    if (ready2(row)) mergeLane(row, { c: c2, root, ctx });
+    if (row.id && !row.excluded) mergeLane(row, { c: c2, ...options });
   }
-}
-function ready2(row) {
-  return !!row.id && !row.excluded && !row.warnings.length;
 }
 function mergeLane(row, env) {
   const { c: c2 } = env;
   if (row.id === c2.coordinator.id) {
-    c2.coordinator.cwd = row.cwd;
+    mergeCoordinator(row, env);
     return;
   }
   const existing = c2.lanes.find((l2) => l2.id === row.id);
-  if (directoryConflict(row, env) || existing?.retired) {
+  if (existing) {
+    compareStored(row, existing, env);
+    return;
+  }
+  if (!validNewId(row.id)) row.warnings.push("unsupported id, rename the lane");
+  if (row.warnings.length) return;
+  insertLane(row, env);
+}
+function mergeCoordinator(row, { c: c2, root, ctx, existingConfig }) {
+  if (existingConfig) {
+    const stored = configuredDirectory(expand(c2.coordinator.cwd, c2, root, ctx.home), ctx);
+    compareValue(row, "cwd", stored, row.cwd);
+    return;
+  }
+  if (row.warnings.length) return;
+  Object.assign(c2.coordinator, { cwd: row.cwd, tty: row.tty, sessionId: row.sessionId });
+}
+function compareStored(row, lane, env) {
+  const stored = configuredDirectory(laneDir(lane, env.c, env.root, env.ctx), env.ctx);
+  compareValue(row, "cwd", stored, row.cwd);
+  compareValue(row, "repo", lane.repo, row.repo);
+  compareValue(row, "branch", lane.branch, row.branch);
+  compareValue(row, "role", lane.role ?? "lane", env.roles.get(lane.id));
+}
+function compareValue(row, field, stored, found) {
+  if (found !== void 0 && stored !== found) row.warnings.push(`conflict: stored ${field} ${stored}, found ${found}`);
+}
+function insertLane(row, env) {
+  if (directoryConflict(row, env)) {
     row.warnings.push("conflict: existing lane directory or retired id");
     return;
   }
-  if (orchestratorConflict(row, c2)) {
+  if (orchestratorConflict(row, env)) {
     row.warnings.push("conflict: existing repository orchestrator");
     return;
   }
-  const lane = adoptedLane(row, existing, env);
-  if (existing) c2.lanes[c2.lanes.indexOf(existing)] = lane;
-  else c2.lanes.push(lane);
+  env.c.lanes.push(adoptedLane(row, env));
 }
 function directoryConflict(row, { c: c2, root, ctx }) {
   return c2.lanes.filter((l2) => l2.id !== row.id && !l2.retired).some((l2) => configuredDirectory(laneDir(l2, c2, root, ctx), ctx) === row.cwd);
 }
-function orchestratorConflict(row, c2) {
-  if (!row.id.startsWith("R-")) return false;
-  const others = c2.lanes.filter((l2) => !l2.retired && l2.id !== row.id);
+function discoveredRole(row, env) {
+  return env.roles.get(row.id) ?? (row.id.startsWith("R-") ? "repo-orch" : "lane");
+}
+function orchestratorConflict(row, env) {
+  if (discoveredRole(row, env) !== "repo-orch") return false;
+  const others = env.c.lanes.filter((l2) => !l2.retired && l2.id !== row.id);
   return others.some((l2) => l2.role === "repo-orch" && l2.repo === row.repo);
 }
-function adoptedLane(row, existing, { c: c2, root, ctx }) {
+function adoptedLane(row, env) {
+  const { c: c2, root, ctx } = env;
   const lane = {
-    ...existing,
     id: row.id,
     repo: row.repo,
     branch: row.branch,
-    role: row.id.startsWith("R-") ? "repo-orch" : "lane",
+    role: discoveredRole(row, env),
     worktree: basename3(row.cwd),
-    group: existing?.group ?? null,
-    prompt: existing?.prompt ?? `prompts/${row.id}.md`
+    group: null,
+    prompt: `prompts/${row.id}.md`
   };
   const managed = configuredDirectory(expand(c2.worktreesDir, c2, root, ctx.home), ctx);
   if (dirname6(row.cwd) === managed) {
@@ -2441,6 +2506,7 @@ var init_proposal = __esm({
   "src/lanes/adopt/proposal.ts"() {
     init_config();
     init_process();
+    init_names();
   }
 });
 
@@ -2455,8 +2521,9 @@ async function adopt(opts, ctx) {
   configure(c2, opts, root, ctx);
   const excluded = excludedTtys(opts);
   const entries = inventory(opts.inventory ? resolve7(ctx.cwd, opts.inventory) : void 0);
-  const rows = await discover(ctx, entries, excluded);
-  mergeDiscovered(c2, rows, root, ctx);
+  const roles = requestedRoles(opts.role, c2.coordinator.id);
+  const rows = await discover(ctx, entries, excluded, c2.coordinator.id);
+  mergeDiscovered(c2, rows, { root, ctx, existingConfig: exists, roles });
   validate(c2, root, ctx.home);
   const before = exists ? readFileSync14(path2, "utf8") : "";
   const after = JSON.stringify(c2, null, 2) + "\n";
@@ -2468,9 +2535,14 @@ async function adopt(opts, ctx) {
   return 0;
 }
 function configure(c2, opts, root, ctx) {
-  if (opts.coordinator) c2.coordinator.id = opts.coordinator;
+  c2.coordinator.id = selectedCoordinator(opts.coordinator, c2.coordinator.id);
   if (!validCoordinator(c2)) throw new UsageError("invalid or reserved coordinator id");
   if (opts.messages) c2.messages.dir = expand(opts.messages, c2, root, ctx.home);
+}
+function selectedCoordinator(requested, current) {
+  if (requested === void 0 || requested === current) return current;
+  if (!validNewId(requested)) throw new UsageError("invalid or reserved coordinator id");
+  return requested;
 }
 function validCoordinator(c2) {
   return validId(c2.coordinator.id) && c2.coordinator.id !== "ALL" && !c2.lanes.some((l2) => l2.id === c2.coordinator.id);
@@ -2495,6 +2567,7 @@ var init_adopt = __esm({
     init_names();
     init_discover();
     init_inventory();
+    init_roles();
     init_proposal();
   }
 });
@@ -2567,7 +2640,7 @@ async function add(id, opts, c2, root, ctx) {
   return 0;
 }
 function validateInput(id, opts, c2) {
-  if (!validId(id) || ["ALL", c2.messages.broadcast, c2.coordinator.id].includes(id)) {
+  if (!validNewId(id) || ["ALL", c2.messages.broadcast, c2.coordinator.id].includes(id)) {
     throw new UsageError("invalid lane id");
   }
   if (c2.lanes.some((l2) => l2.id === id)) throw new Error(`lane ${id} already exists`);
@@ -2632,7 +2705,7 @@ function newOrchestrator(lane, opts, c2) {
   const name = lane.repo.split("/")[1];
   const id = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
   const reserved = [lane.id, c2.coordinator.id, "ALL", c2.messages.broadcast, ...c2.lanes.map((l2) => l2.id)];
-  if (!validId(id) || reserved.includes(id)) {
+  if (!validNewId(id) || reserved.includes(id)) {
     throw new Error("repo-orch ID collision or invalid ID; choose --orchestrator-id");
   }
   const lower = id.toLowerCase();
@@ -2979,7 +3052,7 @@ function restoreLane(input, env) {
   return { ...source, id, prompt: path2, retired: false, parent: activeParent(source, env) };
 }
 function validateTarget({ id, source }, { c: c2 }) {
-  if (!validId(id) || [c2.coordinator.id, "ALL", c2.messages.broadcast].includes(id)) {
+  if (!validNewId(id) || [c2.coordinator.id, "ALL", c2.messages.broadcast].includes(id)) {
     throw new UsageError("invalid lane id");
   }
   if (id !== source.id && c2.lanes.some((lane) => lane.id === id)) throw new UsageError("resume target lane already exists");
@@ -3496,7 +3569,7 @@ function parseOption(argv, i2, opts) {
     return i2;
   }
   if (equals < 0) requireValue({ argv, index: i2 });
-  if (key === "exclude-tty") return parseExcluded(argv, i2, opts, equals);
+  if (["exclude-tty", "role"].includes(key)) return parseRepeated(argv, i2, opts, equals);
   return parseSingleOption({ argv, index: i2 }, opts, { key, equals });
 }
 function parseSingleOption({ argv, index: i2 }, opts, { key, equals }) {
@@ -3505,10 +3578,15 @@ function parseSingleOption({ argv, index: i2 }, opts, { key, equals }) {
   opts[key] = equals < 0 ? argv[++i2] : token.slice(equals + 1);
   return i2;
 }
-function parseExcluded(argv, i2, opts, equals) {
+function parseRepeated(argv, i2, opts, equals) {
+  const { key } = optionName({ argv, index: i2 });
   const values = [equals < 0 ? argv[++i2] : argv[i2].slice(equals + 1)];
+  if (key === "exclude-tty") i2 = consumeTtys({ argv, index: i2, values });
+  opts[key] = [opts[key], ...values].filter(Boolean).join(",");
+  return i2;
+}
+function consumeTtys({ argv, index: i2, values }) {
   while (argv[i2 + 1] && /^ttys\d+$/.test(argv[i2 + 1])) values.push(argv[++i2]);
-  opts["exclude-tty"] = [opts["exclude-tty"], ...values].filter(Boolean).join(",");
   return i2;
 }
 function requireValue({ argv, index }) {
@@ -3661,7 +3739,7 @@ var init_main = __esm({
     init_retention();
     init_status();
     HELP = `Usage: lanes [--dir root] <command> [options]
-  adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--write]
+  adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--write]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
     [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
@@ -3683,7 +3761,7 @@ Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
     OPTIONS = {
-      adopt: ["messages", "coordinator", "exclude-tty", "inventory", "write"],
+      adopt: ["messages", "coordinator", "exclude-tty", "inventory", "role", "write"],
       init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"],
       add: [
         "repo",
@@ -4845,23 +4923,23 @@ function loadProfiles(repoDir2) {
   }
   return metas;
 }
-function chooseProfile(ready4, profiles) {
-  const fit = profiles.filter((p) => p.requires.every((r2) => ready4.has(r2))).sort((a2, b) => b.rank - a2.rank)[0];
+function chooseProfile(ready3, profiles) {
+  const fit = profiles.filter((p) => p.requires.every((r2) => ready3.has(r2))).sort((a2, b) => b.rank - a2.rank)[0];
   const name = fit?.name ?? FALLBACK_PROFILE;
-  return { name, reason: reasonFor(ready4, name), provisional: !fit, source: "chooser" };
+  return { name, reason: reasonFor(ready3, name), provisional: !fit, source: "chooser" };
 }
-function reasonFor(ready4, name) {
-  const claude = ready4.has("anthropic");
-  const gpt = ready4.has("openai-codex");
-  const kimi = ready4.has("kimi-coding");
+function reasonFor(ready3, name) {
+  const claude = ready3.has("anthropic");
+  const gpt = ready3.has("openai-codex");
+  const kimi = ready3.has("kimi-coding");
   if (claude && gpt && kimi) return "you have Claude, ChatGPT and Kimi: each role goes where it is strongest";
   if (claude && gpt) return "you have Claude and ChatGPT; Kimi roles (ops, scout) fall back to GPT via provider-fallback";
   if (gpt && !claude) return `only ChatGPT is logged in: ${name} keeps every role on GPT`;
   if (claude) return "no Claude-only profile yet; balanced is used and GPT roles need a ChatGPT login";
   return "log in with /login in pi, then rerun ./install.sh --profile auto";
 }
-function kimiNote(profile2, ready4) {
-  if (!profile2?.uses.includes("kimi-coding") || ready4.has("kimi-coding")) return void 0;
+function kimiNote(profile2, ready3) {
+  if (!profile2?.uses.includes("kimi-coding") || ready3.has("kimi-coding")) return void 0;
   return "Kimi is not logged in: the Kimi roles fall back to GPT.";
 }
 function pinnedModels(profileDir) {
@@ -4873,9 +4951,9 @@ function pinnedModels(profileDir) {
   }
   return [...pins].sort();
 }
-function pinWarnings(pins, ready4, catalog) {
+function pinWarnings(pins, ready3, catalog) {
   if (!catalog || catalog.size === 0) return [];
-  return pins.filter((pin) => ready4.has(pin.split("/")[0]) && !catalog.has(pin)).map((pin) => `Pinned model ${pin} is not in this pi's model catalog.`);
+  return pins.filter((pin) => ready3.has(pin.split("/")[0]) && !catalog.has(pin)).map((pin) => `Pinned model ${pin} is not in this pi's model catalog.`);
 }
 function overlayFor(repoDir2, name, settings2) {
   const base = join40(profilesDir(repoDir2), name);
@@ -5868,7 +5946,7 @@ function profile(s) {
   if (missing.length) return check("profile", "fail", `${s.profile}: ${missing.map((p) => PROVIDER_LABELS[p] ?? p).join(", ")} has no login`, `run \`pi\`, type /login and choose ${PROVIDER_LABELS[missing[0]] ?? missing[0]}`);
   const unknown = meta.requires.filter((p) => s.facts.providers[p]?.status !== "ready");
   if (unknown.length) return check("profile", "warn", `${unknown.map((p) => PROVIDER_LABELS[p] ?? p).join(", ")}: could not check (pi auth check timed out)`, `${s.setup} doctor`);
-  return check("profile", "ok", `${s.profile}; ready: ${Object.keys(s.facts.providers).filter((p) => ready3(s, `${p}/`)).map((p) => PROVIDER_LABELS[p] ?? p).join(", ")}`);
+  return check("profile", "ok", `${s.profile}; ready: ${Object.keys(s.facts.providers).filter((p) => ready2(s, `${p}/`)).map((p) => PROVIDER_LABELS[p] ?? p).join(", ")}`);
 }
 function providers(s) {
   return Object.entries(s.facts.providers).filter(([, provider]) => provider.status === "unknown").map(([id]) => check(`provider:${id}`, "warn", `${PROVIDER_LABELS[id] ?? id}: could not determine`, `${s.setup} doctor`));
@@ -5878,7 +5956,7 @@ function models(s) {
     if (s.facts.summary || !Object.values(s.facts.providers).some((p) => p.status === "ready")) return check("models", "skip", "catalog not checked");
     return check("models", "fail", "pi lists no models", "pi update");
   }
-  const missing = s.pins.filter((p) => ready3(s, p.model) && !s.facts.catalog.has(p.model)).map((p) => p.model);
+  const missing = s.pins.filter((p) => ready2(s, p.model) && !s.facts.catalog.has(p.model)).map((p) => p.model);
   return check("models", missing.length ? "fail" : "ok", missing.length ? "pins missing from catalog" : "available pins are in the catalog", "pi update", missing);
 }
 function fallback(s) {
@@ -5886,17 +5964,17 @@ function fallback(s) {
   const pairs = Array.isArray(config.pairs) ? config.pairs.filter((p) => Array.isArray(p) && p.length === 2 && p.every((v) => typeof v === "string")) : [];
   const chains = config.chains && typeof config.chains === "object" ? config.chains : {};
   const targets = (pin) => Array.isArray(chains[pin]) ? chains[pin].filter((v) => typeof v === "string") : pairs.filter((p) => p.includes(pin)).map((p) => p[0] === pin ? p[1] : p[0]);
-  const available2 = (pin) => ready3(s, pin) && (!s.facts.catalog?.size || s.facts.catalog.has(pin));
+  const available2 = (pin) => ready2(s, pin) && (!s.facts.catalog?.size || s.facts.catalog.has(pin));
   const result2 = [];
   for (const pin of s.pins.filter((p) => providerStatus(s, p.model) === "not_ready")) {
     const target = targets(pin.model).find(available2);
     const safe = config.enabled === true && target && pin.agents.every((a2) => a2.fallback);
     const label = PROVIDER_LABELS[pin.model.split("/")[0]] ?? pin.model.split("/")[0];
-    const choice = chooseProfile(new Set(Object.keys(s.facts.providers).filter((p) => ready3(s, `${p}/`))), loadProfiles(s.ctx.repoDir));
+    const choice = chooseProfile(new Set(Object.keys(s.facts.providers).filter((p) => ready2(s, `${p}/`))), loadProfiles(s.ctx.repoDir));
     result2.push(check(`fallback:${pin.model}`, safe ? "warn" : "fail", `${pin.agents.map((a2) => a2.name).join(", ")} pin ${pin.model} but ${label} has no login: subagents may run on the parent model or fail before fallback switches${target ? ` to ${target}` : "; no ready target"}${!safe ? " (fallback unavailable)" : ""}`, `run \`pi\`, type /login and choose ${label}; or \`${s.setup} --profile auto\` (would pick ${choice.name})`));
   }
   const sources = /* @__PURE__ */ new Set([...Object.keys(chains), ...pairs.flat()]);
-  const unavailable = [...sources].filter((p) => ready3(s, p) && !targets(p).some(available2));
+  const unavailable = [...sources].filter((p) => ready2(s, p) && !targets(p).some(available2));
   if (config.enabled === true && unavailable.length) result2.push(check("fallback-targets", "warn", "fallback sources have no ready target", "edit ~/.pi/agent/provider-fallback.json", unavailable));
   if (!result2.length) result2.push(check("fallback", "ok", "fallback targets ready"));
   return result2;
@@ -5932,7 +6010,7 @@ function localChecks(ctx, facts) {
   const s = state(ctx, facts);
   return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), ...providers(s), models(s), ...fallback(s), guards(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
 }
-var text, present, providerStatus, ready3, check, packages;
+var text, present, providerStatus, ready2, check, packages;
 var init_doctor_checks = __esm({
   "src/doctor-checks.ts"() {
     init_manifest();
@@ -5954,7 +6032,7 @@ var init_doctor_checks = __esm({
       }
     };
     providerStatus = (s, model) => s.facts.providers[model.split("/")[0]]?.status;
-    ready3 = (s, model) => providerStatus(s, model) === "ready";
+    ready2 = (s, model) => providerStatus(s, model) === "ready";
     check = (id, status2, detail, fix, items) => ({ id, title: id, status: status2, detail, ...fix ? { fix } : {}, ...items?.length ? { items } : {} });
     packages = (s) => Array.isArray(s.settings.packages) ? s.settings.packages.filter((p) => typeof p === "string") : [];
   }
@@ -8016,7 +8094,7 @@ __export(run_exports, {
 });
 import { join as join51 } from "node:path";
 import { existsSync as existsSync33 } from "node:fs";
-function pickProfile(options, activeBefore, ready4, profiles, names, readOnly = false) {
+function pickProfile(options, activeBefore, ready3, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
     if (!names.includes(options.profile)) {
       throw new SetupError(`unknown profile '${options.profile}'. available: ${names.join(", ")}`);
@@ -8029,7 +8107,7 @@ function pickProfile(options, activeBefore, ready4, profiles, names, readOnly = 
   if (readOnly) {
     return { name: "balanced", reason: "provisional: the real install picks by logged-in providers", provisional: false, source: "chooser" };
   }
-  return chooseProfile(ready4, profiles);
+  return chooseProfile(ready3, profiles);
 }
 function requiredToolErrors(ctx, detection, options) {
   const needed = ["python3", ...options.skipNpm ? [] : ["npm"]];
@@ -8071,9 +8149,9 @@ function resolveAll(ctx, options, detection, saved, answers, manifest) {
   const names = profileNames(ctx.repoDir);
   const profiles = loadProfiles(ctx.repoDir);
   const activeBefore = readActive(piDir);
-  const ready4 = readyProviders(detection);
+  const ready3 = readyProviders(detection);
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
-  const choice = pickProfile(asked, activeBefore, ready4, profiles, names, options.dryRun || options.plan);
+  const choice = pickProfile(asked, activeBefore, ready3, profiles, names, options.dryRun || options.plan);
   const profile2 = profiles.find((p) => p.name === choice.name);
   const components = resolveComponents({
     flags: flagMap(options),
@@ -8116,15 +8194,15 @@ function resolveAll(ctx, options, detection, saved, answers, manifest) {
   for (const def of COMPONENTS.filter((c2) => !c2.service)) records[def.id] = { on: on[def.id] };
   componentNotes.push(...notes, ...services.notes);
   if (on.codescene) componentNotes.push(...codesceneNotes(ctx));
-  const kimi = options.dryRun || options.plan ? void 0 : kimiNote(profile2, ready4);
+  const kimi = options.dryRun || options.plan ? void 0 : kimiNote(profile2, ready3);
   const warnings = [
     ...settings2.warnings,
     ...componentNotes.filter((n3) => n3.startsWith("warning:")).map((n3) => n3.slice(9)),
     ...detection.warnings,
-    ...pinWarnings(pinnedModels(join51(profilesDir(ctx.repoDir), choice.name)), ready4, detection.catalog),
+    ...pinWarnings(pinnedModels(join51(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
     ...kimi ? [kimi] : []
   ];
-  return { settings: settings2, choice, actions, warnings, profile: profile2, ready: ready4, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
+  return { settings: settings2, choice, actions, warnings, profile: profile2, ready: ready3, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
 }
 function jsonReport(r2, detection, exitCode) {
   return JSON.stringify({

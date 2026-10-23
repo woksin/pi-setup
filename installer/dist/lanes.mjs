@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 37628698ef601abf7a80916dd8b20f115331ee2785e9202dedef736087229645
+// pi-setup-source-sha256: 525801e85a4a901042e5d03c70fd452bb0faf461ec34c531e7459149f1a5a83a
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -98,7 +98,8 @@ import { randomUUID } from "node:crypto";
 // src/lanes/names.ts
 import { join as join3, resolve as resolve2 } from "node:path";
 var ID = "(?:[A-Z][A-Z0-9]*[a-z]?|[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)+)";
-var validId = (s) => s.length <= 32 && /^(?:[A-Z][A-Z0-9]*[a-z]?|R-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)$/.test(s);
+var validNewId = (s) => s.length <= 32 && /^(?:[A-Z][A-Z0-9]*[a-z]?|R-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)$/.test(s);
+var validId = (s) => s.length <= 32 && new RegExp(`^${ID}$`).test(s);
 var validTopic = (s) => /^[a-z0-9][a-z0-9-]{0,47}$/.test(s);
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32).replace(/-$/, "") || "task";
 function messageName(from, to, topic, at, collision = 1) {
@@ -1776,7 +1777,7 @@ async function alive(ctx, pid) {
 }
 
 // src/lanes/adopt/discover.ts
-async function discover(ctx, entries, excluded) {
+async function discover(ctx, entries, excluded, coordinatorId) {
   const rows = [];
   for (const p of await runningPi(ctx)) {
     const row = { pid: p.pid, tty: await ttyOf(ctx, p.pid) ?? "?", cwd: absolute(ctx, p.cwd), warnings: [] };
@@ -1786,7 +1787,7 @@ async function discover(ctx, entries, excluded) {
       row.warnings.push("excluded");
       continue;
     }
-    await inspect(row, entries, ctx);
+    await inspect(row, entries, ctx, coordinatorId);
     warnId(row);
   }
   markDuplicates(rows, "id", "duplicate id");
@@ -1794,10 +1795,10 @@ async function discover(ctx, entries, excluded) {
   markDuplicates(rows, "sessionId", "duplicate session identity");
   return rows;
 }
-async function inspect(row, entries, ctx) {
+async function inspect(row, entries, ctx, coordinatorId) {
   try {
     await identify(row, entries, ctx);
-    await gitIdentity(row, ctx);
+    if (row.id !== coordinatorId) await gitIdentity(row, ctx);
   } catch (e) {
     row.warnings.push(e.message);
   }
@@ -1809,11 +1810,24 @@ function warnId(row) {
 async function gitIdentity(row, ctx) {
   const remote = await ctx.run("git", ["-C", row.cwd, "remote", "get-url", "origin"], { timeoutMs: 5e3 });
   const branch = await ctx.run("git", ["-C", row.cwd, "rev-parse", "--abbrev-ref", "HEAD"], { timeoutMs: 5e3 });
-  row.repo = repoName(remote.stdout.trim());
-  row.branch = branch.stdout.trim();
-  const probeFailed = remote.code !== 0 || branch.code !== 0;
-  const incomplete = !row.repo || !row.branch || row.branch === "HEAD";
-  if (probeFailed || incomplete) row.warnings.push("git repo/branch unknown");
+  row.repo = remote.code === 0 ? repoName(remote.stdout.trim()) : void 0;
+  discoverBranch(row, branch);
+  if (row.branch && !row.repo) row.warnings.push("origin repo unknown");
+}
+function discoverBranch(row, probe) {
+  const branch = probe.stdout.trim();
+  if (!validGitBranch(probe)) {
+    row.warnings.push("not a git repo");
+    return;
+  }
+  if (branch === "HEAD") {
+    row.warnings.push("detached HEAD");
+    return;
+  }
+  row.branch = branch;
+}
+function validGitBranch(probe) {
+  return probe.code === 0 && !probe.timedOut && !!probe.stdout.trim();
 }
 async function identify(row, entries, ctx) {
   const signals = { cwd: row.cwd, pid: row.pid, procStart: await processStart(row.pid, ctx) };
@@ -1877,54 +1891,99 @@ function entry(c, keys) {
   return { tty: tty.startsWith("ttys") ? tty : `ttys${tty.padStart(3, "0")}`, worktree: c[keys.indexOf("worktree")], id: c[keys.indexOf("lane")] };
 }
 
+// src/lanes/adopt/roles.ts
+function requestedRoles(value, coordinatorId) {
+  const roles = /* @__PURE__ */ new Map();
+  if (value === void 0) return roles;
+  for (const assignment of value.split(",")) {
+    const [id, role] = roleAssignment(assignment);
+    if (id === coordinatorId) throw new UsageError("--role cannot target the coordinator");
+    if (roles.has(id) && roles.get(id) !== role) throw new UsageError(`conflicting --role for ${id}`);
+    roles.set(id, role);
+  }
+  return roles;
+}
+function roleAssignment(value) {
+  const [id, role, extra] = value.split("=");
+  if (!validId(id) || extra !== void 0) throw new UsageError("invalid --role; expected ID=role");
+  if (!["lane", "repo-orch", "sub-orch"].includes(role)) throw new UsageError("invalid --role; expected lane, repo-orch or sub-orch");
+  return [id, role];
+}
+
 // src/lanes/adopt/proposal.ts
 import { existsSync as existsSync5 } from "node:fs";
 import { basename as basename3, dirname as dirname6, relative as relative6 } from "node:path";
-function mergeDiscovered(c, rows, root, ctx) {
+function mergeDiscovered(c, rows, options) {
   for (const row of rows) {
-    if (ready2(row)) mergeLane(row, { c, root, ctx });
+    if (row.id && !row.excluded) mergeLane(row, { c, ...options });
   }
-}
-function ready2(row) {
-  return !!row.id && !row.excluded && !row.warnings.length;
 }
 function mergeLane(row, env) {
   const { c } = env;
   if (row.id === c.coordinator.id) {
-    c.coordinator.cwd = row.cwd;
+    mergeCoordinator(row, env);
     return;
   }
   const existing = c.lanes.find((l) => l.id === row.id);
-  if (directoryConflict(row, env) || existing?.retired) {
+  if (existing) {
+    compareStored(row, existing, env);
+    return;
+  }
+  if (!validNewId(row.id)) row.warnings.push("unsupported id, rename the lane");
+  if (row.warnings.length) return;
+  insertLane(row, env);
+}
+function mergeCoordinator(row, { c, root, ctx, existingConfig }) {
+  if (existingConfig) {
+    const stored = configuredDirectory(expand(c.coordinator.cwd, c, root, ctx.home), ctx);
+    compareValue(row, "cwd", stored, row.cwd);
+    return;
+  }
+  if (row.warnings.length) return;
+  Object.assign(c.coordinator, { cwd: row.cwd, tty: row.tty, sessionId: row.sessionId });
+}
+function compareStored(row, lane, env) {
+  const stored = configuredDirectory(laneDir(lane, env.c, env.root, env.ctx), env.ctx);
+  compareValue(row, "cwd", stored, row.cwd);
+  compareValue(row, "repo", lane.repo, row.repo);
+  compareValue(row, "branch", lane.branch, row.branch);
+  compareValue(row, "role", lane.role ?? "lane", env.roles.get(lane.id));
+}
+function compareValue(row, field, stored, found) {
+  if (found !== void 0 && stored !== found) row.warnings.push(`conflict: stored ${field} ${stored}, found ${found}`);
+}
+function insertLane(row, env) {
+  if (directoryConflict(row, env)) {
     row.warnings.push("conflict: existing lane directory or retired id");
     return;
   }
-  if (orchestratorConflict(row, c)) {
+  if (orchestratorConflict(row, env)) {
     row.warnings.push("conflict: existing repository orchestrator");
     return;
   }
-  const lane = adoptedLane(row, existing, env);
-  if (existing) c.lanes[c.lanes.indexOf(existing)] = lane;
-  else c.lanes.push(lane);
+  env.c.lanes.push(adoptedLane(row, env));
 }
 function directoryConflict(row, { c, root, ctx }) {
   return c.lanes.filter((l) => l.id !== row.id && !l.retired).some((l) => configuredDirectory(laneDir(l, c, root, ctx), ctx) === row.cwd);
 }
-function orchestratorConflict(row, c) {
-  if (!row.id.startsWith("R-")) return false;
-  const others = c.lanes.filter((l) => !l.retired && l.id !== row.id);
+function discoveredRole(row, env) {
+  return env.roles.get(row.id) ?? (row.id.startsWith("R-") ? "repo-orch" : "lane");
+}
+function orchestratorConflict(row, env) {
+  if (discoveredRole(row, env) !== "repo-orch") return false;
+  const others = env.c.lanes.filter((l) => !l.retired && l.id !== row.id);
   return others.some((l) => l.role === "repo-orch" && l.repo === row.repo);
 }
-function adoptedLane(row, existing, { c, root, ctx }) {
+function adoptedLane(row, env) {
+  const { c, root, ctx } = env;
   const lane = {
-    ...existing,
     id: row.id,
     repo: row.repo,
     branch: row.branch,
-    role: row.id.startsWith("R-") ? "repo-orch" : "lane",
+    role: discoveredRole(row, env),
     worktree: basename3(row.cwd),
-    group: existing?.group ?? null,
-    prompt: existing?.prompt ?? `prompts/${row.id}.md`
+    group: null,
+    prompt: `prompts/${row.id}.md`
   };
   const managed = configuredDirectory(expand(c.worktreesDir, c, root, ctx.home), ctx);
   if (dirname6(row.cwd) === managed) {
@@ -1967,8 +2026,9 @@ async function adopt(opts, ctx) {
   configure(c, opts, root, ctx);
   const excluded = excludedTtys(opts);
   const entries = inventory(opts.inventory ? resolve7(ctx.cwd, opts.inventory) : void 0);
-  const rows = await discover(ctx, entries, excluded);
-  mergeDiscovered(c, rows, root, ctx);
+  const roles = requestedRoles(opts.role, c.coordinator.id);
+  const rows = await discover(ctx, entries, excluded, c.coordinator.id);
+  mergeDiscovered(c, rows, { root, ctx, existingConfig: exists, roles });
   validate(c, root, ctx.home);
   const before = exists ? readFileSync12(path, "utf8") : "";
   const after = JSON.stringify(c, null, 2) + "\n";
@@ -1980,9 +2040,14 @@ async function adopt(opts, ctx) {
   return 0;
 }
 function configure(c, opts, root, ctx) {
-  if (opts.coordinator) c.coordinator.id = opts.coordinator;
+  c.coordinator.id = selectedCoordinator(opts.coordinator, c.coordinator.id);
   if (!validCoordinator(c)) throw new UsageError("invalid or reserved coordinator id");
   if (opts.messages) c.messages.dir = expand(opts.messages, c, root, ctx.home);
+}
+function selectedCoordinator(requested, current) {
+  if (requested === void 0 || requested === current) return current;
+  if (!validNewId(requested)) throw new UsageError("invalid or reserved coordinator id");
+  return requested;
 }
 function validCoordinator(c) {
   return validId(c.coordinator.id) && c.coordinator.id !== "ALL" && !c.lanes.some((l) => l.id === c.coordinator.id);
@@ -2067,7 +2132,7 @@ async function add(id, opts, c, root, ctx) {
   return 0;
 }
 function validateInput(id, opts, c) {
-  if (!validId(id) || ["ALL", c.messages.broadcast, c.coordinator.id].includes(id)) {
+  if (!validNewId(id) || ["ALL", c.messages.broadcast, c.coordinator.id].includes(id)) {
     throw new UsageError("invalid lane id");
   }
   if (c.lanes.some((l) => l.id === id)) throw new Error(`lane ${id} already exists`);
@@ -2132,7 +2197,7 @@ function newOrchestrator(lane, opts, c) {
   const name = lane.repo.split("/")[1];
   const id = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
   const reserved = [lane.id, c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.map((l) => l.id)];
-  if (!validId(id) || reserved.includes(id)) {
+  if (!validNewId(id) || reserved.includes(id)) {
     throw new Error("repo-orch ID collision or invalid ID; choose --orchestrator-id");
   }
   const lower = id.toLowerCase();
@@ -2448,7 +2513,7 @@ function restoreLane(input, env) {
   return { ...source, id, prompt: path, retired: false, parent: activeParent(source, env) };
 }
 function validateTarget({ id, source }, { c }) {
-  if (!validId(id) || [c.coordinator.id, "ALL", c.messages.broadcast].includes(id)) {
+  if (!validNewId(id) || [c.coordinator.id, "ALL", c.messages.broadcast].includes(id)) {
     throw new UsageError("invalid lane id");
   }
   if (id !== source.id && c.lanes.some((lane) => lane.id === id)) throw new UsageError("resume target lane already exists");
@@ -2889,7 +2954,7 @@ function warnMissingOrchestrators(c, ctx) {
 
 // src/lanes/main.ts
 var HELP = `Usage: lanes [--dir root] <command> [options]
-  adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--write]
+  adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--write]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
     [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
@@ -2911,7 +2976,7 @@ Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
 var OPTIONS = {
-  adopt: ["messages", "coordinator", "exclude-tty", "inventory", "write"],
+  adopt: ["messages", "coordinator", "exclude-tty", "inventory", "role", "write"],
   init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"],
   add: [
     "repo",
@@ -2964,7 +3029,7 @@ function parseOption(argv, i, opts) {
     return i;
   }
   if (equals < 0) requireValue({ argv, index: i });
-  if (key === "exclude-tty") return parseExcluded(argv, i, opts, equals);
+  if (["exclude-tty", "role"].includes(key)) return parseRepeated(argv, i, opts, equals);
   return parseSingleOption({ argv, index: i }, opts, { key, equals });
 }
 function parseSingleOption({ argv, index: i }, opts, { key, equals }) {
@@ -2973,10 +3038,15 @@ function parseSingleOption({ argv, index: i }, opts, { key, equals }) {
   opts[key] = equals < 0 ? argv[++i] : token.slice(equals + 1);
   return i;
 }
-function parseExcluded(argv, i, opts, equals) {
+function parseRepeated(argv, i, opts, equals) {
+  const { key } = optionName({ argv, index: i });
   const values = [equals < 0 ? argv[++i] : argv[i].slice(equals + 1)];
+  if (key === "exclude-tty") i = consumeTtys({ argv, index: i, values });
+  opts[key] = [opts[key], ...values].filter(Boolean).join(",");
+  return i;
+}
+function consumeTtys({ argv, index: i, values }) {
   while (argv[i + 1] && /^ttys\d+$/.test(argv[i + 1])) values.push(argv[++i]);
-  opts["exclude-tty"] = [opts["exclude-tty"], ...values].filter(Boolean).join(",");
   return i;
 }
 function requireValue({ argv, index }) {

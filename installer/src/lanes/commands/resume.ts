@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { laneDir, effectiveParent, saveConfig, validate, UsageError, type Lane } from "../config.ts";
-import { validId } from "../names.ts";
+import { validNewId as validId } from "../names.ts";
 import { readContext, type Snapshot } from "../reap/context-format.ts";
 import type { CommandEnv } from "../reap/signals.ts";
 import { changedPaths, treeDigest } from "../reap/tree.ts";

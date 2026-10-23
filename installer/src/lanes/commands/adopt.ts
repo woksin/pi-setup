@@ -2,9 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { defaults, expand, findRoot, loadConfig, saveConfig, UsageError, validate, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
-import { validId } from "../names.ts";
+import { validId, validNewId } from "../names.ts";
 import { discover } from "../adopt/discover.ts";
 import { inventory } from "../adopt/inventory.ts";
+import { requestedRoles } from "../adopt/roles.ts";
 import { mergeDiscovered, missingLanes, printProposal } from "../adopt/proposal.ts";
 
 export async function adopt(opts: Record<string, string>, ctx: LanesCtx): Promise<number> {
@@ -14,8 +15,9 @@ export async function adopt(opts: Record<string, string>, ctx: LanesCtx): Promis
   configure(c, opts, root, ctx);
   const excluded = excludedTtys(opts);
   const entries = inventory(opts.inventory ? resolve(ctx.cwd, opts.inventory) : undefined);
-  const rows = await discover(ctx, entries, excluded);
-  mergeDiscovered(c, rows, root, ctx); validate(c, root, ctx.home);
+  const roles = requestedRoles(opts.role, c.coordinator.id);
+  const rows = await discover(ctx, entries, excluded, c.coordinator.id);
+  mergeDiscovered(c, rows, { root, ctx, existingConfig: exists, roles }); validate(c, root, ctx.home);
   const before = exists ? readFileSync(path, "utf8") : "";
   const after = JSON.stringify(c, null, 2) + "\n";
   printProposal({ rows, missing: missingLanes(c, rows), before, after }, ctx);
@@ -23,9 +25,14 @@ export async function adopt(opts: Record<string, string>, ctx: LanesCtx): Promis
   return 0;
 }
 function configure(c: Config, opts: Record<string, string>, root: string, ctx: LanesCtx): void {
-  if (opts.coordinator) c.coordinator.id = opts.coordinator;
+  c.coordinator.id = selectedCoordinator(opts.coordinator, c.coordinator.id);
   if (!validCoordinator(c)) throw new UsageError("invalid or reserved coordinator id");
   if (opts.messages) c.messages.dir = expand(opts.messages, c, root, ctx.home);
+}
+function selectedCoordinator(requested: string | undefined, current: string): string {
+  if (requested === undefined || requested === current) return current;
+  if (!validNewId(requested)) throw new UsageError("invalid or reserved coordinator id");
+  return requested;
 }
 function validCoordinator(c: Config): boolean {
   return validId(c.coordinator.id) && c.coordinator.id !== "ALL" && !c.lanes.some(l => l.id === c.coordinator.id);
