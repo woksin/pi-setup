@@ -24,9 +24,12 @@ function statusFiles(base: string): string[] {
 function field(text: string, name: string): string | undefined {
   return new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.+)$`, "mi").exec(text)?.[1].trim().replace(/^`|`$/g, "");
 }
-function exactOwner(text: string, s: Signals): boolean {
-  return field(text, "Session") === s.sessionId || field(text, "SessionId") === s.sessionId
-    || [field(text, "Cwd"), field(text, "Worktree")].includes(s.cwd);
+function exactOwner(text: string, s: Signals, lane: Lane): boolean {
+  if (field(text, "Session") === s.sessionId || field(text, "SessionId") === s.sessionId) return true;
+  if ([field(text, "Cwd"), field(text, "Worktree")].includes(s.cwd)) return true;
+  const repo = field(text, "Repo");
+  if (repo && repo.toLowerCase() !== lane.repo?.toLowerCase()) return false;
+  return Boolean(lane.branch && field(text, "Branch") === lane.branch);
 }
 function issueOwner(text: string, path: string, lane: Lane, base: string): boolean {
   if (!lane.repo || !lane.issue) return false;
@@ -41,7 +44,7 @@ export function localClaims(s: Signals, env: EvidenceContext): void {
   for (const base of bases) for (const path of statusFiles(base)) {
     const text = optionalText(path)!;
     if (field(text, "State")?.toLowerCase() !== "in-progress") continue;
-    if (exactOwner(text, s) || issueOwner(text, path, env.lane, base)) s.keeps.push("in-progress local claim");
+    if (exactOwner(text, s, env.lane) || issueOwner(text, path, env.lane, base)) s.keeps.push("in-progress local claim");
     else if (!field(text, "Repo") || field(text, "Repo")?.toLowerCase() === env.lane.repo?.toLowerCase()) {
       s.asks.push("local claim ownership unknown");
     }

@@ -10,6 +10,8 @@ import { collect, type Signals } from "../src/lanes/reap/signals.ts";
 import { expectedSnapshot, readContext, validateContext } from "../src/lanes/reap/context-format.ts";
 import { verdict } from "../src/lanes/reap/verdict.ts";
 import { sessionDirFor } from "../src/lanes/names.ts";
+import { sessionTail } from "../src/lanes/reap/session-tail.ts";
+import { summaryLine } from "../src/lanes/reap/summary.ts";
 import { tempDir, REPO } from "./helpers/home.ts";
 import type { LanesCtx } from "../src/lanes/ctx.ts";
 export function fixture() {
@@ -107,8 +109,75 @@ test("old mail stays read and malformed or future watcher markers fail closed", 
     assert.ok((await evidence(f)).asks.includes("inbox marker invalid"));
   }
 });
+const liveMessageNames = [
+  ["R-CHR-to-L44-5340-ok-1710.md", "L44"],
+  ["L41-to-L19-stage-deliver-721-0a.md", "L19"],
+  ["L0-to-ai-skills-1406-resume.md", "ai-skills"],
+  ["L34-chronicle-correctness-to-L0-5177-merged.md", "L0"],
+  ["20261023-041109-L15-to-L0-L29-L33-L36-L45-v0.280.1-deployed.md", "L36"],
+  ["20261023-070746-RETRO-to-L24-L0-cand2-guard-advisory-fixed.md", "L24"],
+  ["20261023-075216-L15-to-L46-2400-review.md", "L46"],
+  ["20261023-0555-L46-to-L15-189-cratis-bot.md", "L15"],
+];
+test("live message names count only when newer than marker or session activity", async () => {
+  for (const [name, id] of liveMessageNames) for (const marker of [true, false]) {
+    const f = fixture(); f.c.lanes[0].id = id; rmSync(f.marker);
+    if (marker) f.put(join(f.root, `messages/${id}-inbox.marker`), "", 10);
+    const path = join(f.root, "messages", name); f.put(path, "fixture", 180);
+    const old = await evidence(f); assert.deepEqual(old.asks, [], name); assert.deepEqual(old.unread, [], name);
+    f.put(path, "fixture"); const fresh = await evidence(f); assert.deepEqual(fresh.unread, [name], name);
+    if (!marker) assert.ok(fresh.asks.includes("pending inbound; inbox marker and watch evidence missing"));
+  }
+});
+test("missing marker is only a JSON note until pending inbound needs watch evidence", async () => {
+  const f = fixture(); rmSync(f.marker); const initial = await evidence(f);
+  assert.deepEqual(initial.asks, []); assert.deepEqual(initial.notes, ["inbox marker missing"]);
+  assert.equal(verdict(initial).verdict, "handoff");
+  f.put(join(f.root, "messages/L0-to-L1-work.md"), "fixture");
+  assert.ok((await evidence(f)).asks.includes("pending inbound; inbox marker and watch evidence missing"));
+  for (const command of ["inbox-watch L1", "~/.pi/agent/bin/inbox-watch --alias ttys003 L1"]) {
+    f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_watch", details: { command } } }), 120);
+    const watched = await evidence(f); assert.equal(watched.inboxWatch, true); assert.deepEqual(watched.asks, []);
+    assert.ok(watched.keeps.includes("unread inbox"));
+  }
+  f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_watch", details: { command: "inbox-watch L10" } } }), 120);
+  assert.equal((await evidence(f)).inboxWatch, undefined);
+});
+test("claim mapping is independent of source and foreign claims appear only in summary", async () => {
+  for (const extra of [{ sessionId: "foreign", branch: "l1", cwd: "/other" }, { sessionId: "foreign", cwd: "CWD" }, { source: "detected" }]) {
+    const f = fixture(); f.claim("in-progress", undefined, { ...extra, ...(extra.cwd === "CWD" ? { cwd: f.cwd } : {}) });
+    const s = await evidence(f); assert.deepEqual(s.asks, []); assert.ok(s.keeps.includes("in-progress claim"));
+  }
+  const f = fixture(); f.claim("in-progress", undefined, { sessionId: "foreign", branch: "other", cwd: "/other" });
+  await f.invoke("reap", "--json"); assert.equal(f.rows()[0].verdict, "handoff");
+  const plan = JSON.parse(readFileSync(join(f.root, ".state/reap-plan.json"), "utf8"));
+  assert.deepEqual(plan.summaries.find(item => item.label === "Foreign claims").names, ["example/alpha#1"]);
+});
+test("large sessions use an aligned bounded tail and name undecidable open jobs", async () => {
+  const f = fixture(); const prefix = JSON.stringify({ padding: "x".repeat(33 * 1024 * 1024) });
+  const header = { id: "j-before", status: "running" };
+  const entry = JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_output", details: header } });
+  f.put(f.sessionFile, `${prefix}\n${entry}\n`, 120);
+  assert.ok(sessionTail(f.sessionFile).text.startsWith(entry));
+  assert.deepEqual((await evidence(f)).asks, ["job j-before open; start before session tail"]);
+  f.put(f.sessionFile, `${prefix}\n${JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_output", details: { ...header, status: "completed" } } })}\n`, 120);
+  assert.deepEqual((await evidence(f)).asks, []);
+});
+test("summary samples are capped while saved lists remain complete", async () => {
+  const f = fixture();
+  for (let i = 0; i < 14; i++) f.put(join(f.root, `messages/unknown-${i}.md`), "fixture");
+  await f.invoke("reap"); const line = f.out.find(line => line.startsWith("Unparseable messages"))!;
+  assert.ok(line.endsWith("(+4 more)"));
+  const plan = JSON.parse(readFileSync(join(f.root, ".state/reap-plan.json"), "utf8"));
+  assert.equal(plan.summaries[0].names.length, 14); assert.equal(line, summaryLine(plan.summaries[0]));
+});
+test("missing worktree has a lane-specific human reason", async () => {
+  const f = fixture(); const realpath = f.ctx.realpath;
+  f.ctx.realpath = path => { if (path !== f.cwd) return realpath(path); throw Object.assign(new Error("raw lstat error"), { code: "ENOENT" }); };
+  assert.deepEqual((await evidence(f)).asks, [`worktree gone: ${f.cwd}`]);
+});
 test("local active claims require exact identity rather than branch substrings", async () => {
-  for (const [fields, keep] of [["**Session:** s1", true], ["**Worktree:** CWD", true], ["**Repo:** example/alpha\n**Issue:** #1", true], ["**Branch:** work\n**Issue:** #170", false]] as const) {
+  for (const [fields, keep] of [["**Session:** s1", true], ["**Worktree:** CWD", true], ["**Branch:** l1", true], ["**Repo:** example/alpha\n**Issue:** #1", true], ["**Branch:** work\n**Issue:** #170", false]] as const) {
     const f = fixture(); f.c.lanes[0].issue = 1;
     f.put(join(f.cwd, ".ai-work/issue-work/1/status.md"), `**State:** in-progress\n${fields.replace("CWD", f.cwd)}`);
     const s = await evidence(f); assert.equal(s.keeps.includes("in-progress local claim"), keep, fields);
@@ -162,8 +231,8 @@ const askCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["sessions directory", f => rmSync(dirname(f.sessionFile), { recursive: true })],
   ["process descendants", f => { const run = f.ctx.run; f.ctx.run = async (cmd, a, o) => cmd === "ps" && a[0] === "-A" ? f.result("", 1) : run(cmd, a, o); }],
   ["open files", f => { const run = f.ctx.run; f.ctx.run = async (cmd, a, o) => cmd === "lsof" && !a.includes("cwd") ? f.result("", 1) : run(cmd, a, o); }],
-  ["inbox watch never ran", f => rmSync(f.marker)], ["message name ambiguous", f => f.put(join(f.root, "messages/mystery-L1-123.md"), "?")],
-  ["claim from another tool", f => f.claim("in-progress", undefined, { source: "detected" })],
+  ["pending inbound", f => { rmSync(f.marker); f.put(join(f.root, "messages/L0-to-L1-pending.md"), "fixture"); }],
+  ["message name ambiguous", f => f.put(join(f.root, "messages/mystery-L1-123.md"), "?")],
   ["named in NOW.md", f => f.put(join(f.root, "coordinator/NOW.md"), "L1 owns the release")],
   ["signals disagree", f => f.put(join(f.home, ".pi/orch/heartbeats/s1.json"), JSON.stringify({ pid: 101, state: "working", at: f.now.toISOString() }))],
   ["foreground not the expected pi", f => f.setForeground(false)],

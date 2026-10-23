@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import { localClaims } from "./local-claims.ts";
 import { optionalText, jsonFiles } from "./files.ts";
+import type { Lane } from "../config.ts";
 import type { Claim, EvidenceContext, Signals } from "./signals.ts";
 export function registry(text: string): Claim[] {
   const folded = new Map<string, Claim>();
@@ -13,7 +14,6 @@ export function registry(text: string): Claim[] {
 }
 function validEvent(ev: Claim): boolean { return Boolean(ev?.repo && Number.isInteger(ev.issue) && ev.sessionId && ev.source); }
 function classifyClaim(claim: Claim, s: Signals): void {
-  if (claim.sessionId !== s.sessionId || claim.source !== "tool") { s.asks.push("claim from another tool or unmapped session"); return; }
   s.claims.push(claim);
   if (activeUnnoted(claim)) { s.keeps.push("in-progress claim"); return; }
   if (readyClaim(claim)) return;
@@ -40,11 +40,14 @@ function orchestration(s: Signals, env: EvidenceContext): void {
     else s.keeps.push("subagent running");
   }
 }
+export function claimMapsToLane(claim: Claim, s: Signals, lane: Lane): boolean {
+  if (lane.repo && claim.repo.toLowerCase() !== lane.repo.toLowerCase()) return false;
+  return claim.sessionId === s.sessionId || claim.cwd === s.cwd || claim.worktree === s.cwd
+    || Boolean(claim.branch && claim.branch === lane.branch);
+}
 export function claimsAndOwnership(s: Signals, env: EvidenceContext): void {
   const text = optionalText(join(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
-  const claims = registry(text || "").filter(claim => env.lane.repo
-    ? claim.repo.toLowerCase() === env.lane.repo.toLowerCase() && claim.sessionId === s.sessionId
-    : claim.sessionId === s.sessionId);
+  const claims = registry(text || "").filter(claim => claimMapsToLane(claim, s, env.lane));
   for (const claim of claims) classifyClaim(claim, s);
   localClaims(s, env); namedNotes(s, env); orchestration(s, env);
 }
