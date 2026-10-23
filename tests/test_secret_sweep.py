@@ -23,7 +23,7 @@ class SecretSweepTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="secret-sweep-test-")
         self.addCleanup(self.temporary.cleanup)
-        self.base = Path(self.temporary.name)
+        self.base = Path(self.temporary.name).resolve()
         self.home = self.base / "home"
         self.root = self.base / "repos"
         self.work = self.root / "fixture/.ai-work"
