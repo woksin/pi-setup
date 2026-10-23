@@ -114,7 +114,7 @@ test('extension blocks folded pushes and honours the trains guard switch', async
   const f = await fixture(t), old = { PI_TRAIN_DIR: process.env.PI_TRAIN_DIR, PI_GUARDS_OFF: process.env.PI_GUARDS_OFF, PI_GUARDS_FILE: process.env.PI_GUARDS_FILE };
   Object.assign(process.env, { PI_TRAIN_DIR: f.env.PI_TRAIN_DIR, PI_GUARDS_FILE: join(f.root, 'guards.json'), PI_GUARDS_OFF: '' });
   t.after(() => { for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
-  let handler: any; extension({ on: (name: string, fn: any) => { assert.equal(name, 'tool_call'); handler = fn; } } as any);
+  let handler: any; extension({ on: (name: string, fn: any) => { if (name === 'tool_call') handler = fn; } } as any);
   const event = { toolName: 'bash', input: { command: 'git push origin fix/folded' } };
   const ctx = { cwd: f.repo, hasUI: true, ui: { notify: () => {} } };
   assert.equal((await handler(event, ctx)).block, true);
@@ -140,7 +140,7 @@ test('hook install chains existing hook, rejects a real push, escape hatch permi
 
 test('extension allows unparseable pushes without accessing a missing headless UI', async t => {
   const f = await fixture(t);
-  let handler: any; extension({ on: (_name: string, fn: any) => { handler = fn; } } as any);
+  let handler: any; extension({ on: (name: string, fn: any) => { if (name === 'tool_call') handler = fn; } } as any);
   const result = await handler({ toolName: 'bash', input: { command: 'git push origin "$BRANCH"' } }, { cwd: f.repo, hasUI: false });
   assert.equal(result, undefined);
 });

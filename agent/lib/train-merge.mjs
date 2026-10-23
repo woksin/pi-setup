@@ -1,7 +1,14 @@
 import { TrainError } from './train-gh.mjs';
 
-export async function fetchHead(api, manifest, resolved, dryRun) {
+export async function fetchHead(api, manifest, resolved, dryRun, report = () => {}) {
   await api.git(manifest.worktree, ['check-ref-format', '--branch', resolved.branch]);
+  if (!resolved.pr) {
+    const local = (await api.git(manifest.worktree, ['for-each-ref', '--format=%(objectname)', `refs/heads/${resolved.branch}`])).stdout.trim();
+    if (local) {
+      report(`folding local head ${local.slice(0, 7)} of ${resolved.branch}`);
+      return local;
+    }
+  }
   await api.git(manifest.worktree, ['fetch', 'origin', resolved.branch], { mutate: true });
   const sha = dryRun
     ? (await api.git(manifest.worktree, ['ls-remote', 'origin', `refs/heads/${resolved.branch}`])).stdout.trim().split(/\s+/)[0]

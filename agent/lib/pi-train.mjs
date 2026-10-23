@@ -1,7 +1,8 @@
 import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { client, TrainError, realContext } from './train-gh.mjs';
-import { repoKey } from './train-manifest.mjs';
+import { repoKey, listManifests } from './train-manifest.mjs';
+import { scanRepository } from './train-concurrency.mjs';
 import { initTrain, repository } from './train-init.mjs';
 import { foldTrain } from './train-fold.mjs';
 import { statusTrains } from './train-status.mjs';
@@ -16,9 +17,10 @@ export { realContext };
 export const HELP = `Usage: pi-train [--repo-dir path] [--dry-run] [--json] <command>
   init <repo-dir> <train-branch> [--from origin/main] [--worktree path]
   init --adopt <repo-dir> <existing-train-branch> [--base origin/main]
-  fold <PR#|branch> [--train branch] [--allow-foreign] [--eta when]
+  fold [PR#|branch] [--train branch] [--allow-foreign] [--eta when]
   planned <PR#> <train-branch> [--allow-foreign] [--eta when]
   eta <PR#|branch> <when|clear> [--train branch]
+  concurrency [--json]
   status [--all] [--train branch] [--json] [--gate duration]
   ship [--train branch] [--label major|minor|patch|no-release] [--summary-file f] [--title text] [--allow-behind]
   close [train-branch] [--shipped PR#] [--head sha] | [--abandoned]   (manifest only; works when the worktree is gone)
@@ -79,7 +81,8 @@ function addArgument(argv, parsed) {
 }
 
 function validateArity(command, args) {
-  if (command === 'close' && args.length <= 1) return;
+  if (['close', 'fold'].includes(command) && args.length <= 1) return;
+  if (command === 'concurrency' && args.length === 0) return;
   const arity = new Map(Object.entries({ init: 2, fold: 1, planned: 2, eta: 2, status: 0, ship: 0, close: 0, hook: 1, guard: 0 }));
   if (args.length !== arity.get(command)) throw new TrainError(HELP, 2);
 }
@@ -113,10 +116,24 @@ async function commandRepo(ctx, api, request) {
   return repoKey(await repository(api, repoDir));
 }
 
+async function concurrency(ctx, api, options) {
+  const scan = await scanRepository({ git: (cwd, args) => api.git(cwd, args, { allowFailure: true }),
+    cwd: ctx.cwd, manifests: await listManifests(ctx.env) });
+  if (options.json) ctx.out(JSON.stringify(scan));
+  else if (scan.verdict === 'solo') ctx.out('solo: no candidate needed');
+  else {
+    ctx.out(`${scan.verdict}: ${scan.repo}${scan.trains.length ? ` (${scan.trains.map(t => t.train).join(', ')})` : ''}`);
+    for (const entry of scan.worktrees.filter(w => w.role !== 'idle')) ctx.out(`${entry.branch || '(detached)'}: ${entry.role} (${entry.path})`);
+    for (const command of scan.next) ctx.out(command);
+  }
+  return 0;
+}
+
 async function dispatch(ctx, request) {
   const { options, command, args } = request;
   const api = client(ctx, options);
   if (command === 'hook') { await manageHook(ctx, api, args[0], options.dryRun); return 0; }
+  if (command === 'concurrency') return concurrency(ctx, api, options);
   const repo = await commandRepo(ctx, api, request);
   if (command === 'status') return statusTrains(ctx, api, options, repo);
   if (command === 'guard') return runGuard(ctx, options, repo);

@@ -16,6 +16,7 @@ Copy to `<repo>/.ai-work/<task>/brief.md`, fill every section, and pass the agen
 
 ## Done =
 - [ ] The Tier 1 gate `<exact command, e.g. .ai-work/ci-local.sh>` exits 0 (whole-solution build with CI's configuration and warnings, lint, all non-integration tests). Affected-project commands are for iterating only, never completion evidence. If a Tier 1 part genuinely cannot run here, name it and say what ran instead.
+- [ ] Candidate delivery instead (repo has an open `pi-train` candidate): targeted checks `<command>` exit 0 and the branch is delivered with `pi-train fold <branch>`; the candidate owner runs Tier 1 once.
 - [ ] <acceptance check: failing-first spec now passes / behaviour X observable via Y>.
 - [ ] Diff limited to the owned files; no unrelated reformatting or renames. Work only in this repository and issue; report anything else instead of doing it.
 - [ ] Every claim of "done" is backed by a check you ran on the final code state; a report without a run check is "unverified", not done.

@@ -131,14 +131,14 @@ export function nativeGuardGit(cwd: string, args: string[]): string {
   throw new Error(result.error?.message || result.stderr || 'git resolution failed');
 }
 
-function changedDirectory(segment: Segment) {
+export function changedDirectory(segment: Segment) {
   const { tokens, cwd } = segment;
   if (tokens.length !== 2) return '';
   if (dynamic(tokens[1])) return '';
   return resolve(cwd, tokens[1]);
 }
 
-function commandTokens(segment: Segment) {
+export function commandTokens(segment: Segment) {
   const tokens = [...segment.tokens];
   while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? '')) tokens.shift();
   if (tokens[0] === 'command') tokens.shift();

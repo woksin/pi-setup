@@ -28,7 +28,7 @@ async function setup(t: any, init = true) {
   const state = { pr: prFixture() as any, runs: [runFixture()] as any[], branchExists: init, head: BASE,
     fetched: SHA, ancestor: false, conflict: false, dirty: false, onBranch: TRAIN, defaultBranch: 'main',
     openPRs: [] as any[], failBefore: '', failAfter: '', closed: 0, comments: 0, merges: 0, aborts: 0,
-    branchPR: true, unknownAncestor: false, checkedOut: true, trainPR: null as any, creates: 0, edits: 0, pushes: 0, remoteHead: '' };
+    localBranches: {} as Record<string, string>, branchPR: true, unknownAncestor: false, checkedOut: true, trainPR: null as any, creates: 0, edits: 0, pushes: 0, remoteHead: '' };
   const env = { HOME: root, USER: 'me', PI_TRAIN_DIR: join(root, 'store') };
   const path = manifestPath(env, REPO, TRAIN);
   const manifest = { v: 1, repo: REPO, train: TRAIN, base: { ref: 'origin/main', sha: BASE },
@@ -74,6 +74,7 @@ async function setup(t: any, init = true) {
     remote: () => ok('git@github.com:acme/widget.git\n'),
     'check-ref-format': () => ok(),
     'show-ref': () => state.branchExists ? ok() : bad(),
+    'for-each-ref': (args: string[]) => ok(state.localBranches[args.at(-1)!.replace('refs/heads/', '')] ?? ''),
     fetch: () => ok(),
     worktree: (args: string[]) => ok(args[1] === 'list' && state.checkedOut ? `worktree ${manifest.worktree}\nHEAD ${state.head}\nbranch refs/heads/${TRAIN}\n\n` : ''),
     log: () => ok('abcd Fold widgets\n'),
@@ -224,7 +225,6 @@ test('help and usage have stable exit codes without commands', async t => {
   const f = await setup(t);
   assert.equal(await f.invoke('--help'), 0);
   assert.equal(await f.invoke('unknown'), 2);
-  assert.equal(await f.invoke('fold'), 2);
   assert.equal(await f.invoke('fold', '7', '--override'), 2);
   assert.equal(f.calls.length, 0);
 });
@@ -610,6 +610,58 @@ function nativeGit(cwd: string, args: string[]) {
       GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' } });
   return { status: result.status ?? 2, stdout: result.stdout ?? '', stderr: result.error?.message ?? result.stderr ?? '' };
 }
+
+test('local branch skips fetch, PR still fetches, implicit branch and detached usage', async t => {
+  const f = await setup(t);
+  f.state.branchPR = false; f.state.runs = []; f.state.localBranches['fix/local'] = SHA;
+  f.state.onBranch = 'fix/local';
+  // Only the caller is on the delivery branch; the train remains on its own branch.
+  const mock = f.ctx.run;
+  f.ctx.run = async (command, args) => args[1] === f.ctx.cwd && args[2] === 'branch'
+    ? ok(f.state.onBranch) : command === 'git' && args[2] === 'branch' && args[3] === '--show-current' ? ok(TRAIN) : mock(command, args);
+  assert.equal(await f.invoke('fold'), 0, f.errors.join('\n'));
+  assert.equal((await f.read()).items[0].sha, SHA);
+  assert.ok(!f.calls.some(c => c.command === 'git' && c.args[2] === 'fetch'));
+  assert.match(f.output.join('\n'), /folding local head bbbbbbb/);
+  f.state.onBranch = '';
+  assert.equal(await f.invoke('fold'), 2); assert.match(f.errors.at(-1)!, /Usage: pi-train/);
+  const pr = await setup(t); pr.state.localBranches['fix/widget'] = BASE;
+  assert.equal(await pr.invoke('fold', '7'), 0);
+  assert.ok(pr.calls.some(c => c.command === 'git' && c.args[2] === 'fetch'));
+});
+
+test('real local worktree: never-pushed delivery, forward redelivery, rewrite refused', async t => {
+  const f = await setup(t, false), repo = join(f.root, 'repo'), origin = join(f.root, 'origin.git');
+  const train = join(f.root, 'train'), lane = join(f.root, 'lane');
+  await mkdir(repo); await mkdir(origin);
+  const git = (cwd: string, ...args: string[]) => {
+    const r = nativeGit(cwd, args); assert.equal(r.status, 0, r.stderr); return r.stdout.trim();
+  };
+  git(origin, 'init', '--bare'); git(repo, 'init', '-b', 'main');
+  await writeFile(join(repo, 'file'), 'base'); git(repo, 'add', '.'); git(repo, 'commit', '-m', 'base');
+  git(repo, 'remote', 'add', 'origin', origin); git(repo, 'push', '-u', 'origin', 'main');
+  const mock = f.ctx.run; let fetches = 0;
+  f.ctx.run = async (command, args) => {
+    if (command !== 'git' || args[2] === 'remote') return mock(command, args);
+    if (args[2] === 'fetch') fetches++;
+    return nativeGit(args[1], args.slice(2));
+  };
+  assert.equal(await f.invoke('init', repo, TRAIN, '--worktree', train), 0, f.errors.join('\n'));
+  git(repo, 'worktree', 'add', '-b', 'fix/local', lane); f.ctx.cwd = lane;
+  f.state.branchPR = false; f.state.runs = [];
+  for (const text of ['first', 'second']) {
+    await writeFile(join(lane, 'file'), text); git(lane, 'commit', '-am', text);
+    assert.equal(await f.invoke('fold'), 0, f.errors.join('\n'));
+    const item = (await f.read()).items[0];
+    assert.equal(item.branch, 'fix/local'); assert.equal(item.pr, null); assert.equal(item.kind, 'folded');
+    assert.equal(item.sha, git(lane, 'rev-parse', 'HEAD'));
+    assert.equal(await readFile(join(train, 'file'), 'utf8'), text);
+  }
+  assert.equal(fetches, 1); // init only
+  git(lane, 'reset', '--hard', 'main');
+  await writeFile(join(lane, 'file'), 'rewritten'); git(lane, 'commit', '-am', 'rewritten');
+  assert.equal(await f.invoke('fold'), 1); assert.equal(f.errors.at(-1), 'folded branch head moved');
+});
 
 test('real local bare origin: init, merge, ancestor rerun and conflict abort keep PR untouched', async t => {
   const f = await setup(t, false), repo = join(f.root, 'repo'), origin = join(f.root, 'origin.git'), wt = join(f.root, 'train');

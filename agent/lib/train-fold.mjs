@@ -1,3 +1,4 @@
+import { HELP } from './pi-train.mjs';
 import { TrainError, defaultBranch } from './train-gh.mjs';
 import { loadManifest, saveManifest, withManifestLock } from './train-manifest.mjs';
 import { checkItem, resolveItem, selectTrain } from './train-resolve.mjs';
@@ -31,12 +32,14 @@ async function prepareOperation(ctx, api, request, selected) {
   const { options, repo, args, planned } = request;
   const manifest = await loadManifest(selected.path, selected.manifest.train);
   if (manifest.state !== 'open') throw new TrainError('train is not open');
-  const resolved = await resolveItem(api, manifest, args[0]);
+  const branch = args[0] ?? (await api.git(ctx.cwd, ['branch', '--show-current'])).stdout.trim();
+  if (!branch) throw new TrainError(HELP, 2);
+  const resolved = await resolveItem(api, manifest, branch);
   const defaultRef = await defaultBranch(api, repo);
   await checkItem(api, manifest, resolved, { defaultRef, allowForeign: options.allowForeign });
   if (planned && !resolved.pr) throw new TrainError('planned requires a PR', 2);
   const record = recorder(ctx, options, selected.path, manifest);
-  return { manifest, resolved, defaultRef, record, planned };
+  return { manifest, resolved, defaultRef, record, planned, report: text => ctx.out(text) };
 }
 
 export async function foldTrain(ctx, api, request) {
@@ -51,10 +54,19 @@ export async function foldTrain(ctx, api, request) {
   else await withManifestLock(selected.path, perform);
 }
 
-function checkPriorHead(ctx, item, resolved) {
+async function forwardDelivery(api, manifest, item, resolved) {
+  if (item.pr !== null || resolved.pr) return false;
+  return (await api.git(manifest.worktree, ['merge-base', '--is-ancestor', item.sha, resolved.sha], { allowFailure: true })).status === 0;
+}
+
+async function checkPriorHead(ctx, api, operation, item) {
+  const { manifest, resolved } = operation;
   if (!item || !resolved.sha) return;
   if (item.sha === resolved.sha) return;
-  if (item.kind !== 'planned') throw new TrainError('folded branch head moved');
+  if (item.kind !== 'planned') {
+    if (await forwardDelivery(api, manifest, item, resolved)) return;
+    throw new TrainError('folded branch head moved');
+  }
   ctx.err(`warning: planned head moved for ${resolved.branch}`);
 }
 
@@ -67,10 +79,16 @@ function updateItem(operation, item, options) {
   else item.mergedAt ??= record.now();
 }
 
+function foldedHeadMoved(item, resolved) {
+  return item?.kind === 'folded' && item.sha !== resolved.sha;
+}
+
 async function mergeItem(api, options, operation, item) {
   const { manifest, resolved } = operation;
-  resolved.sha = await fetchHead(api, manifest, resolved, options.dryRun);
-  if (item?.kind === 'folded' && item.sha !== resolved.sha) throw new TrainError('folded branch head moved');
+  resolved.sha = await fetchHead(api, manifest, resolved, options.dryRun, operation.report);
+  if (foldedHeadMoved(item, resolved) && !await forwardDelivery(api, manifest, item, resolved)) {
+    throw new TrainError('folded branch head moved');
+  }
   manifest.head = await mergeHead(api, manifest, resolved, options.dryRun);
 }
 
@@ -95,7 +113,7 @@ async function applyFold(ctx, api, options, operation) {
   const { manifest, resolved, record, planned } = operation;
   const prior = manifest.items.find(entry => entry.branch === resolved.branch);
   if (prior?.kind === 'folded' && planned) throw new TrainError('item is already folded');
-  checkPriorHead(ctx, prior, resolved);
+  await checkPriorHead(ctx, api, operation, prior);
   if (!planned) await mergeItem(api, options, operation, prior);
   const item = prior ?? createItem(operation);
   updateItem(operation, item, options);
