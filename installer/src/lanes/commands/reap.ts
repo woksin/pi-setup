@@ -1,7 +1,8 @@
 import { join, relative } from "node:path";
-import { UsageError, type Config } from "../config.ts";
+import { laneTree, UsageError, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { prepare, readPack, handoffRecipient, packPath, fingerprint, recipient } from "../reap/handoff.ts";
+import { ownContext } from "../reap/own-context.ts";
 import { safeQuit } from "../reap/safe-quit.ts";
 import { archive, checkRetirement } from "../reap/archive.ts";
 import { collect, type CommandEnv, type EvidenceContext, type Signals } from "../reap/signals.ts";
@@ -17,6 +18,7 @@ function validateArgs(args: string[], opts: Record<string, string>, c: Config): 
 async function applyRow(row: Row, env: EvidenceContext, opts: Record<string, string>): Promise<void> {
   const { lane, c, root, ctx } = env; checkRetirement(lane, c, root);
   const to = opts["handoff-to"] || readPack({ root, lane })?.to || handoffRecipient(lane, c);
+  await recipient(env, to); await ownContext(env, row.signals);
   const pack = await prepare(env, to, row.signals); row.pack = relative(root, packPath({ root, lane }));
   if (pack.acceptance?.from !== to || pack.acceptance?.fingerprint !== fingerprint(row.signals)) {
     row.reason = `takeover request sent to ${to}; explicit acceptance required`; return;
@@ -43,7 +45,7 @@ function display(rows: Row[], json: boolean, ctx: LanesCtx): void {
 export async function reap(args: string[], opts: Record<string, string>, env: CommandEnv): Promise<number> {
   const { c, root, ctx } = env;
   const minutes = validateArgs(args, opts, c); const rows: Row[] = [];
-  const active = c.lanes.filter(l => !l.retired).filter(l => !args[0] || l.id === args[0]);
+  const active = laneTree(c).reverse().map(row => row.lane).filter(l => !args[0] || l.id === args[0]);
   for (const lane of active) rows.push(await planRow({ c, lane, root, ctx, minutes }, opts));
   atomicJson(join(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), minutes, rows });
   display(rows, Boolean(opts.json), ctx);
@@ -56,6 +58,6 @@ function validateId(id: string | undefined, c: Config): void {
 }
 
 function idleMinutes(opts: Record<string, string>, c: Config): number {
-  const minutes = Number(opts.minutes ?? c.idle?.minutes ?? 90);
+  const minutes = Number(opts.minutes ?? c.idle?.minutes ?? 75);
   if (!Number.isFinite(minutes) || minutes < 1) throw new UsageError("--minutes must be positive"); return minutes;
 }

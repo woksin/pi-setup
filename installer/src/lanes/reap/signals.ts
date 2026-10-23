@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { expand } from "../config.ts";
+import { effectiveParent, expand } from "../config.ts";
 import { optionalText } from "./files.ts";
 import { gitEvidence } from "./git.ts";
 import { absolute, processEvidence, processIds } from "./process.ts";
@@ -36,6 +36,8 @@ export async function collect(env: EvidenceContext): Promise<Signals> {
   const { c, lane, root, ctx } = env;
   const s: Signals = { id: lane.id, cwd: "", asks: [], keeps: [], finished: false, takeover: false,
     pids: [], claims: [], git: {}, unread: [] };
+  const protectedReason = callerProtection(env);
+  if (protectedReason) { s.keeps.push(protectedReason); return s; }
   try {
     s.cwd = absolute(ctx, join(expand(c.worktreesDir, c, root, ctx.home), lane.worktree));
     s.pids = await processIds(ctx, s.cwd);
@@ -47,4 +49,12 @@ export async function collect(env: EvidenceContext): Promise<Signals> {
     // File messages cannot prove delivery acknowledgement or candidate ownership.
   } catch (e) { s.asks.push((e as Error).message); }
   return s;
+}
+
+function callerProtection({ ctx, lane, c }: EvidenceContext): string | undefined {
+  const id = ctx.env.PI_ORCH_ID;
+  if (lane.id === id) return "caller";
+  const caller = c.lanes.find(l => l.id === id);
+  if (caller && effectiveParent(caller, c) === lane.id) return "caller's parent";
+  return undefined;
 }

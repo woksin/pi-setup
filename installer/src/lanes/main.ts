@@ -5,7 +5,7 @@ import { type LanesCtx } from "./ctx.ts";
 import { findRoot, loadConfig, UsageError, type Config } from "./config.ts";
 import { init } from "./commands/init.ts";
 import { add } from "./commands/add.ts";
-import { start } from "./commands/start.ts";
+import { resume, startCommand } from "./commands/resume.ts";
 import { send } from "./commands/send.ts";
 import { idleCheck } from "./commands/idle-check.ts";
 import { nudge } from "./commands/nudge.ts";
@@ -19,7 +19,8 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
     [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
-  start <ID>|coordinator [--terminal backend]
+  start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
+  resume <ID> [--terminal backend]
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
   status [--all]
   messages prune [--dry-run] [--json]
@@ -39,7 +40,8 @@ const OPTIONS: Record<string, string[]> = {
   init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"],
   add: ["repo", "issue", "goal", "group", "branch", "base", "path",
     "orchestrator", "orchestrator-id", "no-orchestrator"],
-  start: ["terminal"], send: ["m", "from", "direct"], status: ["all"], messages: ["dry-run", "json"],
+  start: ["terminal", "from-handoff"], resume: ["terminal"], send: ["m", "from", "direct"],
+  status: ["all"], messages: ["dry-run", "json"],
   "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"],
   handoff: ["to", "accept", "from"], reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
   snooze: ["until", "clear"],
@@ -81,7 +83,7 @@ function validateInvocation({ command, positional, opts }: Invocation): void {
   if (!Object.hasOwn(OPTIONS, command)) throw new UsageError(HELP);
   validateOptions({ command, opts });
   const bounds: Record<string, [number, number]> = {
-    init: [0, 1], add: [1, 1], start: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1],
+    init: [0, 1], add: [1, 1], start: [1, 1], resume: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1],
     "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], handoff: [1, 1],
     reap: [0, 1], snooze: [1, 1], close: [opts.inactive ? 0 : 1, 1],
   };
@@ -98,7 +100,8 @@ function validateMinutes(minutes: string | undefined): void {
 async function dispatch(input: Invocation, env: CommandEnv): Promise<number> {
   const { command, positional: args, opts } = input; const { c, root, ctx } = env;
   const handlers: Record<string, () => number | Promise<number>> = {
-    add: () => add(args[0], opts, c, root, ctx), start: () => start(args[0], opts, c, root, ctx),
+    add: () => add(args[0], opts, c, root, ctx), start: () => startCommand(args[0], opts, env),
+    resume: () => resume(args, opts, env),
     messages: () => messagesPrune(opts, c, root, ctx), send: () => send(args, opts, c, root, ctx),
     "idle-check": () => idleCheck(opts, c, root, ctx), nudge: () => nudge(args[0], args[1], opts, c, root, ctx),
     "resume-check": () => resumeCheck(c, root, ctx), "green-prs": () => greenPrs(opts, c, root, ctx),

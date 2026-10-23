@@ -50,6 +50,9 @@ export async function prepare(env: EvidenceContext, to: string, s: Signals): Pro
     `SHA: ${s.git.head || "unknown"}`,
     `Dirty: ${s.git.dirty}`,
     `Ahead: ${s.git.ahead ?? "unknown"}`,
+    `Uncommitted paths: ${JSON.stringify(s.git.paths)}`,
+    `Unpushed commits: ${JSON.stringify(s.git.unpushed)}`,
+    `Tree digest: ${s.git.digest}`,
     `PR merged at HEAD: ${s.git.merged ?? "unknown"}`,
     ``,
     `## Claims`,
@@ -77,6 +80,7 @@ export async function prepare(env: EvidenceContext, to: string, s: Signals): Pro
 }
 export async function accept(env: EvidenceContext, from: string): Promise<Handoff> {
   const { lane, ctx } = env;
+  validateAcceptanceIdentity(env, from);
   const pack = readPack(env);
   if (!pack || pack.to !== from) throw new UsageError("acceptance must come from the named handoff recipient");
   await recipient(env, from);
@@ -108,4 +112,9 @@ function validateRecipient(input: { to: string; target?: Lane }, env: EvidenceCo
   const error = "handoff recipient must be another active lane or coordinator";
   if (input.to === env.lane.id) throw new UsageError(error);
   if (!input.target && input.to !== env.c.coordinator.id) throw new UsageError(error);
+}
+
+function validateAcceptanceIdentity(env: EvidenceContext, from: string): void {
+  const caller = env.ctx.env.PI_ORCH_ID;
+  if (caller && caller !== from) throw new UsageError("--from must match PI_ORCH_ID");
 }

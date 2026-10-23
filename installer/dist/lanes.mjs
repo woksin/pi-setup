@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 502379ec56ab76fbd48f66a0cac13c40db49f6e984d59a03473ca1b4a6648235
+// pi-setup-source-sha256: d420c3fe3cc62796fa948abc055004fc946d587c104eca8ee47b4df881186d42
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -17,15 +17,15 @@ import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 var MAX_BUFFER = 16 * 1024 * 1024;
 function inherited(cmd, args, options) {
-  return new Promise((resolve8) => {
+  return new Promise((resolve10) => {
     const child = spawn(cmd, args, { cwd: options.cwd, env: { ...process.env, ...options.env }, stdio: "inherit" });
-    child.on("error", (error) => resolve8({ code: null, stdout: "", stderr: error.message, timedOut: false }));
-    child.on("close", (code) => resolve8({ code, stdout: "", stderr: "", timedOut: false }));
+    child.on("error", (error) => resolve10({ code: null, stdout: "", stderr: error.message, timedOut: false }));
+    child.on("close", (code) => resolve10({ code, stdout: "", stderr: "", timedOut: false }));
   });
 }
 var realRun = (cmd, args, options = {}) => {
   if (options.inherit) return inherited(cmd, args, options);
-  return new Promise((resolve8) => {
+  return new Promise((resolve10) => {
     const child = execFile(
       cmd,
       args,
@@ -33,7 +33,7 @@ var realRun = (cmd, args, options = {}) => {
       (error, stdout, stderr) => {
         const failure = error;
         const code = failure ? typeof failure.code === "number" ? failure.code : null : 0;
-        resolve8({
+        resolve10({
           code,
           stdout: String(stdout ?? ""),
           stderr: failure && code === null && !stderr ? failure.message : String(stderr ?? ""),
@@ -87,7 +87,7 @@ function realLanesCtx() {
 }
 
 // src/lanes/commands/handoff.ts
-import { join as join13, relative as relative2 } from "node:path";
+import { join as join13, relative as relative3 } from "node:path";
 
 // src/lanes/config.ts
 import { existsSync as existsSync2, readFileSync, realpathSync as realpathSync2, renameSync, writeFileSync } from "node:fs";
@@ -376,15 +376,62 @@ function atomicJson(path, value) {
 // src/lanes/reap/signals.ts
 import { join as join10 } from "node:path";
 
+// src/lanes/reap/tree.ts
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync as readFileSync3, readlinkSync } from "node:fs";
+import { isAbsolute as isAbsolute2, relative as relative2, resolve as resolve4 } from "node:path";
+function changedPaths(status2) {
+  const records = status2.split("\0");
+  const paths = [];
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (!record) continue;
+    if (!/^[ MADRCU?!]{2} /.test(record)) throw new Error("git status paths unknown");
+    paths.push(record.slice(3));
+    if (/[RC]/.test(record.slice(0, 2))) paths.push(renameSource(records[++i]));
+  }
+  return [...new Set(paths)].sort();
+}
+function renameSource(path) {
+  if (!path) throw new Error("git rename source unknown");
+  return path;
+}
+function below(cwd, path) {
+  const full = resolve4(cwd, path);
+  const rel = relative2(cwd, full);
+  if (!rel) throw new Error("git path outside worktree");
+  if (rel.startsWith("..") || isAbsolute2(rel)) throw new Error("git path outside worktree");
+  return full;
+}
+function contents(path) {
+  let stat2;
+  try {
+    stat2 = lstatSync(path);
+  } catch (e) {
+    if (e.code === "ENOENT") return "<missing>";
+    throw e;
+  }
+  if (stat2.isSymbolicLink()) return `symlink:${readlinkSync(path)}`;
+  if (!stat2.isFile()) throw new Error("dirty directory/submodule contents unknown");
+  return Buffer.concat([Buffer.from(`mode:${stat2.mode}:`), readFileSync3(path)]);
+}
+function treeDigest(input) {
+  const hash = createHash("sha256").update(input.status).update(input.diff);
+  for (const path of input.paths) hash.update(JSON.stringify(path)).update(contents(below(input.cwd, path)));
+  return hash.digest("hex");
+}
+function commitList(text) {
+  const commits = text.trim().split(/\s+/).filter(Boolean);
+  if (!commits.every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) throw new Error("unpushed commits unknown");
+  return commits;
+}
+
 // src/lanes/reap/git.ts
 function succeeded(probe) {
   return !probe.code && !probe.timedOut;
 }
 function validHead(head) {
   return succeeded(head) && /^[a-f0-9]{40,64}$/.test(head.stdout.trim());
-}
-function aheadCount(ahead) {
-  return !ahead.code && /^\d+$/.test(ahead.stdout.trim()) ? Number(ahead.stdout) : void 0;
 }
 function mergedAtHead(prs, head) {
   if (!succeeded(prs)) return void 0;
@@ -398,9 +445,14 @@ function mergedAtHead(prs, head) {
 async function gitEvidence(ctx, lane, cwd) {
   const run = (args) => ctx.run("git", ["--no-optional-locks", "-C", cwd, ...args], { timeoutMs: 4e3 });
   const head = await run(["rev-parse", "HEAD"]);
-  const status2 = await run(["status", "--porcelain"]);
+  const status2 = await run(["status", "--porcelain=v1", "--untracked-files=all", "-z"]);
   if (!validHead(head) || !succeeded(status2)) return { error: "git HEAD/status unknown" };
-  const ahead = await run(["rev-list", "--count", "@{upstream}..HEAD"]);
+  const ahead = await run(["rev-list", "HEAD", "--not", "--remotes"]);
+  const diff = await run(["diff", "--binary", "HEAD"]);
+  if (!succeeded(ahead) || !succeeded(diff)) return { error: "git unpushed/tree evidence unknown" };
+  const unpushed = commitList(ahead.stdout);
+  const paths = changedPaths(status2.stdout);
+  const digest = treeDigest({ cwd, paths, status: status2.stdout, diff: diff.stdout });
   const prs = await ctx.run("gh", [
     "pr",
     "list",
@@ -417,12 +469,16 @@ async function gitEvidence(ctx, lane, cwd) {
     head: head.stdout.trim(),
     dirty: Boolean(status2.stdout.trim()),
     merged: mergedAtHead(prs, head.stdout.trim()),
-    ahead: aheadCount(ahead)
+    ahead: unpushed.length,
+    status: status2.stdout,
+    paths,
+    unpushed,
+    digest
   };
 }
 
 // src/lanes/reap/process.ts
-import { readFileSync as readFileSync3 } from "node:fs";
+import { readFileSync as readFileSync4 } from "node:fs";
 import { join as join6, normalize } from "node:path";
 function absolute(ctx, path) {
   return normalize(ctx.realpath(path));
@@ -471,7 +527,7 @@ async function openJobs(s, ctx) {
   requireProbe(files, "open files unknown");
   const jobs = files.stdout.split("\n").filter((l) => l.startsWith("n" + join6(ctx.piAgentDir, "jobs") + "/"));
   for (const path of jobs) {
-    readFileSync3(path.slice(1), "utf8");
+    readFileSync4(path.slice(1), "utf8");
     s.keeps.push("job/watch running (log open)");
   }
 }
@@ -502,7 +558,7 @@ function canonicalCwd(ctx, cwd) {
 
 // src/lanes/reap/session.ts
 import { readdirSync as readdirSync2 } from "node:fs";
-import { isAbsolute as isAbsolute2, join as join7 } from "node:path";
+import { isAbsolute as isAbsolute3, join as join7 } from "node:path";
 function sameProcess(value, s, ctx) {
   if (value.pid !== s.pid) return false;
   return !value.cwd || absolute(ctx, value.cwd) === s.cwd;
@@ -535,7 +591,7 @@ function fileFor(identity, dir) {
 }
 function checkFile(s, dir, ctx) {
   if (!s.sessionId || !s.sessionFile) throw new Error("session file unknown");
-  if (!isAbsolute2(s.sessionFile)) throw new Error("session file unknown");
+  if (!isAbsolute3(s.sessionFile)) throw new Error("session file unknown");
   if (!absolute(ctx, s.sessionFile).startsWith(absolute(ctx, dir) + "/")) throw new Error("session file unknown");
   s.lastWrite = mtime(s.sessionFile);
 }
@@ -637,7 +693,7 @@ function classifyClaim(claim, s) {
     return;
   }
   s.claims.push(claim);
-  if (claim.state === "in-progress") {
+  if (activeUnnoted(claim)) {
     s.keeps.push("in-progress claim");
     return;
   }
@@ -678,7 +734,10 @@ function claimsAndOwnership(s, env) {
 }
 function readyClaim(claim) {
   if (["done", "in-review"].includes(claim.state || "")) return true;
-  return ["blocked", "planned"].includes(claim.state || "") && Boolean(claim.note?.trim());
+  return ["blocked", "planned", "paused", "in-progress"].includes(claim.state || "") && Boolean(claim.note?.trim());
+}
+function activeUnnoted(claim) {
+  return claim.state === "in-progress" && !claim.note?.trim();
 }
 
 // src/lanes/reap/signals.ts
@@ -708,6 +767,11 @@ async function collect(env) {
     git: {},
     unread: []
   };
+  const protectedReason = callerProtection(env);
+  if (protectedReason) {
+    s.keeps.push(protectedReason);
+    return s;
+  }
   try {
     s.cwd = absolute(ctx, join10(expand(c.worktreesDir, c, root, ctx.home), lane.worktree));
     s.pids = await processIds(ctx, s.cwd);
@@ -733,14 +797,21 @@ async function collect(env) {
   }
   return s;
 }
+function callerProtection({ ctx, lane, c }) {
+  const id = ctx.env.PI_ORCH_ID;
+  if (lane.id === id) return "caller";
+  const caller = c.lanes.find((l) => l.id === id);
+  if (caller && effectiveParent(caller, c) === lane.id) return "caller's parent";
+  return void 0;
+}
 
 // src/lanes/reap/handoff.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { join as join12 } from "node:path";
 
 // src/lanes/backend.ts
-import { mkdirSync as mkdirSync2, readdirSync as readdirSync4, readFileSync as readFileSync4, renameSync as renameSync3, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync2, readdirSync as readdirSync4, readFileSync as readFileSync5, renameSync as renameSync3, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { join as join11 } from "node:path";
 function addressed(m, id) {
@@ -819,7 +890,7 @@ var FileBackend = class {
   async status(lane) {
     if (!validId(lane)) throw new Error("invalid lane id");
     try {
-      return readFileSync4(join11(this.dir, "status", `${lane}.status`), "utf8").split(/\r?\n/)[0];
+      return readFileSync5(join11(this.dir, "status", `${lane}.status`), "utf8").split(/\r?\n/)[0];
     } catch (e) {
       if (e.code === "ENOENT") return void 0;
       throw e;
@@ -832,7 +903,7 @@ function backendFor(config, ctx, root) {
 
 // src/lanes/reap/handoff.ts
 function fingerprint(s) {
-  return createHash("sha256").update(JSON.stringify(s)).digest("hex");
+  return createHash2("sha256").update(JSON.stringify(s)).digest("hex");
 }
 function packPath(env) {
   return join12(env.root, ".state/handoffs", env.lane.id);
@@ -880,6 +951,9 @@ ${optionalText(join12(root, "coordinator", n)) || "unknown/not present"}`).join(
     `SHA: ${s.git.head || "unknown"}`,
     `Dirty: ${s.git.dirty}`,
     `Ahead: ${s.git.ahead ?? "unknown"}`,
+    `Uncommitted paths: ${JSON.stringify(s.git.paths)}`,
+    `Unpushed commits: ${JSON.stringify(s.git.unpushed)}`,
+    `Tree digest: ${s.git.digest}`,
     `PR merged at HEAD: ${s.git.merged ?? "unknown"}`,
     ``,
     `## Claims`,
@@ -907,6 +981,7 @@ ${optionalText(join12(root, "coordinator", n)) || "unknown/not present"}`).join(
 }
 async function accept(env, from) {
   const { lane, ctx } = env;
+  validateAcceptanceIdentity(env, from);
   const pack = readPack(env);
   if (!pack || pack.to !== from) throw new UsageError("acceptance must come from the named handoff recipient");
   await recipient(env, from);
@@ -937,12 +1012,16 @@ function validateRecipient(input, env) {
   if (input.to === env.lane.id) throw new UsageError(error);
   if (!input.target && input.to !== env.c.coordinator.id) throw new UsageError(error);
 }
+function validateAcceptanceIdentity(env, from) {
+  const caller = env.ctx.env.PI_ORCH_ID;
+  if (caller && caller !== from) throw new UsageError("--from must match PI_ORCH_ID");
+}
 
 // src/lanes/commands/handoff.ts
 async function handoff(args, opts, env) {
   const { c, root, ctx } = env;
   const lane = activeLane(args, c);
-  const minutes = c.idle?.minutes ?? 90;
+  const minutes = c.idle?.minutes ?? 75;
   if (opts.accept) {
     validateAcceptance(opts);
     await accept({ c, lane, root, ctx, minutes }, opts.from);
@@ -955,7 +1034,7 @@ async function handoff(args, opts, env) {
   atomicJson(join13(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), rows: [{
     id: lane.id,
     verdict: "handoff",
-    pack: relative2(root, packPath({ root, lane })),
+    pack: relative3(root, packPath({ root, lane })),
     signals: s
   }] });
   ctx.out(`handoff ${pack.id}: ${packPath({ root, lane })}`);
@@ -971,7 +1050,11 @@ function validateAcceptance(opts) {
 }
 
 // src/lanes/commands/reap.ts
-import { join as join16, relative as relative4 } from "node:path";
+import { join as join18, relative as relative5 } from "node:path";
+
+// src/lanes/reap/own-context.ts
+import { join as join15 } from "node:path";
+import { createHash as createHash4 } from "node:crypto";
 
 // src/lanes/terminal.ts
 import { join as join14 } from "node:path";
@@ -992,7 +1075,7 @@ function launchCommand(c, root, cwd, id, prompt, wrapper, messages2) {
 }
 function terminalBackend(name) {
   if (!BACKENDS.includes(name) || name === "auto") throw new UsageError("invalid terminal.backend");
-  return { quit: (ctx, tty, guard) => nudgeTerminal(name, ctx, { tty, text: "/quit" }, guard), nudge: (ctx, input) => nudgeTerminal(name, ctx, input), async start(ctx, { id, cwd, command }) {
+  return { quit: (ctx, tty, guard) => nudgeTerminal(name, ctx, { tty, text: "/quit" }, guard), nudge: (ctx, input, guard) => nudgeTerminal(name, ctx, input, guard), async start(ctx, { id, cwd, command }) {
     if (name === "print") {
       ctx.out(command);
       return 0;
@@ -1075,6 +1158,167 @@ async function guardQuit(guard) {
   if (guard) await guard();
 }
 
+// src/lanes/reap/context-format.ts
+import { createHash as createHash3 } from "node:crypto";
+import { lstatSync as lstatSync2, readFileSync as readFileSync6 } from "node:fs";
+var HEADINGS = [
+  "Goal",
+  "Repository",
+  "Worktree",
+  "Branch",
+  "HEAD",
+  "Dirty files",
+  "Issue claims",
+  "Open PRs or candidates",
+  "External work",
+  "Next step",
+  "User constraints",
+  "Open items",
+  "Launch prompt"
+];
+function sections(text) {
+  const matches = [...text.matchAll(/^##\s+([^\r\n]+)\r?$/gm)];
+  const result = /* @__PURE__ */ new Map();
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i];
+    const end = matches[i + 1]?.index ?? text.length;
+    result.set(match[1].trim().toLowerCase(), text.slice(match.index + match[0].length, end).trim());
+  }
+  return result;
+}
+function snapshotSection(section) {
+  const json = section?.match(/^```json\s*\n([\s\S]*?)\n```\s*$/)?.[1];
+  if (!json) throw new Error("lane handoff requires a JSON Snapshot section");
+  const snapshot = JSON.parse(json);
+  if (!validSnapshot(snapshot)) throw new Error("lane handoff Snapshot invalid");
+  return snapshot;
+}
+function strings(value) {
+  return Array.isArray(value) && value.every((s) => typeof s === "string");
+}
+function validSnapshot(s) {
+  if (!s || !/^[a-f0-9]{40,64}$/.test(s.head)) return false;
+  if (!strings(s.paths) || !strings(s.unpushed)) return false;
+  return [s.repo, s.worktree, s.branch].every((value) => typeof value === "string" && Boolean(value));
+}
+function readContext(path) {
+  const stat2 = lstatSync2(path);
+  if (!stat2.isFile()) throw new Error("lane handoff must be a regular file");
+  const text = readFileSync6(path, "utf8");
+  const parts = sections(text);
+  for (const heading of HEADINGS) {
+    if (!parts.get(heading.toLowerCase())) throw new Error(`lane handoff missing ${heading}`);
+  }
+  return {
+    text,
+    snapshot: snapshotSection(parts.get("snapshot")),
+    mtime: stat2.mtimeMs,
+    digest: createHash3("sha256").update(text).digest("hex")
+  };
+}
+function expectedSnapshot(env, s) {
+  return {
+    head: s.git.head,
+    paths: s.git.paths,
+    unpushed: s.git.unpushed,
+    repo: env.lane.repo,
+    worktree: s.cwd,
+    branch: env.lane.branch
+  };
+}
+function validateContext(file, expected) {
+  const actual = file.snapshot;
+  if (actual.head !== expected.head) throw new Error("lane handoff HEAD differs from worktree");
+  if (!samePaths(actual.paths, expected.paths)) throw new Error("lane handoff has unaccounted dirty files");
+  if (!samePaths(actual.unpushed, expected.unpushed)) throw new Error("lane handoff unpushed commits differ");
+  validateLocation(actual, expected);
+}
+function validateLocation(actual, expected) {
+  for (const key of ["repo", "worktree", "branch"]) {
+    if (actual[key] !== expected[key]) throw new Error(`lane handoff ${key} differs`);
+  }
+}
+function samePaths(actual, expected) {
+  return JSON.stringify([...actual].sort()) === JSON.stringify([...expected].sort());
+}
+
+// src/lanes/reap/own-context.ts
+function contextPath(env) {
+  return join15(env.root, ".state/handoffs", `${env.lane.id}.md`);
+}
+function receiptPath(env) {
+  return join15(env.root, ".state/handoffs", `${env.lane.id}.request.json`);
+}
+function version(s) {
+  const state = {
+    pid: s.pid,
+    procStart: s.procStart,
+    sessionId: s.sessionId,
+    sessionFile: s.sessionFile,
+    lastWrite: s.lastWrite,
+    git: s.git,
+    claims: s.claims
+  };
+  return createHash4("sha256").update(JSON.stringify(state)).digest("hex");
+}
+function cached(env, s) {
+  const text = optionalText(receiptPath(env));
+  if (text === void 0) return false;
+  const receipt = JSON.parse(text);
+  if (receipt.version !== version(s)) return false;
+  const file = readContext(contextPath(env));
+  validateContext(file, expectedSnapshot(env, s));
+  if (file.digest !== receipt.digest || file.mtime !== receipt.mtime) throw new Error("lane handoff changed after validation");
+  return true;
+}
+async function request(env, s) {
+  if (!s.tty) throw new Error("lane handoff TTY unknown");
+  const backend = terminalBackend(detectBackend("auto", env.ctx));
+  let at = env.ctx.now().getTime();
+  const text = `Write your own context handoff to ${contextPath(env)}. Use nonempty ## sections: ${HEADINGS.join(", ")}. Preserve user constraints verbatim. Add ## Snapshot with a fenced json object matching ${JSON.stringify(expectedSnapshot(env, s))}. Account for every dirty path, outstanding acknowledgement, candidate and CI run. Do not quit.`;
+  const result = await backend.nudge(env.ctx, { tty: s.tty, text }, async () => {
+    await unchanged(env, s);
+    at = env.ctx.now().getTime();
+  });
+  if (result !== "sent") throw new Error("could not request lane's own handoff through its terminal");
+  return at;
+}
+async function unchanged(env, s) {
+  const current = await collect(env);
+  if (current.asks.length || current.keeps.length) throw new Error("handoff request safety evidence changed");
+  if (version(current) !== version(s)) throw new Error("handoff request safety evidence changed");
+}
+async function waitForContext(env, s, at) {
+  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve10) => setTimeout(resolve10, ms)));
+  let reason = "lane handoff absent or stale";
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try {
+      const file = readContext(contextPath(env));
+      if (file.mtime > at) {
+        validateContext(file, expectedSnapshot(env, s));
+        return file;
+      }
+    } catch (e) {
+      reason = e.message;
+    }
+    await sleep(1e3);
+  }
+  throw new Error(`lane handoff timed out: ${reason}`);
+}
+async function ownContext(env, s) {
+  if (cached(env, s)) return contextPath(env);
+  const at = await request(env, s);
+  const file = await waitForContext(env, s, at);
+  const current = await collect(env);
+  if (JSON.stringify(current.git) !== JSON.stringify(s.git)) throw new Error("tree changed while writing lane handoff");
+  atomicJson(receiptPath(env), { version: version(current), digest: file.digest, mtime: file.mtime });
+  if (JSON.stringify(current) !== JSON.stringify(s)) throw new Error("lane wrote handoff; wait until idle and review again");
+  return contextPath(env);
+}
+function verifyOwnContext(env, s) {
+  if (!cached(env, s)) throw new Error("lane handoff no longer matches session/tree evidence");
+}
+
 // src/lanes/reap/safe-quit.ts
 function ready(s, env) {
   if (env.ctx.now().getTime() - (s.lastWrite || 0) < 18e4) throw new Error("quit refused: session wrote less than 180s ago");
@@ -1085,6 +1329,7 @@ async function revalidate(env, s, to) {
   const fresh = await collect(env);
   if (fresh.asks.length || fresh.keeps.length) throw new Error("quit refused: safety evidence changed");
   if (fingerprint(fresh) !== fingerprint(s)) throw new Error("quit refused: safety evidence changed");
+  verifyOwnContext(env, fresh);
 }
 async function exited(env, pid) {
   const probe = await env.ctx.run("ps", ["-p", String(pid)], { timeoutMs: 2e3 });
@@ -1094,7 +1339,7 @@ async function exited(env, pid) {
   return false;
 }
 async function awaitExit(env, pid) {
-  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
+  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve10) => setTimeout(resolve10, ms)));
   for (let attempt = 0; attempt < 5; attempt++) {
     if (await exited(env, pid)) return;
     await sleep(200);
@@ -1110,53 +1355,109 @@ async function safeQuit(env, s, to) {
 }
 
 // src/lanes/reap/archive.ts
-import { copyFileSync, existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync4, readFileSync as readFileSync5, readdirSync as readdirSync5, unlinkSync } from "node:fs";
-import { dirname as dirname4, isAbsolute as isAbsolute3, join as join15, relative as relative3, resolve as resolve4 } from "node:path";
+import { copyFileSync, existsSync as existsSync3, lstatSync as lstatSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync7, readdirSync as readdirSync5, unlinkSync } from "node:fs";
+import { dirname as dirname4, isAbsolute as isAbsolute4, join as join17, relative as relative4, resolve as resolve5 } from "node:path";
+
+// src/lanes/reap/closure.ts
+import { appendFileSync, mkdirSync as mkdirSync4 } from "node:fs";
+import { join as join16 } from "node:path";
+function pauseClaims(env, s, record) {
+  const path = join16(env.ctx.piAgentDir, "issue-work/registry.jsonl");
+  const latest = registry(optionalText(path) || "");
+  for (const claim of s.claims.filter((claim2) => claim2.state !== "done")) {
+    const current = latest.find((value) => value.repo.toLowerCase() === claim.repo.toLowerCase() && value.issue === claim.issue);
+    if (JSON.stringify(current) !== JSON.stringify(claim)) throw new Error("claim changed before pause; inspect closure");
+    const event = {
+      ...claim,
+      ts: record.ts,
+      state: "paused",
+      sessionFile: s.sessionFile,
+      note: `Paused by lanes reap; takeover by ${record.to}; handoff: ${record.handoff}`
+    };
+    appendFileSync(path, `
+${JSON.stringify(event)}
+`);
+  }
+}
+async function recordClosure(env, s, target) {
+  const { root, lane, c, ctx } = env;
+  const record = {
+    id: lane.id,
+    ground: "takeover",
+    verdict: "retire",
+    ts: ctx.now().toISOString(),
+    sha: s.git.head,
+    sessionFile: s.sessionFile,
+    handoff: contextPath(env),
+    archive: target.archive,
+    to: target.to,
+    evidence: `Accepted takeover; clean foreground /quit and exit confirmed; tree=${s.git.digest}`
+  };
+  pauseClaims(env, s, record);
+  mkdirSync4(join16(root, "coordinator"), { recursive: true });
+  appendFileSync(
+    join16(root, "coordinator/STATE.md"),
+    `
+- ${record.ts} ${lane.id}: takeover by ${target.to}; handoff ${record.handoff}; SHA ${record.sha}.
+`
+  );
+  appendFileSync(join16(root, ".state/reaped.log"), `${JSON.stringify(record)}
+`);
+  await backendFor(c, ctx, root).send({
+    from: lane.id,
+    to: effectiveParent(lane, c),
+    topic: "lane-closed",
+    body: `${lane.id} closed (takeover by ${target.to}). Handoff: ${record.handoff}. Archive: ${target.archive}.`
+  });
+}
+
+// src/lanes/reap/archive.ts
 function checkRetirement(lane, c, root) {
   if (c.lanes.some((l) => !l.retired && effectiveParent(l, c) === lane.id)) throw new Error("retirement would orphan active children; reparent first");
-  const prompt = relative3(root, resolve4(root, lane.prompt));
-  if (prompt.startsWith("..") || isAbsolute3(prompt)) throw new Error("prompt outside coordination root cannot be archived");
+  const prompt = relative4(root, resolve5(root, lane.prompt));
+  if (prompt.startsWith("..") || isAbsolute4(prompt)) throw new Error("prompt outside coordination root cannot be archived");
 }
 async function archive(env, s, to) {
   const { c, lane, root, ctx } = env;
   checkRetirement(lane, c, root);
   const stamp = ctx.now().toISOString().replace(/[:.]/g, "-");
-  const dest = join15(root, ".state/retired", stamp, lane.id);
-  if (existsSync3(join15(dest, "closure.json"))) throw new Error("retirement archive already exists; inspect before retrying");
+  const dest = join17(root, ".state/retired", stamp, lane.id);
+  if (existsSync3(join17(dest, "closure.json"))) throw new Error("retirement archive already exists; inspect before retrying");
   const dir = expand(c.messages.dir, c, root, ctx.home);
   const sources = [];
   const add2 = (path, target) => {
-    if (existsSync3(path)) sources.push({ path, dest: join15(dest, target) });
+    if (existsSync3(path)) sources.push({ path, dest: join17(dest, target) });
   };
-  add2(resolve4(root, lane.prompt), `prompts/${lane.id}.md`);
-  add2(join15(dir, "status", `${lane.id}.status`), `messages/status/${lane.id}.status`);
-  add2(join15(dir, `${lane.id}-inbox.marker`), `messages/${lane.id}-inbox.marker`);
+  add2(resolve5(root, lane.prompt), `prompts/${lane.id}.md`);
+  add2(join17(dir, "status", `${lane.id}.status`), `messages/status/${lane.id}.status`);
+  add2(join17(dir, `${lane.id}-inbox.marker`), `messages/${lane.id}-inbox.marker`);
   for (const name of readdirSync5(dir)) {
     const parsed = parseMessageName(name);
-    if (laneAddressed(parsed, lane)) add2(join15(dir, name), `messages/${name}`);
+    if (laneAddressed(parsed, lane)) add2(join17(dir, name), `messages/${name}`);
   }
   const handoff2 = packPath({ root, lane });
-  if (existsSync3(handoff2)) for (const name of readdirSync5(handoff2)) add2(join15(handoff2, name), `handoff/${name}`);
-  mkdirSync4(dest, { recursive: true });
-  atomicJson(join15(dest, "lane.json"), lane);
+  if (existsSync3(handoff2)) for (const name of readdirSync5(handoff2)) add2(join17(handoff2, name), `handoff/${name}`);
+  mkdirSync5(dest, { recursive: true });
+  atomicJson(join17(dest, "lane.json"), lane);
   sources.forEach(copySource);
+  copySource({ path: contextPath(env), dest: join17(dest, "handoff", `${lane.id}.md`) });
   const closure = { id: lane.id, at: ctx.now().toISOString(), ground: "takeover", to, signals: s, worktreePreserved: s.cwd, branchPreserved: lane.branch };
-  atomicJson(join15(dest, "closure.json"), closure);
+  atomicJson(join17(dest, "closure.json"), closure);
+  await recordClosure(env, s, { to, archive: dest });
   lane.retired = true;
-  lane.stateFile = relative3(root, join15(dest, "closure.json"));
+  lane.stateFile = relative4(root, join17(dest, "closure.json"));
   saveConfig(root, c);
   sources.forEach(removeUnchanged);
-  await backendFor(c, ctx, root).send({ from: c.coordinator.id, to: "ALL", topic: "lane-retired", body: `${lane.id} retired (takeover by ${to}). Archive: ${dest}. Worktree, branch, dirty files and session JSONL preserved. To resume, add a fresh lane and review the archived handoff.` });
   return dest;
 }
 function copySource(source) {
-  if (!lstatSync(source.path).isFile()) throw new Error(`archive source is not a regular file: ${source.path}`);
-  source.body = readFileSync5(source.path);
-  mkdirSync4(dirname4(source.dest), { recursive: true });
+  if (!lstatSync3(source.path).isFile()) throw new Error(`archive source is not a regular file: ${source.path}`);
+  source.body = readFileSync7(source.path);
+  mkdirSync5(dirname4(source.dest), { recursive: true });
   copyFileSync(source.path, source.dest);
 }
 function removeUnchanged(source) {
-  if (source.body && readFileSync5(source.path).equals(source.body)) unlinkSync(source.path);
+  if (source.body && readFileSync7(source.path).equals(source.body)) unlinkSync(source.path);
 }
 function laneAddressed(parsed, lane) {
   if (!parsed) return false;
@@ -1183,15 +1484,17 @@ async function applyRow(row, env, opts) {
   const { lane, c, root, ctx } = env;
   checkRetirement(lane, c, root);
   const to = opts["handoff-to"] || readPack({ root, lane })?.to || handoffRecipient(lane, c);
+  await recipient(env, to);
+  await ownContext(env, row.signals);
   const pack = await prepare(env, to, row.signals);
-  row.pack = relative4(root, packPath({ root, lane }));
+  row.pack = relative5(root, packPath({ root, lane }));
   if (pack.acceptance?.from !== to || pack.acceptance?.fingerprint !== fingerprint(row.signals)) {
     row.reason = `takeover request sent to ${to}; explicit acceptance required`;
     return;
   }
   await recipient(env, to);
   await safeQuit(env, row.signals, to);
-  row.pack = relative4(root, await archive(env, row.signals, to));
+  row.pack = relative5(root, await archive(env, row.signals, to));
   row.verdict = "retire";
   row.ground = "takeover";
   row.reason = `takeover accepted by ${to}; /quit exit confirmed; archived`;
@@ -1223,9 +1526,9 @@ async function reap(args, opts, env) {
   const { c, root, ctx } = env;
   const minutes = validateArgs(args, opts, c);
   const rows = [];
-  const active = c.lanes.filter((l) => !l.retired).filter((l) => !args[0] || l.id === args[0]);
+  const active = laneTree(c).reverse().map((row) => row.lane).filter((l) => !args[0] || l.id === args[0]);
   for (const lane of active) rows.push(await planRow({ c, lane, root, ctx, minutes }, opts));
-  atomicJson(join16(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), minutes, rows });
+  atomicJson(join18(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), minutes, rows });
   display(rows, Boolean(opts.json), ctx);
   return rows.some((row) => row.failed) ? 2 : 0;
 }
@@ -1234,20 +1537,20 @@ function validateId(id, c) {
   if (!c.lanes.some((l) => l.id === id && !l.retired)) throw new UsageError("reap accepts one active lane ID");
 }
 function idleMinutes(opts, c) {
-  const minutes = Number(opts.minutes ?? c.idle?.minutes ?? 90);
+  const minutes = Number(opts.minutes ?? c.idle?.minutes ?? 75);
   if (!Number.isFinite(minutes) || minutes < 1) throw new UsageError("--minutes must be positive");
   return minutes;
 }
 
 // src/lanes/commands/snooze.ts
-import { mkdirSync as mkdirSync5, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
-import { join as join17 } from "node:path";
+import { mkdirSync as mkdirSync6, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { join as join19 } from "node:path";
 async function snooze2(args, opts, env) {
   const { c, root, ctx } = env;
   const lane = c.lanes.find((l) => l.id === args[0] && !l.retired);
   if (invalidRequest(args, lane, opts)) throw new UsageError("snooze requires ID and --until ISO|+90m or --clear");
-  const dir = join17(root, ".state/snooze");
-  const path = join17(dir, lane.id);
+  const dir = join19(root, ".state/snooze");
+  const path = join19(dir, lane.id);
   if (opts.clear) {
     clear(path);
     ctx.out(`snooze cleared ${lane.id}`);
@@ -1257,7 +1560,7 @@ async function snooze2(args, opts, env) {
   if (!Number.isFinite(date) || date <= ctx.now().getTime()) {
     throw new UsageError("--until must be a future ISO timestamp or +90m");
   }
-  mkdirSync5(dir, { recursive: true });
+  mkdirSync6(dir, { recursive: true });
   writeFileSync5(path, new Date(date).toISOString() + "\n");
   ctx.out(`snoozed ${lane.id} until ${new Date(date).toISOString()}`);
   return 0;
@@ -1267,8 +1570,8 @@ function invalidRequest(args, lane, opts) {
   return Boolean(opts.clear) === Boolean(opts.until);
 }
 function until(value, ctx) {
-  const relative5 = /^\+(\d+)m$/.exec(value);
-  return relative5 ? ctx.now().getTime() + Number(relative5[1]) * 6e4 : Date.parse(value);
+  const relative6 = /^\+(\d+)m$/.exec(value);
+  return relative6 ? ctx.now().getTime() + Number(relative6[1]) * 6e4 : Date.parse(value);
 }
 function clear(path) {
   try {
@@ -1279,17 +1582,17 @@ function clear(path) {
 }
 
 // src/lanes/commands/init.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname5, join as join19, resolve as resolve5 } from "node:path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname5, join as join21, resolve as resolve6 } from "node:path";
 
 // src/lanes/templates.ts
-import { readFileSync as readFileSync6 } from "node:fs";
-import { join as join18 } from "node:path";
+import { readFileSync as readFileSync8 } from "node:fs";
+import { join as join20 } from "node:path";
 function renderTemplate(text, vars) {
   return text.replace(/\{\{(\w+)\}\}/g, (token, name) => Object.hasOwn(vars, name) ? String(vars[name]) : token);
 }
 function readTemplate(ctx, name) {
-  return readFileSync6(join18(ctx.templatesDir, name), "utf8");
+  return readFileSync8(join20(ctx.templatesDir, name), "utf8");
 }
 function templateVars(c, ctx, root) {
   const messages2 = expand(c.messages.dir, c, root, ctx.home);
@@ -1300,17 +1603,17 @@ function templateVars(c, ctx, root) {
     coordinator_sh: shellQuote(c.coordinator.id),
     coordinator: c.coordinator.id,
     maxRunning: c.coordinator.maxRunning,
-    rules: join18(root, "rules.md"),
+    rules: join20(root, "rules.md"),
     messages: messages2,
-    watches: join18(root, "coordinator/WATCHES.md"),
-    handoff: join18(root, "coordinator/handoff-protocol.md")
+    watches: join20(root, "coordinator/WATCHES.md"),
+    handoff: join20(root, "coordinator/handoff-protocol.md")
   };
 }
 
 // src/lanes/commands/init.ts
 async function init(args, opts, ctx) {
-  const root = resolve5(ctx.cwd, args[0] || ".");
-  const configPath = join19(root, "lanes.json");
+  const root = resolve6(ctx.cwd, args[0] || ".");
+  const configPath = join21(root, "lanes.json");
   const c = existsSync4(configPath) ? loadConfig(root) : defaults(root, ctx.home, opts["repos-root"]);
   if (!existsSync4(configPath)) {
     c.coordinator.id = opts.coordinator || c.coordinator.id;
@@ -1320,8 +1623,8 @@ async function init(args, opts, ctx) {
   validate(c);
   const vars = templateVars(c, ctx, root);
   const put = (rel, content) => {
-    const path = join19(root, rel);
-    mkdirSync6(dirname5(path), { recursive: true });
+    const path = join21(root, rel);
+    mkdirSync7(dirname5(path), { recursive: true });
     if (existsSync4(path)) ctx.out(`kept ${path}`);
     else {
       writeFileSync6(path, content, { flag: "wx" });
@@ -1333,12 +1636,12 @@ async function init(args, opts, ctx) {
   for (const [source, dest] of [["rules.md", "rules.md"], ["coordinator.md", "prompts/coordinator.md"], ...["WATCHES.md", "handoff-protocol.md", "NOW.md", "STATE.md"].map((n) => [n, `coordinator/${n}`])]) {
     put(dest, renderTemplate(readTemplate(ctx, source), vars));
   }
-  const status2 = join19(root, "messages/status");
+  const status2 = join21(root, "messages/status");
   const hadStatus = existsSync4(status2);
-  mkdirSync6(status2, { recursive: true });
+  mkdirSync7(status2, { recursive: true });
   ctx.out(`${hadStatus ? "kept" : "created"} ${status2}`);
-  const ignore = join19(root, ".gitignore");
-  const text = existsSync4(ignore) ? readFileSync7(ignore, "utf8") : "";
+  const ignore = join21(root, ".gitignore");
+  const text = existsSync4(ignore) ? readFileSync9(ignore, "utf8") : "";
   const missing = [".state/", "messages/"].filter((s) => !text.split(/\r?\n/).includes(s));
   if (missing.length) {
     writeFileSync6(ignore, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${missing.join("\n")}
@@ -1349,38 +1652,38 @@ async function init(args, opts, ctx) {
 }
 
 // src/lanes/commands/add.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync7, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname6, join as join21, resolve as resolve6 } from "node:path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync8, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname6, join as join23, resolve as resolve7 } from "node:path";
 
 // src/lanes/preapprove.ts
-import { existsSync as existsSync5, readFileSync as readFileSync8 } from "node:fs";
-import { join as join20 } from "node:path";
+import { existsSync as existsSync5, readFileSync as readFileSync10 } from "node:fs";
+import { join as join22 } from "node:path";
 var SUPPORTED_MAJORS = [5];
 async function preapprove(ctx, cwd, enabled) {
   if (!enabled) {
     ctx.out("MCP preapproval is off; enable with lanes init --preapprove-mcp for a new folder, or set launch.preapproveMcp to true in lanes.json.");
     return;
   }
-  const files = [".mcp.json", ".pi/mcp.json"].filter((f) => existsSync5(join20(cwd, f)));
+  const files = [".mcp.json", ".pi/mcp.json"].filter((f) => existsSync5(join22(cwd, f)));
   if (!files.length) return;
   const skip = (reason2) => ctx.err(`MCP preapproval skipped: ${reason2}; pi will ask once per server when the lane starts.`);
   let reason = "adapter not found";
   try {
-    const adapter = join20(ctx.piAgentDir, "npm/node_modules/pi-mcp-adapter");
-    const pkg = JSON.parse(readFileSync8(join20(adapter, "package.json"), "utf8"));
+    const adapter = join22(ctx.piAgentDir, "npm/node_modules/pi-mcp-adapter");
+    const pkg = JSON.parse(readFileSync10(join22(adapter, "package.json"), "utf8"));
     if (!SUPPORTED_MAJORS.includes(Number(String(pkg.version).split(".")[0]))) {
       reason = `adapter ${pkg.version} not supported (supports ${SUPPORTED_MAJORS.join(", ")}.x)`;
       throw new Error(reason);
     }
     reason = "adapter API changed";
-    const mod = await ctx.loadModule(join20(adapter, "dist/project-server-trust.js"));
+    const mod = await ctx.loadModule(join22(adapter, "dist/project-server-trust.js"));
     if (typeof mod.approveProjectServer !== "function" || typeof mod.hashProjectServerDefinition !== "function") throw new Error(reason);
     for (const file of files) {
       let servers;
       try {
-        servers = JSON.parse(readFileSync8(join20(cwd, file), "utf8")).mcpServers ?? {};
+        servers = JSON.parse(readFileSync10(join22(cwd, file), "utf8")).mcpServers ?? {};
       } catch {
-        skip(`invalid ${file} (${join20(cwd, file)})`);
+        skip(`invalid ${file} (${join22(cwd, file)})`);
         continue;
       }
       for (const [name, def] of Object.entries(servers)) {
@@ -1515,7 +1818,7 @@ async function createWorktree(lane, opts, env) {
   const git = (clone2, args, timeoutMs = 1e4) => ctx.run("git", ["-C", clone2, ...args], { timeoutMs });
   const clone = await findClone(lane, opts, env, git);
   const base = await prepareBase({ clone, lane, opts, env }, git);
-  const wt = join21(expand(c.worktreesDir, c, root, ctx.home), lane.worktree);
+  const wt = join23(expand(c.worktreesDir, c, root, ctx.home), lane.worktree);
   await addWorktree({ clone, lane, wt, base }, git);
   try {
     const lock = await git(clone, ["worktree", "lock", "--reason", `lanes ${lane.id}`, wt]);
@@ -1534,13 +1837,13 @@ async function findClone(lane, opts, { c, root, ctx }, git) {
   const [owner, name] = lane.repo.split("/");
   const repos = expand(c.reposRoot, c, root, ctx.home);
   const candidates = [
-    opts.path ? resolve6(ctx.cwd, opts.path) : void 0,
+    opts.path ? resolve7(ctx.cwd, opts.path) : void 0,
     c.repos[lane.repo] ? expand(c.repos[lane.repo], c, root, ctx.home) : void 0,
-    join21(repos, name),
-    join21(repos, owner, name)
+    join23(repos, name),
+    join23(repos, owner, name)
   ].filter((p) => Boolean(p));
   for (const path of candidates) if ((await git(path, ["rev-parse", "--git-dir"])).code === 0) return path;
-  throw new Error(`clone it first: gh repo clone ${lane.repo} ${join21(repos, name)}`);
+  throw new Error(`clone it first: gh repo clone ${lane.repo} ${join23(repos, name)}`);
 }
 async function prepareBase(input, git) {
   const { clone, lane, opts, env: { c, ctx } } = input;
@@ -1568,7 +1871,7 @@ function writePrompt(input, { c, root, ctx }) {
   const { lane, wt, base } = input;
   const { id, repo, branch } = lane;
   const prompt = expand(lane.prompt, c, root, ctx.home);
-  mkdirSync7(dirname6(prompt), { recursive: true });
+  mkdirSync8(dirname6(prompt), { recursive: true });
   const template = readTemplate(ctx, lane.role === "repo-orch" ? "repo-orchestrator.md" : "lane.md");
   const vars = {
     ...templateVars(c, ctx, root),
@@ -1595,12 +1898,16 @@ function needsOrchestrator(plan, opts) {
   return !opts["no-orchestrator"];
 }
 
+// src/lanes/commands/resume.ts
+import { join as join26, resolve as resolve8 } from "node:path";
+import { existsSync as existsSync8, statSync as statSync6 } from "node:fs";
+
 // src/lanes/commands/start.ts
 import { existsSync as existsSync7, statSync as statSync5 } from "node:fs";
 
 // src/lanes/sessions.ts
 import { readdirSync as readdirSync6, statSync as statSync4 } from "node:fs";
-import { join as join22 } from "node:path";
+import { join as join24 } from "node:path";
 
 // src/lanes/processes.ts
 async function runningPi(ctx) {
@@ -1672,13 +1979,13 @@ function laneTarget(id, c, root, ctx) {
   const coordinator = id === "coordinator" || id === c.coordinator.id;
   const lane = c.lanes.find((l) => l.id === id);
   if (!coordinator && !lane) throw new Error(`lane not found: ${id}`);
-  const cwd = coordinator ? expand(c.coordinator.cwd, c, root, ctx.home) : join22(expand(c.worktreesDir, c, root, ctx.home), lane.worktree);
+  const cwd = coordinator ? expand(c.coordinator.cwd, c, root, ctx.home) : join24(expand(c.worktreesDir, c, root, ctx.home), lane.worktree);
   return { id: coordinator ? c.coordinator.id : id, cwd, coordinator, lane };
 }
 function idleMinutes2(cwd, ctx) {
   try {
     const dir = sessionDirFor(cwd, ctx.piAgentDir);
-    const times = readdirSync6(dir).map((n) => statSync4(join22(dir, n))).filter((s) => s.isFile()).map((s) => s.mtimeMs);
+    const times = readdirSync6(dir).map((n) => statSync4(join24(dir, n))).filter((s) => s.isFile()).map((s) => s.mtimeMs);
     return times.length ? Math.max(0, Math.floor((ctx.now().getTime() - Math.max(...times)) / 6e4)) : void 0;
   } catch {
     return void 0;
@@ -1694,12 +2001,12 @@ async function piIn(cwd, ctx) {
 }
 
 // src/lanes/retention.ts
-import { closeSync, copyFileSync as copyFileSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync8, openSync, readdirSync as readdirSync7, renameSync as renameSync4, unlinkSync as unlinkSync3, utimesSync } from "node:fs";
-import { join as join23 } from "node:path";
+import { closeSync, copyFileSync as copyFileSync2, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync, readdirSync as readdirSync7, renameSync as renameSync4, unlinkSync as unlinkSync3, utimesSync } from "node:fs";
+import { join as join25 } from "node:path";
 var DAY = 864e5;
 function stat(path) {
   try {
-    return lstatSync2(path);
+    return lstatSync4(path);
   } catch (e) {
     if (e.code === "ENOENT") return void 0;
     throw e;
@@ -1712,7 +2019,7 @@ function messages(dir) {
   return readdirSync7(dir).flatMap((name) => {
     const parsed = parseMessageName(name);
     if (!parsed || name.startsWith(".")) return [];
-    const path = join23(dir, name);
+    const path = join25(dir, name);
     const info2 = stat(path);
     return info2?.isFile() ? [{ name, path, info: info2, ...parsed, at: info2.mtime }] : [];
   });
@@ -1721,13 +2028,13 @@ function unread(m, c, dir) {
   const broadcast = addressed(m, "ALL") || addressed(m, c.messages.broadcast);
   return [{ id: c.coordinator.id, group: null }, ...c.lanes].some(({ id, group }) => {
     if (!broadcast && ![id, ...group ? [group] : []].some((recipient2) => addressed(m, recipient2))) return false;
-    const marker = stat(join23(dir, `${id}-inbox.marker`));
+    const marker = stat(join25(dir, `${id}-inbox.marker`));
     return marker?.isFile() === true && marker.mtimeMs < m.info.mtimeMs;
   });
 }
 function archive2(m, dir) {
-  mkdirSync8(dir, { recursive: true });
-  const target = join23(dir, m.name);
+  mkdirSync9(dir, { recursive: true });
+  const target = join25(dir, m.name);
   try {
     closeSync(openSync(target, "wx"));
   } catch (e) {
@@ -1782,7 +2089,7 @@ function prune(c, root, ctx, dryRun = false) {
       counts.deleted++;
       continue;
     }
-    const target = stat(join23(destination, m.name));
+    const target = stat(join25(destination, m.name));
     const expired = target?.isFile() && r.archiveMaxAgeDays !== null && target.mtimeMs < now - r.archiveMaxAgeDays * DAY;
     if (target && !(dryRun && expired) || !dryRun && !archive2(m, destination)) {
       counts.skippedCollision++;
@@ -1832,9 +2139,78 @@ function rejectRetired(id, c) {
   if (c.lanes.find((l) => l.id === id)?.retired) throw new Error(`lane ${id} is retired; add a fresh lane instead`);
 }
 
+// src/lanes/commands/resume.ts
+async function startCommand(id, opts, env) {
+  if (opts["from-handoff"]) return fromHandoff({ id, opts }, env);
+  return start(id, opts, env.c, env.root, env.ctx);
+}
+async function resume(args, opts, env) {
+  return fromHandoff({ id: args[0], opts: { ...opts, "from-handoff": args[0] } }, env);
+}
+function filePath(value, env) {
+  return env.c.lanes.some((lane) => lane.id === value) ? join26(env.root, ".state/handoffs", `${value}.md`) : resolve8(env.ctx.cwd, value);
+}
+function sourceLane(snapshot, env) {
+  const { c, ctx, root } = env;
+  const lanes = c.lanes.filter((lane) => lane.repo === snapshot.repo && lane.branch === snapshot.branch);
+  const source = lanes.find((lane) => ctx.realpath(join26(expand(c.worktreesDir, c, root, ctx.home), lane.worktree)) === ctx.realpath(snapshot.worktree));
+  if (!source) throw new UsageError("handoff does not match a configured lane worktree");
+  return source;
+}
+function restoreLane(input, env) {
+  const { c } = env;
+  const { id, path, source } = input;
+  validateTarget({ id, source }, env);
+  return { ...source, id, prompt: path, retired: false, parent: activeParent(source, env) };
+}
+function validateTarget({ id, source }, { c }) {
+  if (!validId(id) || [c.coordinator.id, "ALL", c.messages.broadcast].includes(id)) {
+    throw new UsageError("invalid lane id");
+  }
+  if (id !== source.id && c.lanes.some((lane) => lane.id === id)) throw new UsageError("resume target lane already exists");
+}
+function activeParent(source, { c }) {
+  const parent = effectiveParent(source, c);
+  if (parent === c.coordinator.id) return parent;
+  if (c.lanes.some((lane) => lane.id === parent && !lane.retired)) return parent;
+  return c.coordinator.id;
+}
+async function verifyWorktree(snapshot, env) {
+  requireWorktree(snapshot.worktree);
+  const head = await env.ctx.run(
+    "git",
+    ["--no-optional-locks", "-C", snapshot.worktree, "rev-parse", "HEAD"],
+    { timeoutMs: 4e3 }
+  );
+  if (head.code || head.timedOut) throw new Error("handoff HEAD changed");
+  if (head.stdout.trim() !== snapshot.head) throw new Error("handoff HEAD changed");
+}
+async function fromHandoff(input, env) {
+  const { c, root, ctx } = env;
+  const path = filePath(input.opts["from-handoff"], env);
+  const file = readContext(path);
+  const source = sourceLane(file.snapshot, env);
+  await verifyWorktree(file.snapshot, env);
+  const restored = restoreLane({ id: input.id, path, source }, env);
+  const lanes = c.lanes.filter((lane) => lane.id !== input.id).concat(restored);
+  const next = { ...c, lanes };
+  validate(next, root, ctx.home);
+  const opts = { ...input.opts };
+  delete opts["from-handoff"];
+  const code = await start(input.id, opts, next, root, ctx);
+  if (code === 0) {
+    saveConfig(root, next);
+    c.lanes = lanes;
+  }
+  return code;
+}
+function requireWorktree(path) {
+  if (!existsSync8(path) || !statSync6(path).isDirectory()) throw new Error("handoff worktree missing");
+}
+
 // src/lanes/commands/send.ts
-import { readFileSync as readFileSync9 } from "node:fs";
-import { resolve as resolve7 } from "node:path";
+import { readFileSync as readFileSync11 } from "node:fs";
+import { resolve as resolve9 } from "node:path";
 async function send(args, opts, c, root, ctx) {
   let [to, topic, file] = args;
   const from = opts.from || ctx.env.PI_ORCH_ID;
@@ -1845,7 +2221,7 @@ async function send(args, opts, c, root, ctx) {
   if (opts.m !== void 0 && file !== void 0) throw new UsageError("choose a file or -m, not both");
   const known = [c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.flatMap((l) => [l.id, l.group])];
   if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
-  const body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync9(resolve7(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+  const body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync11(resolve9(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
   if (!body.trim()) throw new UsageError("empty message body");
   to = route({ to, from, direct: opts.direct }, c, ctx);
   ctx.out((await backendFor(c, ctx, root).send({ from, to, topic, body })).path);
@@ -1910,12 +2286,12 @@ async function nudge(id, text, opts, c, root, ctx) {
 }
 
 // src/lanes/commands/resume-check.ts
-import { existsSync as existsSync8, readFileSync as readFileSync10, statSync as statSync7 } from "node:fs";
-import { join as join25 } from "node:path";
+import { existsSync as existsSync9, readFileSync as readFileSync12, statSync as statSync8 } from "node:fs";
+import { join as join28 } from "node:path";
 
 // src/lanes/joblogs.ts
-import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync8, statSync as statSync6 } from "node:fs";
-import { join as join24 } from "node:path";
+import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync8, statSync as statSync7 } from "node:fs";
+import { join as join27 } from "node:path";
 function parseWatches(text) {
   return text.split(/\r?\n/).flatMap((line) => {
     const [tag, label, until2, interval, ...check] = line.split("|");
@@ -1940,7 +2316,7 @@ function liveWatch(jobs, watch, now) {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   for (const date of [now, yesterday]) {
-    const dir = join24(jobs, day(date));
+    const dir = join27(jobs, day(date));
     let names;
     try {
       names = readdirSync8(dir);
@@ -1949,8 +2325,8 @@ function liveWatch(jobs, watch, now) {
       throw e;
     }
     for (const name of names.filter((n) => n.endsWith(".log"))) {
-      const path = join24(dir, name);
-      const stat2 = statSync6(path);
+      const path = join27(dir, name);
+      const stat2 = statSync7(path);
       if (!stat2.isFile() || !chunk(path, Math.min(4096, stat2.size), 0).split("\n")[0].includes(watch.check)) continue;
       const tail = chunk(path, Math.min(65536, stat2.size), Math.max(0, stat2.size - 65536));
       const last = tail.split("\n").filter((s) => /^--- check .* exit \d+ ---$/.test(s)).at(-1);
@@ -1983,12 +2359,12 @@ async function resumeCheck(c, root, ctx) {
   const now = ctx.now();
   let bad = false;
   ctx.out(`date: ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`);
-  const watches = join25(root, "coordinator/WATCHES.md");
-  if (!existsSync8(watches)) {
+  const watches = join28(root, "coordinator/WATCHES.md");
+  if (!existsSync9(watches)) {
     ctx.out("MISSING coordinator/WATCHES.md");
     bad = true;
-  } else for (const w of parseWatches(readFileSync10(watches, "utf8"))) {
-    if (liveWatch(join25(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
+  } else for (const w of parseWatches(readFileSync12(watches, "utf8"))) {
+    if (liveWatch(join28(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
     else {
       ctx.out(`MISSING watch: ${w.label} -> job_watch until=${w.until} interval=${w.interval} check from coordinator/WATCHES.md`);
       bad = true;
@@ -2004,20 +2380,20 @@ async function resumeCheck(c, root, ctx) {
     if (old.length) bad = true;
     else ctx.out("OK      inbox: no unread backlog");
   }
-  const path = join25(root, "coordinator/NOW.md");
-  if (!existsSync8(path)) {
+  const path = join28(root, "coordinator/NOW.md");
+  if (!existsSync9(path)) {
     ctx.out("MISSING coordinator/NOW.md");
     bad = true;
   } else {
-    await livePrs(readFileSync10(path, "utf8"), ctx);
-    const age = Math.floor((now.getTime() - statSync7(path).mtimeMs) / 6e4);
+    await livePrs(readFileSync12(path, "utf8"), ctx);
+    const age = Math.floor((now.getTime() - statSync8(path).mtimeMs) / 6e4);
     if (age > 90) {
       ctx.out(`STALE   NOW.md not updated for ${age} min`);
       bad = true;
     }
   }
-  const questions = join25(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
-  if (existsSync8(questions)) {
+  const questions = join28(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
+  if (existsSync9(questions)) {
     const r = await ctx.run(process.execPath, [questions, "list", "--all"], { timeoutMs: 15e3 });
     for (const line of r.stdout.split("\n").filter((s) => /^Q-\d+/.test(s))) ctx.out(`OPEN    ${line}`);
   }
@@ -2025,8 +2401,8 @@ async function resumeCheck(c, root, ctx) {
 }
 
 // src/lanes/commands/green-prs.ts
-import { existsSync as existsSync9, mkdirSync as mkdirSync9, readFileSync as readFileSync11, writeFileSync as writeFileSync8 } from "node:fs";
-import { join as join26 } from "node:path";
+import { existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync13, writeFileSync as writeFileSync8 } from "node:fs";
+import { join as join29 } from "node:path";
 function green(pr, excluded) {
   return !pr.isDraft && !pr.labels.some((l) => excluded.includes(l.name)) && pr.statusCheckRollup.length > 0 && pr.statusCheckRollup.every((s) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(s.conclusion ?? s.state ?? ""));
 }
@@ -2057,15 +2433,15 @@ async function greenPrs(opts, c, root, ctx) {
     }
   }
   refs.sort();
-  const ack = join26(root, ".state/green-ack");
+  const ack = join29(root, ".state/green-ack");
   if (opts.ack) {
-    mkdirSync9(join26(root, ".state"), { recursive: true });
+    mkdirSync10(join29(root, ".state"), { recursive: true });
     writeFileSync8(ack, refs.length ? `${refs.join("\n")}
 ` : "");
     ctx.out(`acked ${refs.length}`);
     return 0;
   }
-  const previous = opts.new && existsSync9(ack) ? readFileSync11(ack, "utf8").split(/\r?\n/) : [];
+  const previous = opts.new && existsSync10(ack) ? readFileSync13(ack, "utf8").split(/\r?\n/) : [];
   const output = opts.new ? refs.filter((r) => !previous.includes(r)) : refs;
   if (output.length) ctx.out(output.join("\n"));
   return opts.new && !output.length ? 1 : 0;
@@ -2132,8 +2508,8 @@ async function close(id, opts, c, root, ctx) {
 }
 
 // src/lanes/commands/status.ts
-import { existsSync as existsSync10 } from "node:fs";
-import { join as join27 } from "node:path";
+import { existsSync as existsSync11 } from "node:fs";
+import { join as join30 } from "node:path";
 async function status(c, root, ctx, all = false) {
   const backend = backendFor(c, ctx, root);
   const processes = await runningPi(ctx);
@@ -2179,13 +2555,13 @@ function statusLanes(env, all) {
       role: lane.role || "lane",
       parent: effectiveParent(lane, c),
       label: "  ".repeat(depth) + lane.id,
-      cwd: join27(expand(c.worktreesDir, c, root, ctx.home), lane.worktree)
+      cwd: join30(expand(c.worktreesDir, c, root, ctx.home), lane.worktree)
     }))
   ];
 }
 function findPid(cwd, processes, ctx) {
   let pid = "missing";
-  if (existsSync10(cwd)) {
+  if (existsSync11(cwd)) {
     try {
       pid = String(processes.find((p) => p.cwd === ctx.realpath(cwd))?.pid || "-");
     } catch {
@@ -2210,7 +2586,8 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
     [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
-  start <ID>|coordinator [--terminal backend]
+  start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
+  resume <ID> [--terminal backend]
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
   status [--all]
   messages prune [--dry-run] [--json]
@@ -2240,7 +2617,8 @@ var OPTIONS = {
     "orchestrator-id",
     "no-orchestrator"
   ],
-  start: ["terminal"],
+  start: ["terminal", "from-handoff"],
+  resume: ["terminal"],
   send: ["m", "from", "direct"],
   status: ["all"],
   messages: ["dry-run", "json"],
@@ -2306,6 +2684,7 @@ function validateInvocation({ command, positional, opts }) {
     init: [0, 1],
     add: [1, 1],
     start: [1, 1],
+    resume: [1, 1],
     send: [2, 3],
     status: [0, 0],
     messages: [1, 1],
@@ -2333,7 +2712,8 @@ async function dispatch(input, env) {
   const { c, root, ctx } = env;
   const handlers = {
     add: () => add(args[0], opts, c, root, ctx),
-    start: () => start(args[0], opts, c, root, ctx),
+    start: () => startCommand(args[0], opts, env),
+    resume: () => resume(args, opts, env),
     messages: () => messagesPrune(opts, c, root, ctx),
     send: () => send(args, opts, c, root, ctx),
     "idle-check": () => idleCheck(opts, c, root, ctx),

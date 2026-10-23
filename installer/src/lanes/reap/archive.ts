@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { backendFor } from "../backend.ts";
+import { recordClosure } from "./closure.ts";
+import { contextPath } from "./own-context.ts";
 import { effectiveParent, expand, saveConfig, type Config, type Lane } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { parseMessageName } from "../names.ts";
@@ -29,11 +30,13 @@ export async function archive(env: EvidenceContext, s: Signals, to: string): Pro
   if (existsSync(handoff)) for (const name of readdirSync(handoff)) add(join(handoff, name), `handoff/${name}`);
   mkdirSync(dest, { recursive: true }); atomicJson(join(dest, "lane.json"), lane);
   sources.forEach(copySource);
+  copySource({ path: contextPath(env), dest: join(dest, "handoff", `${lane.id}.md`) });
   const closure = { id: lane.id, at: ctx.now().toISOString(), ground: "takeover", to, signals: s, worktreePreserved: s.cwd, branchPreserved: lane.branch };
   atomicJson(join(dest, "closure.json"), closure);
+  await recordClosure(env, s, { to, archive: dest });
   lane.retired = true; lane.stateFile = relative(root, join(dest, "closure.json")); saveConfig(root, c);
   sources.forEach(removeUnchanged);
-  await backendFor(c, ctx, root).send({ from: c.coordinator.id, to: "ALL", topic: "lane-retired", body: `${lane.id} retired (takeover by ${to}). Archive: ${dest}. Worktree, branch, dirty files and session JSONL preserved. To resume, add a fresh lane and review the archived handoff.` });
+
   return dest;
 }
 

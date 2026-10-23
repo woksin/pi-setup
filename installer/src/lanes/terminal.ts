@@ -21,11 +21,11 @@ interface Launch { id: string; cwd: string; command: string }
 export interface TerminalBackend {
   quit(ctx: LanesCtx, tty: string, beforeSend: () => Promise<void>): Promise<"sent" | "not-found">;
   start(ctx: LanesCtx, launch: Launch): Promise<number>;
-  nudge(ctx: LanesCtx, input: { tty: string; text: string }): Promise<"sent" | "not-found">;
+  nudge(ctx: LanesCtx, input: { tty: string; text: string }, beforeSend?: () => Promise<void>): Promise<"sent" | "not-found">;
 }
 export function terminalBackend(name: string): TerminalBackend {
   if (!BACKENDS.includes(name) || name === "auto") throw new UsageError("invalid terminal.backend");
-  return { quit: (ctx, tty, guard) => nudgeTerminal(name, ctx, { tty, text: "/quit" }, guard), nudge: (ctx, input) => nudgeTerminal(name, ctx, input), async start(ctx, { id, cwd, command }) {
+  return { quit: (ctx, tty, guard) => nudgeTerminal(name, ctx, { tty, text: "/quit" }, guard), nudge: (ctx, input, guard) => nudgeTerminal(name, ctx, input, guard), async start(ctx, { id, cwd, command }) {
     if (name === "print") { ctx.out(command); return 0; }
     let cmd: string; let args: string[];
     if (name === "terminal-app") {

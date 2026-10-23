@@ -1,4 +1,5 @@
 import { terminalBackend, detectBackend } from "../terminal.ts";
+import { verifyOwnContext } from "./own-context.ts";
 import { fingerprint, recipient } from "./handoff.ts";
 import { collect, type EvidenceContext, type Signals } from "./signals.ts";
 function ready(s: Signals, env: EvidenceContext): void {
@@ -9,6 +10,7 @@ async function revalidate(env: EvidenceContext, s: Signals, to: string): Promise
   await recipient(env, to); const fresh = await collect(env);
   if (fresh.asks.length || fresh.keeps.length) throw new Error("quit refused: safety evidence changed");
   if (fingerprint(fresh) !== fingerprint(s)) throw new Error("quit refused: safety evidence changed");
+  verifyOwnContext(env, fresh);
 }
 async function exited(env: EvidenceContext, pid: number): Promise<boolean> {
   const probe = await env.ctx.run("ps", ["-p", String(pid)], { timeoutMs: 2000 });

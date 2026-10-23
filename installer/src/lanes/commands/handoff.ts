@@ -6,7 +6,7 @@ import { accept, handoffRecipient, packPath, prepare } from "../reap/handoff.ts"
 export async function handoff(args: string[], opts: Record<string, string>, env: CommandEnv): Promise<number> {
   const { c, root, ctx } = env;
   const lane = activeLane(args, c);
-  const minutes = c.idle?.minutes ?? 90;
+  const minutes = c.idle?.minutes ?? 75;
   if (opts.accept) {
     validateAcceptance(opts);
     await accept({ c, lane, root, ctx, minutes }, opts.from);

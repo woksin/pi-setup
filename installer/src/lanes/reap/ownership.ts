@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { optionalText, jsonFiles } from "./files.ts";
 import type { Claim, EvidenceContext, Signals } from "./signals.ts";
-function registry(text: string): Claim[] {
+export function registry(text: string): Claim[] {
   const folded = new Map<string, Claim>();
   for (const line of text.split("\n").filter(l => l.trim())) {
     let ev: Claim; try { ev = JSON.parse(line); } catch { throw new Error("cannot read issue-work registry"); }
@@ -14,7 +14,7 @@ function validEvent(ev: Claim): boolean { return Boolean(ev?.repo && Number.isIn
 function classifyClaim(claim: Claim, s: Signals): void {
   if (claim.sessionId !== s.sessionId || claim.source !== "tool") { s.asks.push("claim from another tool or unmapped session"); return; }
   s.claims.push(claim);
-  if (claim.state === "in-progress") { s.keeps.push("in-progress claim"); return; }
+  if (activeUnnoted(claim)) { s.keeps.push("in-progress claim"); return; }
   if (readyClaim(claim)) return;
   s.asks.push("claim needs named ready/blocked note or completion evidence");
 }
@@ -43,5 +43,9 @@ export function claimsAndOwnership(s: Signals, env: EvidenceContext): void {
 
 function readyClaim(claim: Claim): boolean {
   if (["done", "in-review"].includes(claim.state || "")) return true;
-  return ["blocked", "planned"].includes(claim.state || "") && Boolean(claim.note?.trim());
+  return ["blocked", "planned", "paused", "in-progress"].includes(claim.state || "") && Boolean(claim.note?.trim());
+}
+
+function activeUnnoted(claim: Claim): boolean {
+  return claim.state === "in-progress" && !claim.note?.trim();
 }
