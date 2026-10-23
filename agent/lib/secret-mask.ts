@@ -20,8 +20,10 @@
  * tool details, streaming updates and user_bash (!/!!) output are not covered
  * (user_bash only exposes the command before execution). output-cap masks before offload;
  * oversized offloads are omitted. PEM/Secret sections over 64 KiB are conservatively hidden.
- * GitHub publishing commands additionally scan text/file payloads (including gist files) for
- * credentials and internal paths. Literal echo/printf/heredoc stdin is scanned; unscannable stdin,
+ * Any command mentioning a GitHub publication scans its entire text for credentials, independently
+ * of shell parsing (including quoted text and heredoc bodies). Internal paths are checked only in
+ * parsed payloads/files, so ordinary local paths in cd and file arguments remain usable.
+ * Literal echo/printf/heredoc stdin is scanned; unscannable stdin,
  * unreadable/oversized files and relative files with an uncertain cwd are refused. This scan
  * precedes Cratis credential-read delegation and cannot be approved by a dumper prompt.
  * Command matching is conservative, not a full shell interpreter; computed payloads are refused.
@@ -418,13 +420,15 @@ const OUTBOUND_FLAGS = new Set(["--body", "-b", "--notes", "-n", "--title", "-t"
 const OUTBOUND_FILES = new Set(["--body-file", "-F", "--notes-file", "--add", "-a"]);
 const GH_VALUE_FLAGS = new Set(["--repo", "-R", "--hostname", "-H", "--remove", "-r"]);
 const GIST_SWITCHES = new Set(["--public", "-p", "--web", "-w"]);
+const PUBLICATION_VERBS: Record<string, string[]> = { gist: ["create", "edit"], release: ["create", "edit"], issue: ["comment", "create", "edit", "close"], pr: ["comment", "create", "edit", "close", "review"] };
+const PUBLICATION_TEXT = new RegExp(`\\bgh\\b[\\s\\S]*?\\b(?:${Object.entries(PUBLICATION_VERBS).map(([group, verbs]) => `${group}\\s+(?:${verbs.join("|")})`).join("|")})\\b`);
 const INTERNAL_PATH = /\/(?:Users|home)\/[^\s/]+|\.ai-work\/|~\/\.pi\b/;
 const EXPANDING_WORD = /[$`*?{}\[\]~\\]/;
 const PRODUCER_EXPANSION = /[$`*?{}\[\]~<>]/;
 const HEREDOC_EXPANSION = /[$`\\]/;
 const INPUT_MARKER = "--pi-outbound-stdin-";
 interface Publication { group: string; verb: string; args: string[] }
-interface PublicationInput { cwd?: string; stdin?: string }
+interface PublicationInput { cwd?: string; stdin?: string; hasStdin: boolean }
 interface Payload { value: string; file: boolean }
 
 function executableIndex(tokens: string[]): number {
@@ -434,9 +438,8 @@ function executableIndex(tokens: string[]): number {
 function publication(tokens: string[]): Publication | undefined {
 	const start = executableIndex(tokens);
 	if (basename(tokens[start] ?? "") !== "gh") return;
-	const verbs: Record<string, string[]> = { gist: ["create", "edit"], release: ["create", "edit"], issue: ["comment", "create", "edit", "close"], pr: ["comment", "create", "edit", "close", "review"] };
 	for (let i = start + 1; i < tokens.length; i++) {
-		if (verbs[tokens[i]]?.includes(tokens[i + 1])) return { group: tokens[i], verb: tokens[i + 1], args: tokens.slice(i + 2) };
+		if (PUBLICATION_VERBS[tokens[i]]?.includes(tokens[i + 1])) return { group: tokens[i], verb: tokens[i + 1], args: tokens.slice(i + 2) };
 	}
 	return undefined;
 }
@@ -455,6 +458,10 @@ function outboundFile(file: string, cwd?: string): string | undefined {
 
 function outboundPattern(text: string): string | undefined {
 	if (INTERNAL_PATH.test(text)) return "internal-path";
+	return outboundSecrets(text);
+}
+
+function outboundSecrets(text: string): string | undefined {
 	const result = scan(text);
 	if (result.skipped) return "outbound-payload-too-large";
 	return result.kinds[0];
@@ -487,10 +494,14 @@ function outboundFlagKind(flag: string): "file" | "text" | "ignored" | undefined
 	return undefined;
 }
 
+function gistSwitch(flag: string): boolean {
+	return GIST_SWITCHES.has(flag) || /^-[pw]+$/.test(flag);
+}
+
 function readPublicationOption(args: string[], index: number): PublicationArgument {
 	const { flag, inline } = splitOutboundFlag(args[index]);
 	const kind = outboundFlagKind(flag);
-	if (!kind) return { next: index + 1, error: GIST_SWITCHES.has(flag) ? undefined : "outbound-gist-arguments-unscannable" };
+	if (!kind) return { next: index + 1, error: gistSwitch(flag) ? undefined : "outbound-gist-arguments-unscannable" };
 	const value = inline ?? args[index + 1];
 	const next = inline === undefined ? index + 2 : index + 1;
 	if (value === undefined) return { next, error: "outbound-value-missing" };
@@ -518,10 +529,12 @@ function publicationArguments(args: string[]): PublicationArguments {
 	return result;
 }
 
-function gistPayloads(call: Publication, args: PublicationArguments): void {
+function gistPayloads(call: Publication, args: PublicationArguments, input: PublicationInput): void {
 	if (call.group !== "gist") return;
 	const files = call.verb === "edit" ? args.positional.slice(1) : args.positional;
-	args.payloads.push(...(files.length ? files : ["-"]).map(value => ({ value, file: true })));
+	const implicitStdin = call.verb === "create" || input.hasStdin;
+	const sources = files.length ? files : implicitStdin ? ["-"] : [];
+	args.payloads.push(...sources.map(value => ({ value, file: true })));
 }
 
 function publicationError(call: Publication, error?: string): string | undefined {
@@ -533,7 +546,7 @@ function publicationKind(call: Publication, input: PublicationInput): string | u
 	const args = publicationArguments(call.args);
 	const error = publicationError(call, args.error);
 	if (error) return error;
-	gistPayloads(call, args);
+	gistPayloads(call, args, input);
 	for (const payload of args.payloads) {
 		const kind = payloadKind(payload, input);
 		if (kind) return kind;
@@ -542,11 +555,18 @@ function publicationKind(call: Publication, input: PublicationInput): string | u
 }
 
 interface HereDoc { start: number; end: number; delimiter: string; quoted: boolean; tabs: boolean }
-function hereDocHeaders(line: string, unquoted: string): HereDoc[] {
-	return [...unquoted.matchAll(/<<-?/g)].flatMap(match => {
-		const header = /^<<(-)?[ \t]*(?:(['"])([A-Za-z_]\w*)\2|([A-Za-z_]\w*))/.exec(line.slice(match.index));
-		return header ? [{ start: match.index, end: match.index + header[0].length, delimiter: header[3] ?? header[4], quoted: !!header[2], tabs: !!header[1] }] : [];
-	});
+function hereDocHeader(line: string, start: number): HereDoc | undefined {
+	const header = /^<<(-)?[ \t]*(['"]?)([^\s'"<>|;&()]+)\2(?=$|[\s<>|;&()])/.exec(line.slice(start));
+	if (!header) return undefined;
+	if (header[3].includes("\\")) return undefined;
+	if (!header[2] && HEREDOC_EXPANSION.test(header[3])) return undefined;
+	return { start, end: start + header[0].length, delimiter: header[3], quoted: !!header[2], tabs: !!header[1] };
+}
+
+function hereDocHeaders(line: string, unquoted: string): HereDoc[] | undefined {
+	const offsets = [...unquoted.matchAll(/<<-?/g)];
+	const headers = offsets.map(match => hereDocHeader(line, match.index)).filter((header): header is HereDoc => header !== undefined);
+	return headers.length === offsets.length ? headers : undefined;
 }
 
 function readHereDoc(lines: string[], start: number, header: HereDoc) {
@@ -560,6 +580,23 @@ function readHereDoc(lines: string[], start: number, header: HereDoc) {
 	return { next, text: undefined };
 }
 
+interface HereDocLine { line: string; mask: string; lines: string[]; start: number; input: Map<string, string | undefined> }
+function hereDocLine(state: HereDocLine) {
+	const headers = hereDocHeaders(state.line, state.mask);
+	if (!headers) return undefined;
+	let rendered = "", end = 0, next = state.start;
+	for (const header of headers) {
+		const doc = readHereDoc(state.lines, next, header);
+		if (doc.text === undefined) return undefined;
+		next = doc.next;
+		const key = `${INPUT_MARKER}${state.input.size}`;
+		state.input.set(key, header.quoted || !HEREDOC_EXPANSION.test(doc.text) ? doc.text : undefined);
+		rendered += state.line.slice(end, header.start) + ` ${key} `;
+		end = header.end;
+	}
+	return { next, text: rendered + state.line.slice(end) };
+}
+
 /** Remove heredoc bodies before shell tokenization; they are data, never commands. */
 function inlineInputs(command: string) {
 	const lines = command.split("\n");
@@ -567,20 +604,12 @@ function inlineInputs(command: string) {
 	const input = new Map<string, string | undefined>();
 	const output: string[] = [];
 	for (let i = 0; i < lines.length;) {
-		const mask = unquoted[i];
-		const line = lines[i++];
-		let rendered = "", end = 0;
-		for (const header of hereDocHeaders(line, mask)) {
-			const doc = readHereDoc(lines, i, header);
-			i = doc.next;
-			const key = `${INPUT_MARKER}${input.size}`;
-			input.set(key, header.quoted || !HEREDOC_EXPANSION.test(doc.text ?? "") ? doc.text : undefined);
-			rendered += line.slice(end, header.start) + ` ${key} `;
-			end = header.end;
-		}
-		output.push(rendered + line.slice(end));
+		const rendered = hereDocLine({ line: lines[i], mask: unquoted[i], lines, start: i + 1, input });
+		if (!rendered) return { segments: [], input, error: "outbound-heredoc-unscannable" };
+		i = rendered.next;
+		output.push(rendered.text);
 	}
-	return { segments: shellSegments(output.join("\n")), input };
+	return { segments: shellSegments(output.join("\n")), input, error: undefined };
 }
 
 function literalPrintf(args: string[]): string | undefined {
@@ -650,19 +679,31 @@ function advanceCwd(state: { cwd?: string; conditional: boolean }, segment: Shel
 	state.conditional = true;
 }
 
-/** No command, path or candidate value is included in a refusal. */
-export function outboundReason(command: string, cwd: string): string | undefined {
+function segmentHasStdin(segment: ShellSegment): boolean {
+	return segment.after === "|" || segment.tokens.some(token => token.startsWith(INPUT_MARKER));
+}
+
+function parsedPublicationKind(command: string, cwd: string): string | undefined {
 	const parsed = inlineInputs(command);
+	if (parsed.error) return parsed.error;
 	const state = { cwd: cwd as string | undefined, conditional: false };
 	for (let i = 0; i < parsed.segments.length; i++) {
 		const segment = parsed.segments[i];
 		advanceCwd(state, segment, parsed.segments[i + 1]);
 		const call = publication(segment.tokens);
 		if (!call) continue;
-		const kind = publicationKind(call, { cwd: state.cwd, stdin: segmentInput(parsed.segments, i, parsed.input) });
-		if (kind) return `secret-mask: GitHub publication blocked (${kind}). Remove credentials and internal paths from public text; payloads must be readable literal text within 2 MiB, with a known cwd for relative files and scannable stdin.`;
+		const kind = publicationKind(call, { cwd: state.cwd, stdin: segmentInput(parsed.segments, i, parsed.input), hasStdin: segmentHasStdin(segment) });
+		if (kind) return kind;
 	}
 	return undefined;
+}
+
+/** Secret scanning never depends on shell parsing; no candidate text is included in a refusal. */
+export function outboundReason(command: string, cwd: string): string | undefined {
+	const mention = command.replace(/\\\r?\n/g, "").replace(/['"\\]/g, "");
+	if (!PUBLICATION_TEXT.test(mention)) return undefined;
+	const kind = outboundSecrets(command) ?? parsedPublicationKind(command, cwd);
+	return kind ? `secret-mask: GitHub publication blocked (${kind}). Remove credentials and internal paths from public text; payloads must be readable literal text within 2 MiB, with a known cwd for relative files and scannable stdin.` : undefined;
 }
 
 export function summary(count: number, kinds: readonly string[]): string {

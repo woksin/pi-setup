@@ -65,7 +65,6 @@ test("unreadable, stdin and oversized files fail closed without exposing paths",
 
 test("unrelated commands, read-only gh and safe public text are unchanged", () => {
 	for (const command of [
-		`printf 'gh pr create --body ${secret}'`,
 		`gh issue view 1 --body '${secret}'`,
 		`gh api repos/o/r --title '${secret}'`,
 		"gh issue create --title 'Fix bug' --body 'Public explanation'",

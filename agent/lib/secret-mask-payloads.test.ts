@@ -44,7 +44,7 @@ for (const verb of ["create", "edit"]) {
 }
 
 const stdinCommands = [
-	"gh gist create -", "gh gist edit abc123 -", "gh gist create --filename public.txt", "gh gist edit abc123 --filename public.txt",
+	"gh gist create -", "gh gist edit abc123 -", "gh gist create --filename public.txt",
 	"gh issue create --body-file -", "gh pr comment 1 -F-", "gh pr review 1 --body-file=-",
 	"gh release create v1 -F -", "gh release edit v1 --notes-file=-",
 ];
@@ -80,7 +80,7 @@ test("direct and piped literal heredocs are scanned; their bodies are not comman
 	assert.equal(outboundReason("gh gist create - <<'EOF'\nUse $PATH as an example\nEOF", dir), undefined);
 	blocked("gh gist create - <<EOF\n$TOKEN\nEOF", "outbound-stdin-unscannable");
 	blocked(`gh gist create - <<EOF\nghp_\\\n${"A".repeat(40)}\nEOF`, "outbound-stdin-unscannable");
-	blocked("gh gist create - <<'EOF'\nUnterminated", "outbound-stdin-unscannable");
+	blocked("gh gist create - <<'EOF'\nUnterminated", "outbound-heredoc-unscannable");
 	blocked(`# <<EOF\ngh release create v1 -n '${secret}'\nEOF`);
 	assert.equal(outboundReason("cat <<'EOF'\ngh release create v1 -n private\nEOF", dir), undefined);
 });
