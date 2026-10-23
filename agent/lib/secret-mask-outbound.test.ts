@@ -54,9 +54,10 @@ test("inline equals, compact short flags, wrappers and compound commands are sca
 });
 
 test("unreadable, stdin and oversized files fail closed without exposing paths", () => {
-	for (const file of ["absent.md", "-", "."]) {
+	for (const file of ["absent.md", "."]) {
 		assert.match(outboundReason(`gh issue create --body-file '${file}'`, dir)!, /outbound-file-unreadable/);
 	}
+	assert.match(outboundReason("gh issue create --body-file -", dir)!, /outbound-stdin-unscannable/);
 	writeFileSync(join(dir, "big.md"), "a".repeat(MAX_BYTES + 1));
 	assert.match(outboundReason("gh release create v1 --notes-file big.md", dir)!, /outbound-payload-too-large/);
 	assert.match(outboundReason("gh issue create --body", dir)!, /outbound-value-missing/);

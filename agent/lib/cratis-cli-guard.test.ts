@@ -503,13 +503,22 @@ describe("guards.test.ts harness cases", () => {
 		assert.equal(app.selections.length, 0);
 	});
 
-	test("guard off cannot rule out production when context is unreadable", async () => {
-		setGuards("cratis", true);
-		context = "";
-		const app = fake(false);
-		cratisExtension(app.pi);
-		assert.match((await app.fire("tool_call", bash("cratis chronicle replay observer"))).reason, /production target cannot be ruled out/);
-	});
+	for (const hasUI of [true, false]) {
+		test(`guard off fails closed on unreadable context even with a dev override (UI=${hasUI})`, async () => {
+			setGuards("cratis", true);
+			context = "";
+			const app = fake(hasUI);
+			cratisExtension(app.pi);
+			for (const command of ["cratis chronicle replay observer", "cratis prologue start", "cratis chronicle replay observer --server chronicle://localhost:35000"]) {
+				const result = await app.fire("tool_call", bash(command));
+				assert.equal(result?.block, true);
+				assert.match(result.reason, /production target cannot be ruled out/);
+			}
+			assert.equal(await app.fire("tool_call", bash("cratis chronicle jobs list")), undefined);
+			assert.equal(app.selections.length, 0);
+			assert.equal(app.notices.length, 0);
+		});
+	}
 
 	test("cratis classifier ignores heredoc bodies and quoted prose but still finds real command lines", () => {
 		// Regression for the L0 stall: prose in a message file was classified as a cratis call.

@@ -20,17 +20,19 @@
  * tool details, streaming updates and user_bash (!/!!) output are not covered
  * (user_bash only exposes the command before execution). output-cap masks before offload;
  * oversized offloads are omitted. PEM/Secret sections over 64 KiB are conservatively hidden.
- * GitHub publishing commands additionally scan body/title/notes values and body/notes files
- * for credentials and internal paths; unreadable or oversized files are refused. This scan
+ * GitHub publishing commands additionally scan text/file payloads (including gist files) for
+ * credentials and internal paths. Literal echo/printf/heredoc stdin is scanned; unscannable stdin,
+ * unreadable/oversized files and relative files with an uncertain cwd are refused. This scan
  * precedes Cratis credential-read delegation and cannot be approved by a dumper prompt.
- * Command matching is conservative, not a full shell interpreter; computed payloads are not evaluated.
+ * Command matching is conservative, not a full shell interpreter; computed payloads are refused.
  * Logs contain counts/kinds only, never commands or credential values.
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { tokenizeShell } from "./issue-work.ts";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { shellSegments } from "./issue-work.ts";
+import type { ShellSegment } from "./issue-work.ts";
 import { isGuardOff } from "./guards.ts";
 import { cratisVerdict, spawnRunner } from "./cratis-hooks-detect.ts";
 import { guardSelect, isOrchestrated, orchLog } from "./orchestration.ts";
@@ -412,24 +414,41 @@ export function scan(text: string, allowlist: readonly string[] = []): Scan {
 	return result;
 }
 
-const OUTBOUND_FLAGS = new Set(["--body", "-b", "--notes", "--title", "-t", "--body-file", "-F", "--notes-file"]);
-const OUTBOUND_FILES = new Set(["--body-file", "-F", "--notes-file"]);
+const OUTBOUND_FLAGS = new Set(["--body", "-b", "--notes", "-n", "--title", "-t", "--comment", "-c", "--desc", "-d", "--filename", "-f"]);
+const OUTBOUND_FILES = new Set(["--body-file", "-F", "--notes-file", "--add", "-a"]);
+const GH_VALUE_FLAGS = new Set(["--repo", "-R", "--hostname", "-H", "--remove", "-r"]);
+const GIST_SWITCHES = new Set(["--public", "-p", "--web", "-w"]);
 const INTERNAL_PATH = /\/(?:Users|home)\/[^\s/]+|\.ai-work\/|~\/\.pi\b/;
+const EXPANDING_WORD = /[$`*?{}\[\]~\\]/;
+const PRODUCER_EXPANSION = /[$`*?{}\[\]~<>]/;
+const HEREDOC_EXPANSION = /[$`\\]/;
+const INPUT_MARKER = "--pi-outbound-stdin-";
+interface Publication { group: string; verb: string; args: string[] }
+interface PublicationInput { cwd?: string; stdin?: string }
+interface Payload { value: string; file: boolean }
 
-function publishes(tokens: string[]): boolean {
-	const start = tokens.findIndex((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) && !["env", "command", "exec", "rtk", "proxy", "time", "nohup"].includes(token));
-	if (basename(tokens[start] ?? "") !== "gh") return false;
-	return tokens.slice(start + 1).some((token, i, rest) => {
-		const verbs = ["gist", "release"].includes(token) ? ["create", "edit"] : ["issue", "pr"].includes(token) ? ["comment", "create", "edit"] : [];
-		return verbs.includes(rest[i + 1]);
-	});
+function executableIndex(tokens: string[]): number {
+	return tokens.findIndex((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) && !["env", "command", "exec", "rtk", "proxy", "time", "nohup"].includes(token));
 }
 
-function outboundFile(file: string, cwd: string): string | undefined {
+function publication(tokens: string[]): Publication | undefined {
+	const start = executableIndex(tokens);
+	if (basename(tokens[start] ?? "") !== "gh") return;
+	const verbs: Record<string, string[]> = { gist: ["create", "edit"], release: ["create", "edit"], issue: ["comment", "create", "edit", "close"], pr: ["comment", "create", "edit", "close", "review"] };
+	for (let i = start + 1; i < tokens.length; i++) {
+		if (verbs[tokens[i]]?.includes(tokens[i + 1])) return { group: tokens[i], verb: tokens[i + 1], args: tokens.slice(i + 2) };
+	}
+	return undefined;
+}
+
+function outboundFile(file: string, cwd?: string): string | undefined {
+	if (EXPANDING_WORD.test(file)) return "outbound-file-unscannable";
+	if (!cwd && !isAbsolute(file)) return "outbound-cwd-unscannable";
 	try {
-		const path = resolve(cwd, file.startsWith("~/") ? join(homedir(), file.slice(2)) : file);
-		if (file === "-" || !statSync(path).isFile()) return "outbound-file-unreadable";
-		if (statSync(path).size > MAX_BYTES) return "outbound-payload-too-large";
+		const path = resolve(cwd ?? "/", file);
+		const info = statSync(path);
+		if (!info.isFile()) return "outbound-file-unreadable";
+		if (info.size > MAX_BYTES) return "outbound-payload-too-large";
 		return outboundPattern(readFileSync(path, "utf8"));
 	} catch { return "outbound-file-unreadable"; }
 }
@@ -441,24 +460,207 @@ function outboundPattern(text: string): string | undefined {
 	return result.kinds[0];
 }
 
-function publicationKind(tokens: string[], cwd: string): string | undefined {
-	for (let i = 0; i < tokens.length; i++) {
-		const compact = /^(-[bFt])([^=].*)$/.exec(tokens[i]);
-		const [flag, ...inline] = (compact ? `${compact[1]}=${compact[2]}` : tokens[i]).split("=");
-		if (!OUTBOUND_FLAGS.has(flag)) continue;
-		const value = inline.length ? inline.join("=") : tokens[++i];
-		if (value === undefined) return "outbound-value-missing";
-		const kind = OUTBOUND_FILES.has(flag) ? outboundFile(value, cwd) : outboundPattern(value);
+function inlineValueKind(value: string): string | undefined {
+	const kind = outboundPattern(value);
+	if (kind) return kind;
+	return EXPANDING_WORD.test(value) ? "outbound-value-unscannable" : undefined;
+}
+
+function payloadKind(payload: Payload, input: PublicationInput): string | undefined {
+	if (!payload.file) return inlineValueKind(payload.value);
+	if (payload.value !== "-") return outboundFile(payload.value, input.cwd);
+	return input.stdin === undefined ? "outbound-stdin-unscannable" : outboundPattern(input.stdin);
+}
+
+function splitOutboundFlag(token: string): { flag: string; inline?: string } {
+	const compact = /^(-[bFtncfdaRHr])([^=].*)$/.exec(token);
+	const [flag, ...value] = (compact ? `${compact[1]}=${compact[2]}` : token).split("=");
+	return { flag, inline: value.length ? value.join("=") : undefined };
+}
+
+interface PublicationArguments { payloads: Payload[]; positional: string[]; error?: string }
+interface PublicationArgument { next: number; payload?: Payload; positional?: string; error?: string }
+function outboundFlagKind(flag: string): "file" | "text" | "ignored" | undefined {
+	if (OUTBOUND_FILES.has(flag)) return "file";
+	if (OUTBOUND_FLAGS.has(flag)) return "text";
+	if (GH_VALUE_FLAGS.has(flag)) return "ignored";
+	return undefined;
+}
+
+function readPublicationOption(args: string[], index: number): PublicationArgument {
+	const { flag, inline } = splitOutboundFlag(args[index]);
+	const kind = outboundFlagKind(flag);
+	if (!kind) return { next: index + 1, error: GIST_SWITCHES.has(flag) ? undefined : "outbound-gist-arguments-unscannable" };
+	const value = inline ?? args[index + 1];
+	const next = inline === undefined ? index + 2 : index + 1;
+	if (value === undefined) return { next, error: "outbound-value-missing" };
+	return { next, payload: kind === "ignored" ? undefined : { value, file: kind === "file" } };
+}
+
+function readPublicationArgument(args: string[], index: number): PublicationArgument {
+	const token = args[index];
+	if (token.startsWith(INPUT_MARKER)) return { next: index + 1 };
+	if (token.startsWith("<")) return { next: index + 2, error: "outbound-stdin-unscannable" };
+	if (token === "-" || !token.startsWith("-")) return { next: index + 1, positional: token };
+	return readPublicationOption(args, index);
+}
+
+function publicationArguments(args: string[]): PublicationArguments {
+	const result: PublicationArguments = { payloads: [], positional: [] };
+	for (let i = 0; i < args.length;) {
+		if (args[i] === "--") { result.positional.push(...args.slice(i + 1)); break; }
+		const argument = readPublicationArgument(args, i);
+		i = argument.next;
+		if (argument.payload) result.payloads.push(argument.payload);
+		if (argument.positional !== undefined) result.positional.push(argument.positional);
+		result.error = argument.error ?? result.error;
+	}
+	return result;
+}
+
+function gistPayloads(call: Publication, args: PublicationArguments): void {
+	if (call.group !== "gist") return;
+	const files = call.verb === "edit" ? args.positional.slice(1) : args.positional;
+	args.payloads.push(...(files.length ? files : ["-"]).map(value => ({ value, file: true })));
+}
+
+function publicationError(call: Publication, error?: string): string | undefined {
+	if (call.group === "gist") return error;
+	return error === "outbound-gist-arguments-unscannable" ? undefined : error;
+}
+
+function publicationKind(call: Publication, input: PublicationInput): string | undefined {
+	const args = publicationArguments(call.args);
+	const error = publicationError(call, args.error);
+	if (error) return error;
+	gistPayloads(call, args);
+	for (const payload of args.payloads) {
+		const kind = payloadKind(payload, input);
 		if (kind) return kind;
 	}
 	return undefined;
 }
 
+interface HereDoc { start: number; end: number; delimiter: string; quoted: boolean; tabs: boolean }
+function hereDocHeaders(line: string, unquoted: string): HereDoc[] {
+	return [...unquoted.matchAll(/<<-?/g)].flatMap(match => {
+		const header = /^<<(-)?[ \t]*(?:(['"])([A-Za-z_]\w*)\2|([A-Za-z_]\w*))/.exec(line.slice(match.index));
+		return header ? [{ start: match.index, end: match.index + header[0].length, delimiter: header[3] ?? header[4], quoted: !!header[2], tabs: !!header[1] }] : [];
+	});
+}
+
+function readHereDoc(lines: string[], start: number, header: HereDoc) {
+	const body: string[] = [];
+	let next = start;
+	while (next < lines.length) {
+		const line = header.tabs ? lines[next++].replace(/^\t+/, "") : lines[next++];
+		if (line === header.delimiter) return { next, text: body.join("\n") + "\n" };
+		body.push(line);
+	}
+	return { next, text: undefined };
+}
+
+/** Remove heredoc bodies before shell tokenization; they are data, never commands. */
+function inlineInputs(command: string) {
+	const lines = command.split("\n");
+	const unquoted = command.replace(/'(?:[^']*)'|"(?:\\.|[^"\\])*"|\\.|(?:^|[\s;&|()])#[^\n]*/g, match => match.replace(/[^\n]/g, " ")).split("\n");
+	const input = new Map<string, string | undefined>();
+	const output: string[] = [];
+	for (let i = 0; i < lines.length;) {
+		const mask = unquoted[i];
+		const line = lines[i++];
+		let rendered = "", end = 0;
+		for (const header of hereDocHeaders(line, mask)) {
+			const doc = readHereDoc(lines, i, header);
+			i = doc.next;
+			const key = `${INPUT_MARKER}${input.size}`;
+			input.set(key, header.quoted || !HEREDOC_EXPANSION.test(doc.text ?? "") ? doc.text : undefined);
+			rendered += line.slice(end, header.start) + ` ${key} `;
+			end = header.end;
+		}
+		output.push(rendered + line.slice(end));
+	}
+	return { segments: shellSegments(output.join("\n")), input };
+}
+
+function literalPrintf(args: string[]): string | undefined {
+	if (args[0] === "--") args = args.slice(1);
+	const [format, ...values] = args;
+	if (format === undefined) return undefined;
+	if (/[%\\]/.test(format.replace(/%%|%s|\\[nrt\\]/g, ""))) return undefined;
+	let index = 0;
+	const rendered = format.replace(/\\[nrt\\]|%%|%s/g, token => {
+		if (token === "%s") return values[index++] ?? "";
+		return ({ "\\n": "\n", "\\r": "\r", "\\t": "\t", "\\\\": "\\", "%%": "%" })[token]!;
+	});
+	return index < values.length ? undefined : rendered;
+}
+
+function literalEcho(args: string[]): string | undefined {
+	if (args.some(token => token.includes("\\"))) return undefined;
+	if (args[0] === "-n") args.shift();
+	if (args[0]?.startsWith("-")) return undefined;
+	return args.join(" ");
+}
+
+function literalProducer(segment: ShellSegment, input: Map<string, string | undefined>): string | undefined {
+	const marker = segment.tokens.findLast(token => token.startsWith(INPUT_MARKER));
+	const tokens = segment.tokens.filter(token => !token.startsWith(INPUT_MARKER));
+	if (tokens.some(token => PRODUCER_EXPANSION.test(token))) return undefined;
+	const [program, ...args] = tokens;
+	if (program === "cat") return args.length ? undefined : input.get(marker ?? "");
+	if (program === "printf") return literalPrintf(args);
+	if (program === "echo") return literalEcho(args);
+	return undefined;
+}
+
+function segmentInput(segments: ShellSegment[], index: number, input: Map<string, string | undefined>): string | undefined {
+	const segment = segments[index];
+	const marker = segment.tokens.findLast(token => token.startsWith(INPUT_MARKER));
+	if (marker) return input.get(marker);
+	return segment.after === "|" ? literalProducer(segments[index - 1], input) : undefined;
+}
+
+function literalCdPath(tokens: string[]): string | undefined {
+	if (tokens.length !== 2) return undefined;
+	if (tokens[1] === "-") return undefined;
+	if (EXPANDING_WORD.test(tokens[1])) return undefined;
+	return tokens[1];
+}
+
+function cdDestination(tokens: string[], next: ShellSegment | undefined, cwd?: string): string | undefined {
+	if (next?.after !== "&&") return undefined;
+	const path = literalCdPath(tokens);
+	if (!path) return undefined;
+	if (process.env.CDPATH && !isAbsolute(path)) return undefined;
+	if (!cwd && !isAbsolute(path)) return undefined;
+	return resolve(cwd ?? "/", path);
+}
+
+function uncertainCwd(segment: ShellSegment, tokens: string[]): boolean {
+	return ["(", ")"].includes(segment.after) || ["eval", "source", ".", "pushd", "popd"].includes(tokens[0]);
+}
+
+function advanceCwd(state: { cwd?: string; conditional: boolean }, segment: ShellSegment, next?: ShellSegment): void {
+	if (state.conditional && !["&&", "|"].includes(segment.after)) state.cwd = undefined;
+	const tokens = segment.tokens.slice(executableIndex(segment.tokens));
+	if (uncertainCwd(segment, tokens)) state.cwd = undefined;
+	if (tokens[0] !== "cd") return;
+	state.cwd = segment.after === "|" ? undefined : cdDestination(segment.tokens, next, state.cwd);
+	state.conditional = true;
+}
+
 /** No command, path or candidate value is included in a refusal. */
 export function outboundReason(command: string, cwd: string): string | undefined {
-	for (const tokens of tokenizeShell(command).filter(publishes)) {
-		const kind = publicationKind(tokens, cwd);
-		if (kind) return `secret-mask: GitHub publication blocked (${kind}). Remove credentials and internal paths from public text; file payloads must be readable and within 2 MiB.`;
+	const parsed = inlineInputs(command);
+	const state = { cwd: cwd as string | undefined, conditional: false };
+	for (let i = 0; i < parsed.segments.length; i++) {
+		const segment = parsed.segments[i];
+		advanceCwd(state, segment, parsed.segments[i + 1]);
+		const call = publication(segment.tokens);
+		if (!call) continue;
+		const kind = publicationKind(call, { cwd: state.cwd, stdin: segmentInput(parsed.segments, i, parsed.input) });
+		if (kind) return `secret-mask: GitHub publication blocked (${kind}). Remove credentials and internal paths from public text; payloads must be readable literal text within 2 MiB, with a known cwd for relative files and scannable stdin.`;
 	}
 	return undefined;
 }
