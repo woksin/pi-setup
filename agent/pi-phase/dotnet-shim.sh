@@ -24,6 +24,14 @@ subcommand=0
 subcommand_name=
 assemblies=no
 cap=yes
+msbuild=yes
+shared=yes
+reuse=yes
+property_next=no
+if [ "${PI_PHASE_SHARED_COMPILATION:-}" = 1 ]; then
+    shared=no
+    reuse=no
+fi
 for arg do
     index=$((index + 1))
     lower=$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')
@@ -33,6 +41,21 @@ for arg do
     esac
     case $lower in
         -m|-m:*|/m|/m:*|-maxcpucount*|/maxcpucount*|--maxcpucount*) cap=no ;;
+    esac
+    properties=
+    if [ "$property_next" = yes ]; then properties=$lower; fi
+    property_next=no
+    case $lower in
+        -p|-property|--property|/p|/property) property_next=yes ;;
+        -p:*|-property:*|--property:*|/p:*|/property:*) properties=${lower#*:} ;;
+        -p=*|-property=*|--property=*|/p=*|/property=*) properties=${lower#*=} ;;
+    esac
+    case $properties in
+        usesharedcompilation=*|*\;usesharedcompilation=*|*,usesharedcompilation=*) shared=no ;;
+    esac
+    case $lower in
+        -nodereuse|-nodereuse:*|-nodereuse=*|/nodereuse|/nodereuse:*|/nodereuse=*|--nodereuse|--nodereuse:*|--nodereuse=*|\
+        -nr|-nr:*|-nr=*|/nr|/nr:*|/nr=*|--nr|--nr:*|--nr=*) reuse=no ;;
     esac
     if [ "$subcommand" -eq 0 ]; then
         case $arg in
@@ -47,12 +70,12 @@ for arg do
         esac
     fi
 done
-if [ "$cap" = yes ] && [ "$subcommand_name" = test ]; then
+if [ "$subcommand_name" = test ]; then
     if [ "$assemblies" = yes ] || "$PI_PHASE_PYTHON" "$PI_PHASE_SHIM_DIR/test-runner.py"; then
-        cap=no
+        msbuild=no
     fi
 fi
-if [ "$cap" = yes ] && [ "$subcommand" -gt 0 ]; then
+if [ "$msbuild" = yes ] && [ "$subcommand" -gt 0 ]; then
     # The for-list is expanded before set replaces the positional parameters.
     index=0
     for arg do
@@ -60,7 +83,9 @@ if [ "$cap" = yes ] && [ "$subcommand" -gt 0 ]; then
         index=$((index + 1))
         set -- "$@" "$arg"
         if [ "$index" -eq "$subcommand" ]; then
-            set -- "$@" "-m:$PI_PHASE_MSBUILD_MAX_CPU"
+            if [ "$cap" = yes ]; then set -- "$@" "-m:$PI_PHASE_MSBUILD_MAX_CPU"; fi
+            if [ "$shared" = yes ]; then set -- "$@" "-p:UseSharedCompilation=false"; fi
+            if [ "$reuse" = yes ]; then set -- "$@" "-nodeReuse:false"; fi
         fi
     done
 fi

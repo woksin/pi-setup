@@ -179,6 +179,7 @@ has been deleted. Shared layers mean modest savings: about 1 GB on a 13.7 GB
 | `profiles/` | Model-routing profiles (`balanced`, `anthropic-heavy`, `openai-heavy`, …). Switch with `bin/pi-profile use <name>`. |
 | `extensions/guards.ts` | `/guards` command that turns the guards below on or off. |
 | `extensions/wait-guard.ts` | Blocks long foreground waits and repeated CI status polling. |
+| `extensions/dotnet-guard.ts` | In orchestration mode, blocks unwrapped .NET build/test/run work with a pi-phase replacement; `/guards off dotnet` disables it. |
 | `extensions/cratis-cli-guard.ts` | Blocks state-changing `cratis chronicle` commands unless approved. |
 | `extensions/issue-work.ts` | `issue_work` tool: claim, update and list the GitHub issues a session is working on, with leases across sessions and checks for new activity (logic in `lib/issue-work.ts`). |
 | `extensions/phase-priority.ts` | Asks you before an agent gets high priority in the `pi-phase` queue (`--priority high`); blocks subagents and self-granting. `/phase-priority` grants or revokes. A session you designate as orchestrator can grant priority itself, capped at 10 uses or 120 minutes (`lib/phase-priority.ts`). |
