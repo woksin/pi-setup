@@ -319,23 +319,161 @@ class PhaseTests(unittest.TestCase):
             self.assertEqual(pi_phase.git_state(self.root), (head, None))
             self.assertLessEqual(probe.call_args.kwargs["timeout"], 5)
 
-    def test_ledger_snapshots_at_enqueue_and_admission_not_finish(self):
-        entry = ("import sys;sys.path.insert(0,sys.argv[1]);import pi_phase\n"
-                 "snapshots=iter([('enqueue-head','enqueue-dirty'),('admitted-head','admitted-dirty')])\n"
-                 "pi_phase.git_state=lambda cwd: next(snapshots)\n"
-                 "sys.exit(pi_phase.main(sys.argv[4:],state=sys.argv[2],configuration=sys.argv[3]))")
-        result = subprocess.run([sys.executable, "-B", "-c", entry, str(HERE), str(self.state), str(self.config),
-                                 "run", "--kind", "test", "--label", "snapshots", "--", sys.executable, "-c", "pass"],
-                                capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_ledger_one_snapshot_after_registration_not_admission(self):
+        calls = self.root / "git-calls.jsonl"
+        patch = ("import json,threading\n"
+                 f"calls=pi_phase.Path({str(calls)!r})\n"
+                 "registered=False\n"
+                 "original_register=pi_phase.register_waiter\n"
+                 "def register(*args):\n"
+                 "    global registered\n"
+                 "    result=original_register(*args)\n"
+                 "    registered=result[0]\n"
+                 "    return result\n"
+                 "pi_phase.register_waiter=register\n"
+                 "def snapshot(cwd):\n"
+                 "    with calls.open('a') as f: f.write(json.dumps([registered,threading.current_thread().daemon])+'\\n')\n"
+                 "    return ('queued-head','queued-dirty')\n"
+                 "pi_phase.git_state=snapshot")
+        child, _ = self.patched_phase(patch)
+        code, output = self.done(child)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls.read_text().splitlines(), ["[true, true]"])
         record = self.ledger_records()[0]
-        self.assertEqual((record["head"], record["dirty"]), ("admitted-head", "admitted-dirty"))
-        # A timeout before admission retains only the enqueue snapshot.
-        child, _ = self.patched_phase("pi_phase.git_state=lambda cwd: ('queued-head','queued-dirty')\n"
-                                      "pi_phase.claim=lambda *a,**k: None", queue=".1")
-        self.assertEqual(self.done(child)[0], 75)
-        record = self.ledger_records()[1]
         self.assertEqual((record["head"], record["dirty"]), ("queued-head", "queued-dirty"))
+
+    def test_ledger_slow_snapshot_never_blocks_registration_or_claim(self):
+        registered = self.root / "registered"
+        attempted = self.root / "claim-attempted"
+        patch = ("import time\n"
+                 "original_register=pi_phase.register_waiter\n"
+                 "def register(*args):\n"
+                 "    result=original_register(*args)\n"
+                 f"    if result[0]: pi_phase.Path({str(registered)!r}).touch()\n"
+                 "    return result\n"
+                 "pi_phase.register_waiter=register\n"
+                 "def snapshot(cwd):\n"
+                 "    time.sleep(5)\n"
+                 "    return ('too-late','too-late')\n"
+                 "pi_phase.git_state=snapshot\n"
+                 "def claim(*args,**kwargs):\n"
+                 f"    pi_phase.Path({str(attempted)!r}).touch()\n"
+                 "    return None\n"
+                 "pi_phase.claim=claim")
+        started = time.monotonic()
+        child, _ = self.patched_phase(patch, queue=".2")
+        self.wait_for(registered.exists, seconds=1.5)
+        self.wait_for(attempted.exists, seconds=1.5)
+        code, output = self.done(child, timeout=3)
+        self.assertEqual(code, 75, output)
+        self.assertLess(time.monotonic() - started, 3)
+        record = self.ledger_records()[0]
+        self.assertEqual((record["head"], record["dirty"]), (None, None))
+
+    def test_ledger_snapshot_join_is_bounded_and_cannot_change_finished_record(self):
+        ledger = pi_phase.PhaseLedger(SimpleNamespace(kind="test", label="slow", priority="normal", command=[]))
+        ready, release = threading.Event(), threading.Event()
+        def snapshot(cwd):
+            ready.set()
+            release.wait(3)
+            return "late-head", "late-dirty"
+        with patch.object(pi_phase, "git_state", side_effect=snapshot):
+            started = time.monotonic()
+            ledger.enqueue()
+            try:
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertTrue(ready.wait(1))
+                self.assertTrue(ledger.snapshot_thread.daemon)
+                with patch.object(ledger.snapshot_thread, "join", wraps=ledger.snapshot_thread.join) as join:
+                    ledger.finish(self.state, 75)
+                join.assert_called_once_with(timeout=1)
+                self.assertEqual((ledger.record["head"], ledger.record["dirty"]), (None, None))
+            finally:
+                release.set()
+                ledger.snapshot_thread.join(timeout=1)
+        self.assertEqual((ledger.record["head"], ledger.record["dirty"]), (None, None))
+
+    def test_ledger_snapshot_thread_unavailable_keeps_metadata_optional(self):
+        ledger = pi_phase.PhaseLedger(SimpleNamespace(kind="test", label="no-thread", priority="normal", command=[]))
+        with patch.object(threading.Thread, "start", side_effect=RuntimeError("no threads available")):
+            ledger.enqueue()
+        ledger.start()
+        ledger.finish(self.state, 0)
+        record = self.ledger_records()[0]
+        self.assertEqual((record["outcome"], record["exit"], record["head"], record["dirty"]),
+                         ("passed", 0, None, None))
+
+    def test_ledger_git_probes_disable_optional_locks(self):
+        replies = [SimpleNamespace(stdout="head\n"), SimpleNamespace(stdout=b"dirty"), SimpleNamespace(stdout=b"diff")]
+        with patch.dict(os.environ, GIT_OPTIONAL_LOCKS="1"), \
+                patch.object(pi_phase.subprocess, "run", side_effect=replies) as probe:
+            self.assertEqual(pi_phase.git_state(self.root), ("head", hashlib.sha256(b"dirtydiff").hexdigest()))
+        self.assertEqual(probe.call_count, 3)
+        for call in probe.call_args_list:
+            self.assertEqual(call.args[0][:2], ["git", "--no-optional-locks"])
+            self.assertEqual(call.kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+
+    def test_wait_eta_probes_slots_under_shared_coordinator(self):
+        self.seed_ledger()
+        self.config.write_text('{"heavy_slots": 1}')
+        for name in ("coordinator.lock", "heavy-0.lock"):
+            (self.state / name).touch()
+        original_probe = pi_phase.readonly_busy
+        def probe(path):
+            with patch.object(pi_phase, "lock_file", wraps=pi_phase.lock_file) as lock:
+                held = pi_phase.claim(self.state, [[path]], time.monotonic() + 1, lambda: False)
+                if held:
+                    self.addCleanup(lambda: [os.close(fd) for _, fd in held])
+                self.assertIsNone(held, "ETA must protect its probes with the coordinator")
+                self.assertNotIn(path, [call.args[0] for call in lock.call_args_list])
+            with patch.object(pi_phase.fcntl, "flock", wraps=pi_phase.fcntl.flock) as flock:
+                result = original_probe(path)
+            self.assertEqual(flock.call_args.args[1], pi_phase.fcntl.LOCK_SH | pi_phase.fcntl.LOCK_NB)
+            return result
+        with patch.object(pi_phase, "readonly_busy", side_effect=probe) as busy, \
+                patch.object(pi_phase, "live_groups", return_value=set()), \
+                patch.object(sys, "stdout", new_callable=io.StringIO):
+            self.assertEqual(pi_phase.wait_eta(self.state, self.config, "build"), 0)
+        busy.assert_called_once()
+        held = pi_phase.claim(self.state, [[self.state / "heavy-0.lock"]], time.monotonic() + 1, lambda: False)
+        self.assertIsNotNone(held)
+        for _, fd in held:
+            self.addCleanup(os.close, fd)
+
+    def test_ledger_deleted_cwd_preserves_run_and_parse_exit_codes(self):
+        entry = ("import os,sys;sys.path.insert(0,sys.argv[1]);import pi_phase;"
+                 "os.chdir(sys.argv[4]);os.rmdir(sys.argv[4]);"
+                 "sys.exit(pi_phase.main(sys.argv[5:],state=sys.argv[2],configuration=sys.argv[3]))")
+        for timeout, expected in (("3", 125), ("nan", 125), ("invalid", 2)):
+            deleted = self.root / "deleted-cwd"
+            deleted.mkdir()
+            result = subprocess.run([sys.executable, "-B", "-c", entry, str(HERE), str(self.state),
+                                     str(self.config), str(deleted), "run", "--kind", "test", "--label", "deleted",
+                                     "--timeout", timeout, "--", sys.executable, "-c", "pass"],
+                                    capture_output=True, text=True, timeout=3)
+            self.assertEqual(result.returncode, expected, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            record = self.ledger_records()[-1]
+            self.assertIsNone(record["cwd"])
+            self.assertEqual(record["exit"], expected)
+        self.assertEqual(len(self.ledger_records()), 3)
+
+    def test_ledger_internal_claim_and_popen_errors_are_not_rejections(self):
+        for target in ("pi_phase.claim", "pi_phase.subprocess.Popen"):
+            with self.subTest(target=target):
+                child, marker = self.patched_phase("def broken(*args,**kwargs): raise OSError('internal failure')\n"
+                                                   + target + "=broken")
+                code, output = self.done(child)
+                self.assertEqual(code, 125, output)
+                self.assertNotIn("Traceback", output)
+                self.assertFalse(marker.exists())
+                record = self.ledger_records()[-1]
+                self.assertEqual(record["outcome"], "error")
+                self.assertIsNone(record["startedAt"])
+                self.assertFalse(list((self.state / "waiters").glob("*.json")))
+        with patch.object(sys, "stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(pi_phase.stats(self.state, 7, None, True), 0)
+        self.assertTrue(all(r["failures"] == 2 for r in json.loads(stdout.getvalue())["rows"]))
 
     def test_ledger_argparse_rejection_after_kind_known(self):
         result = subprocess.run(self.cli("run", "--kind", "test", "--label", "bad", "--timeout", "invalid"),

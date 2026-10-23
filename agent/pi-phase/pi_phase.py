@@ -53,7 +53,7 @@ def note(message):
 
 
 KINDS = ("build", "test", "integration", "ci")
-OUTCOMES = ("passed", "failed", "queue-timeout", "timeout", "cancelled", "rejected")
+OUTCOMES = ("passed", "failed", "queue-timeout", "timeout", "cancelled", "rejected", "error")
 
 
 def stack_name(value):
@@ -125,25 +125,28 @@ def utc_stamp():
 
 
 def git_state(cwd):
-    """Capture the code being admitted, without recording filenames or diffs."""
+    """Capture queued code without optional index writes, filenames or diffs in the ledger."""
     head = dirty = None
+    if cwd is None:
+        return head, dirty
+    environment = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
     try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True,
+        head = subprocess.run(["git", "--no-optional-locks", "rev-parse", "HEAD"], cwd=cwd, env=environment, capture_output=True,
                               text=True, check=True, timeout=2).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         pass
     deadline = time.monotonic() + 5
     try:
-        status = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
-                                cwd=cwd, capture_output=True, check=True, timeout=5).stdout
+        status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+                                cwd=cwd, env=environment, capture_output=True, check=True, timeout=5).stdout
         if not status:
             dirty = "clean"
         else:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return head, None
-            diff = subprocess.run(["git", "diff", "HEAD", "--binary"], cwd=cwd,
-                                  capture_output=True, check=True, timeout=remaining).stdout
+            diff = subprocess.run(["git", "--no-optional-locks", "diff", "HEAD", "--binary"], cwd=cwd,
+                                  env=environment, capture_output=True, check=True, timeout=remaining).stdout
             dirty = hashlib.sha256(status + diff).hexdigest()
     except (OSError, subprocess.SubprocessError):
         pass
@@ -188,23 +191,38 @@ def append_ledger(state, record):
 class PhaseLedger:
     def __init__(self, args):
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
+        try:
+            cwd = os.getcwd()
+        except OSError:
+            cwd = None
         self.record = dict(v=1, ts=None, session=os.environ.get("PI_SESSION_ID") or None,
                            lane=os.environ.get("PI_ORCH_ID") or os.environ.get("PI_LANE_ID") or None,
-                           cwd=os.getcwd(), kind=args.kind, label=args.label, priority=args.priority,
+                           cwd=cwd, kind=args.kind, label=args.label, priority=args.priority,
                            stack=getattr(args, "stack", None) or command_stack(command),
                            queuedAt=utc_stamp(), startedAt=None, endedAt=None, waitS=0, runS=0,
                            exit=None, outcome="rejected", head=None, dirty=None,
                            argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest())
         self.queued = time.monotonic()
         self.started = None
+        self.enqueued = False
+        self.snapshot_thread = None
+        self.git_result = (None, None)
 
     def enqueue(self):
         self.record["queuedAt"] = utc_stamp()
         self.queued = time.monotonic()
-        self.snapshot()
+        self.enqueued = True
+        self.snapshot_thread = threading.Thread(target=self.snapshot, daemon=True)
+        try:
+            self.snapshot_thread.start()
+        except RuntimeError:
+            self.snapshot_thread = None  # Thread exhaustion is only missing optional metadata.
 
     def snapshot(self):
-        self.record["head"], self.record["dirty"] = git_state(self.record["cwd"])
+        try:
+            self.git_result = git_state(self.record["cwd"])
+        except Exception:
+            pass  # Optional metadata must not interrupt the phase or print a traceback.
 
     def start(self):
         self.record["outcome"] = "failed"
@@ -224,6 +242,10 @@ class PhaseLedger:
             self.record["runS"] = max(0, time.monotonic() - self.started)
             if self.record["outcome"] == "failed" and code == 0:
                 self.record["outcome"] = "passed"
+        if self.snapshot_thread is not None:
+            self.snapshot_thread.join(timeout=1)
+            if not self.snapshot_thread.is_alive():
+                self.record["head"], self.record["dirty"] = self.git_result
         append_ledger(state, self.record)
 
 
@@ -318,7 +340,7 @@ def stats(state, days, kind, as_json, stack=None):
                          waitS={f"p{p}": percentile([r["waitS"] for r in entries], p) for p in (50, 90)},
                          runS={f"p{p}": percentile([r["runS"] for r in started], p) for p in (50, 90)},
                          queueTimeouts=sum(r["outcome"] == "queue-timeout" for r in entries),
-                         failures=sum(r["outcome"] in ("failed", "timeout") for r in entries)))
+                         failures=sum(r["outcome"] in ("failed", "timeout", "error") for r in entries)))
     if as_json:
         print(json.dumps(dict(days=days, skipped=skipped, rows=rows)))
     else:
@@ -339,7 +361,7 @@ def readonly_busy(path):
         return False
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             return True
         return False
@@ -363,17 +385,6 @@ def wait_eta(state, configuration, kind):
     now = time.time()
     # Probe once for orphan metadata as well as live locks, as admission does.
     live = live_groups(2) if state.exists() else set()
-    for path in state.glob("*.lock"):
-        resource = path.stem.split("-", 1)[0]
-        if resource not in free:
-            continue
-        data = metadata(path.with_suffix(".json"))
-        if not (readonly_busy(path) or data.get("unreadable") or live is None or data.get("pgid") in live):
-            continue
-        free[resource] -= 1
-        running.add(data.get("token", path.stem))
-        remaining = max(0, medians.get(data.get("kind"), median) - max(0, now - data.get("started", now)))
-        events.append((remaining, resource))
     try:
         coordinator = os.open(state / "coordinator.lock", os.O_RDONLY)
     except FileNotFoundError:
@@ -381,6 +392,17 @@ def wait_eta(state, configuration, kind):
     else:
         try:
             fcntl.flock(coordinator, fcntl.LOCK_SH)
+            for path in state.glob("*.lock"):
+                resource = path.stem.split("-", 1)[0]
+                if resource not in free:
+                    continue
+                data = metadata(path.with_suffix(".json"))
+                if not (readonly_busy(path) or data.get("unreadable") or live is None or data.get("pgid") in live):
+                    continue
+                free[resource] -= 1
+                running.add(data.get("token", path.stem))
+                remaining = max(0, medians.get(data.get("kind"), median) - max(0, now - data.get("started", now)))
+                events.append((remaining, resource))
             waiters = live_waiters(state, readonly=True)
         finally:
             os.close(coordinator)
@@ -1326,8 +1348,8 @@ def run(args, state, configuration, output=None):
             raise ValueError("VSTest preset requires a confirmed 'dotnet test' VSTest runner (not MTP)")
         if not 1 <= args.vstest_hang_minutes <= 60:
             raise ValueError("vstest-hang-minutes must be 1-60")
-        root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
-                              text=True, check=True).stdout.strip()
+        root = subprocess.run(["git", "--no-optional-locks", "rev-parse", "--show-toplevel"], capture_output=True,
+                              env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"), text=True, check=True).stdout.strip()
         results = Path(root) / ".ai-work" / "pi-phase" / uuid.uuid4().hex
         results.mkdir(parents=True)
         command += ["--blame-hang", "--blame-hang-timeout", f"{args.vstest_hang_minutes}m",
@@ -1363,8 +1385,6 @@ def run(args, state, configuration, output=None):
     fingerprint = test_fingerprint(os.getcwd(), command)
     admission_args = argparse.Namespace(**vars(args))
     try:
-        if ledger:
-            ledger.enqueue()
         config_notes = set()
         settings = config(configuration, notes=config_notes)
         options = settings.options
@@ -1391,6 +1411,8 @@ def run(args, state, configuration, output=None):
                 return 75
             if not registered:
                 registered, waiter_fd = register_waiter(state, admission_args, token)
+                if registered and ledger:
+                    ledger.enqueue()
                 if not registered:
                     time.sleep(min(TICK, max(0, deadline - time.monotonic())))
                     continue
@@ -1436,8 +1458,6 @@ def run(args, state, configuration, output=None):
             if ledger:
                 ledger.outcome("cancelled")
             return 128 + cancelled[0]
-        if ledger:
-            ledger.snapshot()
         child_env = None
         cap = msbuild_cap(options["msbuild_max_cpu"], heavy)
         if cap and args.kind in ("build", "test", "integration"):
@@ -1640,6 +1660,8 @@ def main(argv=None, *, state=None, configuration=None):
         return_code = exc.code
         raise
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        if ledger and ledger.enqueued and ledger.started is None:
+            ledger.outcome("error")
         print(f"pi-phase: {exc}", file=sys.stderr, flush=True)
     finally:
         if output is not None:
