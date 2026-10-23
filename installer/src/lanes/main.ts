@@ -15,9 +15,10 @@ import { status } from "./commands/status.ts";
 export const HELP = `Usage: lanes [--dir root] <command> [options]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
+    [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
   start <ID>|coordinator [--terminal backend]
-  send <TO> <topic> [file|-] [-m text] [--from ID]
-  status
+  send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
+  status [--all]
   messages prune [--dry-run] [--json]
   idle-check [--minutes n]
   nudge <ID|coordinator> <text> [--terminal backend]
@@ -28,7 +29,7 @@ Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
-const OPTIONS: Record<string, string[]> = { init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"], add: ["repo", "issue", "goal", "group", "branch", "base", "path"], start: ["terminal"], send: ["m", "from"], status: [], messages: ["dry-run", "json"], "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"], close: ["reassign-to", "reason", "from", "quit"] };
+const OPTIONS: Record<string, string[]> = { init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"], add: ["repo", "issue", "goal", "group", "branch", "base", "path", "orchestrator", "orchestrator-id", "no-orchestrator"], start: ["terminal"], send: ["m", "from", "direct"], status: ["all"], messages: ["dry-run", "json"], "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"], close: ["reassign-to", "reason", "from", "quit"] };
 export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
   let command = "";
   try {
@@ -40,7 +41,7 @@ export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
       if (token.startsWith("--") || token === "-m") {
         const equals = token.startsWith("--") ? token.indexOf("=") : -1;
         const key = token === "-m" ? "m" : token.slice(2, equals < 0 ? undefined : equals);
-        if (["preapprove-mcp", "new", "ack", "quit", "dry-run", "json"].includes(key)) {
+        if (["preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all", "no-orchestrator"].includes(key)) {
           if (equals >= 0) throw new UsageError(`unknown option ${token}`);
           opts[key] = "true"; continue;
         }
@@ -68,6 +69,6 @@ export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
     if (command === "resume-check") return await resumeCheck(c, root, ctx);
     if (command === "green-prs") return await greenPrs(opts, c, root, ctx);
     if (command === "close") return await close(positional[0], opts, c, root, ctx);
-    return await status(c, root, ctx);
+    return await status(c, root, ctx, Boolean(opts.all));
   } catch (e) { ctx.err((e as Error).message); return e instanceof UsageError || ["idle-check", "nudge", "resume-check", "green-prs", "close"].includes(command) ? 2 : 1; }
 }

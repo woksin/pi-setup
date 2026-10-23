@@ -10,8 +10,11 @@ export function messageName(from: string, to: string, topic: string, at: Date, c
 }
 
 export function parseMessageName(name: string): { from: string; to: string[]; topic: string } | undefined {
+  name = name.replace(/^\d{8}-\d{6}-/, "");
+  const timestamped = new RegExp(`^(${ID})-to-(${ID})-([a-z0-9][a-z0-9-]*)\\.md$`).exec(name);
   const match = new RegExp(`^(${ID})-to-(${ID})-([a-z0-9][a-z0-9-]*?)-[0-9]{4}(?:-[0-9]+)?\\.md$`).exec(name);
   if (match) return { from: match[1], to: [match[2]], topic: match[3] };
+  if (timestamped) return { from: timestamped[1], to: [timestamped[2]], topic: timestamped[3] };
   const legacy = new RegExp(`^(${ID})-from-(${ID})-([a-z0-9].*)\\.md$`).exec(name);
   if (legacy) return { from: legacy[2], to: [legacy[1]], topic: legacy[3] };
   // Broadcast/group files also use the recipient-prefix convention.

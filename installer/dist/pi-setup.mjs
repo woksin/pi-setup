@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: b95b5f229f1e9e4b3ccaf67032b67150a1146479183fe14af6e652bac04ee245
+// pi-setup-source-sha256: a0cd400c04f1a7657aa797e92c7f8109b602139458576ecf7e3fa3f5a6973408
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -413,8 +413,11 @@ function messageName(from, to, topic, at, collision = 1) {
   return `${from}-to-${to}-${topic}-${hhmm}${collision > 1 ? `-${collision}` : ""}.md`;
 }
 function parseMessageName(name) {
+  name = name.replace(/^\d{8}-\d{6}-/, "");
+  const timestamped = new RegExp(`^(${ID})-to-(${ID})-([a-z0-9][a-z0-9-]*)\\.md$`).exec(name);
   const match = new RegExp(`^(${ID})-to-(${ID})-([a-z0-9][a-z0-9-]*?)-[0-9]{4}(?:-[0-9]+)?\\.md$`).exec(name);
   if (match) return { from: match[1], to: [match[2]], topic: match[3] };
+  if (timestamped) return { from: timestamped[1], to: [timestamped[2]], topic: timestamped[3] };
   const legacy = new RegExp(`^(${ID})-from-(${ID})-([a-z0-9].*)\\.md$`).exec(name);
   if (legacy) return { from: legacy[2], to: [legacy[1]], topic: legacy[3] };
   const prefix = new RegExp(`^(${ID})-([a-z0-9].*)\\.md$`).exec(name);
@@ -526,6 +529,26 @@ function validate(value, root = process.cwd(), home = homedir3()) {
     require2(lane.group === null || typeof lane.group === "string" && validId(lane.group) && !["ALL", c2.messages.broadcast].includes(lane.group), `${key}.group`);
     require2(lane.issue === void 0 || Number.isInteger(lane.issue) && lane.issue > 0, `${key}.issue`);
     require2(lane.goal === void 0 || text3(lane.goal), `${key}.goal`);
+    require2(lane.role === void 0 || ["lane", "repo-orch", "sub-orch"].includes(lane.role), `${key}.role`);
+    require2(lane.retired === void 0 || typeof lane.retired === "boolean", `${key}.retired`);
+    require2(lane.stateFile === void 0 || text3(lane.stateFile), `${key}.stateFile`);
+    require2(lane.parent === void 0 || lane.parent === c2.coordinator.id || c2.lanes.some((l2) => l2.id === lane.parent && !l2.retired), `${key}.parent`);
+    require2(lane.role !== "repo-orch" || lane.parent === void 0 || lane.parent === c2.coordinator.id, `${key}.parent`);
+  }
+  const active = c2.lanes.filter((l2) => !l2.retired);
+  require2(new Set(active.map((l2) => l2.worktree)).size === active.length, "duplicate worktree");
+  const orchs = active.filter((l2) => l2.role === "repo-orch");
+  require2(new Set(orchs.map((l2) => l2.repo)).size === orchs.length, "duplicate repo-orch");
+  for (const lane of active) {
+    const seen = /* @__PURE__ */ new Set([lane.id]);
+    let parent = effectiveParent(lane, c2);
+    while (parent !== c2.coordinator.id) {
+      require2(!seen.has(parent), "parent cycle");
+      seen.add(parent);
+      const next = c2.lanes.find((l2) => l2.id === parent);
+      require2(next, "parent");
+      parent = effectiveParent(next, c2);
+    }
   }
 }
 function expand(value, c2, root, home, base = root) {
@@ -587,6 +610,21 @@ function saveConfig(root, c2) {
   writeFileSync(tmp, `${JSON.stringify(c2, null, 2)}
 `, { flag: "wx" });
   renameSync(tmp, join5(root, "lanes.json"));
+}
+function effectiveParent(lane, c2) {
+  return lane.parent ?? (lane.role === "repo-orch" ? c2.coordinator.id : c2.lanes.find((l2) => !l2.retired && l2.role === "repo-orch" && l2.repo === lane.repo)?.id ?? c2.coordinator.id);
+}
+function laneTree(c2, all = false) {
+  const lanes = c2.lanes.filter((l2) => all || !l2.retired);
+  const rows = [];
+  const visit = (parent, depth) => {
+    for (const lane of lanes.filter((l2) => effectiveParent(l2, c2) === parent)) {
+      rows.push({ lane, depth });
+      visit(lane.id, depth + 1);
+    }
+  };
+  visit(c2.coordinator.id, 0);
+  return rows;
 }
 var BACKENDS, UsageError;
 var init_config = __esm({
@@ -781,34 +819,132 @@ var init_init = __esm({
   }
 });
 
-// src/lanes/preapprove.ts
-import { existsSync as existsSync6, readFileSync as readFileSync6 } from "node:fs";
+// src/lanes/backend.ts
+import { mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync6, renameSync as renameSync2, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { join as join9 } from "node:path";
+function addressed(m2, id) {
+  return m2.to.some((to) => to === id || `-${to}-`.includes(`-${id}-`));
+}
+function backendFor(config, ctx, root) {
+  return new FileBackend(expand(config.messages.dir, config, root, ctx.home), ctx.now, config.messages.broadcast);
+}
+var FileBackend;
+var init_backend = __esm({
+  "src/lanes/backend.ts"() {
+    init_config();
+    init_names();
+    FileBackend = class {
+      name = "file";
+      dir;
+      now;
+      broadcast;
+      constructor(dir, now, broadcast = "ALL") {
+        this.dir = dir;
+        this.now = now;
+        this.broadcast = broadcast;
+      }
+      async send(m2) {
+        if (!validId(m2.from) || !validId(m2.to) || !validTopic(m2.topic)) throw new Error("invalid message name");
+        mkdirSync2(this.dir, { recursive: true });
+        const at = this.now();
+        for (let i2 = 1; ; i2++) {
+          const name = messageName(m2.from, m2.to, m2.topic, at, i2);
+          const path2 = join9(this.dir, name);
+          try {
+            writeFileSync3(path2, m2.body, { flag: "wx" });
+            return { name, from: m2.from, to: [m2.to], topic: m2.topic, at, path: path2 };
+          } catch (e) {
+            if (e.code !== "EEXIST") throw e;
+          }
+        }
+      }
+      async list(filter = {}) {
+        let names;
+        try {
+          names = readdirSync2(this.dir);
+        } catch (e) {
+          if (e.code === "ENOENT") return [];
+          throw e;
+        }
+        const messages2 = [];
+        for (const name of names) {
+          const parsed = parseMessageName(name);
+          if (!parsed) continue;
+          const stat2 = statSync3(join9(this.dir, name));
+          if (!stat2.isFile()) continue;
+          const ref = { name, ...parsed, at: stat2.mtime };
+          if (filter.from !== void 0 && ref.from !== filter.from) continue;
+          if (filter.to !== void 0 && !addressed(ref, filter.to)) continue;
+          messages2.push(ref);
+        }
+        return messages2.sort((a2, b) => b.at.getTime() - a2.at.getTime() || b.name.localeCompare(a2.name)).slice(0, filter.limit);
+      }
+      async inbox(lane, opts = {}) {
+        const recipients = [lane, "ALL", this.broadcast, ...opts.groups || [], ...opts.aliases || []];
+        return (await this.list()).filter((m2) => ![lane, ...opts.aliases || []].includes(m2.from) && recipients.some((id) => addressed(m2, id)));
+      }
+      async setStatus(lane, line) {
+        if (!validId(lane)) throw new Error("invalid lane id");
+        const dir = join9(this.dir, "status");
+        mkdirSync2(dir, { recursive: true });
+        const tmp = join9(dir, `.${lane}-${randomUUID2()}.tmp`);
+        writeFileSync3(tmp, `${line}
+`, { flag: "wx" });
+        renameSync2(tmp, join9(dir, `${lane}.status`));
+      }
+      async unread(lane, opts = {}) {
+        if (!validId(lane)) throw new Error("invalid lane id");
+        let since;
+        try {
+          since = statSync3(join9(this.dir, `${lane}-inbox.marker`)).mtimeMs;
+        } catch (e) {
+          if (e.code === "ENOENT") return void 0;
+          throw e;
+        }
+        return (await this.inbox(lane, opts)).filter((m2) => m2.at.getTime() > since);
+      }
+      async status(lane) {
+        if (!validId(lane)) throw new Error("invalid lane id");
+        try {
+          return readFileSync6(join9(this.dir, "status", `${lane}.status`), "utf8").split(/\r?\n/)[0];
+        } catch (e) {
+          if (e.code === "ENOENT") return void 0;
+          throw e;
+        }
+      }
+    };
+  }
+});
+
+// src/lanes/preapprove.ts
+import { existsSync as existsSync6, readFileSync as readFileSync7 } from "node:fs";
+import { join as join10 } from "node:path";
 async function preapprove(ctx, cwd, enabled) {
   if (!enabled) {
     ctx.out("MCP preapproval is off; enable with lanes init --preapprove-mcp for a new folder, or set launch.preapproveMcp to true in lanes.json.");
     return;
   }
-  const files2 = [".mcp.json", ".pi/mcp.json"].filter((f) => existsSync6(join9(cwd, f)));
+  const files2 = [".mcp.json", ".pi/mcp.json"].filter((f) => existsSync6(join10(cwd, f)));
   if (!files2.length) return;
   const skip = (reason2) => ctx.err(`MCP preapproval skipped: ${reason2}; pi will ask once per server when the lane starts.`);
   let reason = "adapter not found";
   try {
-    const adapter = join9(ctx.piAgentDir, "npm/node_modules/pi-mcp-adapter");
-    const pkg = JSON.parse(readFileSync6(join9(adapter, "package.json"), "utf8"));
+    const adapter = join10(ctx.piAgentDir, "npm/node_modules/pi-mcp-adapter");
+    const pkg = JSON.parse(readFileSync7(join10(adapter, "package.json"), "utf8"));
     if (!SUPPORTED_MAJORS.includes(Number(String(pkg.version).split(".")[0]))) {
       reason = `adapter ${pkg.version} not supported (supports ${SUPPORTED_MAJORS.join(", ")}.x)`;
       throw new Error(reason);
     }
     reason = "adapter API changed";
-    const mod = await ctx.loadModule(join9(adapter, "dist/project-server-trust.js"));
+    const mod = await ctx.loadModule(join10(adapter, "dist/project-server-trust.js"));
     if (typeof mod.approveProjectServer !== "function" || typeof mod.hashProjectServerDefinition !== "function") throw new Error(reason);
     for (const file of files2) {
       let servers;
       try {
-        servers = JSON.parse(readFileSync6(join9(cwd, file), "utf8")).mcpServers ?? {};
+        servers = JSON.parse(readFileSync7(join10(cwd, file), "utf8")).mcpServers ?? {};
       } catch {
-        skip(`invalid ${file} (${join9(cwd, file)})`);
+        skip(`invalid ${file} (${join10(cwd, file)})`);
         continue;
       }
       for (const [name, def] of Object.entries(servers)) {
@@ -829,8 +965,8 @@ var init_preapprove = __esm({
 });
 
 // src/lanes/commands/add.ts
-import { existsSync as existsSync7, mkdirSync as mkdirSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname4, join as join10, resolve as resolve5 } from "node:path";
+import { existsSync as existsSync7, mkdirSync as mkdirSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname4, join as join11, resolve as resolve5 } from "node:path";
 async function add(id, opts, c2, root, ctx) {
   if (!validId(id) || ["ALL", c2.messages.broadcast, c2.coordinator.id].includes(id)) throw new UsageError("invalid lane id");
   if (c2.lanes.some((l2) => l2.id === id)) throw new Error(`lane ${id} already exists`);
@@ -844,15 +980,49 @@ async function add(id, opts, c2, root, ctx) {
   const branch = opts.branch || (opts.issue ? `${lower}-issue-${Number(opts.issue)}` : opts.goal ? `${lower}-${slug(opts.goal)}` : worktree);
   const lane = { id, repo, ...opts.issue ? { issue: Number(opts.issue) } : {}, ...opts.goal ? { goal: opts.goal } : {}, group: opts.group || null, worktree, branch, prompt: `prompts/${id}.md` };
   validate({ ...c2, lanes: [...c2.lanes, lane] });
+  const siblings = c2.lanes.filter((l2) => !l2.retired && l2.repo === repo);
+  let orchestrator = siblings.find((l2) => l2.role === "repo-orch");
+  let candidate;
+  if (opts["orchestrator"] && opts["no-orchestrator"]) throw new UsageError("choose --orchestrator or --no-orchestrator");
+  if (opts.orchestrator) {
+    orchestrator = siblings.find((l2) => l2.id === opts.orchestrator);
+    if (!orchestrator) throw new UsageError("--orchestrator must name an existing lane in the repository");
+    if (siblings.some((l2) => l2.role === "repo-orch" && l2.id !== orchestrator.id)) throw new UsageError("repository already has a repo-orch");
+  } else if (!orchestrator && siblings.length && !opts["no-orchestrator"]) {
+    const orchId = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
+    if (!validId(orchId) || [id, c2.coordinator.id, "ALL", c2.messages.broadcast, ...c2.lanes.map((l2) => l2.id)].includes(orchId)) throw new Error("repo-orch ID collision or invalid ID; choose --orchestrator-id");
+    const lower2 = orchId.toLowerCase();
+    candidate = { id: orchId, repo, group: null, role: "repo-orch", parent: c2.coordinator.id, worktree: lower2, branch: `${lower2}-candidate`, prompt: `prompts/${orchId}.md` };
+    orchestrator = candidate;
+  }
+  if (orchestrator) lane.parent = orchestrator.id;
+  const code = await createWorktree(lane, opts, c2, root, ctx);
+  if (code !== 0) return code;
+  if (candidate && await createWorktree(candidate, opts, c2, root, ctx) !== 0) return 1;
+  if (orchestrator) {
+    orchestrator.role = "repo-orch";
+    orchestrator.parent = c2.coordinator.id;
+    for (const sibling of c2.lanes.filter((l2) => !l2.retired && l2.repo === repo && l2.id !== orchestrator.id)) sibling.parent = orchestrator.id;
+    saveConfig(root, c2);
+    for (const sibling of siblings.filter((l2) => l2.id !== orchestrator.id)) await backendFor(c2, ctx, root).send({ from: c2.coordinator.id, to: sibling.id, topic: "repo-orch-assigned", body: `Report to ${orchestrator.id} from now on.` });
+    ctx.out(`next: lanes start ${orchestrator.id}`);
+  } else if (siblings.length) ctx.err(`warning: ${siblings.length + 1} lanes, no repo-orch`);
+  saveConfig(root, c2);
+  ctx.out(`next: lanes start ${id}`);
+  return 0;
+}
+async function createWorktree(lane, opts, c2, root, ctx) {
+  const { id, repo, worktree, branch } = lane;
+  const [owner, name] = repo.split("/");
   const repos = expand(c2.reposRoot, c2, root, ctx.home);
-  const candidates = [opts.path ? resolve5(ctx.cwd, opts.path) : void 0, c2.repos[repo] ? expand(c2.repos[repo], c2, root, ctx.home) : void 0, join10(repos, name), join10(repos, owner, name)].filter((p) => Boolean(p));
+  const candidates = [opts.path ? resolve5(ctx.cwd, opts.path) : void 0, c2.repos[repo] ? expand(c2.repos[repo], c2, root, ctx.home) : void 0, join11(repos, name), join11(repos, owner, name)].filter((p) => Boolean(p));
   const git2 = (clone2, args, timeoutMs = 1e4) => ctx.run("git", ["-C", clone2, ...args], { timeoutMs });
   let clone;
   for (const p of candidates) if ((await git2(p, ["rev-parse", "--git-dir"])).code === 0) {
     clone = p;
     break;
   }
-  if (!clone) throw new Error(`clone it first: gh repo clone ${repo} ${join10(repos, name)}`);
+  if (!clone) throw new Error(`clone it first: gh repo clone ${repo} ${join11(repos, name)}`);
   const remote = await git2(clone, ["remote", "get-url", "origin"]);
   if (!remote.stdout.trim().endsWith(repo) && !remote.stdout.trim().endsWith(`${repo}.git`)) ctx.err(`warning: origin does not match ${repo}`);
   const base = opts.base || c2.baseBranch;
@@ -860,7 +1030,7 @@ async function add(id, opts, c2, root, ctx) {
   const ref = await git2(clone, ["rev-parse", "--verify", `${base}^{commit}`]);
   if (ref.code !== 0) throw new Error(`base ${base} does not resolve`);
   if (fetch.code !== 0) ctx.err(`warning: fetch origin failed; using local ${base}`);
-  const wt = join10(expand(c2.worktreesDir, c2, root, ctx.home), worktree);
+  const wt = join11(expand(c2.worktreesDir, c2, root, ctx.home), worktree);
   if (existsSync7(wt)) throw new Error(`worktree already exists: ${wt}`);
   if ((await git2(clone, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).code === 0) throw new Error(`branch already exists: ${branch}`);
   const created = await git2(clone, ["worktree", "add", "-b", branch, wt, base], 12e4);
@@ -869,23 +1039,22 @@ async function add(id, opts, c2, root, ctx) {
     const lock = await git2(clone, ["worktree", "lock", "--reason", `lanes ${id}`, wt]);
     if (lock.code !== 0) throw new Error(`git worktree lock failed: ${lock.stderr.trim()}`);
     const prompt = expand(lane.prompt, c2, root, ctx.home);
-    mkdirSync2(dirname4(prompt), { recursive: true });
-    writeFileSync3(prompt, renderTemplate(readTemplate(ctx, "lane.md"), { ...templateVars(c2, ctx, root), id, repo, issue: lane.issue ?? "none", goal: lane.goal || "none", group: lane.group || "none", worktree: wt, branch, base }), { flag: "wx" });
+    mkdirSync3(dirname4(prompt), { recursive: true });
+    writeFileSync4(prompt, renderTemplate(readTemplate(ctx, lane.role === "repo-orch" ? "repo-orchestrator.md" : "lane.md"), { ...templateVars(c2, ctx, root), id, repo, parent: effectiveParent(lane, c2), parent_sh: shellQuote(effectiveParent(lane, c2)), lanes: c2.lanes.filter((l2) => l2.repo === repo).map((l2) => l2.id).join(", "), issue: lane.issue ?? "none", goal: lane.goal || "none", group: lane.group || "none", worktree: wt, branch, base }), { flag: "wx" });
     c2.lanes.push(lane);
-    saveConfig(root, c2);
     await preapprove(ctx, wt, c2.launch.preapproveMcp);
   } catch (e) {
     ctx.err(e.message);
     ctx.err(`undo: git -C ${shellQuote(clone)} worktree unlock ${shellQuote(wt)} && git -C ${shellQuote(clone)} worktree remove ${shellQuote(wt)} && git -C ${shellQuote(clone)} branch -D ${shellQuote(branch)}`);
     return 1;
   }
-  ctx.out(`next: lanes start ${id}`);
   return 0;
 }
 var init_add = __esm({
   "src/lanes/commands/add.ts"() {
     init_config();
     init_names();
+    init_backend();
     init_preapprove();
     init_terminal();
     init_templates();
@@ -962,19 +1131,19 @@ var init_processes = __esm({
 });
 
 // src/lanes/sessions.ts
-import { readdirSync as readdirSync2, statSync as statSync3 } from "node:fs";
-import { join as join11 } from "node:path";
+import { readdirSync as readdirSync3, statSync as statSync4 } from "node:fs";
+import { join as join12 } from "node:path";
 function laneTarget(id, c2, root, ctx) {
   const coordinator = id === "coordinator" || id === c2.coordinator.id;
   const lane = c2.lanes.find((l2) => l2.id === id);
   if (!coordinator && !lane) throw new Error(`lane not found: ${id}`);
-  const cwd = coordinator ? expand(c2.coordinator.cwd, c2, root, ctx.home) : join11(expand(c2.worktreesDir, c2, root, ctx.home), lane.worktree);
+  const cwd = coordinator ? expand(c2.coordinator.cwd, c2, root, ctx.home) : join12(expand(c2.worktreesDir, c2, root, ctx.home), lane.worktree);
   return { id: coordinator ? c2.coordinator.id : id, cwd, coordinator, lane };
 }
 function idleMinutes(cwd, ctx) {
   try {
     const dir = sessionDirFor(cwd, ctx.piAgentDir);
-    const times = readdirSync2(dir).map((n3) => statSync3(join11(dir, n3))).filter((s) => s.isFile()).map((s) => s.mtimeMs);
+    const times = readdirSync3(dir).map((n3) => statSync4(join12(dir, n3))).filter((s) => s.isFile()).map((s) => s.mtimeMs);
     return times.length ? Math.max(0, Math.floor((ctx.now().getTime() - Math.max(...times)) / 6e4)) : void 0;
   } catch {
     return void 0;
@@ -993,104 +1162,6 @@ var init_sessions = __esm({
     init_config();
     init_names();
     init_processes();
-  }
-});
-
-// src/lanes/backend.ts
-import { mkdirSync as mkdirSync3, readdirSync as readdirSync3, readFileSync as readFileSync7, renameSync as renameSync2, statSync as statSync4, writeFileSync as writeFileSync4 } from "node:fs";
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { join as join12 } from "node:path";
-function addressed(m2, id) {
-  return m2.to.some((to) => to === id || `-${to}-`.includes(`-${id}-`));
-}
-function backendFor(config, ctx, root) {
-  return new FileBackend(expand(config.messages.dir, config, root, ctx.home), ctx.now, config.messages.broadcast);
-}
-var FileBackend;
-var init_backend = __esm({
-  "src/lanes/backend.ts"() {
-    init_config();
-    init_names();
-    FileBackend = class {
-      name = "file";
-      dir;
-      now;
-      broadcast;
-      constructor(dir, now, broadcast = "ALL") {
-        this.dir = dir;
-        this.now = now;
-        this.broadcast = broadcast;
-      }
-      async send(m2) {
-        if (!validId(m2.from) || !validId(m2.to) || !validTopic(m2.topic)) throw new Error("invalid message name");
-        mkdirSync3(this.dir, { recursive: true });
-        const at = this.now();
-        for (let i2 = 1; ; i2++) {
-          const name = messageName(m2.from, m2.to, m2.topic, at, i2);
-          const path2 = join12(this.dir, name);
-          try {
-            writeFileSync4(path2, m2.body, { flag: "wx" });
-            return { name, from: m2.from, to: [m2.to], topic: m2.topic, at, path: path2 };
-          } catch (e) {
-            if (e.code !== "EEXIST") throw e;
-          }
-        }
-      }
-      async list(filter = {}) {
-        let names;
-        try {
-          names = readdirSync3(this.dir);
-        } catch (e) {
-          if (e.code === "ENOENT") return [];
-          throw e;
-        }
-        const messages2 = [];
-        for (const name of names) {
-          const parsed = parseMessageName(name);
-          if (!parsed) continue;
-          const stat2 = statSync4(join12(this.dir, name));
-          if (!stat2.isFile()) continue;
-          const ref = { name, ...parsed, at: stat2.mtime };
-          if (filter.from !== void 0 && ref.from !== filter.from) continue;
-          if (filter.to !== void 0 && !addressed(ref, filter.to)) continue;
-          messages2.push(ref);
-        }
-        return messages2.sort((a2, b) => b.at.getTime() - a2.at.getTime() || b.name.localeCompare(a2.name)).slice(0, filter.limit);
-      }
-      async inbox(lane, opts = {}) {
-        const recipients = [lane, "ALL", this.broadcast, ...opts.groups || [], ...opts.aliases || []];
-        return (await this.list()).filter((m2) => ![lane, ...opts.aliases || []].includes(m2.from) && recipients.some((id) => addressed(m2, id)));
-      }
-      async setStatus(lane, line) {
-        if (!validId(lane)) throw new Error("invalid lane id");
-        const dir = join12(this.dir, "status");
-        mkdirSync3(dir, { recursive: true });
-        const tmp = join12(dir, `.${lane}-${randomUUID2()}.tmp`);
-        writeFileSync4(tmp, `${line}
-`, { flag: "wx" });
-        renameSync2(tmp, join12(dir, `${lane}.status`));
-      }
-      async unread(lane, opts = {}) {
-        if (!validId(lane)) throw new Error("invalid lane id");
-        let since;
-        try {
-          since = statSync4(join12(this.dir, `${lane}-inbox.marker`)).mtimeMs;
-        } catch (e) {
-          if (e.code === "ENOENT") return void 0;
-          throw e;
-        }
-        return (await this.inbox(lane, opts)).filter((m2) => m2.at.getTime() > since);
-      }
-      async status(lane) {
-        if (!validId(lane)) throw new Error("invalid lane id");
-        try {
-          return readFileSync7(join12(this.dir, "status", `${lane}.status`), "utf8").split(/\r?\n/)[0];
-        } catch (e) {
-          if (e.code === "ENOENT") return void 0;
-          throw e;
-        }
-      }
-    };
   }
 });
 
@@ -1252,7 +1323,7 @@ var init_start = __esm({
 import { readFileSync as readFileSync8 } from "node:fs";
 import { resolve as resolve6 } from "node:path";
 async function send(args, opts, c2, root, ctx) {
-  const [to, topic, file] = args;
+  let [to, topic, file] = args;
   const from = opts.from || ctx.env.PI_ORCH_ID;
   if (!from) throw new UsageError("set --from or PI_ORCH_ID");
   if (!validId(from)) throw new UsageError("invalid from");
@@ -1263,6 +1334,14 @@ async function send(args, opts, c2, root, ctx) {
   if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
   const body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync8(resolve6(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
   if (!body.trim()) throw new UsageError("empty message body");
+  const sender = c2.lanes.find((l2) => l2.id === from && !l2.retired);
+  if (!opts.direct && to === c2.coordinator.id && sender && sender.role !== "repo-orch") {
+    const parent = effectiveParent(sender, c2);
+    if (parent !== to) {
+      to = parent;
+      ctx.err(`routed to ${parent} (repo orchestrator of ${sender.repo}); --direct to bypass`);
+    }
+  }
   ctx.out((await backendFor(c2, ctx, root).send({ from, to, topic, body })).path);
   return 0;
 }
@@ -1606,11 +1685,11 @@ var init_close = __esm({
 // src/lanes/commands/status.ts
 import { existsSync as existsSync11 } from "node:fs";
 import { join as join17 } from "node:path";
-async function status(c2, root, ctx) {
+async function status(c2, root, ctx, all = false) {
   const backend = backendFor(c2, ctx, root);
   const processes = await runningPi(ctx);
-  const rows = [["LANE", "REPO", "BRANCH", "RUN", "IDLE", "STATUS", "LAST MESSAGE"]];
-  const lanes = [{ id: c2.coordinator.id, repo: "-", branch: "-", group: null, cwd: expand(c2.coordinator.cwd, c2, root, ctx.home) }, ...c2.lanes.map((l2) => ({ ...l2, cwd: join17(expand(c2.worktreesDir, c2, root, ctx.home), l2.worktree) }))];
+  const rows = [["LANE", "ROLE", "PARENT", "REPO", "BRANCH", "RUN", "IDLE", "STATUS", "LAST MESSAGE"]];
+  const lanes = [{ id: c2.coordinator.id, repo: "-", branch: "-", group: null, role: "coord", parent: "-", label: c2.coordinator.id, cwd: expand(c2.coordinator.cwd, c2, root, ctx.home) }, ...laneTree(c2, all).map(({ lane: l2, depth }) => ({ ...l2, role: l2.role || "lane", parent: effectiveParent(l2, c2), label: "  ".repeat(depth) + l2.id, cwd: join17(expand(c2.worktreesDir, c2, root, ctx.home), l2.worktree) }))];
   for (const lane of lanes) {
     let pid = "missing";
     if (existsSync11(lane.cwd)) {
@@ -1621,7 +1700,11 @@ async function status(c2, root, ctx) {
     }
     const messages2 = [...await backend.inbox(lane.id, { groups: lane.group ? [lane.group] : [] }), ...await backend.list({ from: lane.id, limit: 1 })].sort((a2, b) => b.at.getTime() - a2.at.getTime());
     const last = messages2[0];
-    rows.push([lane.id, lane.repo, lane.branch, pid, String(idleMinutes(lane.cwd, ctx) ?? "-"), await backend.status(lane.id) || "-", last ? `${last.name} (${Math.max(0, Math.floor((ctx.now().getTime() - last.at.getTime()) / 6e4))}m)` : "-"]);
+    rows.push([lane.label, lane.role, lane.parent, lane.repo, lane.branch, pid, String(idleMinutes(lane.cwd, ctx) ?? "-"), await backend.status(lane.id) || "-", last ? `${last.name} (${Math.max(0, Math.floor((ctx.now().getTime() - last.at.getTime()) / 6e4))}m)` : "-"]);
+  }
+  for (const repo of new Set(c2.lanes.filter((l2) => !l2.retired).map((l2) => l2.repo))) {
+    const lanes2 = c2.lanes.filter((l2) => !l2.retired && l2.repo === repo);
+    if (lanes2.length > 1 && !lanes2.some((l2) => l2.role === "repo-orch")) ctx.err(`warning: ${repo}: ${lanes2.length} lanes, no repo-orch`);
   }
   const widths = rows[0].map((_, i2) => Math.max(...rows.map((r2) => r2[i2].length)));
   ctx.out(rows.map((r2) => r2.map((s, i2) => i2 === r2.length - 1 ? s : s.padEnd(widths[i2])).join("  ")).join("\n"));
@@ -1655,7 +1738,7 @@ async function main(argv, ctx) {
       if (token.startsWith("--") || token === "-m") {
         const equals = token.startsWith("--") ? token.indexOf("=") : -1;
         const key = token === "-m" ? "m" : token.slice(2, equals < 0 ? void 0 : equals);
-        if (["preapprove-mcp", "new", "ack", "quit", "dry-run", "json"].includes(key)) {
+        if (["preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all", "no-orchestrator"].includes(key)) {
           if (equals >= 0) throw new UsageError(`unknown option ${token}`);
           opts[key] = "true";
           continue;
@@ -1685,7 +1768,7 @@ async function main(argv, ctx) {
     if (command === "resume-check") return await resumeCheck(c2, root, ctx);
     if (command === "green-prs") return await greenPrs(opts, c2, root, ctx);
     if (command === "close") return await close(positional[0], opts, c2, root, ctx);
-    return await status(c2, root, ctx);
+    return await status(c2, root, ctx, Boolean(opts.all));
   } catch (e) {
     ctx.err(e.message);
     return e instanceof UsageError || ["idle-check", "nudge", "resume-check", "green-prs", "close"].includes(command) ? 2 : 1;
@@ -1709,9 +1792,10 @@ var init_main = __esm({
     HELP = `Usage: lanes [--dir root] <command> [options]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
+    [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
   start <ID>|coordinator [--terminal backend]
-  send <TO> <topic> [file|-] [-m text] [--from ID]
-  status
+  send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
+  status [--all]
   messages prune [--dry-run] [--json]
   idle-check [--minutes n]
   nudge <ID|coordinator> <text> [--terminal backend]
@@ -1722,7 +1806,7 @@ Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
-    OPTIONS = { init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"], add: ["repo", "issue", "goal", "group", "branch", "base", "path"], start: ["terminal"], send: ["m", "from"], status: [], messages: ["dry-run", "json"], "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"], close: ["reassign-to", "reason", "from", "quit"] };
+    OPTIONS = { init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"], add: ["repo", "issue", "goal", "group", "branch", "base", "path", "orchestrator", "orchestrator-id", "no-orchestrator"], start: ["terminal"], send: ["m", "from", "direct"], status: ["all"], messages: ["dry-run", "json"], "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"], close: ["reassign-to", "reason", "from", "quit"] };
   }
 });
 
