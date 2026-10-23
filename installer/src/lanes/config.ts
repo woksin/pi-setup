@@ -97,7 +97,7 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
     require(lane.role === undefined || ["lane", "repo-orch", "sub-orch"].includes(lane.role), `${key}.role`);
     require(lane.retired === undefined || typeof lane.retired === "boolean", `${key}.retired`);
     require(lane.stateFile === undefined || text(lane.stateFile), `${key}.stateFile`);
-    require(lane.parent === undefined || lane.parent === c.coordinator.id || c.lanes.some(l => l.id === lane.parent && !l.retired), `${key}.parent`);
+    require(lane.parent === undefined || lane.parent === c.coordinator.id || c.lanes.some(l => l.id === lane.parent && (lane.retired || !l.retired)), `${key}.parent`);
     require(lane.role !== "repo-orch" || lane.parent === undefined || lane.parent === c.coordinator.id, `${key}.parent`);
   }
   const active = c.lanes.filter(l => !l.retired);

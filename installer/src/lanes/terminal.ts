@@ -19,12 +19,13 @@ export function launchCommand(c: Config, root: string, cwd: string, id: string, 
 }
 interface Launch { id: string; cwd: string; command: string }
 export interface TerminalBackend {
+  quit(ctx: LanesCtx, tty: string, beforeSend: () => Promise<void>): Promise<"sent" | "not-found">;
   start(ctx: LanesCtx, launch: Launch): Promise<number>;
   nudge(ctx: LanesCtx, input: { tty: string; text: string }): Promise<"sent" | "not-found">;
 }
 export function terminalBackend(name: string): TerminalBackend {
   if (!BACKENDS.includes(name) || name === "auto") throw new UsageError("invalid terminal.backend");
-  return { nudge: (ctx, input) => nudgeTerminal(name, ctx, input), async start(ctx, { id, cwd, command }) {
+  return { quit: (ctx, tty, guard) => nudgeTerminal(name, ctx, { tty, text: "/quit" }, guard), nudge: (ctx, input) => nudgeTerminal(name, ctx, input), async start(ctx, { id, cwd, command }) {
     if (name === "print") { ctx.out(command); return 0; }
     let cmd: string; let args: string[];
     if (name === "terminal-app") {
@@ -47,7 +48,7 @@ export function terminalBackend(name: string): TerminalBackend {
   } };
 }
 
-async function nudgeTerminal(name: string, ctx: LanesCtx, { tty, text }: { tty: string; text: string }): Promise<"sent" | "not-found"> {
+async function nudgeTerminal(name: string, ctx: LanesCtx, { tty, text }: { tty: string; text: string }, beforeSend?: () => Promise<void>): Promise<"sent" | "not-found"> {
   if (!/^[A-Za-z0-9/]+$/.test(tty)) throw new UsageError("invalid tty");
   if (name === "print") return "not-found";
   if (name === "tmux") {
@@ -55,6 +56,7 @@ async function nudgeTerminal(name: string, ctx: LanesCtx, { tty, text }: { tty: 
     if (panes.code !== 0) throw new Error("tmux list-panes failed");
     const pane = panes.stdout.split("\n").map((s) => s.trim().split(/\s+/)).find(([t]) => t === `/dev/${tty}`)?.[1];
     if (!pane) return "not-found";
+    await guardQuit(beforeSend);
     for (const args of [["send-keys", "-t", pane, "-l", "--", text], ["send-keys", "-t", pane, "Enter"]]) {
       if ((await ctx.run("tmux", args, { timeoutMs: 10000 })).code !== 0) throw new Error("tmux send-keys failed");
     }
@@ -86,7 +88,10 @@ end repeat
 end repeat
 return "not-found"
 end tell`;
+  await guardQuit(beforeSend);
   const result = await ctx.run("osascript", ["-e", script], { timeoutMs: 10000 });
   if (result.code !== 0) throw new Error(`osascript failed: ${result.stderr.trim()}`);
   return result.stdout.trim() === "sent" ? "sent" : "not-found";
 }
+
+async function guardQuit(guard?: () => Promise<void>): Promise<void> { if (guard) await guard(); }
