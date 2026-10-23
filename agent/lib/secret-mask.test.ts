@@ -605,10 +605,10 @@ for (const [key, value] of [
 });
 
 for (const input of [
-	'"token": "abcd"', "API_KEY: abcd", "passwordless=abcd",
-	"DB_PASSWORD = hunter", "DB_PASSWORD= hunter", "DB_PASSWORD =hunter", "DB_PASSWORD='two words'",
+	'"token": "abcd"', "passwordless=abcd",
+	"DB_PASSWORD = hunter", "DB_PASSWORD= hunter", "DB_PASSWORD =hunter",
 	"DB_PASSWORD=two words", '"DB_PASSWORD"="hunter"', "db_password=hunter",
-	"\"token\": \"alphabetic\"", "API_KEY: alphabetic", "passwordless=alphabetic",
+	"\"token\": \"alphabetic\"", "passwordless=alphabetic",
 	"const token = /(<<-?|1?>>?)|('[A-Za-z0-9_./:@%+=, \\t-]*'|…)/y;",
 	"function parseIssueRef(token: string): { repo?: string; issue: number } | undefined {",
 	'save(state / "test-generation.json", {"token": token})',
@@ -640,3 +640,24 @@ for (const value of ["none", "null", "true", "false", "fail", "pass", "bearer"])
 		}
 	});
 }
+
+// Round 3 review: env-style short secrets in docker JSON, compose maps, quoted values, command prefixes and -e flags.
+for (const input of [
+	'["DB_PASSWORD=hunter"]',
+	'"Env": [\n "DB_PASSWORD=hunter",\n "PATH=/usr/bin"\n]',
+	"environment:\n  DB_PASSWORD: hunter\n",
+	"export DB_PASSWORD='abc def'",
+	"DB_PASSWORD=hunter npm start",
+	"docker run -e DB_PASSWORD=hunter img",
+	"API_KEY: abcd", "API_KEY: alphabetic", "DB_PASSWORD='two words'",
+]) test(`env-style short secret is redacted: ${JSON.stringify(input)}`, () => {
+	const out = scan(input).text;
+	assert.ok(!/hunter|abc def|abcd|alphabetic|two words/.test(out), out);
+});
+for (const input of [
+	"environment:\n  NODE_ENV: production\n",
+	"  API_KEY: process.env.API_KEY,",
+	'const env = { TOKEN: token };',
+	"PI_AGENT_DIR=agent node --test",
+	'run(["git", "commit"], env={"GIT_DIR": d})',
+]) test(`env-like code and non-secret settings stay intact: ${JSON.stringify(input)}`, () => assert.equal(scan(input).text, input));

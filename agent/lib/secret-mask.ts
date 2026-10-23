@@ -223,16 +223,27 @@ function envYaml(line: string, offset: number, previous: EnvField | undefined, o
 	return field;
 }
 
-/** Relax short/letters-only detection only for env/printenv/.env-style assignments. */
+/**
+ * Relax short/letters-only detection only for env-style assignments of an UPPERCASE secret-named key:
+ * `KEY=value` (line start, after whitespace/`export `, or inside a quoted/listed entry such as docker's
+ * `["DB_PASSWORD=x"]` or `-e KEY=x`, also as a command prefix) and YAML map entries `KEY: value` alone on a line
+ * (compose `environment:`). Code (spaces around `=`, lowercase identifiers, trailing `,`/`;`/brackets) keeps the
+ * stricter thresholds of `connections`.
+ */
+const ENV_FORMS = [
+	/(?:^|[ \t"'\[,(])(?:export[ \t]+)?([A-Z_][A-Z0-9_]*)=(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s"'`;,&|()[\]{}<>\\]+))(?=$|[\s"',\])])/gmd,
+	/^[ \t]*(?:-[ \t]+)?([A-Z_][A-Z0-9_]*):[ \t]+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#"'`;,&|()[\]{}<>\\]+))[ \t]*(?:#.*)?\r?$/gmd,
+];
 function envAssignments(text: string, out: Candidate[]): void {
-	const fields = /(?:^|[ \t])(?:export[ \t]+)?([A-Z_][A-Z0-9_]*)=(?:"([^"\s]+)"|'([^'\s]+)'|([^\s"'`;,&|()[\]{}<>\\]+))(?=[ \t]*(?:#.*)?\r?$)/gmd;
-	for (const match of text.matchAll(fields)) {
-		if (!isSecretKey(match[1])) continue;
-		const group = match[2] !== undefined ? 2 : match[3] !== undefined ? 3 : 4;
-		const value = match[group];
-		if (value.length < 4 || !secretValue(value, group !== 4, false, true)) continue;
-		const [start, end] = match.indices![group]!;
-		out.push({ start, end, kind: "connection-string" });
+	for (const form of ENV_FORMS) {
+		for (const match of text.matchAll(form)) {
+			if (!isSecretKey(match[1])) continue;
+			const group = match[2] !== undefined ? 2 : match[3] !== undefined ? 3 : 4;
+			const value = match[group];
+			if (value.length < 4 || !secretValue(value, group !== 4, false, true)) continue;
+			const [start, end] = match.indices![group]!;
+			out.push({ start, end, kind: "connection-string" });
+		}
 	}
 }
 
