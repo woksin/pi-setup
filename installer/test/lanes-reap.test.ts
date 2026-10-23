@@ -1,15 +1,17 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { defaults, saveConfig } from "../src/lanes/config.ts";
 import { main } from "../src/lanes/main.ts";
 import { treeDigest } from "../src/lanes/reap/tree.ts";
 import { processEvidence } from "../src/lanes/reap/process.ts";
-import type { Signals } from "../src/lanes/reap/signals.ts";
+import { collect, type Signals } from "../src/lanes/reap/signals.ts";
 import { expectedSnapshot, readContext, validateContext } from "../src/lanes/reap/context-format.ts";
 import { verdict } from "../src/lanes/reap/verdict.ts";
 import { sessionDirFor } from "../src/lanes/names.ts";
+import { scanSession } from "../src/lanes/reap/session-scan.ts";
+import { summaryLine } from "../src/lanes/reap/summary.ts";
 import { tempDir, REPO } from "./helpers/home.ts";
 import type { LanesCtx } from "../src/lanes/ctx.ts";
 export function fixture() {
@@ -47,6 +49,24 @@ export function fixture() {
     getDirty: () => dirty, setReceiver: () => receiver = true, setRunning: (v: boolean) => running = v, setShared: () => shared = true, setBusy: (v: string) => busy = v, setFiles: (v: string) => files = v, setDirty: (v: string) => dirty = v, setMerged: () => merged = true, setForeground: (v: boolean) => foreground = v,
     invoke: (...args: string[]) => main(["--dir", root, ...args], ctx),
     rows: () => JSON.parse(out.at(-1)!) as { id: string; verdict: string; reason: string }[] };
+}
+function subagentStatus(f: ReturnType<typeof fixture>, overrides: Record<string, unknown> = {}, name = "sub"): void {
+  f.put(join(f.ctx.piAgentDir, `context-budget/status/${name}.json`), JSON.stringify({
+    role: "subagent", sessionId: "child-session", sessionFile: "/sessions/child.jsonl", pid: 101,
+    at: f.now.toISOString(), ...overrides,
+  }));
+}
+function agentLaunch(agentId = "agent1", callId = "call1"): string {
+  return [
+    { role: "assistant", content: [{ type: "toolCall", name: "Agent", id: callId, arguments: { subagent_type: "reviewer", prompt: "review" } }] },
+    { role: "toolResult", toolName: "Agent", toolCallId: callId, details: { status: "background", agentId } },
+  ].map(entry => JSON.stringify({ type: "message", message: entry })).join("\n") + "\n";
+}
+function agentReceipt(receipt: Record<string, unknown>, resume?: string): string {
+  return [
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "Agent", id: "call1", arguments: { subagent_type: "reviewer", description: "Review", prompt: "review", resume } }] } },
+    { type: "message", message: { role: "toolResult", toolName: "Agent", toolCallId: "call1", ...receipt } },
+  ].map(entry => JSON.stringify(entry)).join("\n") + "\n";
 }
 function foregroundProbe({ args, foreground, busy }: { args: string[]; foreground: boolean; busy: string }): string | undefined {
   if (args.includes("pgid=,tpgid=")) return "101 101\n";
@@ -87,6 +107,319 @@ for (const variant of ["wrapper and MCP", "vim", "foreign", "background pi", "wr
     else await assert.rejects(processEvidence(signals, f.ctx), /foreground not the expected pi/);
   });
 }
+function evidence(f: ReturnType<typeof fixture>) {
+  return collect({ c: f.c, lane: f.c.lanes[0], root: f.root, ctx: f.ctx, minutes: 75 });
+}
+test("watcher epoch markers and filename grammar preserve unread evidence", async () => {
+  for (const name of ["L0-to-L1-x.md", "20261023-120000-L1-from-L0-x.md", "L1-L2-x.md", "ALL-x.md", "legacy-L1-odd.md"]) {
+    const f = fixture(); rmSync(f.marker);
+    f.put(join(f.root, ".state/inbox-L1.marker"), String(f.now.getTime() / 1000 - 60));
+    f.put(join(f.root, "messages", name), "hello");
+    const s = await evidence(f); assert.ok(s.keeps.includes("unread inbox"), name);
+    assert.ok(!s.asks.some(reason => reason.includes("marker")), name);
+  }
+});
+test("old mail stays read and malformed or future watcher markers fail closed", async () => {
+  const f = fixture(); f.put(join(f.root, "messages/L0-to-L1-hello.md"), "hello", 20);
+  assert.ok(!(await evidence(f)).keeps.includes("unread inbox"));
+  for (const value of ["bad", String(f.now.getTime() / 1000 + 60)]) {
+    f.put(join(f.root, ".state/inbox-L1.marker"), value);
+    assert.ok((await evidence(f)).asks.includes("inbox marker invalid"));
+  }
+});
+const liveMessageNames = [
+  ["R-CHR-to-L44-5340-ok-1710.md", "L44"],
+  ["L41-to-L19-stage-deliver-721-0a.md", "L19"],
+  ["L0-to-ai-skills-1406-resume.md", "ai-skills"],
+  ["L34-chronicle-correctness-to-L0-5177-merged.md", "L0"],
+  ["20261023-041109-L15-to-L0-L29-L33-L36-L45-v0.280.1-deployed.md", "L36"],
+  ["20261023-070746-RETRO-to-L24-L0-cand2-guard-advisory-fixed.md", "L24"],
+  ["20261023-075216-L15-to-L46-2400-review.md", "L46"],
+  ["20261023-0555-L46-to-L15-189-cratis-bot.md", "L15"],
+];
+test("live message names count only when newer than marker or session activity", async () => {
+  for (const [name, id] of liveMessageNames) for (const marker of [true, false]) {
+    const f = fixture(); f.c.lanes[0].id = id; rmSync(f.marker);
+    if (marker) f.put(join(f.root, `messages/${id}-inbox.marker`), "", 10);
+    const path = join(f.root, "messages", name); f.put(path, "fixture", 180);
+    const old = await evidence(f); assert.deepEqual(old.asks, [], name); assert.deepEqual(old.unread, [], name);
+    f.put(path, "fixture"); const fresh = await evidence(f); assert.deepEqual(fresh.unread, [name], name);
+    if (!marker) assert.ok(fresh.asks.includes("pending inbound; inbox marker and watch evidence missing"));
+  }
+});
+test("missing marker is only a JSON note until pending inbound needs watch evidence", async () => {
+  const f = fixture(); rmSync(f.marker); const initial = await evidence(f);
+  assert.deepEqual(initial.asks, []); assert.deepEqual(initial.notes, ["inbox marker missing"]);
+  assert.equal(verdict(initial).verdict, "handoff");
+  f.put(join(f.root, "messages/L0-to-L1-work.md"), "fixture");
+  assert.ok((await evidence(f)).asks.includes("pending inbound; inbox marker and watch evidence missing"));
+  for (const command of ["inbox-watch L1", "~/.pi/agent/bin/inbox-watch --alias ttys003 L1"]) {
+    f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_watch", details: { command } } }), 120);
+    const watched = await evidence(f); assert.equal(watched.inboxWatch, true); assert.deepEqual(watched.asks, []);
+    assert.ok(watched.keeps.includes("unread inbox"));
+  }
+  f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_watch", details: { command: "inbox-watch L10" } } }), 120);
+  assert.equal((await evidence(f)).inboxWatch, undefined);
+});
+test("watch aliases and INBOX_ALIASES count pending inbound only for the lane", async () => {
+  for (const command of ["inbox-watch --alias R-AI --alias ttys003 L1", "INBOX_ALIASES=R-AI,ttys003 inbox-watch L1"]) {
+    const f = fixture();
+    f.put(f.sessionFile, JSON.stringify({ role: "toolResult", toolName: "job_watch", details: { command } }), 120);
+    f.put(join(f.root, "messages/L0-to-R-AI-work.md"), "fixture");
+    f.put(join(f.root, "messages/L0-to-ttys003-work.md"), "fixture");
+    const s = await evidence(f); assert.equal(s.unread.length, 2, command);
+    assert.ok(s.keeps.includes("unread inbox"));
+    f.put(f.sessionFile, JSON.stringify({ role: "toolResult", toolName: "job_watch", details: { command: command.replace(" L1", " L10") } }), 120);
+    assert.deepEqual((await evidence(f)).unread, []);
+  }
+  const f = fixture(); f.ctx.env.INBOX_ALIASES = "R-AI,ttys003";
+  f.put(join(f.root, "messages/L0-to-R-AI-work.md"), "fixture");
+  assert.deepEqual((await evidence(f)).unread, ["L0-to-R-AI-work.md"]);
+});
+test("claim mapping is independent of source and foreign claims appear only in summary", async () => {
+  for (const extra of [{ sessionId: "foreign", branch: "l1", cwd: "/other" }, { sessionId: "foreign", cwd: "CWD" }, { source: "detected" }]) {
+    const f = fixture(); f.claim("in-progress", undefined, { ...extra, ...(extra.cwd === "CWD" ? { cwd: f.cwd } : {}) });
+    const s = await evidence(f); assert.deepEqual(s.asks, []); assert.ok(s.keeps.includes("in-progress claim"));
+  }
+  const f = fixture(); f.claim("in-progress", undefined, { sessionId: "foreign", branch: "other", cwd: "/other" });
+  await f.invoke("reap", "--json"); assert.equal(f.rows()[0].verdict, "handoff");
+  const plan = JSON.parse(readFileSync(join(f.root, ".state/reap-plan.json"), "utf8"));
+  assert.deepEqual(plan.summaries.find(item => item.label === "Foreign claims").names, ["example/alpha#1"]);
+});
+test("whole-session folding retains early jobs, watches and pending calls beyond the old tail", async () => {
+  const f = fixture();
+  const job = { id: "j-before", status: "running", command: "inbox-watch --alias R-AI L1", cwd: f.cwd, startedAt: f.now.getTime() - 120000, timeoutSeconds: 3600 };
+  const result = (toolName: string, details: object) => JSON.stringify({ type: "message", message: { role: "toolResult", toolName, details } });
+  const call = JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "pending", name: "subagent" }] } });
+  const padding = `${JSON.stringify({ padding: "x".repeat(1024) })}\n`.repeat(34000);
+  const history = `${agentLaunch()}${result("job_watch", job)}\n${call}\n${padding}`;
+  f.put(f.sessionFile, history, 120);
+  const active = await evidence(f);
+  assert.deepEqual(active.asks, ["subagent launched without completion"]); assert.ok(active.keeps.includes("job/watch running (session snapshot)"));
+  assert.ok(active.keeps.includes("subagent tool call pending")); assert.equal(active.inboxWatch, true);
+  assert.deepEqual(active.inboxAliases, ["R-AI"]);
+  const notification = JSON.stringify({ customType: "subagent-notification", details: { status: "completed", id: "agent1" } });
+  f.put(f.sessionFile, `${history}${result("job_output", { id: job.id, status: "completed" })}\n${JSON.stringify({ role: "toolResult", toolCallId: "pending" })}\n${notification}\n`, 120);
+  const completed = await evidence(f); assert.deepEqual(completed.asks, []);
+  assert.ok(!completed.keeps.some(reason => /job\/watch|tool call pending/.test(reason)));
+});
+test("session scans fail closed at size and time bounds and on malformed history", async () => {
+  const f = fixture();
+  await assert.rejects(scanSession(f.sessionFile, () => {}, { bytes: 1, milliseconds: 5000 }), /session scan incomplete/);
+  await assert.rejects(scanSession(f.sessionFile, () => {}, { bytes: 1024, milliseconds: 0 }), /session scan incomplete/);
+  truncateSync(f.sessionFile, 256 * 1024 * 1024 + 1);
+  assert.deepEqual((await evidence(f)).asks, ["session scan incomplete"]);
+  f.put(f.sessionFile, "{malformed\n{}\n", 120);
+  assert.deepEqual((await evidence(f)).asks, ["session work history malformed"]);
+  f.put(f.sessionFile, JSON.stringify({ role: "toolResult", toolName: "job_output", details: { id: "j1", status: "running" } }), 120);
+  assert.deepEqual((await evidence(f)).asks, ["job j1 start evidence missing"]);
+});
+test("summary samples are capped while saved lists remain complete", async () => {
+  const f = fixture();
+  for (let i = 0; i < 14; i++) f.put(join(f.root, `messages/unknown-${i}.md`), "fixture");
+  await f.invoke("reap"); const line = f.out.find(line => line.startsWith("Unparseable messages"))!;
+  assert.ok(line.endsWith("(+4 more)"));
+  const plan = JSON.parse(readFileSync(join(f.root, ".state/reap-plan.json"), "utf8"));
+  assert.equal(plan.summaries[0].names.length, 14); assert.equal(line, summaryLine(plan.summaries[0]));
+});
+test("missing worktree has a lane-specific human reason", async () => {
+  const f = fixture(); const realpath = f.ctx.realpath;
+  f.ctx.realpath = path => { if (path !== f.cwd) return realpath(path); throw Object.assign(new Error("raw lstat error"), { code: "ENOENT" }); };
+  assert.deepEqual((await evidence(f)).asks, [`worktree gone: ${f.cwd}`]);
+});
+test("local active claims require exact identity rather than branch substrings", async () => {
+  for (const [fields, keep] of [["**Session:** s1", true], ["**Worktree:** CWD", true], ["**Branch:** l1", true], ["**Repo:** example/alpha\n**Issue:** #1", true], ["**Branch:** work\n**Issue:** #170", false]] as const) {
+    const f = fixture(); f.c.lanes[0].issue = 1;
+    f.put(join(f.cwd, ".ai-work/issue-work/1/status.md"), `**State:** in-progress\n${fields.replace("CWD", f.cwd)}`);
+    const s = await evidence(f); assert.equal(s.keeps.includes("in-progress local claim"), keep, fields);
+    if (!keep) assert.ok(s.asks.includes("local claim ownership unknown"));
+  }
+});
+test("real-shaped child records belong by primary session or legacy shared host pid", async () => {
+  const f = fixture();
+  for (const identity of [{}, { primarySessionId: "s1", state: "active" }, { primarySessionId: "s1", pid: 909 }]) {
+    subagentStatus(f, identity); const s = await evidence(f);
+    assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, ["subagent running"]);
+  }
+  assert.ok(!f.calls.some(c => c.args.includes("pid=")));
+});
+test("explicit primary mismatch never falls back to host pid; cwd and child ancestry do not establish ownership", async () => {
+  const f = fixture();
+  for (const identity of [{ primarySessionId: "s10" }, { primarySessionId: null }, { pid: 909, cwd: f.cwd }, { pid: 909, cwd: join(f.cwd, "child") }, { pid: 909, sessionId: "s1", sessionFile: f.sessionFile, parentPid: 101 }, { role: "main", primarySessionId: "s1" }]) {
+    subagentStatus(f, { at: "unknown", ...identity }); const s = await evidence(f);
+    assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, []);
+  }
+});
+test("ended children are history even with unknown timestamps; active fresh and boundary timestamps keep", async () => {
+  const f = fixture();
+  for (const identity of [{}, { primarySessionId: "s1" }]) {
+    subagentStatus(f, { ...identity, state: "ended", at: "unknown" });
+    assert.deepEqual((await evidence(f)).asks, []); assert.deepEqual((await evidence(f)).keeps, []);
+    subagentStatus(f, { ...identity, state: "active", at: new Date(f.now.getTime() - 600000).toISOString() });
+    assert.deepEqual((await evidence(f)).keeps, ["subagent running"]);
+  }
+});
+test("stale legacy and invalid status records are history, not doubt or liveness", async () => {
+  const f = fixture();
+  for (const at of ["2020-01-01T00:00:00Z", "unknown", undefined, new Date(f.now.getTime() + 1000).toISOString()]) {
+    subagentStatus(f, { at }); const s = await evidence(f);
+    assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, []);
+  }
+  for (let i = 0; i < 20; i++) subagentStatus(f, { primarySessionId: "s1", at: "unknown" }, `unknown${i}`);
+  for (let i = 0; i < 20; i++) subagentStatus(f, { state: "active" }, `fresh${i}`);
+  const s = await evidence(f); assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, ["subagent running"]);
+});
+test("Agent launches without matching completion notifications ask once per lane", async () => {
+  const f = fixture(); f.put(f.sessionFile, agentLaunch() + agentLaunch("agent2", "call2"), 120);
+  subagentStatus(f, { at: "2020-01-01T00:00:00Z", state: "ended" });
+  assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+  f.put(f.sessionFile, JSON.stringify({ role: "assistant", content: [{ type: "toolCall", name: "Agent", id: "call1" }] }), 120);
+  assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+});
+test("matching terminal task notifications settle Agent launches by exact agent id", async () => {
+  const f = fixture();
+  const completions = [
+    { type: "custom_message", customType: "subagent-notification", details: { status: "completed", id: "agent&1" } },
+    { role: "custom", customType: "subagent-notification", details: { status: "failed", agentId: "agent&1" } },
+    { type: "custom_message", customType: "subagent-notification", content: "<task-notification><task-id>agent&amp;1</task-id><status>Done</status></task-notification>" },
+    { type: "custom_message", customType: "subagent-notification", content: [{ type: "text", text: "<task-notification><task-id>agent&amp;1</task-id><status>Aborted</status></task-notification>" }] },
+  ];
+  for (const completion of completions) {
+    f.put(f.sessionFile, agentLaunch("agent&1") + JSON.stringify(completion), 120);
+    const s = await evidence(f); assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, []);
+  }
+});
+test("unrelated, running and quoted messages do not complete Agent launches", async () => {
+  const f = fixture();
+  const completions = [
+    { type: "custom_message", customType: "subagent-notification", details: { status: "completed", id: "agent10" } },
+    { type: "custom_message", customType: "subagent-notification", content: "<task-notification><task-id>agent1</task-id><status>Running</status></task-notification>" },
+    { role: "toolResult", toolName: "get_subagent_result", details: { status: "running", agentId: "agent1" } },
+    { role: "user", content: "<task-notification><task-id>agent1</task-id><status>Done</status></task-notification>" },
+  ];
+  for (const completion of completions) {
+    f.put(f.sessionFile, agentLaunch() + JSON.stringify(completion), 120);
+    assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+  }
+});
+test("Agent text receipts expose ids, launch failures do not leave pending work, partial scans still ask", async () => {
+  const f = fixture(); const call = JSON.stringify({ role: "assistant", content: [{ type: "toolCall", name: "Agent", id: "call1" }] }) + "\n";
+  const receipt = { role: "toolResult", toolName: "Agent", toolCallId: "call1", content: [{ type: "text", text: "Agent started in background.\nAgent ID: agent1\n" }] };
+  f.put(f.sessionFile, call + JSON.stringify(receipt) + "\n" + JSON.stringify({ customType: "subagent-notification", details: { status: "completed", id: "agent1" } }), 120);
+  assert.deepEqual((await evidence(f)).asks, []);
+  f.put(f.sessionFile, call + JSON.stringify({ ...receipt, isError: true }), 120);
+  assert.deepEqual((await evidence(f)).asks, []);
+  f.put(f.sessionFile, agentLaunch() + "{broken", 120);
+  assert.deepEqual((await evidence(f)).asks, ["session work history malformed"]);
+});
+// Native receipt schemas observed in ~/.pi/agent/sessions: chronicle-testing (L8)
+// 2026-10-19T11-28-39-962Z_01a153eb-ba1a-74a2-b699-7c7c873054c8.jsonl and screenplay-mcp (L13)
+// 2026-10-19T11-11-49-701Z_01a153dc-4fc4-77e1-ab27-17081ec91e1b.jsonl; payloads/ids reduced.
+test("foreground Agent completion receipts settle the call without a notification", async () => {
+  const f = fixture();
+  const content = [{ type: "text", text: "Agent completed in 61.5s (20 tool uses, 56.8k token).\n\nReview complete." }];
+  for (const receipt of [
+    { content, details: { displayName: "Sol reviewer", description: "Review", subagentType: "sol-reviewer", status: "completed", agentId: "agent1", durationMs: 61520 }, isError: false },
+    { content: [], details: { status: "completed" }, isError: false },
+    { content, isError: false },
+  ]) {
+    f.put(f.sessionFile, agentReceipt(receipt), 120);
+    assert.deepEqual((await evidence(f)).asks, []);
+  }
+});
+test("foreground output cannot complete an unrelated agent by quoting its id", async () => {
+  const f = fixture();
+  const foreground = agentReceipt({ details: { status: "completed" }, content: [{ type: "text", text: "Agent completed in 1.0s (1 tool uses).\n\nAgent ID: other" }] });
+  f.put(f.sessionFile, agentLaunch("other", "background") + foreground, 120);
+  assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+});
+test("foreground Agent error receipts settle failed launches without a notification", async () => {
+  const f = fixture();
+  f.put(f.sessionFile, agentReceipt({ content: [{ type: "text", text: 'Validation failed for tool "Agent":\n  - description: must have required properties description, subagent_type' }], details: {}, isError: true }), 120);
+  assert.deepEqual((await evidence(f)).asks, []);
+});
+test("later terminal get_subagent_result receipts settle background agents by exact id", async () => {
+  const f = fixture();
+  const header = "Agent: agent1\nType: Reviewer | Status: completed | Tool uses: 8 | 76.1k token | Context: 7% | Duration: 65.9s\nDescription: Review\n\nAgent ID: unrelated-agent";
+  for (const receipt of [
+    { details: { agentId: "agent1", status: "completed" }, isError: false },
+    { content: [{ type: "text", text: header }], isError: false },
+  ]) {
+    f.put(f.sessionFile, agentLaunch() + JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "get_subagent_result", toolCallId: "fetch1", ...receipt } }), 120);
+    assert.deepEqual((await evidence(f)).asks, []);
+  }
+});
+test("every native terminal status settles foreground receipts and text-only result fetches", async () => {
+  const f = fixture();
+  for (const status of ["steered", "stopped", "aborted", "killed", "failed", "error", "cancelled"]) {
+    f.put(f.sessionFile, agentReceipt({ content: [], details: { status, agentId: "agent1" }, isError: false }), 120);
+    assert.deepEqual((await evidence(f)).asks, [], `foreground ${status}`);
+    const header = `Agent: agent1\nType: Reviewer | Status: ${status} | Tool uses: 1\nDescription: Review`;
+    f.put(f.sessionFile, agentLaunch() + JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "get_subagent_result", toolCallId: "fetch1", content: [{ type: "text", text: header }], isError: false } }), 120);
+    assert.deepEqual((await evidence(f)).asks, [], `fetched ${status}`);
+  }
+  for (const status of ["running", "queued", "background"]) {
+    f.put(f.sessionFile, agentLaunch() + JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "get_subagent_result", toolCallId: "fetch1", details: { agentId: "agent1", status }, isError: false } }), 120);
+    assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"], `fetched ${status}`);
+  }
+});
+test("resuming an already-cleaned agent does not manufacture a pending launch", async () => {
+  const f = fixture();
+  const cleaned = agentReceipt({ content: [{ type: "text", text: 'Agent not found: "agent1". It may have been cleaned up.' }], isError: false }, "agent1");
+  f.put(f.sessionFile, cleaned, 120); assert.deepEqual((await evidence(f)).asks, []);
+  f.put(f.sessionFile, agentLaunch("agent1", "earlier") + cleaned, 120);
+  assert.deepEqual((await evidence(f)).asks, []);
+});
+test("unknown Agent receipt shapes stay pending rather than implying completion", async () => {
+  const f = fixture();
+  for (const receipt of [
+    { content: [{ type: "text", text: "Unexpected receipt shape" }], details: {}, isError: false },
+    { details: { agentId: "agent1", status: "unrecognized" }, isError: false },
+    { content: [], isError: false },
+  ]) {
+    f.put(f.sessionFile, agentReceipt(receipt), 120);
+    assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+  }
+});
+test("an earlier completion cannot settle a later resumed background run", async () => {
+  const f = fixture();
+  const notification = JSON.stringify({ customType: "subagent-notification", details: { id: "agent1", status: "completed" } }) + "\n";
+  const history = agentLaunch("agent1", "initial") + notification + agentReceipt({ details: { agentId: "agent1", status: "running" } }, "agent1");
+  f.put(f.sessionFile, history, 120);
+  assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+  f.put(f.sessionFile, history + notification, 120); assert.deepEqual((await evidence(f)).asks, []);
+});
+test("fresh subagent activity keeps a lane while unmatched launches and claim doubts remain notes", async () => {
+  const f = fixture(); f.put(f.sessionFile, agentLaunch(), 120); subagentStatus(f); f.claim("blocked");
+  const output: string[] = []; f.ctx.out = text => output.push(text);
+  await f.invoke("reap"); const row = JSON.parse(readFileSync(join(f.root, ".state/reap-plan.json"), "utf8")).rows[0]; assert.equal(row.verdict, "keep");
+  assert.ok(row.notes.includes("subagent launched without completion")); assert.ok(row.notes.some((note: string) => note.includes("claim")));
+  assert.ok(output.some(line => line.includes("[notes: subagent launched without completion")));
+});
+test("job snapshots cover sleeping watches and terminal updates clear them", async () => {
+  const f = fixture(); const snapshot = { id: "j1", command: "inbox-watch L1", status: "running", cwd: f.cwd, startedAt: f.now.getTime() - 120000, timeoutSeconds: 3600 };
+  const lines = [{ type: "message", message: { role: "toolResult", toolName: "job_watch", details: snapshot } }];
+  f.put(f.sessionFile, lines.map(line => JSON.stringify(line)).join("\n"), 120);
+  assert.ok((await evidence(f)).keeps.includes("job/watch running (session snapshot)"));
+  lines.push({ type: "message", message: { role: "toolResult", toolName: "job_output", details: { ...snapshot, status: "matched" } } });
+  f.put(f.sessionFile, lines.map(line => JSON.stringify(line)).join("\n"), 120);
+  assert.ok(!(await evidence(f)).keeps.some(reason => reason.startsWith("job/watch")));
+});
+test("keep beats ask and retains all uncertainty as deduplicated notes", () => {
+  for (const keep of ["subagent running", "busy child process", "job/watch running (log open)", "job/watch running (session snapshot)"]) {
+    const decision = verdict({ asks: ["doubt", "doubt", "claim"], keeps: [keep], finished: true, takeover: true });
+    assert.equal(decision.verdict, "keep"); assert.equal(decision.ground, undefined); assert.deepEqual(decision.notes, ["doubt", "claim"]);
+  }
+});
+test("reason classes are deduplicated without history counts", () => {
+  assert.equal(verdict({ asks: ["uncertain", "uncertain", "claim", "claim"], keeps: [], finished: false, takeover: false }).reason, "uncertain; claim");
+  assert.equal(verdict({ asks: [], keeps: ["subagent running", "subagent running"], finished: false, takeover: false }).reason, "subagent running");
+});
+test("human reasons are bounded while raw asks remain complete", () => {
+  const asks = Array.from({ length: 8 }, (_, i) => `lane evidence ${i}`);
+  assert.equal(verdict({ asks, keeps: [], finished: false, takeover: false }).reason.split("; ").length, 3);
+  assert.equal(asks.length, 8);
+});
 test("dry run is read-only except plan, explains takeover and threshold fallback", async () => {
   const f = fixture(); assert.equal(await f.invoke("reap", "--json"), 0); assert.equal(f.rows()[0].verdict, "handoff");
   assert.ok(existsSync(join(f.root, ".state/reap-plan.json"))); assert.deepEqual(readdirSync(join(f.root, ".state")), ["reap-plan.json"]);
@@ -98,7 +431,7 @@ const keepCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["busy child", f => f.setBusy("102 101 dotnet build")], ["busy child", f => f.setBusy("102 101 pi-phase run --kind build")],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/job.log"), "command"); f.setFiles(`n${p}\n`); }],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/watch.log"), "# pi-jobs watch until x: gh run watch 123"); f.setFiles(`n${p}\n`); }],
-  ["subagent", f => f.put(join(f.ctx.piAgentDir, "context-budget/status/sub.json"), JSON.stringify({ role: "subagent", pid: 101, phase: "working", at: f.now.toISOString() }))],
+  ["subagent", f => subagentStatus(f, { primarySessionId: "s1", state: "active" })],
   ["unread", f => f.put(join(f.root, "messages/L0-to-L1-work-1200.md"), "hi")],
   ["in-progress claim", f => f.claim("in-progress")],
   ["declared wait", f => f.put(join(f.root, "messages/status/L1.status"), 'waiting-on "ci" until 2026-10-23T14:00:00Z')],
@@ -111,9 +444,8 @@ const askCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["sessions directory", f => rmSync(dirname(f.sessionFile), { recursive: true })],
   ["process descendants", f => { const run = f.ctx.run; f.ctx.run = async (cmd, a, o) => cmd === "ps" && a[0] === "-A" ? f.result("", 1) : run(cmd, a, o); }],
   ["open files", f => { const run = f.ctx.run; f.ctx.run = async (cmd, a, o) => cmd === "lsof" && !a.includes("cwd") ? f.result("", 1) : run(cmd, a, o); }],
-  ["inbox watch never ran", f => rmSync(f.marker)], ["unparseable message", f => f.put(join(f.root, "messages/mystery.md"), "?")],
-  ["claim from another tool", f => f.claim("in-progress", undefined, { source: "detected" })],
-  ["claim from another tool", f => f.claim("blocked", "x", { sessionId: "foreign" })],
+  ["pending inbound", f => { rmSync(f.marker); f.put(join(f.root, "messages/L0-to-L1-pending.md"), "fixture"); }],
+  ["message name ambiguous", f => f.put(join(f.root, "messages/mystery-L1-123.md"), "?")],
   ["named in NOW.md", f => f.put(join(f.root, "coordinator/NOW.md"), "L1 owns the release")],
   ["signals disagree", f => f.put(join(f.home, ".pi/orch/heartbeats/s1.json"), JSON.stringify({ pid: 101, state: "working", at: f.now.toISOString() }))],
   ["foreground not the expected pi", f => f.setForeground(false)],
@@ -317,7 +649,7 @@ test("review 2: a handoff-induced session write defers retirement and is reusabl
   f.ctx.run = async (cmd, args, options) => {
     const result = await run(cmd, args, options);
     if (!wrote && args.at(-1)?.includes("Write your own context handoff")) {
-      wrote = true; f.put(f.sessionFile, "handoff response");
+      wrote = true; f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "assistant", content: "handoff response" } }));
     }
     return result;
   };
@@ -364,9 +696,9 @@ test("round 2: receipt survives trailing session writes and rotation but still w
   const receiptPath = join(f.root, ".state/handoffs/L1.request.json");
   const receipt = readFileSync(receiptPath, "utf8");
   // The native turn keeps writing after ownContext has returned and saved its receipt.
-  f.now.setTime(f.now.getTime() + 1000); f.put(f.sessionFile, "trailing response");
+  f.now.setTime(f.now.getTime() + 1000); f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "assistant", content: "trailing response" } }));
   f.now.setTime(f.now.getTime() + 1000);
-  const continued = f.put(join(dirname(f.sessionFile), "s1-continued.jsonl"), "turn complete");
+  const continued = f.put(join(dirname(f.sessionFile), "s1-continued.jsonl"), JSON.stringify({ type: "message", message: { role: "assistant", content: "turn complete" } }));
   const lease = JSON.parse(readFileSync(f.lease, "utf8")); lease.sessionFile = continued; f.put(f.lease, JSON.stringify(lease));
   assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 0);
   assert.equal(f.rows()[0].verdict, "keep"); assert.ok(!f.calls.some(c => c.args.includes("/quit")));

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { effectiveParent, expand, laneDir, saveConfig, UsageError, validate, type Config, type Lane } from "../config.ts";
+import { effectiveParent, expand, laneDir, orchestratedRepos, repoOrchestrator, saveConfig, UsageError, validate, type Config, type Lane } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { slug, validNewId as validId } from "../names.ts";
 import { backendFor } from "../backend.ts";
@@ -70,11 +70,14 @@ function defaultBranch(lower: string, worktree: string, opts: Options): string {
 }
 function planOrchestration(lane: NewLane, opts: Options, c: Config): Orchestration {
   const siblings = c.lanes.filter(l => !l.retired && l.repo === lane.repo);
-  const current = siblings.find(l => l.role === "repo-orch");
+  const current = repoOrchestrator(c, lane.repo);
   if (opts.orchestrator && opts["no-orchestrator"]) {
     throw new UsageError("choose --orchestrator or --no-orchestrator");
   }
-  if (opts.orchestrator) return { siblings, orchestrator: promotedOrchestrator(siblings, opts.orchestrator) };
+  if (opts.orchestrator) {
+    if (current && current.id !== opts.orchestrator) throw new UsageError("repository already has a repo-orch");
+    return { siblings, orchestrator: promotedOrchestrator(siblings, opts.orchestrator) };
+  }
   if (!needsOrchestrator({ current, siblings }, opts)) return { siblings, orchestrator: current };
   const candidate = newOrchestrator(lane, opts, c);
   return { siblings, orchestrator: candidate, candidate };
@@ -103,7 +106,7 @@ function newOrchestrator(lane: NewLane, opts: Options, c: Config): NewLane {
 async function assignOrchestrator(plan: Orchestration, { c, root, ctx }: AddContext): Promise<void> {
   const orchestrator = plan.orchestrator!;
   orchestrator.role = "repo-orch"; orchestrator.parent = c.coordinator.id;
-  const active = c.lanes.filter(l => !l.retired && l.repo === orchestrator.repo);
+  const active = c.lanes.filter(l => !l.retired && l.repo && orchestratedRepos(orchestrator).includes(l.repo));
   for (const sibling of active.filter(l => l.id !== orchestrator.id)) sibling.parent = orchestrator.id;
   saveConfig(root, c);
   for (const sibling of plan.siblings.filter(l => l.id !== orchestrator.id)) {

@@ -12,26 +12,38 @@ export function messageName(from: string, to: string, topic: string, at: Date, c
 }
 
 export function parseMessageName(name: string): { from: string; to: string[]; topic: string } | undefined {
-  const hasTimestamp = /^\d{8}-\d{6}-/.test(name);
-  name = name.replace(/^\d{8}-\d{6}-/, "");
-  const timestamped = new RegExp(`^(${ID})-to-(${ID})-([a-z0-9][a-z0-9-]*)\\.md$`).exec(name);
-  const match = new RegExp(`^(${ID})-to-(${ID})-([a-z0-9][a-z0-9-]*?)-[0-9]{4}(?:-[0-9]+)?\\.md$`).exec(name);
-  if (match) return { from: match[1], to: [match[2]], topic: match[3] };
-  if (timestamped && directedName(timestamped, hasTimestamp)) {
-    return { from: timestamped[1], to: [timestamped[2]], topic: timestamped[3] };
-  }
-  const legacy = new RegExp(`^(${ID})-from-(${ID})-([a-z0-9].*)\\.md$`).exec(name);
-  if (legacy) return { from: legacy[2], to: [legacy[1]], topic: legacy[3] };
-  // Broadcast/group files also use the recipient-prefix convention.
-  const prefix = new RegExp(`^(${ID})-([a-z0-9].*)\\.md$`).exec(name);
-  if (prefix) return { from: "", to: [prefix[1]], topic: prefix[2] };
-  return undefined;
+  if (!name.endsWith(".md")) return undefined;
+  const tokens = name.replace(/^(?:\d+-)+/, "").slice(0, -3).split("-");
+  const k = tokens.findIndex(t => t === "to" || t === "from");
+  const start = k < 0 ? 0 : k + 1;
+  let end = start;
+  while (end < tokens.length && messageIdToken(tokens[end])) end++;
+  const topic = tokens.slice(end).join("-").replace(/-[0-9]{4}(?:-[0-9]+)?$/, "");
+  if (end === start) return legacyNamedRecipient(tokens, k);
+  if (!topic) return undefined;
+  if (k < 0) return { from: "", to: [tokens.slice(0, end).join("-")], topic };
+  const left = tokens.slice(0, k);
+  if (!left.length || !left.every(messageIdToken)) return undefined;
+  const right = tokens.slice(start, end).join("-");
+  return tokens[k] === "to" ? { from: left.join("-"), to: [right], topic }
+    : { from: right, to: [left.join("-")], topic };
 }
 
-function directedName(match: RegExpExecArray, hasTimestamp: boolean): boolean {
-  return hasTimestamp || suffixedId(match[1]) || suffixedId(match[2]);
+// Legacy named lanes use the clock token to delimit a lowercase recipient.
+function legacyNamedRecipient(tokens: string[], k: number): { from: string; to: string[]; topic: string } | undefined {
+  if (k < 1 || tokens[k] !== "to") return undefined;
+  const left = tokens.slice(0, k);
+  if (!left.every(messageIdToken)) return undefined;
+  const match = /^([a-z][a-z0-9]*(?:-[a-z0-9]+)*?)-((?:[01]\d|2[0-3])[0-5]\d)(?:-([a-z0-9][a-z0-9-]*))?$/.exec(tokens.slice(k + 1).join("-"));
+  if (!match) return undefined;
+  return { from: left.join("-"), to: [match[1]], topic: match[3] || match[2] };
 }
-function suffixedId(id: string): boolean { return /[a-z]$/.test(id); }
+
+// inbox-watch's ids are a run of capital-start tokens (or legacy ttys ids).
+function messageIdToken(token: string): boolean { return /^[A-Z]/.test(token) || /^ttys[0-9]+$/.test(token); }
+export function messageTokenMatch(name: string, id: string): boolean {
+  return (`-${name.replace(/\.md$/, "")}-`).includes(`-${id}-`);
+}
 
 export function sessionDirFor(cwd: string, piAgentDir: string): string {
   return join(piAgentDir, "sessions", `--${resolve(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
