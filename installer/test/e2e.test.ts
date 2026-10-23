@@ -32,7 +32,7 @@ describe("install (e2e)", () => {
     assert.ok(readdirSync(join(box.home, ".agents/skills")).includes("github-issue-hygiene"));
     const npm = stubLog(box).filter((l) => l.startsWith("npm install"));
     assert.equal(npm.length, 1);
-    assert.match(npm[0], /^npm install @woksin\/pi-jobs@0\.3\.1 @woksin\/pi-context-budget@0\.3\.0 @woksin\/pi-recover@0\.1\.1 @woksin\/pi-orch@0\.1\.0 --save-exact --legacy-peer-deps cwd=/);
+    assert.match(npm[0], /^npm install @woksin\/pi-jobs@0\.3\.1 @woksin\/pi-context-budget@0\.4\.0 @woksin\/pi-recover@0\.1\.1 @woksin\/pi-orch@0\.1\.1 --save-exact --legacy-peer-deps cwd=/);
     assert.equal(realpathSync(npm[0].split("cwd=")[1]), realpathSync(piPath(box, "npm")));
     const checks = stubLog(box).filter((l) => l.startsWith("pi auth check"));
     assert.equal(checks.length, 3);
