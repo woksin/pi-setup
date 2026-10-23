@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "agent/bin/secret-sweep"
 loader = importlib.machinery.SourceFileLoader("secret_sweep", str(SCRIPT))
@@ -103,9 +104,64 @@ class SecretSweepTests(unittest.TestCase):
                               time.monotonic() + 5)
         self.assertEqual(found, [self.work])
 
-    def test_discovery_timeout_is_an_error(self):
-        with self.assertRaises(sweep.SweepError):
-            sweep.targets([self.root], self.home / "absent", 8, time.monotonic() - 1)
+    def test_discovery_timeout_is_partial_not_an_error(self):
+        status = {"unreadable": 0, "limits": set()}
+        found = sweep.targets([self.root], self.home / "absent", 8, time.monotonic() - 1, status)
+        self.assertEqual(found, [])
+        self.assertIn("discovery time/directory cap", status["limits"])
+
+    def test_unreadable_directory_is_skipped_and_counted_in_report(self):
+        blocked = self.root / "blocked"
+        blocked.mkdir()
+        original = os.scandir
+
+        def scandir(path):
+            if Path(path) == blocked:
+                raise PermissionError("fixture directory denied")
+            return original(path)
+
+        status = {"unreadable": 0, "limits": set()}
+        with mock.patch.object(sweep.os, "scandir", side_effect=scandir):
+            found = sweep.targets([self.root], self.home / "absent", 8, time.monotonic() + 5, status)
+        self.assertEqual(found, [self.work])
+        self.assertEqual(status["unreadable"], 1)
+        sweep.write_report(self.home / ".pi/agent/logs/secret-sweep", [], None, status)
+        self.assertIn("unreadable directories skipped: 1", self.report())
+        self.assertIn("Partial discovery:", self.report())
+
+    def test_directory_cap_scans_found_records_and_marks_report_partial(self):
+        self.require_gitleaks()
+        (self.root / "zzz").mkdir()
+        (self.work / "capped.txt").write_text(self.secret + "\n")
+        result = self.run_sweep("--max-directories", "3")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = self.report()
+        self.assertIn("Partial discovery:", report)
+        self.assertIn("capped.txt", report)
+        self.assertIn("github-pat", report)
+
+    def test_pruned_directories_and_discovered_records_are_not_walked(self):
+        pruned = [self.root / name for name in sweep.PRUNED_DIRS]
+        pruned += [self.home / "Library", self.home / ".Trash", self.work / "inside"]
+        for path in pruned:
+            (path / "nested/.ai-work").mkdir(parents=True)
+        original = os.scandir
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            with mock.patch.object(sweep.os, "scandir", side_effect=original) as scandir:
+                found = sweep.targets([self.root, self.home], self.home / "absent", 8,
+                                      time.monotonic() + 5)
+        self.assertEqual(found, [self.work])
+        visited = [Path(call.args[0]) for call in scandir.call_args_list]
+        for path in pruned:
+            self.assertFalse(any(path == entry or path in entry.parents for entry in visited), str(path))
+
+    def test_gitleaks_file_size_limit_is_passed(self):
+        report = self.base / "scanner.json"
+        report.write_text("[]")
+        with mock.patch.object(sweep.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+            sweep.scan("gitleaks", self.work, report, time.monotonic() + 5)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--max-target-megabytes") + 1], "20")
 
     def test_tool_error_suppresses_scanner_output(self):
         tool = self.base / "gitleaks"

@@ -194,7 +194,7 @@ for (const code of [
 	"secret = " + "unquotedIdentifier12345;", "token = computeSignature(payload, other);", "token = Record<string, unknown>",
 	'"token": "String"', "token = SomeExtremelyLongConfigurationType",
 ]) test(`source expression stays intact: ${code}`, () => assert.equal(scan(code).text, code));
-for (const input of ['apiKey = "' + "d8f7a6s5" + 'd4f3g2h1"', '"AdminPassword": "Pr0d!pass"', 'secret="' + "VeryLongMixed" + 'CaseSecretLiteral"', 'token = 12345678']) test(`secret-like connection literal: ${input}`, () => {
+for (const input of ['apiKey = "' + "d8f7a6s5" + 'd4f3g2h1"', '"AdminPassword": "Pr0d!pass"', 'secret="' + "VeryLongMixed" + 'CaseSecretLiteral"']) test(`secret-like connection literal: ${input}`, () => {
 	assert.equal(scan(input).count, 1);
 	assert.deepEqual(scan(input).kinds, ["connection-string"]);
 });
@@ -567,7 +567,7 @@ for (const key of ["PGPASSWORD", "MYSQL_PWD", "APP_PWD", "MYpasswdVALUE", "prefi
 for (const command of [
 	"/usr/bin/env", "command env", "env > f && cat f", "cat /proc/self/environ", "cat /proc/*/environ", "cat /proc/123/environ",
 	"declare -x", "declare -p", "kubectl get secret foo --template={{.data}}", "kubectl get secret foo -o go-template='{{.data}}'",
-	"kubectl get pods -o jsonpath='{..env}'", "kubectl get secrets -o jsonpath='{.data}'", "grep -r PASSWORD .",
+	"kubectl get pods -o jsonpath='{..env}'", "kubectl get secrets -o jsonpath='{.data}'", "grep -r PASSWORD= .", "grep -r token .env", "env -0",
 ]) test(`closes credential dumper gap: ${command}`, async () => {
 	const f = fixture({ hasUI: false });
 	assert.equal((await f.call(command))?.block, true);
@@ -578,3 +578,29 @@ for (const command of ["env VAR=x cmd", "/usr/bin/env VAR=x cmd", "command env V
 test("alphabetic free text and sub-four-character assignments stay intact", () => {
 	for (const text of ["the PASSWORD is abcd", "TOKEN abcdef", "PASSWORD=abc"]) assert.equal(scan(text).text, text);
 });
+
+for (const command of [
+	"grep -rn token src", "grep -rn getAccessToken src", "grep -r secretName k8s/", "grep -rl passwordless src",
+	"git grep -r password docs", "grep -rn sig src", "git grep -r token .env", "grep -r PASSWORD .",
+	"declare -x FOO=bar", "declare -ix n",
+]) test(`routine search/declaration stays allowed: ${command}`, async () => {
+	const f = fixture({ hasUI: false });
+	assert.equal(commandRule(command), undefined);
+	assert.equal(await f.call(command), undefined);
+});
+for (const input of [
+	"TOKEN_COUNT=1000", "token_limit=4096", "token_type: bearer", "passwordHash: bcrypt", "passwordPolicy: local",
+	"SECRET_NAME=prod", "secret: none", "PASSWORD=12345678", '"TOKEN": "12345678"', "token = 12345678",
+	"tokenLength: four", "password_ttl: four", "secret: fail", "secret: pass", "secret: BEARER",
+]) test(`non-credential assignment stays intact: ${input}`, () => assert.equal(scan(input).text, input));
+test("real password assignment remains redacted", () => {
+	assert.equal(scan("DB_PASSWORD=hunter2x").text, "DB_PASSWORD=[REDACTED:connection-string]");
+});
+
+for (const value of ["12345678", "none", "null", "true", "false", "fail", "pass", "bearer"]) {
+	test(`non-credential env value stays intact: ${value}`, () => {
+		for (const input of [`{"name":"PASSWORD","value":"${value}"}`, `- name: PASSWORD\n  value: ${value}\n`]) {
+			assert.equal(scan(input).text, input);
+		}
+	});
+}

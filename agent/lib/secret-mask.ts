@@ -85,9 +85,18 @@ const DUMPERS: [RegExp, Rule][] = [
 	[/\bsecurity\s+find-(?:generic|internet)-password\b[^;\n|&]*\s-w\b/, rule("keychain-password", "Omit `-w` and request only non-secret keychain metadata.")],
 ];
 
+/** Only uppercase assignment patterns indicate a credential search, not code identifiers. */
+function recursiveAssignmentPattern(command: string): boolean {
+	const args = /\bgrep\b([\s\S]*)/.exec(command)?.[1].match(/"(?:\\.|[^"\\])*"|'[^']*'|\S+/g) ?? [];
+	const pattern = args.find(arg => !arg.startsWith("-") || arg.startsWith("--regexp="));
+	return /^(?:[A-Z_]*(?:PASSWORD|SECRET|TOKEN|PWD)[A-Z_]*)=/.test(
+		(pattern ?? "").replace(/^--regexp=/, "").replace(/^["']|["']$/g, ""));
+}
+
 /** Deliberately do not treat a pipe to jq/grep as proof that a credential dump is safe. */
 export function commandRule(command: string): Rule | undefined {
 	for (const part of command.split(/[;\n|&]/)) {
+		if (/\bgit\b[^;\n|&]*\bgrep\b/.test(part)) continue;
 		const kubectl = /\bkubectl\b([\s\S]*)/.exec(part)?.[1];
 		if (kubectl) {
 			if (/\bconfig\s+view\b[^;\n|&]*--raw\b/.test(kubectl)) return rule("kubectl-config-raw", "Omit `--raw` and request non-secret context names with `kubectl config get-contexts -o name`.");
@@ -103,14 +112,14 @@ export function commandRule(command: string): Rule | undefined {
 					"Use `-o name` or `-o custom-columns=NAME:.metadata.name` for Secret metadata; for non-secret resources project only the field you need.");
 			}
 		}
-		if (/^\s*(?:command\s+)?(?:\/usr\/bin\/)?env\s*(?:[<>]|$)|\bdeclare\s+-[A-Za-z]*[xp]\b/.test(part)) {
+		if (/^\s*(?:command\s+)?(?:\/usr\/bin\/)?env\s*(?:-0\s*)?(?:[<>]|$)|\bdeclare\s+-[A-Za-z]*[xp]\s*(?:[<>]|$)/.test(part)) {
 			return rule("environment", "Name the non-secret variable you need instead of dumping the environment.");
 		}
 		if (/(?:\b(?:cat|less|head|tail|bat|more|grep)\s|<)[^;\n|&]*\/proc\/(?:self|\d+|\*)\/environ\b/.test(part)) {
 			return rule("environment", "Name the non-secret variable you need instead of dumping the environment.");
 		}
 		if (/\bgrep\b.*(?:\s-[A-Za-z]*[rR][A-Za-z]*\b|\s--recursive\b)/.test(part)
-			&& (part.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).some(isSecretKey)) {
+			&& recursiveAssignmentPattern(part)) {
 			return rule("credential-search", "Search for a specific non-secret key instead of recursively printing credential assignments.");
 		}
 		if (/\bdocker\s+inspect\b/.test(part) && !/--format(?:=|\s)/.test(part)) return rule("docker-inspect", "Use `docker inspect --format '{{.Config.Image}}'` for a non-secret field.");
@@ -149,11 +158,16 @@ const SECTION_LIMIT = 65536;
 export function isSecretKey(name: string): boolean {
 	const segments = name.replace(/([A-Z])([A-Z][a-z])/g, "$1_$2")
 		.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[^A-Za-z0-9]+/g, "_").toLowerCase();
+	if (/(?:_(?:count|limit|type|name|ttl|length)|hash|policy)$/.test(segments)) return false;
 	return /password|passwd/i.test(name) || /(?:^|_)(?:password|passwd|pass|pwd|secret|token|api_?key|access_?key|secret_?key|client_?secret|private_?key|credentials?|connection_?string|account_?key|shared_?access_?key|shared_?access_?signature|sas|sig)(?:_|$)/.test(segments);
 }
 
+function nonCredentialValue(value: string): boolean {
+	return /^(?:[0-9]+|none|null|true|false|fail|pass|bearer)$/i.test(value);
+}
+
 function secretValue(value: string, quoted: boolean, terminated: boolean): boolean {
-	if (/^\*+$|^<[^>]*>$|^\$\{[^}]*\}$|^\$[A-Za-z_][A-Za-z0-9_]*$|^\[REDACTED:[^\]]+\]$/.test(value)
+	if (nonCredentialValue(value) || /^\*+$|^<[^>]*>$|^\$\{[^}]*\}$|^\$[A-Za-z_][A-Za-z0-9_]*$|^\[REDACTED:[^\]]+\]$/.test(value)
 		|| /^(?:REDACTED|changeme|example|null|true|false|string|number|boolean|undefined|any|unknown|never|void|object|symbol|bigint|Array|Record|Promise|Readonly|Date)(?:<.*>)?$/i.test(value)
 		|| /^(?:[\w$.]+\[|[A-Za-z_$][\w$]*<|\(|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\.|\())/.test(value)
 		|| (!quoted && /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*(\(.*\))?[;,]?$/.test(value)
@@ -183,7 +197,7 @@ function envJson(text: string, out: Candidate[]): void {
 		try { decoded = JSON.parse(`"${name}"`); } catch { decoded = name; }
 		if (!isSecretKey(decoded)) continue;
 		const [start, end] = match.indices![match[1] === "value" ? 2 : 4]!;
-		if (end > start) out.push({ start, end, kind: "env-value" });
+		if (end > start && !nonCredentialValue(text.slice(start, end))) out.push({ start, end, kind: "env-value" });
 	}
 }
 
@@ -197,7 +211,7 @@ function envYaml(line: string, offset: number, previous: EnvField | undefined, o
 	if (previous && !match[2] && previous.indent === field.indent && previous.key !== field.key) {
 		const name = field.key === "name" ? field : previous;
 		const value = field.key === "value" ? field : previous;
-		if (isSecretKey(name.value) && value.end > value.start) out.push({ start: value.start, end: value.end, kind: "env-value" });
+		if (isSecretKey(name.value) && value.end > value.start && !nonCredentialValue(value.value)) out.push({ start: value.start, end: value.end, kind: "env-value" });
 	}
 	return field;
 }
