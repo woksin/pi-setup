@@ -9,7 +9,7 @@
  * function is reported.
  */
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -95,9 +95,12 @@ async function allSites(): Promise<Site[]> {
 	return (await loadedSources()).flatMap(p => findSites(relative(AGENT_DIR, p), readFileSync(p, "utf8")));
 }
 
+// The Cratis CLI guard is an optional component: an install with Cratis off has no such file.
+const GUARD_FILES = ["extensions/phase-priority.ts", ...(existsSync(join(AGENT_DIR, "extensions/cratis-cli-guard.ts")) ? ["extensions/cratis-cli-guard.ts"] : [])];
+
 test("scan covers the loaded sources, including the guards", async () => {
 	const files = (await loadedSources()).map(f => relative(AGENT_DIR, f));
-	for (const must of ["extensions/phase-priority.ts", "extensions/cratis-cli-guard.ts", "extensions/lane-policy.ts", "lib/orchestration.ts"]) assert.ok(files.includes(must), `${must} not scanned`);
+	for (const must of [...GUARD_FILES, "extensions/lane-policy.ts", "lib/orchestration.ts"]) assert.ok(files.includes(must), `${must} not scanned`);
 });
 
 test("every prompt call is allowlisted by call expression (start and end); none are unbounded by accident", async () => {
@@ -114,7 +117,7 @@ test("the allowlist has no stale entries and every entry has a reason", async ()
 });
 
 test("hook guards use the bounded helper", () => {
-	for (const file of ["extensions/phase-priority.ts", "extensions/cratis-cli-guard.ts"]) {
+	for (const file of GUARD_FILES) {
 		assert.match(readFileSync(join(AGENT_DIR, file), "utf8"), /guardSelect\(/, `${file} must prompt via guardSelect`);
 	}
 });
