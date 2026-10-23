@@ -259,7 +259,8 @@ class PhaseLedger:
                            stack=getattr(args, "stack", None) or command_stack(command),
                            queuedAt=utc_stamp(), startedAt=None, endedAt=None, waitS=0, runS=0,
                            exit=None, outcome="rejected", head=None, dirty=None, verified=False, envHash=env_hash(),
-                           argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest())
+                           argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest(),
+                           fingerprint=test_fingerprint(cwd, command) if cwd is not None else None)
         self.queued = time.monotonic()
         self.started = None
         self.enqueued = False
@@ -460,7 +461,16 @@ def readonly_busy(path):
         os.close(fd)
 
 
-def wait_eta(state, configuration, kind):
+def eta_fast(state, settings, request):
+    if request is None or not request.command:
+        return False
+    command = request.command[1:] if request.command[0] == "--" else request.command
+    if not command:
+        return False
+    return fast_phase(state, request, settings, test_fingerprint(os.getcwd(), command))
+
+
+def wait_eta(state, configuration, kind, request=None):
     records, _ = read_ledger(state)
     durations = {k: [r["runS"] for r in records if r["kind"] == k and r["startedAt"] is not None]
                  for k in KINDS}
@@ -470,8 +480,10 @@ def wait_eta(state, configuration, kind):
         return 0
     median = percentile(durations[kind], 50)
     medians = {k: percentile(v, 50) if v else median for k, v in durations.items()}
-    heavy, integration = config(configuration)
-    free = dict(heavy=heavy, integration=integration)
+    settings = config(configuration)
+    heavy, integration = settings
+    fast = settings.options["fast_lane"]
+    free = dict(heavy=heavy, integration=integration, fast=fast["slots"] if fast else 0)
     events, running = [], set()
     now = time.time()
     # Probe once for orphan metadata as well as live locks, as admission does.
@@ -494,19 +506,19 @@ def wait_eta(state, configuration, kind):
                 running.add(data.get("token", path.stem))
                 remaining = max(0, medians.get(data.get("kind"), median) - max(0, now - data.get("started", now)))
                 events.append((remaining, resource))
-            waiters = live_waiters(state, readonly=True)
+            waiters = all_waiters(state, readonly=True)
         finally:
             os.close(coordinator)
     waiters = [w for w in waiters if PRIORITIES[w["priority"]] >= PRIORITIES["normal"]]
     ahead = len(waiters)
-    pending = [w["kind"] for w in waiters] + [kind]
+    pending = [(w["kind"], w.get("fast", False)) for w in waiters] + [(kind, eta_fast(state, fast, request))]
     elapsed = 0
     if kind == "ci":
-        pending, ahead = [kind], 0
+        pending, ahead = [(kind, False)], 0
     while pending:
         for entry in list(enumerate(pending)):
-            index, candidate = entry
-            needs = [] if candidate == "ci" else ["heavy"] + (["integration"] if candidate == "integration" else [])
+            index, (candidate, is_fast) = entry
+            needs = eta_resources(candidate, is_fast, free)
             if not all(free[r] > 0 for r in needs):
                 continue
             if index == len(pending) - 1:
@@ -527,6 +539,14 @@ def wait_eta(state, configuration, kind):
                 free[resource] += 1
         events = [(t, r) for t, r in events if t != elapsed]
     return 0
+
+
+def eta_resources(kind, fast, free):
+    if kind == "ci":
+        return []
+    if fast and free["fast"] > 0:
+        return ["fast"]
+    return ["heavy"] + (["integration"] if kind == "integration" else [])
 
 
 def safe_label(value):
@@ -552,7 +572,8 @@ def config(path, *, notes=None):
 
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
-                    phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3)
+                    phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
+                    fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"]))
     try:
         data = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(data, dict):
@@ -575,6 +596,9 @@ def config(path, *, notes=None):
             valid = type(value) is int and value >= 0  # 0 = off
         elif key == "phase_nice":
             valid = type(value) is int and 0 <= value <= 19
+        elif key == "fast_lane":
+            values[key] = fast_lane_config(value, warn)
+            continue
         elif key == "memory_admission":
             values[key] = memory_admission_config(value, warn)
             continue
@@ -589,6 +613,77 @@ def config(path, *, notes=None):
     heavy = values.pop("heavy_slots")
     integration = values.pop("integration_slots")
     return PhaseConfig(heavy, integration, values)
+
+
+def fast_lane_config(value, warn):
+    defaults = dict(slots=2, max_expected_s=90, kinds=["build", "test"])
+    if value is False:
+        return False
+    if not isinstance(value, dict):
+        warn("invalid fast_lane; using defaults")
+        return defaults
+    settings = defaults.copy()
+    validators = fast_lane_fields()
+    for key, item in value.items():
+        if key not in validators:
+            warn(f"unknown fast_lane key {key}; ignored")
+        elif validators[key](item):
+            settings[key] = item
+        else:
+            warn(f"invalid fast_lane.{key}; using default {defaults[key]!r}")
+    return settings
+
+
+def fast_lane_fields():
+    return dict(slots=lambda v: type(v) is int and 1 <= v <= 32,
+                max_expected_s=lambda v: type(v) in (int, float) and 0 < v <= sys.float_info.max / 3,
+                kinds=lambda v: isinstance(v, list) and all(k in ("build", "test") for k in v))
+
+
+def fast_history(state, fingerprint):
+    records, _ = read_ledger(state, days=8)
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    return [r for r in records if fast_record(r, fingerprint, since)]
+
+
+def fast_record(record, fingerprint, since):
+    if record.get("fingerprint") != fingerprint or record["startedAt"] is None:
+        return False
+    if record["outcome"] not in ("passed", "failed", "timeout"):
+        return False
+    return datetime.fromisoformat(record["ts"].replace("Z", "+00:00")) >= since
+
+
+def slow_fast_history(history, threshold):
+    p90 = percentile([r["runS"] for r in history], 90)
+    return any(r.get("fastBudgetExceeded") is True for r in history) or (p90 is not None and p90 > threshold)
+
+
+def fast_refusal(state, fingerprint, history, threshold):
+    if metadata(state / "container-tests.json").get(fingerprint) is True:
+        return "recorded container test"
+    if slow_fast_history(history, threshold):
+        return "history says this phase is slow"
+    return None
+
+
+def fast_phase(state, args, settings, fingerprint):
+    if not settings or args.kind not in settings["kinds"]:
+        return False
+    try:
+        history = fast_history(state, fingerprint)
+    except (OSError, ValueError):
+        history = []
+    refusal = fast_refusal(state, fingerprint, history, settings["max_expected_s"])
+    if refusal:
+        if getattr(args, "expect_fast", False):
+            note(f"--expect-fast ignored: {refusal}")
+        return False
+    return getattr(args, "expect_fast", False) or len(history) >= 3
+
+
+def fast_budget(settings):
+    return max(3 * settings["max_expected_s"], 120)
 
 
 def memory_admission_config(value, warn=None):
@@ -784,7 +879,7 @@ def burst_available(state, available, prior, live, ceiling):
 def phases_running(state, available, prior, live):
     """Caller holds the coordinator; do not mistake our tentative locks for owners."""
     return any(lease_running(path, prior, live) for path in state.glob("*.lock")
-               if path.name.startswith(("heavy-", "integration-", "ci-")) and path not in available)
+               if path.name.startswith(("heavy-", "integration-", "ci-", "fast-")) and path not in available)
 
 
 def sample_tree(root_pid):
@@ -889,7 +984,7 @@ def test_fingerprint(cwd, command):
 def begin_test_attribution(state, token):
     """A generation change remembers even a peer that exits between Docker polls."""
     paths = [p for p in state.glob("*.lock")
-             if p.name.startswith(("heavy-", "integration-", "ci-"))]
+             if p.name.startswith(("heavy-", "integration-", "ci-", "fast-"))]
     prior = {p: metadata(p.with_suffix(".json")) for p in paths}
     competitors = [entry for entry in prior.values() if entry.get("token") != token
                    and entry.get("kind") not in ("build", "ci")]
@@ -898,7 +993,7 @@ def begin_test_attribution(state, token):
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
         for path in state.glob("*.lock"):
-            if not path.name.startswith(("heavy-", "integration-", "ci-")):
+            if not path.name.startswith(("heavy-", "integration-", "ci-", "fast-")):
                 continue
             entry = metadata(path.with_suffix(".json"))
             if entry.get("token") == token or entry.get("kind") in ("build", "ci"):
@@ -1126,8 +1221,8 @@ def revoke_priority(state):
 
 def high_count(state):
     """Caller holds the coordinator; count queued and leased HIGH tokens only once."""
-    tokens = {w["token"] for w in live_waiters(state) if w["priority"] == "high"}
-    for path in state.glob("heavy-*.lock"):
+    tokens = {w["token"] for w in all_waiters(state) if w["priority"] == "high"}
+    for path in list(state.glob("heavy-*.lock")) + list(state.glob("fast-*.lock")):
         data = metadata(path.with_suffix(".json"))
         if data.get("priority") != "high":
             continue
@@ -1150,7 +1245,7 @@ def register_waiter(state, args, token):
     coordinator = lock_file(state / "coordinator.lock")
     if coordinator is None:
         return False, None
-    path = state / "waiters" / f"{token}.json"
+    path = state / ("fast-waiters" if getattr(args, "fast", False) else "waiters") / f"{token}.json"
     fd = None
     downgrade_note = None
     try:
@@ -1174,6 +1269,8 @@ def register_waiter(state, args, token):
             raise ValueError("cannot lock new waiter")
         data = dict(token=token, pid=os.getpid(), priority=args.priority, kind=args.kind,
                     label=args.label, cwd=os.getcwd(), enqueued=time.time(), seq=seq)
+        if getattr(args, "fast", False):
+            data["fast"] = True
         os.write(fd, json.dumps(data).encode())
         return True, fd
     except BaseException:
@@ -1198,15 +1295,26 @@ def deregister_waiter(state, token, fd):
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
         try:
-            (state / "waiters" / f"{token}.json").unlink(missing_ok=True)
+            waiter_path(state, token).unlink(missing_ok=True)
         finally:
             unlock(fd)
 
 
-def live_waiters(state, cancelled=lambda: False, *, readonly=False):
+def waiter_path(state, token):
+    fast = state / "fast-waiters" / f"{token}.json"
+    return fast if fast.exists() else state / "waiters" / f"{token}.json"
+
+
+def all_waiters(state, cancelled=lambda: False, *, readonly=False):
+    waiters = live_waiters(state, cancelled, readonly=readonly)
+    waiters += live_waiters(state, cancelled, readonly=readonly, directory="fast-waiters")
+    return sorted(waiters, key=lambda w: (-PRIORITIES[w["priority"]], w["enqueued"], w["seq"]))
+
+
+def live_waiters(state, cancelled=lambda: False, *, readonly=False, directory="waiters"):
     """Kernel locks, not PIDs, define liveness. Caller holds the coordinator."""
     waiters = []
-    for path in (state / "waiters").glob("*.json"):
+    for path in (state / directory).glob("*.json"):
         if cancelled():
             return []
         try:
@@ -1235,35 +1343,47 @@ def live_waiters(state, cancelled=lambda: False, *, readonly=False):
     return sorted(waiters, key=lambda w: (-PRIORITIES[w["priority"]], w["enqueued"], w["seq"]))
 
 
+def waiter_resources(waiter, pools):
+    lane = "fast" if waiter.get("fast") and pools["fast"] else "heavy"
+    needed = [lane] + (["integration"] if waiter["kind"] == "integration" else [])
+    if any(not pools[key] for key in needed):
+        return []
+    return [pools[key][0] for key in needed]
+
+
 def ordered_candidate(state, available, token, cancelled):
     """Reserve satisfiable earlier waiters virtually; blocked ones take nothing."""
-    heavy = sorted(p for p in available if p.name.startswith("heavy-"))
-    integration = sorted(p for p in available if p.name.startswith("integration-"))
-    for waiter in live_waiters(state, cancelled):
-        candidate = ([heavy[0]] if heavy else [])
-        if waiter["kind"] == "integration":
-            candidate = candidate + [integration[0]] if candidate and integration else []
+    pools = {key: sorted(p for p in available if p.name.startswith(key + "-"))
+             for key in ("heavy", "integration", "fast")}
+    for waiter in all_waiters(state, cancelled):
+        candidate = waiter_resources(waiter, pools)
         if waiter.get("token") == token:
             return candidate
-        if candidate:
-            heavy.pop(0)
-            if waiter["kind"] == "integration":
-                integration.pop(0)
+        for path in candidate:
+            pools[path.name.split("-", 1)[0]].pop(0)
     return []
+
+
+def claim_paths(state, candidates, waiter, limits):
+    paths = {path for candidate in candidates for path in candidate}
+    if waiter is not None:
+        paths.update(state / f"integration-{n}.lock" for n in range(limits[1]))
+        fast = getattr(limits, "options", {}).get("fast_lane")
+        if fast:
+            paths.update(state / f"fast-{n}.lock" for n in range(fast["slots"]))
+    return paths
 
 
 def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None,
           integration_ceiling=None):
     """One bounded admission scan; kernel locks and metadata identity are checked atomically."""
-    paths = {path for candidate in candidates for path in candidate}
-    if waiter is not None:
-        paths.update(state / f"integration-{n}.lock" for n in range(limits[1]))
+    paths = claim_paths(state, candidates, waiter, limits)
     reason = admission.reason(deadline) if admission and any(
-        path.name.startswith("heavy-") for path in paths) else None
+        path.name.startswith(("heavy-", "fast-")) for path in paths) else None
     snapshot_paths = paths.copy()
     if reason:
         snapshot_paths.update(path for path in state.glob("*.lock")
-                              if path.name.startswith(("heavy-", "integration-", "ci-")))
+                              if path.name.startswith(("heavy-", "integration-", "ci-", "fast-")))
     if integration_ceiling is not None:
         snapshot_paths.update(state.glob("integration-*.lock"))
     prior = {}
@@ -1307,12 +1427,12 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             candidate = next((c for c in candidates if all(p in eligible for p in c)), [])
         if candidate and not cancelled() and time.monotonic() < deadline:
             if waiter is not None:
-                waiter_path = state / "waiters" / f"{waiter}.json"
-                info = metadata(waiter_path)
+                queued_path = waiter_path(state, waiter)
+                info = metadata(queued_path)
                 if info.get("priority") == "high":
                     # Reserve the HIGH count before unlinking; launcher publication happens later.
                     publish([(path, available[path]) for path in candidate], info)
-                waiter_path.unlink(missing_ok=True)
+                queued_path.unlink(missing_ok=True)
             return [(path, available.pop(path)) for path in candidate]
     finally:
         for fd in available.values():
@@ -1343,9 +1463,12 @@ def release(state, held, token, safe):
 
 
 def status(state, configuration=CONFIG):
-    cap = config(configuration).options["max_high"]
+    options = config(configuration).options
+    cap = options["max_high"]
+    fast_slots = options["fast_lane"]["slots"] if options["fast_lane"] else 0
     if not state.exists():
         note("no active phases")
+        note(f"fast=0/{fast_slots} queued=0")
         note(f"high=0/{cap}")
         return 0
     with open(state / "coordinator.lock", "a+b") as coordinator:
@@ -1360,12 +1483,13 @@ def status(state, configuration=CONFIG):
             if fd is not None:
                 unlock(fd)
             owners.append((path, data, busy))
-        waiters = live_waiters(state)
+        waiters = all_waiters(state)
         grant = priority_grant(state)
         high = high_count(state)
     # No slow ps probe or terminal write while holding the shared coordinator.
     live = live_groups(2) if any(not busy and data.get("pgid") for _, data, busy in owners) else set()
     seen = set()
+    fast_running = 0
     for path, data, busy in owners:
         orphan = (data.get("unreadable") or live is None or data.get("pgid") in live) if not busy else False
         if not busy and not orphan:
@@ -1374,16 +1498,20 @@ def status(state, configuration=CONFIG):
         if token in seen:
             continue
         seen.add(token)
+        fast_running += path.name.startswith("fast-")
         age = max(0, int(time.time() - data.get("started", time.time())))
         note(f"{data.get('kind', 'unknown')} {data.get('label', 'unknown')} "
              f"pid={data.get('pid', '?')} cwd={data.get('cwd', '?')} "
-             f"elapsed={age}s {'orphan-group' if orphan else 'running'}")
+             f"elapsed={age}s {'orphan-group' if orphan else 'running'}"
+             f"{' fast' if data.get('fast') or path.name.startswith('fast-') else ''}")
     if not seen:
         note("no active phases")
     for rank, waiter in enumerate(waiters, 1):
         age = max(0, int(time.time() - waiter["enqueued"]))
         note(f"queued priority={waiter['priority']} kind={waiter['kind']} "
-             f"label={waiter.get('label', '?')} waited={age}s rank={rank}")
+             f"label={waiter.get('label', '?')} waited={age}s rank={rank}"
+             f"{' fast' if waiter.get('fast') else ''}")
+    note(f"fast={fast_running}/{fast_slots} queued={sum(bool(w.get('fast')) for w in waiters)}")
     note(f"high={high}/{cap}")
     if grant:
         remaining = "unlimited uses" if grant["uses"] is None else f"{grant['uses']} use(s) remaining"
@@ -1468,6 +1596,30 @@ def report_log(path, tail, return_code):
     note(f"log={path} exit={return_code} lines={lines}")
 
 
+def prepare_fast(state, args, settings, fingerprint):
+    fast = fast_phase(state, args, settings, fingerprint)
+    if getattr(args, "ledger", None):
+        args.ledger.record.update(fingerprint=fingerprint, fast=fast)
+    return fast
+
+
+def apply_fast_budget(args, settings, held):
+    if not any(path.name.startswith("fast-") for path, _ in held):
+        return None
+    budget = fast_budget(settings)
+    args.timeout = min(args.timeout, budget)
+    note(f"fast lane (budget {budget:g}s)")
+    return budget
+
+
+def fast_timeout(args, budget):
+    if budget is None or args.timeout < budget:
+        return
+    note("fast-lane phase exceeded its budget; rerun without --expect-fast")
+    if getattr(args, "ledger", None):
+        args.ledger.record["fastBudgetExceeded"] = True
+
+
 def run(args, state, configuration, output=None):
     safe_label(args.label)
     bounded(args.timeout, "timeout", args.approved_long_timeout)
@@ -1550,6 +1702,7 @@ def run(args, state, configuration, output=None):
                 and metadata(state / "container-tests.json").get(fingerprint) is True):
             admission_args.kind = "integration"
             note("recorded container test: also claiming an integration permit (container_test_detection)")
+        admission_args.fast = prepare_fast(state, admission_args, options["fast_lane"], fingerprint)
         while True:
             if cancelled[0]:
                 note("cancelled while queued")
@@ -1577,7 +1730,7 @@ def run(args, state, configuration, output=None):
                 integration = burst.effective(integration, deadline)
             held = claim(state, slot_paths(state, admission_args.kind, heavy, integration, ci_key),
                          deadline, lambda: bool(cancelled[0]),
-                         token if waiter_fd is not None else None, (heavy, integration), admission,
+                         token if waiter_fd is not None else None, PhaseConfig(heavy, integration, settings.options), admission,
                          integration if burst and admission_args.kind == "integration" else None)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
@@ -1614,6 +1767,7 @@ def run(args, state, configuration, output=None):
             if ledger:
                 ledger.outcome("cancelled")
             return 128 + cancelled[0]
+        budget = apply_fast_budget(args, options["fast_lane"], held)
         child_env = None
         cap = msbuild_cap(options["msbuild_max_cpu"], heavy)
         if cap and args.kind in ("build", "test", "integration"):
@@ -1638,7 +1792,8 @@ def run(args, state, configuration, output=None):
             os.close(read_gate)
             read_gate = -1
             publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, cwd=os.getcwd(),
-                               label=args.label, kind=args.kind, priority=admission_args.priority, started=time.time()))
+                               label=args.label, kind=args.kind, priority=admission_args.priority, started=time.time(),
+                               fast=admission_args.fast))
             if cancelled[0]:
                 note("cancelled before execution; command not started")
                 if ledger:
@@ -1676,6 +1831,7 @@ def run(args, state, configuration, output=None):
             now = time.monotonic()
             if now - started >= args.timeout:
                 note(f"phase timed out ({args.timeout:g}s); stopping owned process group")
+                fast_timeout(args, budget)
                 return_code = 124
                 if ledger:
                     ledger.outcome("timeout")
@@ -1743,6 +1899,8 @@ def main(argv=None, *, state=None, configuration=None):
     waiting = commands.add_parser("wait", help="estimate the wait for a new normal-priority phase")
     waiting.add_argument("--eta", action="store_true", required=True)
     waiting.add_argument("--kind", choices=KINDS, default="build")
+    waiting.add_argument("--expect-fast", action="store_true", help="request fast estimate for a short build/test")
+    waiting.add_argument("command", nargs=argparse.REMAINDER)
     grant = commands.add_parser("grant-priority", help="grant user-approved high priority")
     duration = grant.add_mutually_exclusive_group()
     duration.add_argument("--uses", type=int, help="1-20 uses, expires after 60 minutes (default 1)")
@@ -1757,6 +1915,7 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--queue-timeout", type=float, default=120, help="separate permit wait in seconds")
     runner.add_argument("--approved-long-timeout", action="store_true", help="declare explicit user approval for execution >600 seconds")
     runner.add_argument("--rerun", action="store_true", help="run even if this exact state already passed")
+    runner.add_argument("--expect-fast", action="store_true", help="request fast lane for a short build/test")
     runner.add_argument("--repo", help="ci watcher repo identity")
     runner.add_argument("--pr", help="ci watcher PR identity")
     runner.add_argument("--commit", help="ci watcher commit identity")
@@ -1799,7 +1958,7 @@ def main(argv=None, *, state=None, configuration=None):
                 parser.error("--days must be positive")
             return stats(state, args.days, args.kind, args.json, args.stack)
         if args.action == "wait":
-            return wait_eta(state, configuration, args.kind)
+            return wait_eta(state, configuration, args.kind, args)
         if args.action == "status":
             return status(state, configuration)
         if args.action == "grant-priority":
