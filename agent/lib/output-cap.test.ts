@@ -7,6 +7,7 @@ import {
 	DISABLED, SessionRoles, capResult, capText, countLines, loadConfig, looksLikeTestOrBuild, offloadDirs, parseConfig, logError, pruneToolOut, pruneOncePerHour, resetPruneGuard, errorLogPath, scopeAllows, truncate,
 } from "./output-cap.ts";
 import extension from "../extensions/output-cap.ts";
+import { DEFAULTS as SECRET_DEFAULTS } from "./secret-mask.ts";
 
 const PK = "PRIVATE" + " KEY";
 
@@ -288,3 +289,13 @@ test("pruneOncePerHour runs at most once per hour and covers home and repo root"
 	assert.equal(existsSync(join(home, ".ai-work", "tool-out", "s", "c.txt")), false);
 	resetPruneGuard();
 });
+
+for (const setting of [{ allowlist: ["^abcd$"] }, { enabled: false }]) {
+	test(`offload honours secret-mask config: ${JSON.stringify(setting)}`, () => {
+		const full = "PASSWORD=abcd\n" + lines(1000);
+		const content = capResult({ toolName: "read", toolCallId: "configured", input: {}, content: text(full) },
+			12000, [dir], { ...SECRET_DEFAULTS, ...setting })!;
+		assert.equal(readFileSync(join(dir, "configured.txt"), "utf8"), full);
+		assert.match(content[0].text, /PASSWORD=abcd/);
+	});
+}

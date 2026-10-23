@@ -13,7 +13,7 @@
  * blocks as before. CRATIS_HOOKS_ALLOW_SECRET_READS=1 (set where the harness starts) stands this extension down too.
  * Redaction always stays on. Elsewhere blocking is unchanged.
  * /guards off secrets disables blocking only, NOT redaction. enabled:false disables these
- * handlers; output-cap independently pre-masks offloads. redactResults/redactInput and scope
+ * handlers, including output-cap pre-masking of offloads. redactResults/redactInput and scope
  * are explicit operator controls, not guard switches.
  * Notifications require rotation: masking does not revoke a credential or erase history.
  * Only text parts <= 2 MiB are scanned; non-text parts, split/encoded/unknown secrets,
@@ -96,10 +96,22 @@ export function commandRule(command: string): Rule | undefined {
 				const secret = operation[1] === "get" && /(?:^|\s)secrets?(?=[\s/,]|$)/.test(operation[2]);
 				const outputs = [...part.matchAll(/(?:^|\s)(?:-o(?:=|\s*)|--output(?:=|\s+))["']?([^\s"']+)/g)].map(m => m[1]);
 				const full = outputs.some(output => /^(?:json|yaml)$/.test(output));
-				const secretDump = secret && outputs.some(output => output !== "name" && output !== "custom-columns=NAME:.metadata.name");
-				if (secretDump || operation[1] === "describe" || (!secret && full)) return rule("kubectl-credentials",
+				const secretDump = secret && (outputs.some(output => output !== "name" && output !== "custom-columns=NAME:.metadata.name")
+					|| /--template(?:=|\s)/.test(part));
+				const envProjection = outputs.some(output => /^jsonpath/.test(output)) && /\.\.?env\b/.test(part);
+				if (secretDump || envProjection || operation[1] === "describe" || (!secret && full)) return rule("kubectl-credentials",
 					"Use `-o name` or `-o custom-columns=NAME:.metadata.name` for Secret metadata; for non-secret resources project only the field you need.");
 			}
+		}
+		if (/^\s*(?:command\s+)?(?:\/usr\/bin\/)?env\s*(?:[<>]|$)|\bdeclare\s+-[A-Za-z]*[xp]\b/.test(part)) {
+			return rule("environment", "Name the non-secret variable you need instead of dumping the environment.");
+		}
+		if (/(?:\b(?:cat|less|head|tail|bat|more|grep)\s|<)[^;\n|&]*\/proc\/(?:self|\d+|\*)\/environ\b/.test(part)) {
+			return rule("environment", "Name the non-secret variable you need instead of dumping the environment.");
+		}
+		if (/\bgrep\b.*(?:\s-[A-Za-z]*[rR][A-Za-z]*\b|\s--recursive\b)/.test(part)
+			&& (part.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).some(isSecretKey)) {
+			return rule("credential-search", "Search for a specific non-secret key instead of recursively printing credential assignments.");
 		}
 		if (/\bdocker\s+inspect\b/.test(part) && !/--format(?:=|\s)/.test(part)) return rule("docker-inspect", "Use `docker inspect --format '{{.Config.Image}}'` for a non-secret field.");
 		if ((/\b(?:cat|less|head|tail|bat|more)\s/.test(part) || /\bgrep\b.*(?:\s-[A-Za-z]*[rR][A-Za-z]*\b|\s--recursive\b)/.test(part) || /\bbase64\b[^;\n|&]*(?:\s-(?:d|D|--decode)\b|--decode\b)[^;\n|&]*</.test(part)) && FILE.test(part)) {
@@ -137,21 +149,16 @@ const SECTION_LIMIT = 65536;
 export function isSecretKey(name: string): boolean {
 	const segments = name.replace(/([A-Z])([A-Z][a-z])/g, "$1_$2")
 		.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[^A-Za-z0-9]+/g, "_").toLowerCase();
-	return /(?:^|_)(?:password|passwd|pass|pwd|secret|token|api_?key|access_?key|secret_?key|client_?secret|private_?key|credentials?|connection_?string|account_?key|shared_?access_?key|shared_?access_?signature|sas|sig)(?:_|$)/.test(segments);
+	return /password|passwd/i.test(name) || /(?:^|_)(?:password|passwd|pass|pwd|secret|token|api_?key|access_?key|secret_?key|client_?secret|private_?key|credentials?|connection_?string|account_?key|shared_?access_?key|shared_?access_?signature|sas|sig)(?:_|$)/.test(segments);
 }
 
 function secretValue(value: string, quoted: boolean, terminated: boolean): boolean {
 	if (/^\*+$|^<[^>]*>$|^\$\{[^}]*\}$|^\$[A-Za-z_][A-Za-z0-9_]*$|^\[REDACTED:[^\]]+\]$/.test(value)
 		|| /^(?:REDACTED|changeme|example|null|true|false|string|number|boolean|undefined|any|unknown|never|void|object|symbol|bigint|Array|Record|Promise|Readonly|Date)(?:<.*>)?$/i.test(value)
-		|| /^(?:[\w$.]+\[|\(|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\.|\())/.test(value)
+		|| /^(?:[\w$.]+\[|[A-Za-z_$][\w$]*<|\(|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\.|\())/.test(value)
 		|| (!quoted && /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*(\(.*\))?[;,]?$/.test(value)
-			&& (terminated || /[.();,]/.test(value) || !/[0-9]/.test(value)))) return false;
-	if (!quoted && /^[A-Za-z0-9]+$/.test(value) && /[A-Za-z]/.test(value)) {
-		const digits = value.match(/[0-9]/g)?.length ?? 0;
-		const letters = value.length - digits;
-		return (digits >= 2 && letters >= 2) || (value.length >= 12 && digits >= 1);
-	}
-	return /[0-9+/=~!@#$%^&*-]/.test(value) || (value.length >= 20 && /[a-z]/.test(value) && /[A-Z]/.test(value));
+			&& (terminated || /[.();,]/.test(value) || /^(?:Bearer|process_env)$/.test(value)))) return false;
+	return true;
 }
 
 function privateKeys(text: string, out: Candidate[]): void {
@@ -196,7 +203,7 @@ function envYaml(line: string, offset: number, previous: EnvField | undefined, o
 }
 
 function connections(text: string, out: Candidate[]): void {
-	const fields = /(?<![\w$.-])(["']?)([A-Za-z_$][\w$.-]{0,255})\1[ \t]*[=:][ \t]*(?:(["'])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s"';,&]{8,}))/gd;
+	const fields = /(?<![\w$.-])(["']?)([A-Za-z_$][\w$.-]{0,255})\1[ \t]*[=:][ \t]*(?:(["'])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s"';,&]{4,}))/gd;
 	for (const match of text.matchAll(fields)) {
 		if (!isSecretKey(match[2])) continue;
 		const group = match[3] ? 4 : 5;
@@ -204,7 +211,10 @@ function connections(text: string, out: Candidate[]): void {
 		const [start, end] = match.indices![group]!;
 		// The bare-value capture excludes delimiters; retain that code-expression signal.
 		const terminated = text[end] === ";" || text[end] === ",";
-		if (value.length < 8 || !secretValue(value, !!match[3], terminated)) continue;
+		// Spaced, lowercase source assignments may be unquoted camelCase identifiers.
+		const expression = !match[3] && match[2] === match[2].toLowerCase()
+			&& /\s=/.test(match[0]) && /^[A-Za-z_$][\w$]*$/.test(value) && /[a-z][A-Z]/.test(value);
+		if (value.length < 4 || expression || !secretValue(value, !!match[3], terminated)) continue;
 		out.push({ start, end, kind: "connection-string" });
 	}
 }

@@ -111,10 +111,10 @@ const negatives = [
 	"sk-ant-short", "sk-short", "sk-proj-short", "ghp_short", "github_pat_short", "AKIA123", "aws_secret_access_key = [REDACTED:aws-key]",
 	"AIzaSHORT", "xoxb-short", "https://hooks.slack.com/other", "eyJshort.eyJshort.short", "sk_live_short", "rk_test_short", "live_short", "test_short", "SG.short.short",
 	"https://example.invalid", "https://user:ab@example.invalid", "password: string", "token = os.environ[\"X\"]", "token = process.env.TOKEN", "token = os.getenv('TOKEN')",
-	... ["***", "<placeholder>", "${LONG_VARIABLE}", "$LONG_VARIABLE", "REDACTED", "changeme", "example", "null", "true", "false", "string", "number", "somevalue", "identifier", "[REDACTED:connection-string]"].map(value => `password = ${value}`),
-	'{"token":"shortname","password":"string"}', '{"kind":"ConfigMap","data":{"fixture":"' + a + '"}}',
+	... ["***", "<placeholder>", "${LONG_VARIABLE}", "$LONG_VARIABLE", "REDACTED", "changeme", "example", "null", "true", "false", "string", "number", "[REDACTED:connection-string]"].map(value => `password = ${value}`),
+	'{"kind":"ConfigMap","data":{"fixture":"' + a + '"}}',
 	'{"kind":"Secret","data":{"fixture":"short"}}', '{"kind":"Secret","stringData":{"fixture":"' + a + '"}}',
-	'users:\n- name: local\n  user:\n    token: [REDACTED:kube-data]\nother:\n  password: short\n',
+	'users:\n- name: local\n  user:\n    token: [REDACTED:kube-data]\nother:\n  password: abc\n',
 	`kind: ConfigMap\ndata:\n  fixture: ${a}\n`,
 	"[REDACTED:private-key] [REDACTED:anthropic-key] [REDACTED:jwt]",
 ];
@@ -175,7 +175,7 @@ for (const name of secretNames) test(`secret key segments and env values: ${name
 	}
 	assert.equal(scan(`"${name}": "Pr0d!pass"`).count, 1);
 });
-for (const name of ["BYPASS", "bypass", "SomeBYPASS", "compass", "passwordless", "tokenizer", "secretariat", "PUBLIC_NAME"]) test(`not a secret key segment: ${name}`, () => {
+for (const name of ["BYPASS", "bypass", "SomeBYPASS", "compass", "tokenizer", "secretariat", "PUBLIC_NAME"]) test(`not a secret key segment: ${name}`, () => {
 	assert.equal(isSecretKey(name), false);
 	for (const input of [`{"name":"${name}","value":"Pr0dMongo!pass"}`, `- name: ${name}\n  value: Pr0dMongo!pass\n`, `"${name}": "Pr0d!pass"`]) assert.equal(scan(input).count, 0);
 });
@@ -192,7 +192,7 @@ for (const code of [
 	"const apiKey = config.apiKey;", "const secret = getSecret(name);", "const sig = computeSignature(payload);",
 	'request.headers["x-access-key"]', "const token = credentials[0];", "secret = (getSecret(name));",
 	"secret = " + "unquotedIdentifier12345;", "token = computeSignature(payload, other);", "token = Record<string, unknown>",
-	'"token": "abcdefghijklmnopqrstuvwxyz"', '"token": "String"', "token = SomeExtremelyLongConfigurationType",
+	'"token": "String"', "token = SomeExtremelyLongConfigurationType",
 ]) test(`source expression stays intact: ${code}`, () => assert.equal(scan(code).text, code));
 for (const input of ['apiKey = "' + "d8f7a6s5" + 'd4f3g2h1"', '"AdminPassword": "Pr0d!pass"', 'secret="' + "VeryLongMixed" + 'CaseSecretLiteral"', 'token = 12345678']) test(`secret-like connection literal: ${input}`, () => {
 	assert.equal(scan(input).count, 1);
@@ -217,7 +217,7 @@ for (const [input, value] of [
 for (const input of [
 	"PASSWORD=changeme", "password = getPassword()", "secret = secretValue", "API_KEY=abc",
 	"const secret = getSecret(name)", "password: options.password", "token = Bearer", "token = process_env",
-	"secret = identifier12345;", "secret = identifier12345,", "PASSWORD=abcdefg1", "PASSWORD=1abcdefg",
+	"secret = identifier12345;", "secret = identifier12345,",
 ]) test(`bare code/placeholder/short token stays intact: ${input}`, () => assert.equal(scan(input).text, input));
 test("incomplete PEM in truncated JSON is hidden through end of text by scan and result handler", () => {
 	const input = '{"key":"-----BEGIN RSA ' + PK + '-----\\nlocal-fixture-material\\ntruncated';
@@ -549,4 +549,32 @@ test("layering: Cratis extension not registered (untrusted project) or registere
 		if (env === undefined) delete process.env.CRATIS_HOOKS_ALLOW_SECRET_READS; else process.env.CRATIS_HOOKS_ALLOW_SECRET_READS = env;
 		repo.cleanup(); elsewhere.cleanup();
 	}
+});
+
+for (const value of ["abcd", "abcde", "alphabetic", "lettersOnly", "abcdefg1", "1abcdefg"]) {
+	for (const input of [`PASSWORD=${value}`, `"token": "${value}"`, `API_KEY: ${value}`]) {
+		test(`assignment masks short/alphabetic value: ${input}`, () => {
+			assert.equal(scan(input).text, input.replace(value, "[REDACTED:connection-string]"));
+		});
+	}
+}
+for (const key of ["PGPASSWORD", "MYSQL_PWD", "APP_PWD", "MYpasswdVALUE", "prefixPASSWORDsuffix", "passwordless"]) {
+	test(`glued credential key: ${key}`, () => {
+		assert.equal(isSecretKey(key), true);
+		assert.equal(scan(`${key}=abcd`).text, `${key}=[REDACTED:connection-string]`);
+	});
+}
+for (const command of [
+	"/usr/bin/env", "command env", "env > f && cat f", "cat /proc/self/environ", "cat /proc/*/environ", "cat /proc/123/environ",
+	"declare -x", "declare -p", "kubectl get secret foo --template={{.data}}", "kubectl get secret foo -o go-template='{{.data}}'",
+	"kubectl get pods -o jsonpath='{..env}'", "kubectl get secrets -o jsonpath='{.data}'", "grep -r PASSWORD .",
+]) test(`closes credential dumper gap: ${command}`, async () => {
+	const f = fixture({ hasUI: false });
+	assert.equal((await f.call(command))?.block, true);
+});
+for (const command of ["env VAR=x cmd", "/usr/bin/env VAR=x cmd", "command env VAR=x cmd", "grep -r PUBLIC_NAME .", "ls /proc/self/environ"]) {
+	test(`non-dumping command remains allowed: ${command}`, () => assert.equal(commandRule(command), undefined));
+}
+test("alphabetic free text and sub-four-character assignments stay intact", () => {
+	for (const text of ["the PASSWORD is abcd", "TOKEN abcdef", "PASSWORD=abc"]) assert.equal(scan(text).text, text);
 });
