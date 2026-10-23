@@ -1,4 +1,7 @@
 import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { runLanesFlow } from "./lanes-flow.ts";
+import { preapprovalDefault } from "./lanes/config.ts";
 import { apply, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
 import { isInteractive, parseArgs, USAGE } from "./args.ts";
@@ -97,9 +100,13 @@ function extraRows(
   };
 }
 
+function savedPreapproval(ctx: Ctx): boolean {
+  return preapprovalDefault(join(ctx.home, ".local/share/pi-setup/lanes/templates"));
+}
+
 function resolveAll(
   ctx: Ctx, options: Options, detection: Detection,
-  saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean> },
+  saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean>; preapproveMcp?: boolean },
   manifest: Manifest | undefined,
 ): Resolved {
   const piDir = join(ctx.home, ".pi", "agent");
@@ -137,6 +144,7 @@ function resolveAll(
     buildPlan({
       repoDir: ctx.repoDir, home: ctx.home, settings, overlay: overlayFor(ctx.repoDir, choice.name, settings),
       components: on, which: ctx.which, notes,
+      preapproveMcp: savedPreapproval(ctx) || options.preapproveMcp || answers.preapproveMcp === true,
       drop: on.web === false ? (manifest?.json[".pi/agent/settings.json"]?.ops ?? []).flatMap((o) => (o.op === "array-add" && o.key === "packages" && WEB_PACKAGES.includes(o.value as string) ? [o.value as string] : [])) : [],
       activate: COMPONENTS.map((c) => c.id).filter((id) => on[id] && !wasOn(manifest, currentState(ctx), id)),
     }),
@@ -198,6 +206,7 @@ export async function main(argv: string[], baseCtx: Ctx, injected?: Prompter): P
 }
 
 async function runCommand(ctx: Ctx, options: Options, prompter: Prompter | undefined, baseCtx: Ctx): Promise<number> {
+  if (options.command === "lanes") return runLanesFlow(ctx, options, prompter);
   if (options.command === "doctor") return runDoctor(ctx, options, baseCtx);
   if (options.command === "uninstall") return runUninstall(ctx, options, prompter);
   if (options.command === "update") return runUpdate(ctx, options, prompter);
@@ -229,13 +238,13 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const toolErrors = requiredToolErrors(ctx, detection, options);
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
 
-  let answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean> } = {};
+  let answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean>; preapproveMcp?: boolean } = {};
   if (prompter) {
     const profiles = loadProfiles(ctx.repoDir);
     const activeBefore = readActive(piDir);
     const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, names);
     const result = await collectChoices(prompter, { options, saved, detection, profiles, initial, home: ctx.home, repoDir: ctx.repoDir,
-      extras: extraRows(ctx, options, saved, detection, manifest) });
+      extras: extraRows(ctx, options, saved, detection, manifest), preapproveMcp: savedPreapproval(ctx) });
     if (result === CANCEL) return cancelled(ctx);
     answers = result;
   }
@@ -271,6 +280,14 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   if (result.code === 0) await syncServices(ctx, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
   const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l));
   if (result.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
+  if (prompter && result.code === 0 && !options.dryRun && !options.plan && r.components.lanes.on && !existsSync(join(r.settings.reposRoot, ".lanes/lanes.json"))) {
+    const answer = await prompter.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
+    if (!prompter.isCancel(answer) && answer === true) {
+      try {
+        if (await runLanesFlow(ctx, { ...options, dir: "" }, prompter, true) !== 0) ctx.err("Lanes setup was not completed; run ./install.sh lanes to continue.");
+      } catch (error) { ctx.err(`Lanes setup was not completed: ${(error as Error).message}`); }
+    }
+  }
   return finish(ctx, baseCtx, options, r, detection, shown, result.code, prompter, result.wrote);
 }
 

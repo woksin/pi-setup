@@ -6,7 +6,7 @@ import type { Options } from "./args.ts";
 import { atomicWrite } from "./fsx.ts";
 import { listBackups, tidy } from "./backups.ts";
 import {
-  backupsDir, fileSha, fromHomeRel, manifestPath, pinnedBackups, readManifest, saveIfChanged, sha256, validateManifest,
+  backupsDir, fileSha, fromHomeRel, manifestPath, pinnedBackups, readManifest, saveIfChanged, sha256, validateManifest, symlinkTarget,
 } from "./manifest.ts";
 import type { JsonEntry, Manifest } from "./manifest.ts";
 import { deepEqual } from "./settings.ts";
@@ -133,7 +133,7 @@ class Plan {
 
   private symlink(rel: string, target: string): void {
     const path = this.abs(rel);
-    const targetPath = this.abs(target);
+    const targetPath = symlinkTarget(this.ctx.home, target);
     if (sameLink(path, targetPath) || sameLink(path, target)) this.add(`remove ${path}`, () => unlinkSync(path));
     delete this.remaining.symlinks[rel];
   }
@@ -233,6 +233,21 @@ export function retireFiles(ctx: Ctx, piDir: string, m: Manifest, rels: string[]
     if (!(rel in sub.files)) continue;
     if (rel in plan.remaining.files) m.files[rel] = plan.remaining.files[rel];
     else delete m.files[rel];
+  }
+  return steps;
+}
+
+/** Remove only unchanged recorded links when a component is retired; always drop their records. */
+export function retireSymlinks(ctx: Ctx, m: Manifest, rels: string[]): Step[] {
+  const steps: Step[] = [];
+  for (const rel of rels) {
+    const entry = m.symlinks[rel];
+    if (!entry) continue;
+    const path = fromHomeRel(ctx.home, rel);
+    const target = symlinkTarget(ctx.home, entry.target);
+    if (sameLink(path, target) || sameLink(path, entry.target)) steps.push({ line: `remove ${path}`, run: () => unlinkSync(path) });
+    else steps.push({ line: `left ${path}: no longer points at ${target}`, run: () => {} });
+    delete m.symlinks[rel];
   }
   return steps;
 }

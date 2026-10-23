@@ -1,10 +1,11 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { deepEqual, hasTokens, mergeUserJson, readSettings, render } from "./settings.ts";
 import { listFiles } from "./fsx.ts";
 import { hasRoutingMarkers, spliceRouting } from "./profiles.ts";
 import type { Overlay } from "./profiles.ts";
 import { dropGuardExtension, isCratisFile, stripSections, WEB_PACKAGES } from "./components.ts";
+import { preapprovalDefault } from "./lanes/config.ts";
 import { SetupError } from "./types.ts";
 import type { Action, JsonOp, Settings } from "./types.ts";
 
@@ -21,6 +22,8 @@ export interface PlanInput {
   components?: Record<string, boolean>;
   /** Components being turned on by this run; only these are added to a settings file that already exists. */
   activate?: string[];
+  /** Explicit trust opt-in for newly created lanes folders; saved true is preserved. */
+  preapproveMcp?: boolean;
   /** Packages pi-setup added earlier for a component that is being turned off; they are dropped from the content planned for settings.json, which is read before the component is retired. */
   drop?: string[];
   /** Looks a tool up on PATH (the cs-mcp command). */
@@ -182,6 +185,14 @@ function mcpEdit(codescene: boolean | undefined, activate: boolean, which: (name
   };
 }
 
+function linkIfFree(actions: Action[], notes: string[] | undefined, path: string, target: string, home: string): void {
+  if (!lstatExists(path)) { actions.push({ op: "symlink", path, target }); return; }
+  const link = lstatSync(path).isSymbolicLink() ? readlinkSync(path) : undefined;
+  if (link === target) return;
+  const shown = (p: string) => p.startsWith(`${home}/`) ? `~/${p.slice(home.length + 1)}` : p;
+  notes?.push(`left ${shown(path)}: ${link === undefined ? "a file" : `a link to ${shown(link)}`}; pi-setup does not replace it`);
+}
+
 export function buildPlan(input: PlanInput): Action[] {
   const { repoDir, home, settings, overlay } = input;
   const cratis = input.components?.cratis !== false;
@@ -226,6 +237,18 @@ export function buildPlan(input: PlanInput): Action[] {
   putTree(actions, join(repoDir, "tools/ai-work-lifecycle"), join(home, ".local/share/ai-work-lifecycle"), settings);
   const bin = join(repoDir, "tools/bin/ai-work-lifecycle");
   putSource(actions, bin, join(home, ".local/bin/ai-work-lifecycle"), settings);
+  if (input.components?.lanes === true) {
+    const lanesDir = join(home, ".local/share/pi-setup/lanes");
+    const preapproveMcp = preapprovalDefault(join(lanesDir, "templates")) || input.preapproveMcp === true;
+    put(actions, join(lanesDir, "defaults.json"), { content: Buffer.from(`${JSON.stringify({ launch: { preapproveMcp } }, null, 2)}\n`), mode: 0o644 });
+    putSource(actions, join(repoDir, "installer/dist/lanes.mjs"), join(lanesDir, "lanes.mjs"), settings);
+    putTree(actions, join(repoDir, "installer/lanes/templates"), join(lanesDir, "templates"), settings);
+    linkIfFree(actions, input.notes, join(home, ".local/bin/lanes"), join(lanesDir, "lanes.mjs"), home);
+  }
+  for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"]]) {
+    const target = join(piDir, "npm/node_modules/@woksin", pkg, "bin", cmd);
+    if (existsSync(target)) linkIfFree(actions, input.notes, join(home, ".local/bin", cmd), target, home);
+  }
   return actions;
 }
 

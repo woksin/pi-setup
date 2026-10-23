@@ -68,3 +68,27 @@ test("confirmApply is true only on an explicit yes", async () => {
   assert.equal(await confirmApply(scripted([false]).p, ["x"]), false);
   assert.equal(await confirmApply(scripted([CANCEL]).p, ["x"]), false);
 });
+
+test("MCP trust confirm is off by default, explained, cancellable and only asked with lanes", async () => {
+  const i = input(["--user", "a", "--repos-root", "/x", "--profile", "balanced"]);
+  i.extras = () => [{ id: "lanes", label: "lanes", hint: "opt-in", initial: true }];
+  const off = scripted([false]); const result = await collectChoices(off.p, i);
+  assert.ok(result !== CANCEL); assert.equal(result.preapproveMcp, false);
+  assert.match(off.asked[0], /trusts project MCP server definitions/);
+  const on = scripted([true]); const enabled = await collectChoices(on.p, i);
+  assert.ok(enabled !== CANCEL); assert.equal(enabled.preapproveMcp, true);
+  assert.equal(await collectChoices(scripted([CANCEL]).p, i), CANCEL);
+  i.options.preapproveMcp = true;
+  const fixed = scripted([]); assert.ok(await collectChoices(fixed.p, i) !== CANCEL); assert.equal(fixed.asked.length, 0);
+  i.options.preapproveMcp = false; i.preapproveMcp = true;
+  const saved = scripted([]); const kept = await collectChoices(saved.p, i);
+  assert.ok(kept !== CANCEL); assert.equal(kept.preapproveMcp, true); assert.equal(saved.asked.length, 0);
+  i.preapproveMcp = false; i.extras = () => [{ id: "lanes", label: "lanes", hint: "opt-in", initial: false }];
+  const disabled = scripted([]); await collectChoices(disabled.p, i); assert.equal(disabled.asked.length, 0);
+});
+
+test("installer MCP opt-in flag is install-only and false by default", () => {
+  const plain = parseArgs([], "/w"); assert.ok(plain.ok); assert.equal(plain.options.preapproveMcp, false);
+  const optIn = parseArgs(["--with", "lanes", "--preapprove-mcp"], "/w"); assert.ok(optIn.ok); assert.equal(optIn.options.preapproveMcp, true);
+  assert.equal(parseArgs(["uninstall", "--preapprove-mcp"], "/w").ok, false);
+});

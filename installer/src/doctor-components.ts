@@ -1,5 +1,7 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { detectBackend } from "./lanes/terminal.ts";
+import { findRoot, loadConfig, preapprovalDefault } from "./lanes/config.ts";
 import { COMPONENTS, CS_SKILLS } from "./components.ts";
 import type { Manifest } from "./manifest.ts";
 import { expectedUnit, uid } from "./services.ts";
@@ -15,6 +17,31 @@ async function isLoaded(ctx: Ctx, kind: "launchd" | "systemd", label: string): P
       : await ctx.run("systemctl", ["--user", "is-active", label], { timeoutMs: 5000 });
     return r.code === 0 && !r.timedOut;
   } catch { return false; }
+}
+
+function lanesChecks(ctx: Ctx): DoctorCheck[] {
+  const bin = join(ctx.home, ".local/bin/lanes");
+  const target = join(ctx.home, ".local/share/pi-setup/lanes/lanes.mjs");
+  let linked = false;
+  let present = false;
+  try { const stat = lstatSync(bin); present = true; linked = stat.isSymbolicLink() && readlinkSync(bin) === target; } catch { /* absent */ }
+  const good = linked && existsSync(target);
+  const fix = good ? undefined : present && !linked ? "move ~/.local/bin/lanes away, then pi-setup install --with lanes" : "pi-setup install --with lanes";
+  let config;
+  let configError = "";
+  let root: string | undefined;
+  try { root = findRoot(undefined, ctx.env, ctx.cwd); } catch { /* no coordination folder here */ }
+  if (root) { try { config = loadConfig(root); } catch (e) { configError = (e as Error).message; } }
+  let installedPreapproval = false;
+  try { installedPreapproval = preapprovalDefault(join(ctx.home, ".local/share/pi-setup/lanes/templates")); } catch (e) { configError ||= (e as Error).message; }
+  const enabled = config ? config.launch.preapproveMcp : installedPreapproval;
+  const backend = detectBackend(config?.terminal.backend || "auto", ctx);
+  return [
+    check("lanes", good ? "ok" : "warn", good ? "lanes is installed" : "lanes link or bundle is missing or points elsewhere", fix),
+    check("lanes-git", ctx.which("git") ? "ok" : "warn", ctx.which("git") ? "git is on PATH" : "git is missing", ctx.which("git") ? undefined : "install git"),
+    check("lanes-terminal", "ok", backend === "print" ? "print (no Terminal.app, iTerm or tmux detected; lanes start will print the command)" : backend),
+    check("lanes-preapprove-mcp", configError ? "warn" : "ok", configError || `MCP preapproval is ${enabled ? "on (trusts project MCP server definitions)" : "off"}${config ? ` in ${join(root!, "lanes.json")}` : " for new folders (no lanes.json found)"}`),
+  ];
 }
 
 /** Read-only: asks the service manager for state, never loads, enables or writes anything. Only runs once a choice is recorded. */
@@ -51,5 +78,6 @@ export async function componentChecks(ctx: Ctx, manifest: Manifest | undefined):
         : check("codescene-skills", "warn", `CodeScene skills missing: ${missing.join(", ")}`, "copy skills/<name> from https://github.com/codescene-oss/codescene-mcp-server/tree/main/skills to ~/.agents/skills/"),
     );
   }
+  if (comps.lanes?.on) checks.push(...lanesChecks(ctx));
   return checks;
 }

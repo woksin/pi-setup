@@ -1,6 +1,6 @@
 import { COMPONENT_IDS, isComponentId } from "./components.ts";
 
-export type Command = "install" | "uninstall" | "update" | "backups" | "doctor";
+export type Command = "install" | "uninstall" | "update" | "backups" | "doctor" | "lanes";
 
 export interface Options {
   command: Command;
@@ -14,10 +14,12 @@ export interface Options {
   dryRun: boolean;
   user: string;
   reposRoot: string;
+  dir: string;
   profile: string;
   yes: boolean;
   skipNpm: boolean;
   reinstallNpm: boolean;
+  preapproveMcp: boolean;
   plan: boolean;
   json: boolean;
   fix: boolean;
@@ -34,6 +36,7 @@ export const USAGE = `Usage: ./install.sh [install] [options]
        ./install.sh update [--dry-run] [--ref <tag>] [--yes] [--skip-npm]
        ./install.sh backups [list | prune --keep <n> [--dry-run]]
        ./install.sh doctor [--fix] [--json]
+       ./install.sh lanes [--dir <folder>]
 
   --dry-run             show what would change, write nothing
   --plan                print the full plan (detection, profile, actions), write nothing
@@ -42,15 +45,17 @@ export const USAGE = `Usage: ./install.sh [install] [options]
   --repos-root <dir>    repositories root (default: saved, then ~/repos; interactive runs suggest a detected root)
   --profile <name|auto> profile to apply (default: the active one, else chosen from your logins)
   --with <id> / --without <id>  turn an extra on or off: ${COMPONENT_IDS.join(", ")}
+  --preapprove-mcp      trust project MCP server definitions for new lanes folders (default: off)
   --yes                 never prompt
   --skip-npm            do not run npm install in ~/.pi/agent/npm
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --help                this text`;
 
-const VALUE_FLAGS = new Set(["--user", "--repos-root", "--profile", "--ref", "--keep", "--with", "--without"]);
+const VALUE_FLAGS = new Set(["--dir", "--user", "--repos-root", "--profile", "--ref", "--keep", "--with", "--without"]);
 const COMMON = ["--help", "--dry-run"];
 const ALLOWED: Record<Command, string[] | undefined> = {
   install: undefined,
+  lanes: ["--help", "--dir"],
   doctor: ["--help", "--json", "--fix"],
   uninstall: [...COMMON, "--yes"],
   update: [...COMMON, "--yes", "--skip-npm", "--ref"],
@@ -61,6 +66,7 @@ const BOOLEAN_FLAGS: Record<string, keyof Options> = {
   "--yes": "yes",
   "--skip-npm": "skipNpm",
   "--reinstall-npm": "reinstallNpm",
+  "--preapprove-mcp": "preapproveMcp",
   "--plan": "plan",
   "--json": "json",
   "--fix": "fix",
@@ -73,11 +79,11 @@ function isAbsoluteOrHome(value: string): boolean {
 
 export function parseArgs(argv: string[], cwd: string): Parsed {
   const options: Options = {
-    command: "install", sub: "list", keep: 10, ref: "", help: false, dryRun: false, user: "", reposRoot: "", profile: "",
-    yes: false, skipNpm: false, reinstallNpm: false, plan: false, json: false, fix: false, with: [], without: [],
+    command: "install", sub: "list", keep: 10, ref: "", help: false, dryRun: false, user: "", reposRoot: "", dir: "", profile: "",
+    yes: false, skipNpm: false, reinstallNpm: false, preapproveMcp: false, plan: false, json: false, fix: false, with: [], without: [],
   };
   let args = argv[0] === "install" ? argv.slice(1) : argv;
-  if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor") {
+  if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor" || args[0] === "lanes") {
     options.command = args[0];
     args = args.slice(1);
     if (options.command === "backups" && (args[0] === "list" || args[0] === "prune")) {
@@ -88,6 +94,7 @@ export function parseArgs(argv: string[], cwd: string): Parsed {
   const allowed = ALLOWED[options.command];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (arg === "--dir" && options.command !== "lanes") return { ok: false, error: `--dir is not valid for ${options.command}` };
     if (arg === "--fix" && options.command !== "doctor") return { ok: false, error: `--fix is not valid for ${options.command}` };
     if (allowed && (arg in BOOLEAN_FLAGS || VALUE_FLAGS.has(arg)) && !allowed.includes(arg)) {
       return { ok: false, error: `${arg} is not valid for ${options.command}` };
@@ -117,6 +124,7 @@ export function parseArgs(argv: string[], cwd: string): Parsed {
       }
       if (arg === "--user") options.user = value;
       else if (arg === "--profile") options.profile = value;
+      else if (arg === "--dir") options.dir = isAbsoluteOrHome(value) ? value : `${cwd}/${value}`;
       else options.reposRoot = isAbsoluteOrHome(value) ? value : `${cwd}/${value}`;
     } else {
       return { ok: false, error: `Unknown argument: ${arg}` };

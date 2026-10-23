@@ -53,7 +53,7 @@ function scripted(answers: Record<string, unknown[]>) {
   };
   const p: Prompter = {
     intro: () => {}, outro: () => {}, note: (body) => notes.push(body), spinner: () => ({ start: () => {}, stop: () => {} }),
-    confirm: (o) => answer("confirm", o.message, true) as never,
+    confirm: (o) => answer("confirm", o.message, o.message === "Set up a coordinator and lanes now?" ? false : true) as never,
     select: (o) => {
       offered.push(o.options.map((x) => x.value));
       return answer("select", o.message, o.initial) as never;

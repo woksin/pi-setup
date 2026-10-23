@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Ctx, Detection } from "./types.ts";
 
-export const COMPONENT_IDS = ["docker-guardian", "cleanup", "secret-sweep", "codescene", "cratis", "web"] as const;
+export const COMPONENT_IDS = ["docker-guardian", "cleanup", "secret-sweep", "codescene", "cratis", "web", "lanes"] as const;
 export type ComponentId = (typeof COMPONENT_IDS)[number];
 
 export interface ComponentDef {
@@ -18,6 +18,7 @@ export const COMPONENTS: ComponentDef[] = [
   { id: "secret-sweep", label: "secret-sweep", explain: "daily scan of pi sessions for leaked secrets (macOS launchd; needs gitleaks)", service: true },
   { id: "codescene", label: "CodeScene", explain: "Code Health MCP server and policy in AGENTS.md (needs cs-mcp and a token)", service: false },
   { id: "cratis", label: "Cratis conventions", explain: "Cratis rules, cratis-cli guard and agent, and the Cratis sections of AGENTS.md", service: false },
+  { id: "lanes", label: "lanes", explain: "the lanes command: a coordinator and several pi sessions in git worktrees, talking through message files", service: false },
   { id: "web", label: "browser and web tools", explain: "pi-web-access and pi-browser-use (the browser may download on first use)", service: false },
 ];
 
@@ -27,6 +28,7 @@ export const isComponentId = (id: string): id is ComponentId => (COMPONENT_IDS a
 export function available(id: ComponentId, ctx: Pick<Ctx, "platform" | "which">): true | string {
   if (id === "docker-guardian") return ctx.platform === "darwin" ? true : "needs Docker Desktop on macOS";
   if (id === "secret-sweep") return ctx.platform === "darwin" ? true : "its schedule is a macOS launchd job";
+  if (id === "lanes") return ctx.which("git") ? true : "needs git";
   if (id === "cleanup") return ctx.platform === "darwin" || ctx.which("systemctl") ? true : "needs launchd (macOS) or systemd";
   return true;
 }
@@ -130,6 +132,7 @@ export function detectDefaults(
     codescene: Boolean(ctx.which("cs-mcp")) || Boolean(ctx.env.CS_ACCESS_TOKEN),
     cratis,
     web: true,
+    lanes: false,
   };
 }
 
@@ -142,6 +145,7 @@ export function hintFor(def: ComponentDef, on: boolean): string {
     codescene: ["cs-mcp or a token found", "no cs-mcp or token found"],
     cratis: ["Cratis repos found", "no Cratis repos found"],
     web: ["on by default", "off"],
+    lanes: ["explicitly selected", "opt-in"],
   };
   const [yes, no] = why[def.id];
   return on ? `${yes}; ${def.explain}` : `off: ${no}; ${def.explain}`;

@@ -38,7 +38,27 @@ For build performance and disk cleanup, use `~/.pi/agent/bin/dev-doctor`; doctor
 
 `settings.json`, `models.json` and the other JSON configs are only written when they don't exist yet. `efficiency.json` and `context-budget.json` follow the same rule. Restart pi afterwards.
 
-Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" question) turn on `docker-guardian`, `cleanup`, `secret-sweep`, `codescene`, `cratis` or `web`. Your choice is saved in the manifest and reused on later runs; turning one off removes what pi-setup added and leaves files you changed. The schedules (`docker-guardian`, `cleanup`, `secret-sweep`) are never installed without an explicit choice: on macOS they are written to `~/Library/LaunchAgents/com.<user>.<name>.plist` and loaded with `launchctl bootstrap`; `cleanup` on Linux uses a systemd user timer. `codescene` needs `cs-mcp` on PATH and `CS_ACCESS_TOKEN` in your shell profile; pi-setup never stores the token.
+Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" question) turn on `docker-guardian`, `cleanup`, `secret-sweep`, `codescene`, `cratis`, `web` or `lanes`. Your choice is saved in the manifest and reused on later runs; turning one off removes what pi-setup added and leaves files you changed. The schedules (`docker-guardian`, `cleanup`, `secret-sweep`) are never installed without an explicit choice: on macOS they are written to `~/Library/LaunchAgents/com.<user>.<name>.plist` and loaded with `launchctl bootstrap`; `cleanup` on Linux uses a systemd user timer. `codescene` needs `cs-mcp` on PATH and `CS_ACCESS_TOKEN` in your shell profile; pi-setup never stores the token.
+
+### Lanes (opt-in)
+
+Install with `./install.sh --with lanes`, then run `lanes init <dir>` to create a coordination folder.
+For guided setup, run `./install.sh lanes [--dir <folder>]`; it selects local repositories and issues or goals, creates locked worktrees, and offers to open the coordinator.
+Add work with `lanes --dir <dir> add L1 --repo owner/name --issue 123` (clone the repository first).
+Run `lanes --dir <dir> start coordinator` or `start L1`; the coordinator starts in the coordination folder.
+`lanes send <TO> <topic> -m "text" --from L0` sends a message; `lanes status` shows the lanes (use `--dir` outside the folder).
+Terminal.app, iTerm and tmux are supported; `--terminal print` prints a shell command without starting a session.
+Message retention is configured with `messages.retention`: `mode` is `keep`, `archive` or `delete`; `maxAgeDays` sets the age threshold; `archiveDir` must stay strictly below the messages folder and outside `status/` (relative or absolute paths, without `..`); `archiveMaxAgeDays: null` keeps archives forever. New folders default to archive after 14 days in `archive`, with `keepUnread: true` protecting messages newer than an addressed configured lane’s inbox marker (missing markers do not protect), and `auto: true` pruning before start; prune errors only warn. Existing configs without retention keep messages. Run `lanes messages prune [--dry-run] [--json]` manually; archive expiry also runs in keep mode.
+
+MCP preapproval is off by default. The wizard asks before trusting project MCP server definitions; `./install.sh --with lanes --preapprove-mcp` saves this opt-in for new coordination folders. `lanes init <new-dir> --preapprove-mcp` opts in for one folder. Existing folders keep their saved setting; doctor reports the current folder’s setting or the installed default.
+
+Lanes operations (use `--dir <folder>` outside the coordination folder):
+- `lanes idle-check [--minutes n]` reports running lanes that have gone silent.
+- `lanes nudge <ID|coordinator> <text>` sends one line only to a foreground pi session.
+- `lanes resume-check` verifies standing watches, unread inbox and NOW.md after a reset.
+- `lanes green-prs [--new | --ack]` lists green PRs or acknowledges the current list.
+- `lanes close <ID> [--reassign-to ID2] [--reason text] [--quit]` posts closure and a removal hint; it never removes worktrees or edits lanes.json. `--quit` is opt-in and refuses busy or recently active sessions.
+Watch exits: 0 fire/OK, 1 nothing/missing, 2 error. Nudge: 0 sent, 3 refused, 4 no tab/pane or print backend.
 
 Optional, macOS only: `agent/launchd/*.plist` are templates for the `docker-guardian`, `pi-cleanup` and `secret-sweep` schedules. They are not installed by `install.sh`. Replace `__HOME__` with your home directory, create `~/.pi/agent/logs` (they write stderr there), copy them to `~/Library/LaunchAgents/`, then `launchctl load` them.
 

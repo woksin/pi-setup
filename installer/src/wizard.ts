@@ -15,6 +15,8 @@ export interface WizardInput {
   repoDir: string;
   /** The extras for a repositories root: initial value and why, or the reason one is unavailable. Omitted: no question. */
   extras?: (root: string) => ExtraRow[];
+  /** Saved trust choice from installed defaults or the current coordination folder. */
+  preapproveMcp?: boolean;
 }
 
 export interface ExtraRow {
@@ -29,6 +31,7 @@ export interface ExtraRow {
 }
 
 export interface WizardResult {
+  preapproveMcp?: boolean;
   /** Extras the user chose; only the ids that were asked. */
   components?: Record<string, boolean>;
   user?: string;
@@ -136,7 +139,16 @@ export async function collectChoices(p: Prompter, input: WizardInput): Promise<A
     input.detection.candidates[0]?.path || `${input.home}/repos`;
   const components = await askComponents(p, input, reposRoot);
   if (p.isCancel(components)) return CANCEL;
+  const lanesRow = input.extras?.(reposRoot).find((r) => r.id === "lanes");
+  const lanes = !lanesRow?.unavailable && ((components as Record<string, boolean> | undefined)?.lanes ?? lanesRow?.initial);
+  let preapproveMcp = input.options.preapproveMcp || input.preapproveMcp || false;
+  if (lanes && !preapproveMcp) {
+    const answer = await p.confirm({ message: "Preapprove project MCP servers? This trusts project MCP server definitions in added repositories.", initial: false });
+    if (p.isCancel(answer)) return CANCEL;
+    preapproveMcp = answer === true;
+  }
   return {
+    ...(lanes ? { preapproveMcp } : {}),
     user: user as string | undefined, root: root as string | undefined, profile: profile as string | undefined,
     ...(components ? { components: components as Record<string, boolean> } : {}),
   };

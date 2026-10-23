@@ -13,7 +13,7 @@ const tmp = () => {
   roots.push(d);
   return d;
 };
-const none = { "docker-guardian": false, cleanup: false, "secret-sweep": false, codescene: false, cratis: false, web: false };
+const none = { "docker-guardian": false, cleanup: false, "secret-sweep": false, codescene: false, cratis: false, web: false, lanes: false };
 
 test("precedence: flag > answer > saved > installed > detected", () => {
   const r = resolveComponents({
