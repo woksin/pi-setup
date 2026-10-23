@@ -10,7 +10,7 @@ export interface Candidate {
 const NAMES = ["repos", "src", "code", "dev", "projects", "git", "work", "source"];
 const SKIP = new Set(["Library", "node_modules", ".Trash"]);
 
-function originUrl(gitDir: string): string {
+export function originUrl(gitDir: string): string {
   try {
     const config = readFileSync(join(gitDir, "config"), "utf8");
     const section = /\[remote "origin"\]([^[]*)/.exec(config)?.[1] ?? "";
@@ -24,7 +24,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function isCheckout(dir: string): boolean {
+export function isCheckout(dir: string): boolean {
   return existsSync(join(dir, ".git"));
 }
 
@@ -102,4 +102,29 @@ export async function candidateRoots(ctx: Ctx): Promise<string[]> {
     for (const volume of volumes) list.push(...NAMES.map((n) => join("/Volumes", volume, n)));
   }
   return list;
+}
+
+export interface Checkout { repo: string; path: string }
+/** At most two levels; private workspace and dot-directories are never candidates. */
+export function listCheckouts(root: string, max = 60): Checkout[] {
+  const list = (dir: string) => {
+    try { return readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => e.name); }
+    catch { return []; }
+  };
+  const found: Checkout[] = [];
+  const add = (path: string) => {
+    const match = /[:/]([^/:]+)\/([^/]+?)(?:\.git)?\/?$/.exec(originUrl(join(path, ".git")));
+    const repo = match ? `${match[1]}/${match[2]}` : "";
+    if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) found.push({ repo, path });
+  };
+  for (const name of list(root)) {
+    if (found.length >= max) break;
+    const path = join(root, name);
+    if (isCheckout(path)) add(path);
+    else for (const child of list(path)) {
+      if (found.length >= max) break;
+      if (isCheckout(join(path, child))) add(join(path, child));
+    }
+  }
+  return found;
 }

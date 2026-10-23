@@ -55,3 +55,15 @@ test("missing and unreadable installed defaults are not saved MCP consent", () =
   }
   assert.equal(preapprovalDefault(templates), true);
 });
+
+test("ops defaults validate and slice-5 configs remain valid", () => {
+  const home = tempDir("lanes-ops-config"); const c = defaults(home, home);
+  assert.deepEqual(c.idle, { minutes: 75 });
+  assert.deepEqual(c.github, { repos: [], author: "@me", excludeLabels: [] });
+  const old = { ...c }; delete old.idle; delete old.github;
+  assert.doesNotThrow(() => validate(old));
+  for (const minutes of [0, -1, 1.5, "75"]) assert.throws(() => validate({ ...c, idle: { minutes } }), /idle/);
+  for (const change of [{ repos: ["bad"] }, { author: "" }, { author: "a;bad" }, { excludeLabels: [""] }]) {
+    assert.throws(() => validate({ ...c, github: { ...c.github, ...change } }), /github/);
+  }
+});

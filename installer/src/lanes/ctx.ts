@@ -8,6 +8,7 @@ import type { Runner } from "../types.ts";
 export interface LanesCtx {
   env: Record<string, string | undefined>; platform: string; home: string; cwd: string; now(): Date;
   run: Runner; which(name: string): string | undefined; out(line: string): void; err(line: string): void;
+  sleep?(ms: number): Promise<void>;
   stdinTTY: boolean; readStdin(): Promise<string>; templatesDir: string; piAgentDir: string;
   loadModule(path: string): Promise<Record<string, unknown>>; realpath(p: string): string; readCwd?(pid: number): Promise<string | undefined>;
 }
@@ -15,6 +16,7 @@ export function realLanesCtx(): LanesCtx {
   const dir = dirname(realpathSync(fileURLToPath(import.meta.url)));
   const home = homedir();
   return {
+    sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
     env: process.env, platform: process.platform, home, cwd: process.cwd(), now: () => new Date(),
     run: realRun, which: realWhich(process.env), out: (s) => console.log(s), err: (s) => console.error(s),
     stdinTTY: Boolean(process.stdin.isTTY), readStdin: async () => { let text = ""; for await (const chunk of process.stdin) text += chunk; return text; },

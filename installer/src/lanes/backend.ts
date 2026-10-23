@@ -1,4 +1,5 @@
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { expand, type Config } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
@@ -10,6 +11,8 @@ export interface LaneBackend {
   send(m: { from: string; to: string; topic: string; body: string }): Promise<MessageRef & { path: string }>;
   inbox(lane: string, opts?: { groups?: string[]; aliases?: string[] }): Promise<MessageRef[]>;
   list(filter?: { from?: string; to?: string; limit?: number }): Promise<MessageRef[]>;
+  setStatus(lane: string, line: string): Promise<void>;
+  unread(lane: string, opts?: { groups?: string[]; aliases?: string[] }): Promise<MessageRef[] | undefined>;
   status(lane: string): Promise<string | undefined>;
 }
 function addressed(m: MessageRef, id: string): boolean {
@@ -53,6 +56,20 @@ export class FileBackend implements LaneBackend {
   async inbox(lane: string, opts: { groups?: string[]; aliases?: string[] } = {}): Promise<MessageRef[]> {
     const recipients = [lane, "ALL", this.broadcast, ...opts.groups || [], ...opts.aliases || []];
     return (await this.list()).filter((m) => ![lane, ...opts.aliases || []].includes(m.from) && recipients.some((id) => addressed(m, id)));
+  }
+  async setStatus(lane: string, line: string): Promise<void> {
+    if (!validId(lane)) throw new Error("invalid lane id");
+    const dir = join(this.dir, "status"); mkdirSync(dir, { recursive: true });
+    const tmp = join(dir, `.${lane}-${randomUUID()}.tmp`);
+    writeFileSync(tmp, `${line}\n`, { flag: "wx" });
+    renameSync(tmp, join(dir, `${lane}.status`));
+  }
+  async unread(lane: string, opts: { groups?: string[]; aliases?: string[] } = {}): Promise<MessageRef[] | undefined> {
+    if (!validId(lane)) throw new Error("invalid lane id");
+    let since: number;
+    try { since = statSync(join(this.dir, `${lane}-inbox.marker`)).mtimeMs; }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw e; }
+    return (await this.inbox(lane, opts)).filter((m) => m.at.getTime() > since);
   }
   async status(lane: string): Promise<string | undefined> {
     if (!validId(lane)) throw new Error("invalid lane id");

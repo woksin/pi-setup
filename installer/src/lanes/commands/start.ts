@@ -2,14 +2,12 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { expand, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
+import { laneTarget } from "../sessions.ts";
 import { runningPi } from "../processes.ts";
 import { preapprove } from "../preapprove.ts";
 import { detectBackend, launchCommand, terminalBackend } from "../terminal.ts";
 export async function start(id: string, opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx): Promise<number> {
-  const coordinator = id === "coordinator" || id === c.coordinator.id;
-  const lane = c.lanes.find((l) => l.id === id);
-  if (!coordinator && !lane) throw new Error(`lane not found: ${id}`);
-  const cwd = coordinator ? expand(c.coordinator.cwd, c, root, ctx.home) : join(expand(c.worktreesDir, c, root, ctx.home), lane!.worktree);
+  const { coordinator, lane, cwd } = laneTarget(id, c, root, ctx);
   const prompt = expand(coordinator ? c.coordinator.prompt : lane!.prompt, c, root, ctx.home);
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`cwd not found: ${cwd}`);
   if (!existsSync(prompt) || !statSync(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);

@@ -101,11 +101,11 @@ test("coordinator shell commands quote hostile root and message paths as single 
   const vars = templateVars(c, ctx, root);
   const watches = renderTemplate(readTemplate(ctx, "WATCHES.md"), vars);
   const coordinator = renderTemplate(readTemplate(ctx, "coordinator.md"), vars);
-  const commands = watches.split("\n").filter((s) => s.startsWith("WATCH|")).map((s) => s.split("|").slice(4).join("|"));
+  const commands = watches.split("\n").map((s) => s.replace(/^# /, "")).filter((s) => s.startsWith("WATCH|")).map((s) => s.split("|").slice(4).join("|"));
   commands.push(/First turn: run `([^`]+)`/.exec(coordinator)![1]);
   const rules = renderTemplate(readTemplate(ctx, "rules.md"), vars);
   commands.push(/`(INBOX_DIR=[^`]+)`/.exec(rules)![1]);
-  const expected = [[`INBOX_DIR=${join(root, c.messages.dir)}`, "$HOME/.pi/agent/bin/inbox-watch", "L0"], ["lanes", "--dir", root, "status"], ["lanes", "--dir", root, "status"], [`INBOX_DIR=${join(root, c.messages.dir)}`]];
+  const expected = [[`INBOX_DIR=${join(root, c.messages.dir)}`, "$HOME/.pi/agent/bin/inbox-watch", "L0"], ["lanes", "--dir", root, "status"], ["lanes", "--dir", root, "idle-check"], ["lanes", "--dir", root, "green-prs", "--new"], ["lanes", "--dir", root, "status"], [`INBOX_DIR=${join(root, c.messages.dir)}`]];
   for (const [i, command] of commands.entries()) {
     const env = { ...process.env, HOME: home, BASH_ENV: "/dev/null", ENV: "/dev/null" };
     const syntax = spawnSync("bash", ["--noprofile", "--norc", "-n"], { input: command, env, encoding: "utf8", timeout: 10000 });

@@ -24,7 +24,7 @@ export async function preapprove(ctx: LanesCtx, cwd: string, enabled: boolean): 
     for (const file of files) {
       let servers: Record<string, unknown>;
       try { servers = JSON.parse(readFileSync(join(cwd, file), "utf8")).mcpServers ?? {}; }
-      catch { skip(`invalid .mcp.json (${join(cwd, file)})`); continue; }
+      catch { skip(`invalid ${file} (${join(cwd, file)})`); continue; }
       for (const [name, def] of Object.entries(servers)) {
         const hash = await mod.hashProjectServerDefinition(def);
         await mod.approveProjectServer(cwd, name, def);

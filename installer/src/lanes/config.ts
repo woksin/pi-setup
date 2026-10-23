@@ -14,6 +14,8 @@ export interface Config {
   messages: { dir: string; broadcast: string; [key: string]: unknown };
   terminal: { backend: string; [key: string]: unknown };
   launch: { wrapper: string; preapproveMcp: boolean; unsetEnv: string[]; [key: string]: unknown };
+  idle?: { minutes: number };
+  github?: { repos: string[]; author: string; excludeLabels: string[] };
   lanes: Lane[]; [key: string]: unknown;
 }
 export class UsageError extends Error {}
@@ -22,6 +24,7 @@ export function defaults(root: string, home: string, reposRoot?: string): Config
     try { reposRoot = JSON.parse(readFileSync(join(home, ".pi/agent/user.json"), "utf8")).reposRoot; } catch { /* optional */ }
   }
   return {
+    idle: { minutes: 75 }, github: { repos: [], author: "@me", excludeLabels: [] },
     version: 1, reposRoot: reposRoot || dirname(root), worktreesDir: "${reposRoot}/.worktrees", baseBranch: "origin/main", repos: {},
     coordinator: { id: "L0", cwd: "${root}", prompt: "prompts/coordinator.md", maxRunning: 8 },
     messages: { dir: "messages", broadcast: "ALL" }, terminal: { backend: "auto" },
@@ -57,6 +60,12 @@ export function validate(value: unknown): asserts value is Config {
   require(c.launch && text(c.launch.wrapper), "launch.wrapper");
   require(typeof c.launch.preapproveMcp === "boolean", "launch.preapproveMcp");
   require(Array.isArray(c.launch.unsetEnv) && c.launch.unsetEnv.every((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s)), "launch.unsetEnv");
+  if (c.idle !== undefined) require(c.idle && Number.isInteger(c.idle.minutes) && c.idle.minutes > 0, "idle.minutes");
+  if (c.github !== undefined) {
+    require(c.github && Array.isArray(c.github.repos) && c.github.repos.every((r) => typeof r === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(r)), "github.repos");
+    require(typeof c.github.author === "string" && /^@?[A-Za-z0-9-]+$/.test(c.github.author), "github.author");
+    require(Array.isArray(c.github.excludeLabels) && c.github.excludeLabels.every(text), "github.excludeLabels");
+  }
   require(Array.isArray(c.lanes), "lanes");
   const ids = new Set([c.coordinator.id, "ALL", c.messages.broadcast]);
   for (const [i, lane] of c.lanes.entries()) {

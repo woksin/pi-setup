@@ -18,10 +18,13 @@ export function launchCommand(c: Config, root: string, cwd: string, id: string, 
   return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages)} LANE_STATUS_DIR=${shellQuote(join(messages, "status"))} ${exe} ${shellQuote(`@${prompt}`)}`;
 }
 interface Launch { id: string; cwd: string; command: string }
-export interface TerminalBackend { start(ctx: LanesCtx, launch: Launch): Promise<number> }
+export interface TerminalBackend {
+  start(ctx: LanesCtx, launch: Launch): Promise<number>;
+  nudge(ctx: LanesCtx, input: { tty: string; text: string }): Promise<"sent" | "not-found">;
+}
 export function terminalBackend(name: string): TerminalBackend {
   if (!BACKENDS.includes(name) || name === "auto") throw new UsageError("invalid terminal.backend");
-  return { async start(ctx, { id, cwd, command }) {
+  return { nudge: (ctx, input) => nudgeTerminal(name, ctx, input), async start(ctx, { id, cwd, command }) {
     if (name === "print") { ctx.out(command); return 0; }
     let cmd: string; let args: string[];
     if (name === "terminal-app") {
@@ -42,4 +45,48 @@ export function terminalBackend(name: string): TerminalBackend {
     if (name === "tmux" && !ctx.env.TMUX) ctx.out("attach with: tmux attach -t lanes");
     return 0;
   } };
+}
+
+async function nudgeTerminal(name: string, ctx: LanesCtx, { tty, text }: { tty: string; text: string }): Promise<"sent" | "not-found"> {
+  if (!/^[A-Za-z0-9/]+$/.test(tty)) throw new UsageError("invalid tty");
+  if (name === "print") return "not-found";
+  if (name === "tmux") {
+    const panes = await ctx.run("tmux", ["list-panes", "-a", "-F", "#{pane_tty} #{pane_id}"], { timeoutMs: 10000 });
+    if (panes.code !== 0) throw new Error("tmux list-panes failed");
+    const pane = panes.stdout.split("\n").map((s) => s.trim().split(/\s+/)).find(([t]) => t === `/dev/${tty}`)?.[1];
+    if (!pane) return "not-found";
+    for (const args of [["send-keys", "-t", pane, "-l", "--", text], ["send-keys", "-t", pane, "Enter"]]) {
+      if ((await ctx.run("tmux", args, { timeoutMs: 10000 })).code !== 0) throw new Error("tmux send-keys failed");
+    }
+    return "sent";
+  }
+  const escaped = appleScriptString(text);
+  const script = name === "terminal-app"
+    ? `tell application "Terminal"
+repeat with w in windows
+repeat with t in tabs of w
+if tty of t is "/dev/${tty}" then
+do script "${escaped}" in t
+return "sent"
+end if
+end repeat
+end repeat
+return "not-found"
+end tell`
+    : `tell application "iTerm2"
+repeat with w in windows
+repeat with t in tabs of w
+repeat with s in sessions of t
+if tty of s is "/dev/${tty}" then
+tell s to write text "${escaped}"
+return "sent"
+end if
+end repeat
+end repeat
+end repeat
+return "not-found"
+end tell`;
+  const result = await ctx.run("osascript", ["-e", script], { timeoutMs: 10000 });
+  if (result.code !== 0) throw new Error(`osascript failed: ${result.stderr.trim()}`);
+  return result.stdout.trim() === "sent" ? "sent" : "not-found";
 }

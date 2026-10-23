@@ -183,7 +183,7 @@ test("wizard trust consent reaches installed defaults; declining and cancellatio
       intro: () => {}, outro: () => {}, note: () => {}, spinner: () => ({ start: () => {}, stop: () => {} }),
       text: async () => { throw new Error("unexpected text"); }, select: async () => { throw new Error("unexpected select"); },
       multiselect: async (o) => o.initial as never,
-      confirm: async (o) => { questions.push(o.message); return o.message.startsWith("Preapprove") ? consent : true; }, isCancel: (v) => v === CANCEL,
+      confirm: async (o) => { questions.push(o.message); return o.message === "Set up a coordinator and lanes now?" ? false : o.message.startsWith("Preapprove") ? consent : true; }, isCancel: (v) => v === CANCEL,
     };
     const code = await installerMain(["--user", "tester", "--repos-root", join(home, "repos"), "--profile", "balanced", "--with", "lanes", "--skip-npm"], ctx, p);
     assert.equal(code, consent === CANCEL ? 1 : 0, errors.join("\n")); assert.match(questions[0], /trusts project MCP server definitions/);

@@ -4,6 +4,9 @@ Edit this file in the same turn as any watch change. Re-arm every watch after a 
 
 WATCH|{{coordinator}} inbox|success|120|INBOX_DIR={{messages_sh}} "$HOME/.pi/agent/bin/inbox-watch" {{coordinator_sh}}
 WATCH|lanes status|change|900|lanes --dir {{root_sh}} status
+WATCH|idle lanes|success|900|lanes --dir {{root_sh}} idle-check
+# WATCH|green PRs|success|600|lanes --dir {{root_sh}} green-prs --new
+After handling green PRs, ack with `lanes --dir {{root_sh}} green-prs --ack`.
 
 ## On fire: coordinator inbox
 Read only new files, act in at most 2 calls or record the pending action, and re-arm. Always relay through a new message file, never an edit.
