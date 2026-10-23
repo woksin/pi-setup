@@ -60,7 +60,7 @@ function runningJob(job: Snapshot, s: Signals, ctx: LanesCtx): void {
 }
 export async function sessionWork(s: Signals, ctx: LanesCtx): Promise<void> {
   const jobs = new Map<string, Snapshot>(); const pending = new Map<string, string>();
-  const agents: SubagentWork = { launches: new Map(), completed: new Set() };
+  const agents: SubagentWork = { launches: new Map() };
   try {
     await scanSession(s.sessionFile!, line => {
       const entry = JSON.parse(line); const message = entry.type === "message" ? entry.message : entry;
@@ -70,7 +70,7 @@ export async function sessionWork(s: Signals, ctx: LanesCtx): Promise<void> {
   } catch (error) {
     s.asks.push((error as Error).message === "session scan incomplete" ? "session scan incomplete" : "session work history malformed"); return;
   }
-  if ([...agents.launches.values()].some(id => id === undefined || !agents.completed.has(id))) s.asks.push("subagent launched without completion");
+  if (agents.launches.size) s.asks.push("subagent launched without completion");
   for (const tool of pending.values()) s.keeps.push(`${tool} tool call pending`);
   for (const job of jobs.values()) runningJob(job, s, ctx);
 }

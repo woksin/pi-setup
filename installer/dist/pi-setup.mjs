@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 4e53d9f4140b2a3bd44e8939847e0082dd60d620ff532f23c629d7a7570a6c92
+// pi-setup-source-sha256: 25c77ee85d6ef1a5a5946ec1606bb278065c7b21e55bec7f675504235fec7abe
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -1008,37 +1008,58 @@ function text(content) {
   if (typeof content === "string") return content;
   return Array.isArray(content) ? content.filter((part) => part.type === "text").map((part) => part.text).join("\n") : "";
 }
-function agentId(message) {
+function agentId(message, receipt) {
   const id = message.details?.agentId ?? message.details?.id;
   if (typeof id === "string" && id) return id;
-  return /\bAgent ID:\s*(\S+)/.exec(text(message.content))?.[1];
+  return receipt.id ?? /^Agent (?:started|resumed) in background\.\r?\nAgent ID:\s*(\S+)/.exec(text(message.content))?.[1];
 }
 function agentCall(part) {
   return part.type === "toolCall" && part.name === "Agent" && typeof part.id === "string";
 }
 function launch(work, part) {
-  if (agentCall(part)) work.launches.set(part.id, void 0);
+  if (!agentCall(part)) return;
+  const resume2 = part.arguments?.resume;
+  work.launches.set(part.id, typeof resume2 === "string" ? resume2 : void 0);
 }
 function calls(work, message) {
   if (message.role === "toolCall") launch(work, { ...message, type: "toolCall" });
   if (message.role !== "assistant" || !Array.isArray(message.content)) return;
   for (const part of message.content) launch(work, part);
 }
-function agentResult(message) {
-  return message.role === "toolResult" && message.toolName === "Agent";
+function completionTool(message) {
+  return message.role === "toolResult" && ["Agent", "get_subagent_result"].includes(message.toolName);
+}
+function textReceipt(body) {
+  const cleaned = /^Agent not found: "([^"\n]+)"\. It may have been cleaned up\.\s*$/.exec(body);
+  if (cleaned) return { id: cleaned[1], status: "completed" };
+  const report = /^Agent:\s*(\S+)\r?\nType: [^\n]*?\|\s*Status:\s*([^|\r\n]+)/.exec(body);
+  if (report) return { id: report[1], status: report[2] };
+  if (/^Agent completed in \d+(?:\.\d+)?s\b/.test(body)) return { status: "completed" };
+  return {};
+}
+function resultRecord(message) {
+  const receipt = textReceipt(text(message.content));
+  return { id: agentId(message, receipt), status: message.details?.status ?? receipt.status };
 }
 function result(work, message) {
-  if (!agentResult(message) || !work.launches.has(message.toolCallId)) return;
-  if (message.isError) work.launches.delete(message.toolCallId);
-  else work.launches.set(message.toolCallId, agentId(message));
+  if (!completionTool(message)) return;
+  const record2 = resultRecord(message);
+  const ended = completion(work, record2);
+  if (message.toolName !== "Agent") return;
+  if (message.isError || ended) work.launches.delete(message.toolCallId);
+  else if (work.launches.has(message.toolCallId)) work.launches.set(message.toolCallId, record2.id ?? work.launches.get(message.toolCallId));
 }
 function terminal(status2) {
   return typeof status2 === "string" && /^(done|completed|failed|error|aborted|stopped|wrapped up)\b/i.test(status2.trim());
 }
 function completion(work, record2) {
-  if (!record2 || !terminal(record2.status)) return;
+  if (!record2 || !terminal(record2.status)) return false;
   const id = record2.agentId ?? record2.id;
-  if (typeof id === "string" && id) work.completed.add(id);
+  if (typeof id === "string" && id) settle(work, id);
+  return true;
+}
+function settle(work, id) {
+  for (const [call, agent] of work.launches) if (agent === id) work.launches.delete(call);
 }
 function notificationRecord(block2) {
   const id = /<(?:task-id|agent-id)>([^<]+)<\/(?:task-id|agent-id)>/.exec(block2)?.[1];
@@ -1122,7 +1143,7 @@ function runningJob(job, s, ctx) {
 async function sessionWork(s, ctx) {
   const jobs = /* @__PURE__ */ new Map();
   const pending2 = /* @__PURE__ */ new Map();
-  const agents = { launches: /* @__PURE__ */ new Map(), completed: /* @__PURE__ */ new Set() };
+  const agents = { launches: /* @__PURE__ */ new Map() };
   try {
     await scanSession(s.sessionFile, (line) => {
       const entry2 = JSON.parse(line);
@@ -1137,7 +1158,7 @@ async function sessionWork(s, ctx) {
     s.asks.push(error.message === "session scan incomplete" ? "session scan incomplete" : "session work history malformed");
     return;
   }
-  if ([...agents.launches.values()].some((id) => id === void 0 || !agents.completed.has(id))) s.asks.push("subagent launched without completion");
+  if (agents.launches.size) s.asks.push("subagent launched without completion");
   for (const tool of pending2.values()) s.keeps.push(`${tool} tool call pending`);
   for (const job of jobs.values()) runningJob(job, s, ctx);
 }

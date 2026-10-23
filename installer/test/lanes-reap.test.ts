@@ -62,6 +62,12 @@ function agentLaunch(agentId = "agent1", callId = "call1"): string {
     { role: "toolResult", toolName: "Agent", toolCallId: callId, details: { status: "background", agentId } },
   ].map(entry => JSON.stringify({ type: "message", message: entry })).join("\n") + "\n";
 }
+function agentReceipt(receipt: Record<string, unknown>, resume?: string): string {
+  return [
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "Agent", id: "call1", arguments: { subagent_type: "reviewer", description: "Review", prompt: "review", resume } }] } },
+    { type: "message", message: { role: "toolResult", toolName: "Agent", toolCallId: "call1", ...receipt } },
+  ].map(entry => JSON.stringify(entry)).join("\n") + "\n";
+}
 function foregroundProbe({ args, foreground, busy }: { args: string[]; foreground: boolean; busy: string }): string | undefined {
   if (args.includes("pgid=,tpgid=")) return "101 101\n";
   if (args.includes("pid=,ppid=,pgid=,command=")) return `101 1 101 ${foreground ? "pi" : "bash"}\n${busy.replace(/^(\d+) (\d+) /gm, "$1 $2 102 ")}`;
@@ -283,12 +289,12 @@ test("matching terminal task notifications settle Agent launches by exact agent 
     const s = await evidence(f); assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, []);
   }
 });
-test("unrelated, running, quoted and tool-receipt messages are not Agent completion notifications", async () => {
+test("unrelated, running and quoted messages do not complete Agent launches", async () => {
   const f = fixture();
   const completions = [
     { type: "custom_message", customType: "subagent-notification", details: { status: "completed", id: "agent10" } },
     { type: "custom_message", customType: "subagent-notification", content: "<task-notification><task-id>agent1</task-id><status>Running</status></task-notification>" },
-    { role: "toolResult", toolName: "get_subagent_result", details: { status: "completed", agentId: "agent1" } },
+    { role: "toolResult", toolName: "get_subagent_result", details: { status: "running", agentId: "agent1" } },
     { role: "user", content: "<task-notification><task-id>agent1</task-id><status>Done</status></task-notification>" },
   ];
   for (const completion of completions) {
@@ -305,6 +311,69 @@ test("Agent text receipts expose ids, launch failures do not leave pending work,
   assert.deepEqual((await evidence(f)).asks, []);
   f.put(f.sessionFile, agentLaunch() + "{broken", 120);
   assert.deepEqual((await evidence(f)).asks, ["session work history malformed"]);
+});
+// Native receipt schemas observed in ~/.pi/agent/sessions: chronicle-testing (L8)
+// 2026-10-19T11-28-39-962Z_01a153eb-ba1a-74a2-b699-7c7c873054c8.jsonl and screenplay-mcp (L13)
+// 2026-10-19T11-11-49-701Z_01a153dc-4fc4-77e1-ab27-17081ec91e1b.jsonl; payloads/ids reduced.
+test("foreground Agent completion receipts settle the call without a notification", async () => {
+  const f = fixture();
+  const content = [{ type: "text", text: "Agent completed in 61.5s (20 tool uses, 56.8k token).\n\nReview complete." }];
+  for (const receipt of [
+    { content, details: { displayName: "Sol reviewer", description: "Review", subagentType: "sol-reviewer", status: "completed", agentId: "agent1", durationMs: 61520 }, isError: false },
+    { content: [], details: { status: "completed" }, isError: false },
+    { content, isError: false },
+  ]) {
+    f.put(f.sessionFile, agentReceipt(receipt), 120);
+    assert.deepEqual((await evidence(f)).asks, []);
+  }
+});
+test("foreground output cannot complete an unrelated agent by quoting its id", async () => {
+  const f = fixture();
+  const foreground = agentReceipt({ details: { status: "completed" }, content: [{ type: "text", text: "Agent completed in 1.0s (1 tool uses).\n\nAgent ID: other" }] });
+  f.put(f.sessionFile, agentLaunch("other", "background") + foreground, 120);
+  assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+});
+test("foreground Agent error receipts settle failed launches without a notification", async () => {
+  const f = fixture();
+  f.put(f.sessionFile, agentReceipt({ content: [{ type: "text", text: 'Validation failed for tool "Agent":\n  - description: must have required properties description, subagent_type' }], details: {}, isError: true }), 120);
+  assert.deepEqual((await evidence(f)).asks, []);
+});
+test("later terminal get_subagent_result receipts settle background agents by exact id", async () => {
+  const f = fixture();
+  const header = "Agent: agent1\nType: Reviewer | Status: completed | Tool uses: 8 | 76.1k token | Context: 7% | Duration: 65.9s\nDescription: Review\n\nAgent ID: unrelated-agent";
+  for (const receipt of [
+    { details: { agentId: "agent1", status: "completed" }, isError: false },
+    { content: [{ type: "text", text: header }], isError: false },
+  ]) {
+    f.put(f.sessionFile, agentLaunch() + JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "get_subagent_result", toolCallId: "fetch1", ...receipt } }), 120);
+    assert.deepEqual((await evidence(f)).asks, []);
+  }
+});
+test("resuming an already-cleaned agent does not manufacture a pending launch", async () => {
+  const f = fixture();
+  const cleaned = agentReceipt({ content: [{ type: "text", text: 'Agent not found: "agent1". It may have been cleaned up.' }], isError: false }, "agent1");
+  f.put(f.sessionFile, cleaned, 120); assert.deepEqual((await evidence(f)).asks, []);
+  f.put(f.sessionFile, agentLaunch("agent1", "earlier") + cleaned, 120);
+  assert.deepEqual((await evidence(f)).asks, []);
+});
+test("unknown Agent receipt shapes stay pending rather than implying completion", async () => {
+  const f = fixture();
+  for (const receipt of [
+    { content: [{ type: "text", text: "Unexpected receipt shape" }], details: {}, isError: false },
+    { details: { agentId: "agent1", status: "unrecognized" }, isError: false },
+    { content: [], isError: false },
+  ]) {
+    f.put(f.sessionFile, agentReceipt(receipt), 120);
+    assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+  }
+});
+test("an earlier completion cannot settle a later resumed background run", async () => {
+  const f = fixture();
+  const notification = JSON.stringify({ customType: "subagent-notification", details: { id: "agent1", status: "completed" } }) + "\n";
+  const history = agentLaunch("agent1", "initial") + notification + agentReceipt({ details: { agentId: "agent1", status: "running" } }, "agent1");
+  f.put(f.sessionFile, history, 120);
+  assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+  f.put(f.sessionFile, history + notification, 120); assert.deepEqual((await evidence(f)).asks, []);
 });
 test("fresh subagent activity keeps a lane while unmatched launches and claim doubts remain notes", async () => {
   const f = fixture(); f.put(f.sessionFile, agentLaunch(), 120); subagentStatus(f); f.claim("blocked");
