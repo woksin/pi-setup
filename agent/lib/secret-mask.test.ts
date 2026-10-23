@@ -590,14 +590,23 @@ for (const command of [
 });
 for (const input of [
 	"TOKEN_COUNT=1000", "token_limit=4096", "token_type: bearer", "passwordHash: bcrypt", "passwordPolicy: local",
-	"SECRET_NAME=prod", "secret: none", "PASSWORD=12345678", '"TOKEN": "12345678"', "token = 12345678",
+	"SECRET_NAME=prod", "secret: none",
 	"tokenLength: four", "password_ttl: four", "secret: fail", "secret: pass", "secret: BEARER",
 ]) test(`non-credential assignment stays intact: ${input}`, () => assert.equal(scan(input).text, input));
 test("real password assignment remains redacted", () => {
 	assert.equal(scan("DB_PASSWORD=hunter2x").text, "DB_PASSWORD=[REDACTED:connection-string]");
 });
+for (const input of ["DB_PASSWORD=12345678", '"TOKEN": "12345678"', "- name: DB_PASSWORD\n  value: \"12345678\"\n"]) {
+	test(`numeric secret values stay redacted: ${JSON.stringify(input)}`, () => {
+		assert.notEqual(scan(input).text, input);
+		assert.ok(!scan(input).text.includes("12345678"));
+	});
+}
+for (const command of ["grep -rn 'API_KEY=' .", "grep -rn ACCESS_KEY= src", "grep -rn 'export PASSWORD=' .", "grep -r CONNECTION_STRING= ."]) {
+	test(`credential assignment search is blocked: ${command}`, () => assert.equal(commandRule(command)?.name, "credential-search"));
+}
 
-for (const value of ["12345678", "none", "null", "true", "false", "fail", "pass", "bearer"]) {
+for (const value of ["none", "null", "true", "false", "fail", "pass", "bearer"]) {
 	test(`non-credential env value stays intact: ${value}`, () => {
 		for (const input of [`{"name":"PASSWORD","value":"${value}"}`, `- name: PASSWORD\n  value: ${value}\n`]) {
 			assert.equal(scan(input).text, input);

@@ -89,7 +89,7 @@ const DUMPERS: [RegExp, Rule][] = [
 function recursiveAssignmentPattern(command: string): boolean {
 	const args = /\bgrep\b([\s\S]*)/.exec(command)?.[1].match(/"(?:\\.|[^"\\])*"|'[^']*'|\S+/g) ?? [];
 	const pattern = args.find(arg => !arg.startsWith("-") || arg.startsWith("--regexp="));
-	return /^(?:[A-Z_]*(?:PASSWORD|SECRET|TOKEN|PWD)[A-Z_]*)=/.test(
+	return /^(?:export\s+)?(?:[A-Z_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|PWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?|CONNECTION_?STRING)[A-Z_]*)=/.test(
 		(pattern ?? "").replace(/^--regexp=/, "").replace(/^["']|["']$/g, ""));
 }
 
@@ -163,7 +163,8 @@ export function isSecretKey(name: string): boolean {
 }
 
 function nonCredentialValue(value: string): boolean {
-	return /^(?:[0-9]+|none|null|true|false|fail|pass|bearer)$/i.test(value);
+	// Digits are not exempt: numeric PINs and passwords exist; counts/limits are exempted by key name instead.
+	return /^(?:none|null|true|false|fail|pass|bearer)$/i.test(value);
 }
 
 function secretValue(value: string, quoted: boolean, terminated: boolean): boolean {
