@@ -2,14 +2,14 @@ import { TrainError, PR_FIELDS, checkReviews, isBot } from './train-gh.mjs';
 import { baseBranch } from './train-init.mjs';
 import { listManifests, loadManifest, manifestPath } from './train-manifest.mjs';
 
-export async function selectTrain(ctx, repo, branch) {
+export async function selectTrain(ctx, repo, branch, states = ['open']) {
   if (branch) {
     const path = manifestPath(ctx.env, repo, branch);
     const manifest = await loadManifest(path, branch);
-    if (!manifest || manifest.state !== 'open') throw new TrainError(`no open train: ${branch}`);
+    if (!manifest || !states.includes(manifest.state)) throw new TrainError(`no open train: ${branch}`);
     return { path, manifest };
   }
-  const trains = (await listManifests(ctx.env, repo)).filter(entry => entry.manifest.state === 'open');
+  const trains = (await listManifests(ctx.env, repo)).filter(entry => states.includes(entry.manifest.state));
   if (trains.length !== 1) throw new TrainError('select a train with --train (expected exactly one open train)');
   return trains[0];
 }
