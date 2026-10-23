@@ -1,3 +1,5 @@
+import { COMPONENT_IDS, isComponentId } from "./components.ts";
+
 export type Command = "install" | "uninstall" | "update" | "backups" | "doctor";
 
 export interface Options {
@@ -19,6 +21,10 @@ export interface Options {
   plan: boolean;
   json: boolean;
   fix: boolean;
+  /** `--with <id>` (install only). */
+  with: string[];
+  /** `--without <id>` (install only). */
+  without: string[];
 }
 
 export type Parsed = { ok: true; options: Options } | { ok: false; error: string };
@@ -35,12 +41,13 @@ export const USAGE = `Usage: ./install.sh [install] [options]
   --user <login>        GitHub login (default: saved, then gh, then ask)
   --repos-root <dir>    repositories root (default: saved, then ~/repos; interactive runs suggest a detected root)
   --profile <name|auto> profile to apply (default: the active one, else chosen from your logins)
+  --with <id> / --without <id>  turn an extra on or off: ${COMPONENT_IDS.join(", ")}
   --yes                 never prompt
   --skip-npm            do not run npm install in ~/.pi/agent/npm
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --help                this text`;
 
-const VALUE_FLAGS = new Set(["--user", "--repos-root", "--profile", "--ref", "--keep"]);
+const VALUE_FLAGS = new Set(["--user", "--repos-root", "--profile", "--ref", "--keep", "--with", "--without"]);
 const COMMON = ["--help", "--dry-run"];
 const ALLOWED: Record<Command, string[] | undefined> = {
   install: undefined,
@@ -67,7 +74,7 @@ function isAbsoluteOrHome(value: string): boolean {
 export function parseArgs(argv: string[], cwd: string): Parsed {
   const options: Options = {
     command: "install", sub: "list", keep: 10, ref: "", help: false, dryRun: false, user: "", reposRoot: "", profile: "",
-    yes: false, skipNpm: false, reinstallNpm: false, plan: false, json: false, fix: false,
+    yes: false, skipNpm: false, reinstallNpm: false, plan: false, json: false, fix: false, with: [], without: [],
   };
   let args = argv[0] === "install" ? argv.slice(1) : argv;
   if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor") {
@@ -103,6 +110,11 @@ export function parseArgs(argv: string[], cwd: string): Parsed {
         options.ref = value;
         continue;
       }
+      if (arg === "--with" || arg === "--without") {
+        if (!isComponentId(value)) return { ok: false, error: `unknown component '${value}' for ${arg}; valid ids: ${COMPONENT_IDS.join(", ")}` };
+        (arg === "--with" ? options.with : options.without).push(value);
+        continue;
+      }
       if (arg === "--user") options.user = value;
       else if (arg === "--profile") options.profile = value;
       else options.reposRoot = isAbsoluteOrHome(value) ? value : `${cwd}/${value}`;
@@ -110,6 +122,8 @@ export function parseArgs(argv: string[], cwd: string): Parsed {
       return { ok: false, error: `Unknown argument: ${arg}` };
     }
   }
+  const both = options.with.filter((id) => options.without.includes(id));
+  if (both.length) return { ok: false, error: `${both.join(", ")} is in both --with and --without; valid ids: ${COMPONENT_IDS.join(", ")}` };
   return { ok: true, options };
 }
 

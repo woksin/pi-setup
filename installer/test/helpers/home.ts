@@ -70,6 +70,8 @@ exit 0`);
 echo "npm $* cwd=$PWD" >> "$STUB_LOG"
 mkdir -p node_modules
 : > node_modules/.package-lock.json`);
+  // Never the real service managers: record the call and report "not loaded".
+  for (const name of ["launchctl", "systemctl"]) script(box.stubs, name, `echo "${name} $*" >> "$STUB_LOG"\nexit 0`);
   script(box.stubs, "python3", `echo "python3 $*" >> "$STUB_LOG"\nexec "${realPython()}" "$@"`);
 }
 

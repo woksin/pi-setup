@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 658316c685e22aa51f5ef091e867c97774da8f92668f9f393676726f6f90d51a
+// pi-setup-source-sha256: 12d8af6084f0b0a22683ed52850d1e5d453a865121ac9c2834837a53bd3684f2
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -331,21 +331,28 @@ function checkBackupRel(rel) {
   }
   return rel;
 }
-function validateManifest(home, m) {
-  for (const [rel, e] of Object.entries(m.files)) {
+function validateManifest(home, m2) {
+  for (const [rel, e] of Object.entries(m2.files)) {
     fromHomeRel(home, rel);
     if (e.pending) fromHomeRel(home, e.pending.path);
     if (e.backup !== void 0) checkBackupRel(e.backup);
   }
-  for (const [rel, l2] of Object.entries(m.symlinks)) {
+  for (const [rel, l2] of Object.entries(m2.symlinks)) {
     fromHomeRel(home, rel);
     fromHomeRel(home, l2.target);
   }
-  for (const rel of m.dirs) fromHomeRel(home, rel);
-  for (const rel of Object.keys(m.pendingNew ?? {})) fromHomeRel(home, rel);
-  for (const [rel, j] of Object.entries(m.json)) {
+  for (const rel of m2.dirs) fromHomeRel(home, rel);
+  for (const rel of Object.keys(m2.pendingNew ?? {})) fromHomeRel(home, rel);
+  for (const [rel, j] of Object.entries(m2.json)) {
     fromHomeRel(home, rel);
     if (j.backup !== void 0) checkBackupRel(j.backup);
+  }
+  for (const c2 of Object.values(m2.components ?? {})) {
+    if (!c2.service) continue;
+    if (typeof c2.service.label !== "string" || !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(c2.service.label)) {
+      throw new SetupError(`manifest service label rejected: ${String(c2.service.label)}`);
+    }
+    for (const rel of c2.service.files) fromHomeRel(home, rel);
   }
 }
 function readManifest(piDir) {
@@ -358,25 +365,25 @@ function readManifest(piDir) {
   } catch (error) {
     throw bad(error.message);
   }
-  const m = data;
+  const m2 = data;
   const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-  if (!isObject(m) || m.version !== 1 || !isObject(m.files) || !isObject(m.symlinks) || !isObject(m.json) || !Array.isArray(m.dirs)) {
+  if (!isObject(m2) || m2.version !== 1 || !isObject(m2.files) || !isObject(m2.symlinks) || !isObject(m2.json) || !Array.isArray(m2.dirs)) {
     throw bad("not a version 1 manifest");
   }
-  return m;
+  return m2;
 }
 function saveIfChanged(piDir, old, next, now) {
-  const strip = (m) => JSON.stringify({ ...m, updatedAt: "" });
+  const strip = (m2) => JSON.stringify({ ...m2, updatedAt: "" });
   if (old && strip(old) === strip(next)) return false;
   next.updatedAt = now.toISOString();
   atomicWrite(manifestPath(piDir), `${JSON.stringify(next, null, 2)}
 `, 420);
   return true;
 }
-function pinnedBackups(m) {
+function pinnedBackups(m2) {
   const pinned = /* @__PURE__ */ new Set();
-  for (const e of Object.values(m?.files ?? {})) if (e.backup) pinned.add(e.backup);
-  for (const e of Object.values(m?.json ?? {})) if (e.backup) pinned.add(e.backup);
+  for (const e of Object.values(m2?.files ?? {})) if (e.backup) pinned.add(e.backup);
+  for (const e of Object.values(m2?.json ?? {})) if (e.backup) pinned.add(e.backup);
   return pinned;
 }
 function recordSet(entry, op) {
@@ -417,8 +424,8 @@ function filesBelow(dir, base = "") {
   return out;
 }
 function order(name) {
-  const m = RUN_DIR.exec(name);
-  return [m[1], m[2] ? Number(m[2]) : 1];
+  const m2 = RUN_DIR.exec(name);
+  return [m2[1], m2[2] ? Number(m2[2]) : 1];
 }
 function listBackups(piDir, pinned) {
   const base = backupsDir(piDir);
@@ -538,7 +545,10 @@ import { dirname as dirname3, join as join5 } from "node:path";
 function describe(action) {
   if (action.op === "install") return `install ${action.path}`;
   if (action.op === "keep") return `keep ${action.path} (changed since install; new version in ${action.newPath})`;
-  if (action.op === "register") return `register ./local-packages/pi-questions in ${action.path}`;
+  if (action.op === "register") {
+    const what = (action.jsonOps ?? []).map((o) => o.op === "array-add" ? String(o.value) : o.key).join(", ");
+    return `register ${what || "changes"} in ${action.path}`;
+  }
   return void 0;
 }
 async function sourceOf(ctx) {
@@ -575,13 +585,14 @@ async function apply(ctx, actions, options, manifest) {
     const line = describe(action);
     if (line) ctx.out(line);
   }
-  if (options.dryRun) return { code: 0, wrote: false };
+  if (options.dryRun) return { code: 0, wrote: false, written: /* @__PURE__ */ new Set() };
   const run = new Run(ctx, piDir, manifest, noSource());
   let code = 0;
   try {
     run.source = await sourceOf(ctx);
     for (const action of actions) run.execute(action);
     applyProfile(options, piDir, run);
+    if (options.components) run.next.components = options.components;
     if (code === 0) {
       const npm2 = await runNpm(ctx, actions, options, piDir, manifest);
       code = npm2.code;
@@ -591,7 +602,7 @@ async function apply(ctx, actions, options, manifest) {
   } finally {
     run.finish();
   }
-  return { code, wrote: run.wrote };
+  return { code, wrote: run.wrote, written: run.written };
 }
 function applyProfile(options, piDir, run) {
   if (options.activeBefore === options.profile) return;
@@ -650,7 +661,7 @@ var init_apply = __esm({
         const missing = [];
         for (let d = dir; d.startsWith(`${this.ctx.home}/`) && !existsSync5(d); d = dirname3(d)) missing.push(d);
         mkdirSync3(dir, { recursive: true });
-        for (const m of missing) this.dirs.add(homeRel(this.ctx.home, m));
+        for (const m2 of missing) this.dirs.add(homeRel(this.ctx.home, m2));
       }
       backupIfThere(path2) {
         return existsSync5(path2) && statSync4(path2).isFile() ? this.backups.backup(path2) : void 0;
@@ -786,6 +797,156 @@ var init_apply = __esm({
   }
 });
 
+// src/components.ts
+import { existsSync as existsSync6, readdirSync as readdirSync3, readFileSync as readFileSync4, statSync as statSync5 } from "node:fs";
+import { join as join6 } from "node:path";
+function available(id, ctx) {
+  if (id === "docker-guardian") return ctx.platform === "darwin" ? true : "needs Docker Desktop on macOS";
+  if (id === "secret-sweep") return ctx.platform === "darwin" ? true : "its schedule is a macOS launchd job";
+  if (id === "cleanup") return ctx.platform === "darwin" || ctx.which("systemctl") ? true : "needs launchd (macOS) or systemd";
+  return true;
+}
+function resolveComponents(input) {
+  const out = {};
+  for (const def of COMPONENTS) {
+    const { id } = def;
+    if (input.flags && id in input.flags) out[id] = { on: input.flags[id], source: "flag" };
+    else if (input.answers && id in input.answers) out[id] = { on: input.answers[id], source: "prompt" };
+    else if (input.saved?.[id]) out[id] = { on: input.saved[id].on === true, source: "saved" };
+    else if (!def.service && input.current?.[id]) out[id] = { on: true, source: "installed" };
+    else if (def.service && !input.interactive) out[id] = { on: false, source: "default" };
+    else out[id] = { on: Boolean(input.detected[id]), source: "detected" };
+  }
+  return out;
+}
+function currentState(ctx) {
+  const piDir = join6(ctx.home, ".pi", "agent");
+  const mcp = readJson(join6(piDir, "mcp-adapter.json"));
+  const servers = mcp?.mcpServers;
+  const packages2 = readJson(join6(piDir, "settings.json"))?.packages;
+  return {
+    cratis: existsSync6(join6(piDir, "extensions", "cratis-cli-guard.ts")),
+    codescene: typeof servers === "object" && servers !== null && "codescene" in servers,
+    web: Array.isArray(packages2) && packages2.some((p) => WEB_PACKAGES.includes(p))
+  };
+}
+function isDir(path2) {
+  try {
+    return statSync5(path2).isDirectory();
+  } catch {
+    return false;
+  }
+}
+function hasCratisDir(root) {
+  const entries = (dir) => {
+    try {
+      return readdirSync3(dir).slice(0, LIMIT);
+    } catch {
+      return [];
+    }
+  };
+  for (const a2 of entries(root)) {
+    if (a2 === ".cratis") return true;
+    const one = join6(root, a2);
+    if (!isDir(one)) continue;
+    if (entries(one).some((b) => b === ".cratis" && isDir(join6(one, b)))) return true;
+  }
+  return false;
+}
+function detectDefaults(ctx, detection, reposRoot) {
+  const cratis = detection.github.orgs.some((o) => o.toLowerCase() === "cratis") || isDir(join6(reposRoot, "cratis")) || isDir(join6(reposRoot, "Cratis")) || hasCratisDir(reposRoot);
+  return {
+    "docker-guardian": ctx.platform === "darwin" && Boolean(ctx.which("docker")),
+    cleanup: ctx.platform === "darwin" || Boolean(ctx.which("systemctl")),
+    "secret-sweep": ctx.platform === "darwin" && Boolean(ctx.which("gitleaks")),
+    codescene: Boolean(ctx.which("cs-mcp")) || Boolean(ctx.env.CS_ACCESS_TOKEN),
+    cratis,
+    web: true
+  };
+}
+function hintFor(def, on) {
+  const why = {
+    "docker-guardian": ["docker found", "no docker found"],
+    cleanup: ["a scheduler is available", "no scheduler found"],
+    "secret-sweep": ["gitleaks found", "gitleaks not found"],
+    codescene: ["cs-mcp or a token found", "no cs-mcp or token found"],
+    cratis: ["Cratis repos found", "no Cratis repos found"],
+    web: ["on by default", "off"]
+  };
+  const [yes, no] = why[def.id];
+  return on ? `${yes}; ${def.explain}` : `off: ${no}; ${def.explain}`;
+}
+function isCratisFile(rel) {
+  return rel === "extensions/cratis-cli-guard.ts" || rel === "lib/cratis-cli-guard.test.ts" || rel === "agents/cratis-cli.md" || rel === "bin/cratis-local-run" || /^profiles\/[^/]+\/agents\/cratis-cli\.md$/.test(rel);
+}
+function dropGuardExtension(content) {
+  const text3 = content.toString("utf8");
+  const fm = /^---\n[\s\S]*?\n---/.exec(text3);
+  if (!fm) return content;
+  const head = fm[0].replace(/^(extensions:\s*\[)([^\]\n]*)(\])/m, (_m, a2, list, b) => `${a2}${list.split(",").map((s) => s.trim()).filter((s) => s && s !== "cratis-cli-guard").join(", ")}${b}`);
+  return head === fm[0] ? content : Buffer.from(head + text3.slice(fm[0].length), "utf8");
+}
+function stripSections(buf, offIds) {
+  let text3 = buf.toString("utf8");
+  const warnings = [];
+  for (const id of offIds) {
+    const s = markerRe(id, "start").exec(text3);
+    const e = markerRe(id, "end").exec(text3);
+    if (!s || !e || e.index < s.index) {
+      warnings.push(`AGENTS.md has no pi-setup:${id} markers; its ${id} section stays`);
+      continue;
+    }
+    let end = text3.indexOf("\n", e.index);
+    end = end < 0 ? text3.length : end + 1;
+    if (text3[end] === "\n") end += 1;
+    text3 = text3.slice(0, s.index) + text3.slice(end);
+  }
+  return { content: Buffer.from(text3, "utf8"), warnings };
+}
+function codesceneNotes(ctx) {
+  return [
+    ...ctx.env.CS_ACCESS_TOKEN ? [] : ["CodeScene: set CS_ACCESS_TOKEN in your shell profile (pi-setup never stores it)"],
+    ...ctx.which("cs-mcp") ? [] : [`install cs-mcp: ${CS_REPO}#readme`],
+    `CodeScene skills are not bundled: copy ${CS_SKILLS.join(", ")} from ${CS_REPO}/tree/main/skills to ~/.agents/skills/`
+  ];
+}
+var COMPONENT_IDS, COMPONENTS, isComponentId, readJson, WEB_PACKAGES, LIMIT, markerRe, CS_REPO, CS_SKILLS;
+var init_components = __esm({
+  "src/components.ts"() {
+    COMPONENT_IDS = ["docker-guardian", "cleanup", "secret-sweep", "codescene", "cratis", "web"];
+    COMPONENTS = [
+      { id: "docker-guardian", label: "docker-guardian", explain: "restarts a hung Docker Desktop every 2 minutes (macOS launchd)", service: true },
+      { id: "cleanup", label: "cleanup schedule", explain: "daily disk cleanup of pi's caches (launchd or systemd timer)", service: true },
+      { id: "secret-sweep", label: "secret-sweep", explain: "daily scan of pi sessions for leaked secrets (macOS launchd; needs gitleaks)", service: true },
+      { id: "codescene", label: "CodeScene", explain: "Code Health MCP server and policy in AGENTS.md (needs cs-mcp and a token)", service: false },
+      { id: "cratis", label: "Cratis conventions", explain: "Cratis rules, cratis-cli guard and agent, and the Cratis sections of AGENTS.md", service: false },
+      { id: "web", label: "browser and web tools", explain: "pi-web-access and pi-browser-use (the browser may download on first use)", service: false }
+    ];
+    isComponentId = (id) => COMPONENT_IDS.includes(id);
+    readJson = (path2) => {
+      try {
+        const data = JSON.parse(readFileSync4(path2, "utf8"));
+        return typeof data === "object" && data !== null && !Array.isArray(data) ? data : void 0;
+      } catch {
+        return void 0;
+      }
+    };
+    WEB_PACKAGES = ["npm:pi-web-access", "npm:pi-browser-use"];
+    LIMIT = 200;
+    markerRe = (id, which) => new RegExp(`^<!-- pi-setup:${id}:${which}\\b[^\\n]*-->[ \\t]*$`, "m");
+    CS_REPO = "https://github.com/codescene-oss/codescene-mcp-server";
+    CS_SKILLS = [
+      "explaining-code-health",
+      "guiding-refactoring-with-code-health",
+      "making-the-business-case-for-code-health",
+      "prioritizing-technical-debt",
+      "risk-based-testing-with-code-health",
+      "routing-work-with-code-ownership",
+      "safeguarding-ai-generated-code"
+    ];
+  }
+});
+
 // src/args.ts
 function isAbsoluteOrHome(value) {
   return value.startsWith("/") || value.startsWith("~");
@@ -806,7 +967,9 @@ function parseArgs(argv, cwd) {
     reinstallNpm: false,
     plan: false,
     json: false,
-    fix: false
+    fix: false,
+    with: [],
+    without: []
   };
   let args = argv[0] === "install" ? argv.slice(1) : argv;
   if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor") {
@@ -842,6 +1005,11 @@ function parseArgs(argv, cwd) {
         options.ref = value;
         continue;
       }
+      if (arg === "--with" || arg === "--without") {
+        if (!isComponentId(value)) return { ok: false, error: `unknown component '${value}' for ${arg}; valid ids: ${COMPONENT_IDS.join(", ")}` };
+        (arg === "--with" ? options.with : options.without).push(value);
+        continue;
+      }
       if (arg === "--user") options.user = value;
       else if (arg === "--profile") options.profile = value;
       else options.reposRoot = isAbsoluteOrHome(value) ? value : `${cwd}/${value}`;
@@ -849,6 +1017,8 @@ function parseArgs(argv, cwd) {
       return { ok: false, error: `Unknown argument: ${arg}` };
     }
   }
+  const both = options.with.filter((id) => options.without.includes(id));
+  if (both.length) return { ok: false, error: `${both.join(", ")} is in both --with and --without; valid ids: ${COMPONENT_IDS.join(", ")}` };
   return { ok: true, options };
 }
 function isInteractive(options, env, stdinTTY, stdoutTTY) {
@@ -857,6 +1027,7 @@ function isInteractive(options, env, stdinTTY, stdoutTTY) {
 var USAGE, VALUE_FLAGS, COMMON, ALLOWED, BOOLEAN_FLAGS;
 var init_args = __esm({
   "src/args.ts"() {
+    init_components();
     USAGE = `Usage: ./install.sh [install] [options]
        ./install.sh uninstall [--dry-run] [--yes]
        ./install.sh update [--dry-run] [--ref <tag>] [--yes] [--skip-npm]
@@ -869,11 +1040,12 @@ var init_args = __esm({
   --user <login>        GitHub login (default: saved, then gh, then ask)
   --repos-root <dir>    repositories root (default: saved, then ~/repos; interactive runs suggest a detected root)
   --profile <name|auto> profile to apply (default: the active one, else chosen from your logins)
+  --with <id> / --without <id>  turn an extra on or off: ${COMPONENT_IDS.join(", ")}
   --yes                 never prompt
   --skip-npm            do not run npm install in ~/.pi/agent/npm
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --help                this text`;
-    VALUE_FLAGS = /* @__PURE__ */ new Set(["--user", "--repos-root", "--profile", "--ref", "--keep"]);
+    VALUE_FLAGS = /* @__PURE__ */ new Set(["--user", "--repos-root", "--profile", "--ref", "--keep", "--with", "--without"]);
     COMMON = ["--help", "--dry-run"];
     ALLOWED = {
       install: void 0,
@@ -896,11 +1068,11 @@ var init_args = __esm({
 });
 
 // src/repos-scan.ts
-import { existsSync as existsSync6, readdirSync as readdirSync3, readFileSync as readFileSync4, statSync as statSync5 } from "node:fs";
-import { dirname as dirname4, join as join6 } from "node:path";
+import { existsSync as existsSync7, readdirSync as readdirSync4, readFileSync as readFileSync5, statSync as statSync6 } from "node:fs";
+import { dirname as dirname4, join as join7 } from "node:path";
 function originUrl(gitDir) {
   try {
-    const config = readFileSync4(join6(gitDir, "config"), "utf8");
+    const config = readFileSync5(join7(gitDir, "config"), "utf8");
     const section = /\[remote "origin"\]([^[]*)/.exec(config)?.[1] ?? "";
     return /^\s*url\s*=\s*(.+)$/m.exec(section)?.[1].trim() ?? "";
   } catch {
@@ -911,34 +1083,34 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function isCheckout(dir) {
-  return existsSync6(join6(dir, ".git"));
+  return existsSync7(join7(dir, ".git"));
 }
 function scoreCandidate(path2, owners, options) {
   const names = owners.filter(Boolean).map(escapeRegExp);
   const owned = names.length ? new RegExp(`[:/](${names.join("|")})/`, "i") : void 0;
   const list = (dir) => {
     try {
-      return readdirSync3(dir).filter((name) => !SKIP.has(name)).slice(0, options.maxChildren);
+      return readdirSync4(dir).filter((name) => !SKIP.has(name)).slice(0, options.maxChildren);
     } catch {
       return [];
     }
   };
   const points = (dir) => {
-    const git2 = join6(dir, ".git");
-    return 1 + (owned && statSync5(git2).isDirectory() && owned.test(originUrl(git2)) ? 1 : 0);
+    const git2 = join7(dir, ".git");
+    return 1 + (owned && statSync6(git2).isDirectory() && owned.test(originUrl(git2)) ? 1 : 0);
   };
   let score = 0;
   let budget = options.maxChildren * 4;
   for (const name of list(path2)) {
     if (options.expired()) break;
-    const child = join6(path2, name);
+    const child = join7(path2, name);
     if (isCheckout(child)) {
       score += points(child);
       continue;
     }
     for (const grand of list(child)) {
       if (options.expired() || budget-- <= 0) break;
-      if (isCheckout(join6(child, grand))) score += points(join6(child, grand));
+      if (isCheckout(join7(child, grand))) score += points(join7(child, grand));
     }
   }
   return score;
@@ -962,15 +1134,15 @@ async function candidateRoots(ctx) {
     timeoutMs: 3e3
   });
   if (common.code === 0 && common.stdout.trim()) list.push(dirname4(dirname4(dirname4(common.stdout.trim()))));
-  list.push(...NAMES.map((n3) => join6(ctx.home, n3)));
+  list.push(...NAMES.map((n3) => join7(ctx.home, n3)));
   if (ctx.platform === "darwin") {
     let volumes = [];
     try {
-      volumes = readdirSync3("/Volumes");
+      volumes = readdirSync4("/Volumes");
     } catch {
       volumes = [];
     }
-    for (const volume of volumes) list.push(...NAMES.map((n3) => join6("/Volumes", volume, n3)));
+    for (const volume of volumes) list.push(...NAMES.map((n3) => join7("/Volumes", volume, n3)));
   }
   return list;
 }
@@ -983,8 +1155,8 @@ var init_repos_scan = __esm({
 });
 
 // src/detect.ts
-import { existsSync as existsSync7 } from "node:fs";
-import { join as join7 } from "node:path";
+import { existsSync as existsSync8 } from "node:fs";
+import { join as join8 } from "node:path";
 function parseAuthStatus(text3) {
   const match = /Logged in to (\S+) account (\S+)/.exec(text3);
   return match ? { host: match[1], login: match[2] } : {};
@@ -1077,8 +1249,8 @@ async function detect(ctx, request) {
     github,
     providers: providers2,
     hints: {
-      codexAuthFile: existsSync7(join7(ctx.home, ".codex", "auth.json")),
-      claudeDir: existsSync7(join7(ctx.home, ".claude"))
+      codexAuthFile: existsSync8(join8(ctx.home, ".codex", "auth.json")),
+      claudeDir: existsSync8(join8(ctx.home, ".claude"))
     },
     catalog,
     candidates,
@@ -1108,15 +1280,15 @@ var init_detect = __esm({
 });
 
 // src/profiles.ts
-import { existsSync as existsSync8, readdirSync as readdirSync4, readFileSync as readFileSync5 } from "node:fs";
-import { join as join8 } from "node:path";
+import { existsSync as existsSync9, readdirSync as readdirSync5, readFileSync as readFileSync6 } from "node:fs";
+import { join as join9 } from "node:path";
 function profilesDir(repoDir2) {
-  return join8(repoDir2, "agent", "profiles");
+  return join9(repoDir2, "agent", "profiles");
 }
 function profileNames(repoDir2) {
   const dir = profilesDir(repoDir2);
-  if (!existsSync8(dir)) return [];
-  return readdirSync4(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  if (!existsSync9(dir)) return [];
+  return readdirSync5(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 }
 function stringList(value) {
   return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
@@ -1124,9 +1296,9 @@ function stringList(value) {
 function loadProfiles(repoDir2) {
   const metas = [];
   for (const name of profileNames(repoDir2)) {
-    const file = join8(profilesDir(repoDir2), name, "profile.json");
-    if (!existsSync8(file)) continue;
-    const data = JSON.parse(readFileSync5(file, "utf8"));
+    const file = join9(profilesDir(repoDir2), name, "profile.json");
+    if (!existsSync9(file)) continue;
+    const data = JSON.parse(readFileSync6(file, "utf8"));
     metas.push({
       name,
       summary: typeof data.summary === "string" ? data.summary : "",
@@ -1158,8 +1330,8 @@ function kimiNote(profile2, ready2) {
 }
 function pinnedModels(profileDir) {
   const pins = /* @__PURE__ */ new Set();
-  for (const file of listFiles(join8(profileDir, "agents")).filter((f) => f.endsWith(".md"))) {
-    const text3 = readFileSync5(join8(profileDir, "agents", file), "utf8");
+  for (const file of listFiles(join9(profileDir, "agents")).filter((f) => f.endsWith(".md"))) {
+    const text3 = readFileSync6(join9(profileDir, "agents", file), "utf8");
     const match = /^model:\s*(\S+)/m.exec(text3);
     if (match) pins.add(match[1]);
   }
@@ -1170,16 +1342,16 @@ function pinWarnings(pins, ready2, catalog) {
   return pins.filter((pin) => ready2.has(pin.split("/")[0]) && !catalog.has(pin)).map((pin) => `Pinned model ${pin} is not in this pi's model catalog.`);
 }
 function overlayFor(repoDir2, name, settings2) {
-  const base = join8(profilesDir(repoDir2), name);
-  if (!existsSync8(base)) throw new SetupError(`unknown profile '${name}'. available: ${profileNames(repoDir2).join(", ")}`);
+  const base = join9(profilesDir(repoDir2), name);
+  if (!existsSync9(base)) throw new SetupError(`unknown profile '${name}'. available: ${profileNames(repoDir2).join(", ")}`);
   const sources = /* @__PURE__ */ new Map();
   for (const [sub, ext] of [["agents", ".md"], ["workflows", ".js"]]) {
-    for (const file of listFiles(join8(base, sub))) {
-      if (!file.includes("/") && file.endsWith(ext)) sources.set(`${sub}/${file}`, join8(base, sub, file));
+    for (const file of listFiles(join9(base, sub))) {
+      if (!file.includes("/") && file.endsWith(ext)) sources.set(`${sub}/${file}`, join9(base, sub, file));
     }
   }
-  const routingPath = join8(base, "routing.md");
-  return { sources, routing: existsSync8(routingPath) ? render(readFileSync5(routingPath), settings2) : void 0 };
+  const routingPath = join9(base, "routing.md");
+  return { sources, routing: existsSync9(routingPath) ? render(readFileSync6(routingPath), settings2) : void 0 };
 }
 function markerLines(text3) {
   const start = text3.indexOf(START);
@@ -1195,13 +1367,13 @@ function hasRoutingMarkers(content) {
 }
 function spliceRouting(agentsMd2, routing, live) {
   const text3 = agentsMd2.toString("utf8");
-  const m = markerLines(text3);
-  if (!m) throw new SetupError("routing markers not found in AGENTS.md");
+  const m2 = markerLines(text3);
+  if (!m2) throw new SetupError("routing markers not found in AGENTS.md");
   const l2 = live ? markerLines(live.toString("utf8")) : void 0;
   const liveText = live?.toString("utf8") ?? "";
-  const startLine = l2 ? liveText.slice(l2.start, l2.bodyStart) : text3.slice(m.start, m.bodyStart);
-  const endLine = l2 ? liveText.slice(l2.end, l2.endLineEnd) : text3.slice(m.end, m.endLineEnd);
-  return Buffer.from(text3.slice(0, m.start) + startLine + routing.toString("utf8") + endLine + text3.slice(m.endLineEnd), "utf8");
+  const startLine = l2 ? liveText.slice(l2.start, l2.bodyStart) : text3.slice(m2.start, m2.bodyStart);
+  const endLine = l2 ? liveText.slice(l2.end, l2.endLineEnd) : text3.slice(m2.end, m2.endLineEnd);
+  return Buffer.from(text3.slice(0, m2.start) + startLine + routing.toString("utf8") + endLine + text3.slice(m2.endLineEnd), "utf8");
 }
 var START, END, FALLBACK_PROFILE;
 var init_profiles = __esm({
@@ -1216,40 +1388,44 @@ var init_profiles = __esm({
 });
 
 // src/plan.ts
-import { existsSync as existsSync9, lstatSync as lstatSync3, readdirSync as readdirSync5, readFileSync as readFileSync6, statSync as statSync6 } from "node:fs";
-import { join as join9 } from "node:path";
+import { existsSync as existsSync10, lstatSync as lstatSync3, readdirSync as readdirSync6, readFileSync as readFileSync7, statSync as statSync7 } from "node:fs";
+import { join as join10 } from "node:path";
 function fromSource(src, settings2) {
-  const raw = readFileSync6(src);
-  const st = statSync6(src);
+  const raw = readFileSync7(src);
+  const st = statSync7(src);
   const mode = st.mode & 4095;
   return hasTokens(raw) ? { content: render(raw, settings2), mode } : { content: raw, mode, mtimeMs: st.mtimeMs };
 }
 function sameBytes(dest, content) {
-  return existsSync9(dest) && statSync6(dest).isFile() && readFileSync6(dest).equals(content);
+  return existsSync10(dest) && statSync7(dest).isFile() && readFileSync7(dest).equals(content);
 }
 function put(actions, dest, desired) {
   if (sameBytes(dest, desired.content)) {
     actions.push({ op: "adopt", path: dest });
     return;
   }
-  actions.push({ op: "install", path: dest, existed: existsSync9(dest), ...desired });
+  actions.push({ op: "install", path: dest, existed: existsSync10(dest), ...desired });
 }
 function putSource(actions, src, dest, settings2) {
   put(actions, dest, fromSource(src, settings2));
 }
-function putTree(actions, srcDir, destDir, settings2, overlay, prefix = "") {
+function putTree(actions, srcDir, destDir, settings2, overlay, prefix = "", filter = NO_FILTER, treeRel = "") {
   const files2 = new Set(listFiles(srcDir));
   for (const [rel, src] of overlay ?? []) if (rel.startsWith(prefix)) files2.add(rel.slice(prefix.length));
   for (const rel of [...files2].sort()) {
-    const src = overlay?.get(`${prefix}${rel}`) ?? join9(srcDir, rel);
-    putSource(actions, src, join9(destDir, rel), settings2);
+    const full = `${treeRel}${rel}`;
+    if (filter.skip(full)) continue;
+    const src = overlay?.get(`${prefix}${rel}`) ?? join10(srcDir, rel);
+    const desired = fromSource(src, settings2);
+    const content = filter.transform(full, desired.content);
+    put(actions, join10(destDir, rel), content === desired.content ? desired : { content, mode: desired.mode });
   }
 }
 function userJsonAction(actions, piDir, settings2) {
-  const path2 = join9(piDir, "user.json");
+  const path2 = join10(piDir, "user.json");
   const existing = readSettings(path2);
   const merged = mergeUserJson(existing, settings2);
-  if (existsSync9(path2) && deepEqual(existing, merged)) return;
+  if (existsSync10(path2) && deepEqual(existing, merged)) return;
   const jsonOps = [];
   for (const key of ["githubUser", "reposRoot"]) {
     if (key in existing && deepEqual(existing[key], merged[key])) continue;
@@ -1258,7 +1434,7 @@ function userJsonAction(actions, piDir, settings2) {
   actions.push({
     op: "install",
     path: path2,
-    existed: existsSync9(path2),
+    existed: existsSync10(path2),
     mode: 420,
     merge: "user-json",
     jsonOps,
@@ -1267,16 +1443,22 @@ function userJsonAction(actions, piDir, settings2) {
   });
 }
 function agentsMd(input, live) {
-  const base = fromSource(join9(input.repoDir, "agent", "AGENTS.md"), input.settings);
-  const existing = existsSync9(live) && statSync6(live).isFile() ? readFileSync6(live) : void 0;
+  const base = fromSource(join10(input.repoDir, "agent", "AGENTS.md"), input.settings);
+  const off = ["cratis", "codescene"].filter((id) => input.components?.[id] === false);
+  if (off.length) {
+    const stripped = stripSections(base.content, off);
+    base.content = stripped.content;
+    delete base.mtimeMs;
+    input.notes?.push(...stripped.warnings);
+  }
+  const existing = existsSync10(live) && statSync7(live).isFile() ? readFileSync7(live) : void 0;
   const noMarkers = existing !== void 0 && !hasRoutingMarkers(existing);
   if (!input.overlay.routing) return { ...base, noMarkers };
   return { content: spliceRouting(base.content, input.overlay.routing, noMarkers ? void 0 : existing), mode: base.mode, noMarkers };
 }
-function registerAction(actions, piDir) {
-  const path2 = join9(piDir, "settings.json");
+function registerJson(actions, path2, edit) {
   const pending2 = actions.find((a2) => a2.op === "install" && a2.path === path2);
-  const content = pending2 && pending2.op === "install" ? pending2.content : existsSync9(path2) ? readFileSync6(path2) : void 0;
+  const content = pending2 && pending2.op === "install" ? pending2.content : existsSync10(path2) ? readFileSync7(path2) : void 0;
   if (!content) return;
   let data;
   try {
@@ -1284,64 +1466,103 @@ function registerAction(actions, piDir) {
   } catch (error) {
     throw new SetupError(`${path2}: ${error.message}`);
   }
-  const packages2 = Array.isArray(data.packages) ? data.packages : [];
-  if (packages2.includes(PACKAGE)) return;
-  const updated = { ...data, packages: [...packages2, PACKAGE] };
-  const jsonOps = [{ op: "array-add", key: "packages", value: PACKAGE, keyCreated: !Array.isArray(data.packages) }];
-  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync6(path2).mode & 4095;
-  const next = Buffer.from(`${JSON.stringify(updated, null, 2)}
+  const before = structuredClone(data);
+  const jsonOps = edit(data, Boolean(pending2));
+  if (jsonOps.length === 0 && deepEqual(before, data)) return;
+  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync7(path2).mode & 4095;
+  const next = Buffer.from(`${JSON.stringify(data, null, 2)}
 `);
   if (pending2 && pending2.op === "install") {
     pending2.content = next;
-    actions.push({ op: "register", path: path2, content: next, mode, existed: false, jsonOps });
+    if (jsonOps.length) actions.push({ op: "register", path: path2, content: next, mode, existed: false, jsonOps });
   } else {
     actions.push({ op: "register", path: path2, content: next, mode, existed: true, jsonOps });
   }
 }
+function addPackage(data, value, fresh, ops, allow) {
+  const list = Array.isArray(data.packages) ? data.packages : void 0;
+  const has = list?.includes(value) ?? false;
+  if (has && !fresh || !has && !allow) return;
+  if (!has) data.packages = [...list ?? [], value];
+  ops.push({ op: "array-add", key: "packages", value, keyCreated: !list });
+}
+function settingsEdit(web, activate) {
+  return (data, fresh) => {
+    const ops = [];
+    if (fresh && web !== true && Array.isArray(data.packages)) {
+      if (web === false) data.packages = data.packages.filter((p) => !WEB_PACKAGES.includes(p));
+    }
+    addPackage(data, PACKAGE, false, ops, true);
+    if (web === true) for (const p of WEB_PACKAGES) addPackage(data, p, fresh, ops, fresh || activate);
+    return ops;
+  };
+}
+function mcpEdit(codescene, activate, which) {
+  return (data, fresh) => {
+    const servers = typeof data.mcpServers === "object" && data.mcpServers !== null && !Array.isArray(data.mcpServers) ? data.mcpServers : void 0;
+    const has = Boolean(servers && "codescene" in servers);
+    if (codescene !== true) {
+      if (fresh && codescene === false && servers) delete servers.codescene;
+      return [];
+    }
+    if (has && !fresh || !has && !fresh && !activate) return [];
+    const stripped = { ...servers };
+    delete stripped.codescene;
+    const entry = { command: which("cs-mcp") ?? "cs-mcp", args: [], lifecycle: "lazy-keep-alive" };
+    data.mcpServers = { ...stripped, codescene: entry };
+    return [{ op: "set", key: "mcpServers", before: servers ? { present: true, value: stripped } : { present: false }, after: data.mcpServers }];
+  };
+}
 function buildPlan(input) {
   const { repoDir: repoDir2, home, settings: settings2, overlay } = input;
-  const agent = join9(repoDir2, "agent");
-  const piDir = join9(home, ".pi", "agent");
+  const cratis = input.components?.cratis !== false;
+  const filter = cratis ? NO_FILTER : {
+    skip: isCratisFile,
+    transform: (rel, content) => /(^|\/)agents\/[^/]+\.md$/.test(rel) ? dropGuardExtension(content) : content
+  };
+  const agent = join10(repoDir2, "agent");
+  const piDir = join10(home, ".pi", "agent");
   const actions = [];
   userJsonAction(actions, piDir, settings2);
   for (const tree of TREES) {
     const useOverlay = tree === "agents" || tree === "workflows";
-    putTree(actions, join9(agent, tree), join9(piDir, tree), settings2, useOverlay ? overlay.sources : void 0, useOverlay ? `${tree}/` : "");
+    putTree(actions, join10(agent, tree), join10(piDir, tree), settings2, useOverlay ? overlay.sources : void 0, useOverlay ? `${tree}/` : "", filter, `${tree}/`);
   }
-  putTree(actions, join9(agent, "local-packages/pi-questions"), join9(piDir, "local-packages/pi-questions"), settings2);
-  actions.push({ op: "chmod-x", path: join9(piDir, "local-packages/pi-questions/dist/cli.js") });
-  const agentsPath = join9(piDir, "AGENTS.md");
+  putTree(actions, join10(agent, "local-packages/pi-questions"), join10(piDir, "local-packages/pi-questions"), settings2);
+  actions.push({ op: "chmod-x", path: join10(piDir, "local-packages/pi-questions/dist/cli.js") });
+  const agentsPath = join10(piDir, "AGENTS.md");
   const { noMarkers, ...agentsDesired } = agentsMd(input, agentsPath);
   put(actions, agentsPath, agentsDesired);
   const last = actions[actions.length - 1];
   if (noMarkers && last.op === "install") last.noMarkers = true;
-  putSource(actions, join9(agent, "AGENTS.subagent.md"), join9(piDir, "AGENTS.subagent.md"), settings2);
+  putSource(actions, join10(agent, "AGENTS.subagent.md"), join10(piDir, "AGENTS.subagent.md"), settings2);
   for (const name of ONLY_IF_ABSENT) {
-    if (!existsSync9(join9(piDir, name))) putSource(actions, join9(agent, name), join9(piDir, name), settings2);
+    if (!existsSync10(join10(piDir, name))) putSource(actions, join10(agent, name), join10(piDir, name), settings2);
   }
-  registerAction(actions, piDir);
+  registerJson(actions, join10(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web"))));
+  registerJson(actions, join10(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => void 0)));
   const absent = [
     ["docker-guardian/pinned.example.txt", "docker-guardian/pinned.txt"],
     ["dev-doctor.example.json", "dev-doctor.json"],
     ["npm-package.json", "npm/package.json"]
   ];
   for (const [from, to] of absent) {
-    if (!existsSync9(join9(piDir, to))) putSource(actions, join9(agent, from), join9(piDir, to), settings2);
+    if (!existsSync10(join10(piDir, to))) putSource(actions, join10(agent, from), join10(piDir, to), settings2);
   }
   for (const skill of listSkills(repoDir2)) {
-    putTree(actions, join9(repoDir2, "skills", skill), join9(home, ".agents", "skills", skill), settings2);
+    putTree(actions, join10(repoDir2, "skills", skill), join10(home, ".agents", "skills", skill), settings2);
   }
-  const link = join9(piDir, "skills", "ai-work-lifecycle");
-  if (!lstatExists(link)) actions.push({ op: "symlink", path: link, target: join9(home, ".agents", "skills", "ai-work-lifecycle") });
-  putTree(actions, join9(repoDir2, "tools/ai-work-lifecycle"), join9(home, ".local/share/ai-work-lifecycle"), settings2);
-  const bin = join9(repoDir2, "tools/bin/ai-work-lifecycle");
-  putSource(actions, bin, join9(home, ".local/bin/ai-work-lifecycle"), settings2);
+  const link = join10(piDir, "skills", "ai-work-lifecycle");
+  if (!lstatExists(link)) actions.push({ op: "symlink", path: link, target: join10(home, ".agents", "skills", "ai-work-lifecycle") });
+  putTree(actions, join10(repoDir2, "tools/ai-work-lifecycle"), join10(home, ".local/share/ai-work-lifecycle"), settings2);
+  const bin = join10(repoDir2, "tools/bin/ai-work-lifecycle");
+  putSource(actions, bin, join10(home, ".local/bin/ai-work-lifecycle"), settings2);
   return actions;
 }
 function listSkills(repoDir2) {
-  const dir = join9(repoDir2, "skills");
-  if (!existsSync9(dir)) return [];
-  return readdirSync5(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  const dir = join10(repoDir2, "skills");
+  if (!existsSync10(dir)) return [];
+  return readdirSync6(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 }
 function lstatExists(path2) {
   try {
@@ -1351,31 +1572,33 @@ function lstatExists(path2) {
     return false;
   }
 }
-var TREES, ONLY_IF_ABSENT, PACKAGE;
+var TREES, ONLY_IF_ABSENT, PACKAGE, NO_FILTER;
 var init_plan = __esm({
   "src/plan.ts"() {
     init_settings();
     init_fsx();
     init_profiles();
+    init_components();
     init_types();
     TREES = ["agents", "extensions", "early-extensions", "lib", "workflows", "templates", "profiles", "loose-threads", "bin", "pi-phase", "lane-policy"];
     ONLY_IF_ABSENT = ["settings.json", "models.json", "subagents.json", "provider-fallback.json", "mcp-adapter.json", "efficiency.json", "context-budget.json"];
     PACKAGE = "./local-packages/pi-questions";
+    NO_FILTER = { skip: () => false, transform: (_rel, content) => content };
   }
 });
 
 // src/reconcile.ts
-import { existsSync as existsSync10, mkdtempSync, readFileSync as readFileSync7, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync11, mkdtempSync, readFileSync as readFileSync8, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 function newVersionNeedsWrite(newPath, content) {
-  return !(existsSync10(newPath) && readFileSync7(newPath).equals(content));
+  return !(existsSync11(newPath) && readFileSync8(newPath).equals(content));
 }
 function reconcile(actions, manifest, home) {
   const conflicts = [];
   const out = actions.map((action) => {
     if (action.op !== "install" || action.merge) return action;
-    if (!action.existed || !existsSync10(action.path)) return { ...action, decision: "new" };
+    if (!action.existed || !existsSync11(action.path)) return { ...action, decision: "new" };
     const entry = manifest?.files[homeRel(home, action.path)];
     if (!action.noMarkers) {
       if (!entry) return { ...action, decision: "replace" };
@@ -1401,9 +1624,9 @@ function applyTakes(actions, takes) {
   return actions.map((a2) => a2.op === "keep" && takes.has(a2.path) ? { op: "install", path: a2.path, content: a2.content, mode: a2.mode, mtimeMs: a2.mtimeMs, existed: true, decision: "take" } : a2);
 }
 async function diffText(ctx, conflict) {
-  const dir = mkdtempSync(join10(tmpdir(), "pisetup-diff."));
+  const dir = mkdtempSync(join11(tmpdir(), "pisetup-diff."));
   try {
-    const tmp = join10(dir, "new");
+    const tmp = join11(dir, "new");
     writeFileSync2(tmp, conflict.content);
     const result2 = await ctx.run("diff", ["-u", conflict.path, tmp], { timeoutMs: 1e4 });
     if (result2.code === null || result2.code > 1) return `(diff is not available; the new version is in ${conflict.newPath})`;
@@ -1423,22 +1646,162 @@ var init_reconcile = __esm({
   }
 });
 
+// src/services.ts
+import { existsSync as existsSync12, mkdirSync as mkdirSync4, readFileSync as readFileSync9, statSync as statSync8 } from "node:fs";
+import { join as join12 } from "node:path";
+function serviceUser(env) {
+  return (env.USER ?? "").replace(/[^A-Za-z0-9-]/g, "") || "pi-setup";
+}
+function systemdUnits(home) {
+  const dir = join12(home, ".config/systemd/user");
+  return [
+    {
+      path: join12(dir, "pi-cleanup.service"),
+      content: Buffer.from(
+        "[Unit]\nDescription=pi-setup scheduled cleanup\n\n[Service]\nType=oneshot\nEnvironment=PYTHONDONTWRITEBYTECODE=1\nExecStart=%h/.pi/agent/bin/pi-cleanup --scheduled\n"
+      )
+    },
+    {
+      path: join12(dir, TIMER),
+      content: Buffer.from("[Unit]\nDescription=pi-setup scheduled cleanup (daily)\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
+    }
+  ];
+}
+function launchdUnit(ctx, id) {
+  const name = LAUNCHD_NAME[id];
+  const src = join12(ctx.repoDir, "agent", "launchd", `com.example.${name}.plist`);
+  if (!name || !existsSync12(src)) return void 0;
+  const user = serviceUser(ctx.env);
+  const text3 = readFileSync9(src, "utf8").split("__HOME__").join(xml(ctx.home)).split("com.example.").join(`com.${user}.`);
+  return { unit: { path: join12(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text3) }, label: `com.${user}.${name}` };
+}
+function planServices(ctx, manifest, on) {
+  const out = { actions: [], records: {}, notes: [] };
+  for (const def of COMPONENTS.filter((c2) => c2.service)) {
+    if (!on[def.id] || available(def.id, ctx) !== true) {
+      out.records[def.id] = { on: false };
+      continue;
+    }
+    let kind = "launchd";
+    let label = "";
+    let units = [];
+    if (ctx.platform === "darwin") {
+      const l2 = launchdUnit(ctx, def.id);
+      if (l2) {
+        units = [l2.unit];
+        label = l2.label;
+      }
+    } else {
+      kind = "systemd";
+      label = TIMER;
+      units = systemdUnits(ctx.home);
+    }
+    if (!units.length) {
+      out.records[def.id] = { on: false };
+      continue;
+    }
+    let managed = true;
+    const actions = [];
+    for (const u3 of units) {
+      const rel = homeRel(ctx.home, u3.path);
+      const there = existsSync12(u3.path) && statSync8(u3.path).isFile();
+      if (!there) actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: false, decision: "new" });
+      else if (readFileSync9(u3.path).equals(u3.content)) actions.push({ op: "adopt", path: u3.path });
+      else if (manifest?.files[rel] && fileSha(u3.path) === manifest.files[rel].sha256) {
+        actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: true, decision: "update" });
+      } else {
+        managed = false;
+        out.notes.push(`left your ${u3.path.replace(`${ctx.home}/`, "~/")}; pi-setup does not load or remove it`);
+      }
+    }
+    if (managed) out.actions.push(...actions);
+    out.records[def.id] = { on: true, service: { kind, label, files: units.map((u3) => homeRel(ctx.home, u3.path)), managed } };
+  }
+  return out;
+}
+async function sh(ctx, cmd, args) {
+  try {
+    const r2 = await ctx.run(cmd, args, { timeoutMs: TIMEOUT });
+    return { ok: r2.code === 0 && !r2.timedOut, text: `${r2.stdout}${r2.stderr}`.trim() };
+  } catch (error) {
+    return { ok: false, text: error.message };
+  }
+}
+async function syncServices(ctx, components, changed, dryRun) {
+  for (const [id, c2] of Object.entries(components)) {
+    const svc = c2.service;
+    if (!c2.on || !svc?.managed) continue;
+    const plist = join12(ctx.home, svc.files[0]);
+    const domain = `gui/${uid()}`;
+    if (svc.kind === "launchd") {
+      if (dryRun) {
+        ctx.out(`would load ${svc.label} (launchctl bootstrap ${domain} ${plist})`);
+        continue;
+      }
+      mkdirSync4(join12(ctx.home, ".pi/agent/logs"), { recursive: true });
+      const loaded = (await sh(ctx, "launchctl", ["print", `${domain}/${svc.label}`])).ok;
+      if (loaded && !svc.files.some((f) => changed.has(join12(ctx.home, f)))) continue;
+      if (loaded) await sh(ctx, "launchctl", ["bootout", `${domain}/${svc.label}`]);
+      const r2 = await sh(ctx, "launchctl", ["bootstrap", domain, plist]);
+      if (!r2.ok) ctx.err(`warning: could not load ${id}: launchctl bootstrap ${domain} ${plist}`);
+      else ctx.out(`loaded ${svc.label}`);
+    } else {
+      if (dryRun) {
+        ctx.out(`would enable ${svc.label} (systemctl --user enable --now ${svc.label})`);
+        continue;
+      }
+      if (!ctx.which("systemctl")) {
+        ctx.out(`note: systemctl not found; start ${id} later with: systemctl --user enable --now ${svc.label}`);
+        continue;
+      }
+      await sh(ctx, "systemctl", ["--user", "daemon-reload"]);
+      const r2 = await sh(ctx, "systemctl", ["--user", "enable", "--now", svc.label]);
+      if (!r2.ok) ctx.err(`warning: could not enable ${id}: systemctl --user enable --now ${svc.label}`);
+      else ctx.out(`enabled ${svc.label}`);
+    }
+  }
+}
+function unloadLine(svc) {
+  return svc.kind === "launchd" ? `boot out ${svc.label} (launchctl bootout gui/${uid()}/${svc.label})` : `disable ${svc.label} (systemctl --user disable --now ${svc.label})`;
+}
+async function unloadService(ctx, svc) {
+  if (!svc.managed) return;
+  if (svc.kind === "launchd") await sh(ctx, "launchctl", ["bootout", `gui/${uid()}/${svc.label}`]);
+  else if (ctx.which("systemctl")) await sh(ctx, "systemctl", ["--user", "disable", "--now", svc.label]);
+}
+async function reloadSystemd(ctx, svc) {
+  if (svc.managed && svc.kind === "systemd" && ctx.which("systemctl")) await sh(ctx, "systemctl", ["--user", "daemon-reload"]);
+}
+var LAUNCHD_NAME, TIMER, TIMEOUT, xml, isService, uid;
+var init_services = __esm({
+  "src/services.ts"() {
+    init_components();
+    init_manifest();
+    LAUNCHD_NAME = { "docker-guardian": "docker-guardian", cleanup: "pi-cleanup", "secret-sweep": "secret-sweep" };
+    TIMER = "pi-cleanup.timer";
+    TIMEOUT = 5e3;
+    xml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    isService = (id) => COMPONENTS.some((c2) => c2.id === id && c2.service);
+    uid = () => typeof process.getuid === "function" ? process.getuid() : 0;
+  }
+});
+
 // src/uninstall.ts
 import {
   copyFileSync as copyFileSync2,
-  existsSync as existsSync11,
+  existsSync as existsSync13,
   lstatSync as lstatSync4,
-  mkdirSync as mkdirSync4,
-  readFileSync as readFileSync8,
+  mkdirSync as mkdirSync5,
+  readFileSync as readFileSync10,
   readlinkSync,
   renameSync as renameSync2,
   rmdirSync as rmdirSync2,
-  statSync as statSync7,
+  statSync as statSync9,
   unlinkSync as unlinkSync2
 } from "node:fs";
-import { dirname as dirname5, join as join11 } from "node:path";
+import { dirname as dirname5, join as join13 } from "node:path";
 function restore(from, to) {
-  mkdirSync4(dirname5(to), { recursive: true });
+  mkdirSync5(dirname5(to), { recursive: true });
   try {
     renameSync2(from, to);
   } catch (error) {
@@ -1475,8 +1838,65 @@ function rmdirIfEmpty(path2) {
   } catch {
   }
 }
+function retireFiles(ctx, piDir, m2, rels) {
+  const sub = {
+    ...structuredClone(m2),
+    files: {},
+    json: {},
+    symlinks: {},
+    dirs: [],
+    pendingNew: void 0,
+    components: void 0
+  };
+  for (const rel of rels) if (m2.files[rel]) sub.files[rel] = structuredClone(m2.files[rel]);
+  const plan = new Plan(ctx, piDir, sub);
+  const steps = plan.build();
+  for (const rel of rels) {
+    if (!(rel in sub.files)) continue;
+    if (rel in plan.remaining.files) m2.files[rel] = plan.remaining.files[rel];
+    else delete m2.files[rel];
+  }
+  return steps;
+}
+function revertOps(ctx, m2, rel, match, dryRun) {
+  const entry = m2.json[rel];
+  const mine = entry?.ops.filter(match) ?? [];
+  if (!entry || mine.length === 0) return [];
+  const path2 = fromHomeRel(ctx.home, rel);
+  const lines2 = [];
+  let data;
+  try {
+    data = JSON.parse(readFileSync10(path2, "utf8"));
+    if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not an object");
+  } catch {
+    if (!existsSync13(path2)) {
+      entry.ops = entry.ops.filter((o) => !match(o));
+      if (!entry.ops.length) delete m2.json[rel];
+      return [];
+    }
+    return [`left (cannot read as JSON): ${path2}`];
+  }
+  const left = [];
+  for (const op of [...mine].reverse()) if (!undo(data, op)) left.push(op);
+  for (const op of left) lines2.push(`left (changed by you): ${op.key} in ${path2}`);
+  const done = mine.length - left.length;
+  if (done > 0) lines2.push(`${dryRun ? "would revert" : "revert"} ${done} change(s) made by pi-setup in ${path2}`);
+  if (dryRun) return lines2;
+  if (done > 0) {
+    const tracked = m2.files[rel];
+    const wasTracked = Boolean(tracked) && fileSha(path2) === tracked.sha256;
+    atomicWrite(path2, `${JSON.stringify(data, null, 2)}
+`, statSync9(path2).mode & 4095);
+    const sha = sha256(readFileSync10(path2));
+    entry.sha256After = sha;
+    if (wasTracked) tracked.sha256 = sha;
+  }
+  entry.ops = entry.ops.filter((o) => !match(o) || left.includes(o));
+  if (!entry.ops.length) delete m2.json[rel];
+  return lines2;
+}
 async function runUninstall(ctx, options, prompter) {
-  const piDir = join11(ctx.home, ".pi", "agent");
+  const piDir = join13(ctx.home, ".pi", "agent");
   const manifest = readManifest(piDir);
   if (!manifest) {
     ctx.out(`No pi-setup manifest at ${manifestPath(piDir)}; nothing is tracked (installs older than this version are adopted by running ./install.sh once).`);
@@ -1500,20 +1920,21 @@ async function runUninstall(ctx, options, prompter) {
   } else if (!options.yes) {
     throw new SetupError("uninstall changes files; pass --yes to run it without a prompt (or --dry-run to preview)");
   }
-  for (const step of steps) step.run();
+  for (const step of steps) await step.run();
+  delete plan.remaining.components;
   finalize(ctx, piDir, manifest, plan.remaining);
   return 0;
 }
 function finalize(ctx, piDir, old, left) {
   const empty = Object.keys(left.files).length + Object.keys(left.json).length + Object.keys(left.symlinks).length === 0;
   if (empty) {
-    if (existsSync11(manifestPath(piDir))) unlinkSync2(manifestPath(piDir));
+    if (existsSync13(manifestPath(piDir))) unlinkSync2(manifestPath(piDir));
   } else {
     left.dirs = left.dirs.filter((d) => lstatExists2(fromHomeRel(ctx.home, d)));
     saveIfChanged(piDir, old, left, ctx.now());
   }
-  const cache = join11(piDir, ".pi-setup/update-check.json");
-  if (existsSync11(cache)) unlinkSync2(cache);
+  const cache = join13(piDir, ".pi-setup/update-check.json");
+  if (existsSync13(cache)) unlinkSync2(cache);
   tidy(piDir);
   const rest = listBackups(piDir, pinnedBackups(empty ? void 0 : left));
   for (const rel of [...left.dirs].sort((a2, b) => b.split("/").length - a2.split("/").length || (a2 < b ? 1 : -1))) {
@@ -1530,6 +1951,7 @@ var init_uninstall = __esm({
     init_backups();
     init_manifest();
     init_settings();
+    init_services();
     init_types();
     sameLink = (path2, target) => {
       try {
@@ -1545,10 +1967,10 @@ var init_uninstall = __esm({
       backups;
       ctx;
       m;
-      constructor(ctx, piDir, m) {
+      constructor(ctx, piDir, m2) {
         this.ctx = ctx;
-        this.m = m;
-        this.remaining = structuredClone(m);
+        this.m = m2;
+        this.remaining = structuredClone(m2);
         this.backups = backupsDir(piDir);
       }
       abs(rel) {
@@ -1556,13 +1978,17 @@ var init_uninstall = __esm({
       }
       backupFile(rel) {
         if (!rel) return void 0;
-        const path2 = join11(this.backups, rel);
-        return existsSync11(path2) ? path2 : void 0;
+        const path2 = join13(this.backups, rel);
+        return existsSync13(path2) ? path2 : void 0;
       }
       add(line, run) {
         this.steps.push({ line, run });
       }
       build() {
+        for (const c2 of Object.values(this.m.components ?? {})) {
+          const svc = c2.service;
+          if (svc?.managed) this.add(unloadLine(svc), () => unloadService(this.ctx, svc));
+        }
         const deleted = /* @__PURE__ */ new Set();
         for (const [rel, entry] of Object.entries(this.m.files)) if (this.file(rel, entry)) deleted.add(rel);
         for (const [rel, sha] of Object.entries(this.m.pendingNew ?? {})) {
@@ -1574,6 +2000,10 @@ var init_uninstall = __esm({
         for (const [rel, entry] of Object.entries(this.m.json)) {
           if (deleted.has(rel)) delete this.remaining.json[rel];
           else this.json(rel, entry);
+        }
+        for (const c2 of Object.values(this.m.components ?? {})) {
+          const svc = c2.service;
+          if (svc?.managed && svc.kind === "systemd") this.add("reload systemd (systemctl --user daemon-reload)", () => reloadSystemd(this.ctx, svc));
         }
         return this.steps;
       }
@@ -1644,7 +2074,7 @@ var init_uninstall = __esm({
         const left = [];
         let data;
         try {
-          data = JSON.parse(readFileSync8(path2, "utf8"));
+          data = JSON.parse(readFileSync10(path2, "utf8"));
           if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not an object");
         } catch {
           this.ctx.err(`left (cannot read as JSON): ${path2}`);
@@ -1658,13 +2088,13 @@ var init_uninstall = __esm({
           delete this.remaining.json[rel];
           return;
         }
-        const mode = statSync7(path2).mode & 4095;
+        const mode = statSync9(path2).mode & 4095;
         atomicWrite(path2, `${JSON.stringify(data, null, 2)}
 `, mode);
         if (left.length === 0) {
           delete this.remaining.json[rel];
         } else {
-          this.remaining.json[rel] = { ...entry, ops: left.reverse(), sha256After: sha256(readFileSync8(path2)) };
+          this.remaining.json[rel] = { ...entry, ops: left.reverse(), sha256After: sha256(readFileSync10(path2)) };
           for (const op of left) this.ctx.err(`left (changed by you): ${op.key} in ${path2}`);
         }
       }
@@ -1672,17 +2102,82 @@ var init_uninstall = __esm({
   }
 });
 
+// src/retire.ts
+import { existsSync as existsSync14, readFileSync as readFileSync11 } from "node:fs";
+import { join as join14 } from "node:path";
+function wasOn(manifest, current, id) {
+  const saved = manifest?.components?.[id];
+  return saved ? saved.on : current[id] === true;
+}
+function leftWebPackages(ctx, manifest) {
+  const path2 = join14(ctx.home, PI, "settings.json");
+  if (!existsSync14(path2)) return [];
+  let packages2;
+  try {
+    packages2 = JSON.parse(readFileSync11(path2, "utf8")).packages;
+  } catch {
+    return [];
+  }
+  const added = new Set((manifest.json[`${PI}settings.json`]?.ops ?? []).filter(WEB_PACKAGE_OP).map((o) => o.value));
+  return Array.isArray(packages2) ? WEB_PACKAGES.filter((p) => packages2.includes(p) && !added.has(p)) : [];
+}
+async function retire(ctx, piDir, manifest, off, dryRun) {
+  if (!manifest || off.length === 0) return manifest;
+  const m2 = structuredClone(manifest);
+  const steps = [];
+  const lines2 = [];
+  const files2 = (rels) => {
+    for (const step of retireFiles(ctx, piDir, m2, rels)) steps.push(step);
+  };
+  for (const id of off) {
+    const svc = m2.components?.[id]?.service;
+    if (svc) {
+      if (svc.managed) steps.push({ line: unloadLine(svc), run: () => unloadService(ctx, svc) });
+      files2(svc.files);
+      if (svc.managed && svc.kind === "systemd") steps.push({ line: "reload systemd (systemctl --user daemon-reload)", run: () => reloadSystemd(ctx, svc) });
+    }
+    if (id === "cratis") files2(Object.keys(m2.files).filter((rel) => rel.startsWith(PI) && isCratisFile(rel.slice(PI.length))));
+    if (id === "web") {
+      lines2.push(...revertOps(ctx, m2, `${PI}settings.json`, WEB_PACKAGE_OP, dryRun));
+      for (const p of leftWebPackages(ctx, m2)) lines2.push(`left ${p} in settings.json (not added by pi-setup)`);
+    }
+    if (id === "codescene") {
+      lines2.push(...revertOps(ctx, m2, `${PI}mcp-adapter.json`, (op) => op.op === "set" && op.key === "mcpServers", dryRun));
+    }
+    if (m2.components?.[id]) m2.components[id] = { on: false };
+  }
+  for (const step of steps) {
+    ctx.out(dryRun ? `would ${step.line}` : step.line);
+    if (!dryRun) await step.run();
+  }
+  for (const line of lines2) (line.startsWith("left") ? ctx.err : ctx.out)(line);
+  if (dryRun) return manifest;
+  saveIfChanged(piDir, manifest, m2, ctx.now());
+  return m2;
+}
+var PI, WEB_PACKAGE_OP;
+var init_retire = __esm({
+  "src/retire.ts"() {
+    init_components();
+    init_manifest();
+    init_uninstall();
+    init_services();
+    PI = ".pi/agent/";
+    WEB_PACKAGE_OP = (op) => op.op === "array-add" && op.key === "packages" && WEB_PACKAGES.includes(op.value);
+  }
+});
+
 // src/doctor-checks.ts
-import { existsSync as existsSync12, lstatSync as lstatSync5, readdirSync as readdirSync6, readFileSync as readFileSync9, readlinkSync as readlinkSync2 } from "node:fs";
-import { basename, delimiter as delimiter2, dirname as dirname6, join as join12, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync15, lstatSync as lstatSync5, readdirSync as readdirSync7, readFileSync as readFileSync12, readlinkSync as readlinkSync2 } from "node:fs";
+import { basename, delimiter as delimiter2, dirname as dirname6, join as join15, resolve as resolve2 } from "node:path";
 function setupCmd(ctx) {
   if (ctx.which("pi-setup")) return "pi-setup";
-  const path2 = join12(ctx.repoDir, "install.sh");
+  const path2 = join15(ctx.repoDir, "install.sh");
   return path2.startsWith(`${ctx.home}/`) ? `~/${path2.slice(ctx.home.length + 1)}` : path2;
 }
-function readJson(path2) {
+function readJson2(path2) {
   try {
-    const value = JSON.parse(readFileSync9(path2, "utf8"));
+    const value = JSON.parse(readFileSync12(path2, "utf8"));
     return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
   } catch {
     return void 0;
@@ -1690,9 +2185,9 @@ function readJson(path2) {
 }
 function livePins(piDir, settings2) {
   const pins = /* @__PURE__ */ new Map();
-  const dir = join12(piDir, "agents");
-  if (existsSync12(dir)) for (const file of readdirSync6(dir).filter((f) => f.endsWith(".md"))) {
-    const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text(join12(dir, file)))?.[1] ?? "";
+  const dir = join15(piDir, "agents");
+  if (existsSync15(dir)) for (const file of readdirSync7(dir).filter((f) => f.endsWith(".md"))) {
+    const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text(join15(dir, file)))?.[1] ?? "";
     const model = /^model:\s*(\S+)/m.exec(front)?.[1];
     if (!model) continue;
     const extensions = /^extensions:\s*([^\n]*(?:\n[ \t]+[^\n]*)*)/m.exec(front)?.[1] ?? "";
@@ -1707,8 +2202,8 @@ function livePins(piDir, settings2) {
   return [...pins].map(([model, agents]) => ({ model, agents }));
 }
 function state(ctx, facts) {
-  const piDir = join12(ctx.home, ".pi", "agent");
-  const s = { ctx, facts, piDir, setup: setupCmd(ctx), profile: text(join12(piDir, "profiles/ACTIVE")), settings: readJson(join12(piDir, "settings.json")) ?? {}, pins: [], missing: [], changed: [], modes: [] };
+  const piDir = join15(ctx.home, ".pi", "agent");
+  const s = { ctx, facts, piDir, setup: setupCmd(ctx), profile: text(join15(piDir, "profiles/ACTIVE")), settings: readJson2(join15(piDir, "settings.json")) ?? {}, pins: [], missing: [], changed: [], modes: [] };
   try {
     s.manifest = readManifest(piDir);
     if (s.manifest) validateManifest(ctx.home, s.manifest);
@@ -1734,7 +2229,7 @@ function state(ctx, facts) {
   return s;
 }
 function files(s) {
-  if (!existsSync12(s.piDir)) return check("files", "fail", "not installed", s.setup);
+  if (!existsSync15(s.piDir)) return check("files", "fail", "not installed", s.setup);
   if (s.manifestError) return check("files", "fail", s.manifestError, s.setup);
   if (!s.manifest) return check("files", "warn", "no install manifest", s.setup);
   const moved = s.manifest.source.commit && s.facts.head && s.manifest.source.commit !== s.facts.head;
@@ -1744,7 +2239,7 @@ function files(s) {
   return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...restorable ? { fixable: "restore" } : {} };
 }
 function pending(s) {
-  const paths = [.../* @__PURE__ */ new Set([...Object.values(s.manifest?.files ?? {}).flatMap((e) => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter((p) => existsSync12(fromHomeRel(s.ctx.home, p)));
+  const paths = [.../* @__PURE__ */ new Set([...Object.values(s.manifest?.files ?? {}).flatMap((e) => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter((p) => existsSync15(fromHomeRel(s.ctx.home, p)));
   const first = paths[0] && fromHomeRel(s.ctx.home, paths[0]);
   return check("pending", paths.length ? "warn" : "ok", `${paths.length} pending .pi-setup-new files`, first ? `diff ${first.replace(/\.pi-setup-new$/, "")} ${first}` : void 0, paths);
 }
@@ -1752,9 +2247,9 @@ function modes(s) {
   return { ...check("modes", s.modes.length ? "warn" : "skip", `${s.modes.length} unchanged files have mode drift`, `${s.setup} doctor --fix`, s.modes), ...s.modes.length ? { fixable: "chmod" } : {} };
 }
 function npm(s) {
-  const pkg = readJson(join12(s.piDir, "npm/package.json"));
+  const pkg = readJson2(join15(s.piDir, "npm/package.json"));
   const deps = pkg?.dependencies && typeof pkg.dependencies === "object" ? Object.keys(pkg.dependencies) : [];
-  const installed = (name) => existsSync12(join12(s.piDir, "npm/node_modules", name, "package.json"));
+  const installed = (name) => existsSync15(join15(s.piDir, "npm/node_modules", name, "package.json"));
   const missing = deps.filter((n3) => !installed(n3));
   const result2 = [{ ...check("npm", missing.length ? "fail" : "ok", missing.length ? `${missing.length} missing dependencies` : "dependencies present", "(cd ~/.pi/agent/npm && npm install --legacy-peer-deps)", missing), ...missing.length ? { fixable: "npm" } : {} }];
   for (const spec of packages(s)) {
@@ -1763,7 +2258,7 @@ function npm(s) {
       const at = full.indexOf("@", 1);
       const name = at < 0 ? full : full.slice(0, at);
       if (!installed(name)) result2.push(check(`package:${name}`, "warn", `${spec} is missing`, `pi install npm:${name}`));
-    } else if (spec.startsWith(".") && !existsSync12(resolve2(s.piDir, spec))) result2.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
+    } else if (spec.startsWith(".") && !existsSync15(resolve2(s.piDir, spec))) result2.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
   }
   return result2;
 }
@@ -1789,30 +2284,30 @@ function models(s) {
   return check("models", missing.length ? "fail" : "ok", missing.length ? "pins missing from catalog" : "available pins are in the catalog", "pi update", missing);
 }
 function fallback(s) {
-  const config = readJson(join12(s.piDir, "provider-fallback.json")) ?? {};
+  const config = readJson2(join15(s.piDir, "provider-fallback.json")) ?? {};
   const pairs = Array.isArray(config.pairs) ? config.pairs.filter((p) => Array.isArray(p) && p.length === 2 && p.every((v) => typeof v === "string")) : [];
   const chains = config.chains && typeof config.chains === "object" ? config.chains : {};
   const targets = (pin) => Array.isArray(chains[pin]) ? chains[pin].filter((v) => typeof v === "string") : pairs.filter((p) => p.includes(pin)).map((p) => p[0] === pin ? p[1] : p[0]);
-  const available = (pin) => ready(s, pin) && (!s.facts.catalog?.size || s.facts.catalog.has(pin));
+  const available2 = (pin) => ready(s, pin) && (!s.facts.catalog?.size || s.facts.catalog.has(pin));
   const result2 = [];
   for (const pin of s.pins.filter((p) => providerStatus(s, p.model) === "not_ready")) {
-    const target = targets(pin.model).find(available);
+    const target = targets(pin.model).find(available2);
     const safe = config.enabled === true && target && pin.agents.every((a2) => a2.fallback);
     const label = PROVIDER_LABELS[pin.model.split("/")[0]] ?? pin.model.split("/")[0];
     const choice = chooseProfile(new Set(Object.keys(s.facts.providers).filter((p) => ready(s, `${p}/`))), loadProfiles(s.ctx.repoDir));
     result2.push(check(`fallback:${pin.model}`, safe ? "warn" : "fail", `${pin.agents.map((a2) => a2.name).join(", ")} pin ${pin.model} but ${label} has no login: subagents may run on the parent model or fail before fallback switches${target ? ` to ${target}` : "; no ready target"}${!safe ? " (fallback unavailable)" : ""}`, `run \`pi\`, type /login and choose ${label}; or \`${s.setup} --profile auto\` (would pick ${choice.name})`));
   }
   const sources = /* @__PURE__ */ new Set([...Object.keys(chains), ...pairs.flat()]);
-  const unavailable = [...sources].filter((p) => ready(s, p) && !targets(p).some(available));
+  const unavailable = [...sources].filter((p) => ready(s, p) && !targets(p).some(available2));
   if (config.enabled === true && unavailable.length) result2.push(check("fallback-targets", "warn", "fallback sources have no ready target", "edit ~/.pi/agent/provider-fallback.json", unavailable));
   if (!result2.length) result2.push(check("fallback", "ok", "fallback targets ready"));
   return result2;
 }
 function guards(s) {
-  const path2 = join12(s.piDir, "guards.json");
-  const config = readJson(path2);
+  const path2 = join15(s.piDir, "guards.json");
+  const config = readJson2(path2);
   let detail = "all on";
-  if (existsSync12(path2)) {
+  if (existsSync15(path2)) {
     const off = config?.off;
     if (!off || typeof off !== "object" || Array.isArray(off) || Object.values(off).some((v) => typeof v !== "boolean")) return check("guards", "warn", "invalid guards.json shape", "/guards in pi (guards default to on)");
     const names = Object.entries(off).filter(([, v]) => v).map(([n3]) => n3);
@@ -1822,7 +2317,7 @@ function guards(s) {
   return check("guards", "ok", detail);
 }
 function path(s) {
-  const bin = join12(s.ctx.home, ".local/bin");
+  const bin = join15(s.ctx.home, ".local/bin");
   const onPath = (s.ctx.env.PATH ?? "").split(delimiter2).some((p) => resolve2(s.ctx.cwd, p) === bin);
   const shell = basename(s.ctx.env.SHELL ?? "");
   const rc = shell === "zsh" ? "zshrc" : shell === "bash" ? "bashrc" : "profile";
@@ -1830,7 +2325,7 @@ function path(s) {
   for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"]]) {
     if (!packages(s).some((p) => p.includes(pkg))) continue;
     const target = `~/.pi/agent/npm/node_modules/@woksin/${pkg}/bin/${cmd}`;
-    const fix = existsSync12(join12(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
+    const fix = existsSync15(join15(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
     result2.push(check(`path:${cmd}`, s.ctx.which(cmd) ? "ok" : "warn", s.ctx.which(cmd) ? `${cmd} found` : `${cmd} is missing`, fix));
   }
   return result2;
@@ -1847,7 +2342,7 @@ var init_doctor_checks = __esm({
     init_types();
     text = (path2) => {
       try {
-        return readFileSync9(path2, "utf8").trim();
+        return readFileSync12(path2, "utf8").trim();
       } catch {
         return "";
       }
@@ -1868,8 +2363,8 @@ var init_doctor_checks = __esm({
 });
 
 // src/update.ts
-import { existsSync as existsSync13 } from "node:fs";
-import { join as join13 } from "node:path";
+import { existsSync as existsSync16 } from "node:fs";
+import { join as join16 } from "node:path";
 function compareTags(a2, b) {
   const x = a2.slice(1).split(".").map(Number);
   const y2 = b.slice(1).split(".").map(Number);
@@ -1917,7 +2412,7 @@ async function releaseNotes(ctx, tag) {
   if (r2.code === 0 && r2.stdout.trim()) ctx.out(r2.stdout.trim());
 }
 async function runUpdate(ctx, options, prompter) {
-  if (!existsSync13(join13(ctx.repoDir, ".git"))) throw new SetupError("update needs a git checkout of pi-setup");
+  if (!existsSync16(join16(ctx.repoDir, ".git"))) throw new SetupError("update needs a git checkout of pi-setup");
   const status = await git(ctx, ["status", "--porcelain"]);
   if (!status.ok) throw new SetupError(`git status failed: ${status.err}`);
   if (status.out) throw new SetupError("checkout has local changes; commit or stash them first");
@@ -1939,7 +2434,7 @@ async function runUpdate(ctx, options, prompter) {
   const checkout = await git(ctx, ["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", target], 6e4);
   if (!checkout.ok) throw new SetupError(`git checkout ${target} failed: ${checkout.err}`);
   ctx.out(`checkout is detached at ${target}; \`git switch main\` to go back`);
-  const args = [join13(ctx.repoDir, "installer", "dist", "pi-setup.mjs"), "install"];
+  const args = [join16(ctx.repoDir, "installer", "dist", "pi-setup.mjs"), "install"];
   if (options.yes || !prompter) args.push("--yes");
   if (options.skipNpm) args.push("--skip-npm");
   const result2 = await ctx.run(ctx.nodePath ?? process.execPath, args, { inherit: true });
@@ -1954,20 +2449,20 @@ var init_update = __esm({
 });
 
 // src/doctor-probes.ts
-import { existsSync as existsSync14, readdirSync as readdirSync7, readFileSync as readFileSync10, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join14 } from "node:path";
+import { existsSync as existsSync17, readdirSync as readdirSync8, readFileSync as readFileSync13, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join17 } from "node:path";
 function plists(ctx) {
-  const dir = join14(ctx.home, "Library/LaunchAgents");
-  if (ctx.platform !== "darwin" || !existsSync14(dir)) return [];
-  return readdirSync7(dir).filter((f) => f.endsWith(".plist")).flatMap((file) => {
-    const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(readFileSync10(join14(dir, file), "utf8"))?.[1];
+  const dir = join17(ctx.home, "Library/LaunchAgents");
+  if (ctx.platform !== "darwin" || !existsSync17(dir)) return [];
+  return readdirSync8(dir).filter((f) => f.endsWith(".plist")).flatMap((file) => {
+    const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(readFileSync13(join17(dir, file), "utf8"))?.[1];
     return label && /\.(docker-guardian|pi-cleanup)$/.test(label) ? [{ file, label }] : [];
   });
 }
 async function disk(ctx) {
   const unknown = () => [result("disk", "warn", "disk not checked", "df -h ~")];
-  const script = join14(ctx.home, ".pi/agent/bin/dev-doctor");
-  if (!existsSync14(script)) return unknown();
+  const script = join17(ctx.home, ".pi/agent/bin/dev-doctor");
+  if (!existsSync17(script)) return unknown();
   const r2 = await ctx.run("python3", [script, "--only", "disk", "--json"], { timeoutMs: 6e3, env: { PYTHONDONTWRITEBYTECODE: "1" } });
   if (r2.timedOut || r2.code !== 0) return unknown();
   try {
@@ -1984,9 +2479,9 @@ async function disk(ctx) {
 }
 async function update(ctx, manifest) {
   const skip = (reason) => result("update", "ok", `update check skipped (${reason})`);
-  if (!existsSync14(join14(ctx.repoDir, ".git"))) return skip("not a git checkout");
-  const path2 = join14(ctx.home, ".pi/agent/.pi-setup/update-check.json");
-  const cache = readJson(path2);
+  if (!existsSync17(join17(ctx.repoDir, ".git"))) return skip("not a git checkout");
+  const path2 = join17(ctx.home, ".pi/agent/.pi-setup/update-check.json");
+  const cache = readJson2(path2);
   const age = ctx.now().getTime() - Date.parse(String(cache?.checkedAt));
   let latest;
   if (age >= 0 && age < 864e5 && typeof cache?.latest === "string") latest = latestTag([cache.latest]);
@@ -1995,7 +2490,7 @@ async function update(ctx, manifest) {
     try {
       latest = latestTag(await remoteTags(ctx, 5e3));
       if (!latest) return skip("no release tags");
-      if (existsSync14(join14(ctx.home, ".pi/agent/.pi-setup"))) writeFileSync3(path2, `${JSON.stringify({ checkedAt: ctx.now().toISOString(), latest })}
+      if (existsSync17(join17(ctx.home, ".pi/agent/.pi-setup"))) writeFileSync3(path2, `${JSON.stringify({ checkedAt: ctx.now().toISOString(), latest })}
 `);
     } catch {
       return skip("remote unavailable");
@@ -2057,7 +2552,7 @@ var init_doctor_probes = __esm({
 
 // src/doctor.ts
 import { chmodSync as chmodSync3 } from "node:fs";
-import { join as join15 } from "node:path";
+import { join as join18 } from "node:path";
 function doctorExitCode(checks) {
   return checks.some((c2) => c2.status === "fail") ? 2 : checks.some((c2) => c2.status === "warn") ? 1 : 0;
 }
@@ -2071,7 +2566,7 @@ function render2(checks) {
 async function inspect(ctx) {
   let manifest;
   try {
-    manifest = readManifest(join15(ctx.home, ".pi/agent"));
+    manifest = readManifest(join18(ctx.home, ".pi/agent"));
     if (manifest) validateManifest(ctx.home, manifest);
   } catch {
     manifest = void 0;
@@ -2086,11 +2581,11 @@ async function runDoctor(ctx, options, baseCtx) {
   if (options.fix) {
     const fixable = new Set(report.checks.map((c2) => c2.fixable));
     if (fixable.has("npm")) {
-      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join15(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
+      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join18(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("npm");
     }
     if (fixable.has("restore") && report.facts.checkoutClean === true && report.facts.head && report.facts.head === report.manifest?.source.commit) {
-      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join15(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
+      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join18(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("restore");
     }
     if (fixable.has("chmod") && report.manifest) {
@@ -2179,6 +2674,10 @@ function summaryLines(args) {
     `Files: ${counts2.added} new, ${counts2.changed} changed${counts2.kept ? `, ${counts2.kept} kept (changed by you)` : ""}${counts2.register ? ", register pi-questions" : ""}`,
     `npm install: ${args.skipNpm ? "skipped (--skip-npm)" : args.npm ? "yes" : "up to date"}`
   );
+  if (args.components) {
+    const word = (id) => `${COMPONENTS.find((c2) => c2.id === id)?.label} ${args.components?.[id]?.on ? "on" : "off"}`;
+    lines2.push(`Extras: ${COMPONENTS.map((c2) => word(c2.id)).join(", ")}`);
+  }
   const kept = actions.filter((a2) => a2.op === "keep");
   if (kept.some((a2) => /\/\.pi\/agent\/(agents\/[^/]+\.md|workflows\/[^/]+\.js)$/.test(a2.path))) {
     lines2.push(KEPT_EDITS);
@@ -2186,6 +2685,7 @@ function summaryLines(args) {
   if (kept.some((a2) => a2.op === "keep" && a2.noMarkers)) {
     lines2.push("AGENTS.md has no pi-profile routing markers, so it is reconciled as a whole file; the new version is in AGENTS.md.pi-setup-new");
   }
+  lines2.push(...args.componentNotes ?? []);
   for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines2.push(`warning: ${warning}`);
   return lines2;
 }
@@ -2193,6 +2693,7 @@ var USER_SOURCES, ROOT_SOURCES, KEPT_EDITS;
 var init_report = __esm({
   "src/report.ts"() {
     init_types();
+    init_components();
     USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it" };
     ROOT_SOURCES = { flag: "from --repos-root", saved: "saved in user.json", scan: "best match found", default: "default", prompt: "you typed it" };
     KEPT_EDITS = "kept your edits; `pi-profile save` to adopt them into the profile";
@@ -2256,10 +2757,25 @@ async function askProfile(p, input) {
   if (answer === "keep") return void 0;
   const chosen = await p.select({
     message: "Pick a profile",
-    options: input.profiles.map((m) => ({ value: m.name, label: m.name, hint: m.summary })),
+    options: input.profiles.map((m2) => ({ value: m2.name, label: m2.name, hint: m2.summary })),
     initial: initial.name
   });
   return p.isCancel(chosen) ? CANCEL : chosen;
+}
+async function askComponents(p, input, root) {
+  const rows = input.extras?.(root) ?? [];
+  const missing = rows.filter((r2) => r2.unavailable && !r2.fixed);
+  if (missing.length) p.note(missing.map((r2) => `${r2.label}: not available (${r2.unavailable})`).join("\n"), "Extras not available here");
+  const asked = rows.filter((r2) => !r2.unavailable && !r2.fixed);
+  if (asked.length === 0) return void 0;
+  const picked = await p.multiselect({
+    message: "Extras",
+    options: asked.map((r2) => ({ value: r2.id, label: r2.label, hint: r2.hint })),
+    initial: asked.filter((r2) => r2.initial).map((r2) => r2.id)
+  });
+  if (p.isCancel(picked)) return CANCEL;
+  const chosen = new Set(picked);
+  return Object.fromEntries(asked.map((r2) => [r2.id, chosen.has(r2.id)]));
 }
 async function collectChoices(p, input) {
   p.note(detectionLines(input.detection).join("\n"), "What I found");
@@ -2269,7 +2785,15 @@ async function collectChoices(p, input) {
   if (p.isCancel(root)) return CANCEL;
   const profile2 = await askProfile(p, input);
   if (p.isCancel(profile2)) return CANCEL;
-  return { user, root, profile: profile2 };
+  const reposRoot = root || input.options.reposRoot || savedString(input.saved, "reposRoot") || input.detection.candidates[0]?.path || `${input.home}/repos`;
+  const components = await askComponents(p, input, reposRoot);
+  if (p.isCancel(components)) return CANCEL;
+  return {
+    user,
+    root,
+    profile: profile2,
+    ...components ? { components } : {}
+  };
 }
 async function confirmApply(p, summary) {
   p.note(summary.join("\n"), "Plan");
@@ -2352,7 +2876,7 @@ var init_dist = __esm({
     MODIFIER_RE = new RegExp("\\p{M}+", "gu");
     NO_TRUNCATION = { limit: Infinity, ellipsis: "" };
     getStringTruncatedWidth = (input, truncationOptions = {}, widthOptions = {}) => {
-      const LIMIT = truncationOptions.limit ?? Infinity;
+      const LIMIT2 = truncationOptions.limit ?? Infinity;
       const ELLIPSIS = truncationOptions.ellipsis ?? "";
       const ELLIPSIS_WIDTH = truncationOptions?.ellipsisWidth ?? (ELLIPSIS ? getStringTruncatedWidth(ELLIPSIS, NO_TRUNCATION, widthOptions).width : 0);
       const ANSI_WIDTH = 0;
@@ -2376,7 +2900,7 @@ var init_dist = __esm({
       let lengthExtra = 0;
       let truncationEnabled = false;
       let truncationIndex = length;
-      let truncationLimit = Math.max(0, LIMIT - ELLIPSIS_WIDTH);
+      let truncationLimit = Math.max(0, LIMIT2 - ELLIPSIS_WIDTH);
       let unmatchedStart = 0;
       let unmatchedEnd = 0;
       let width = 0;
@@ -2397,7 +2921,7 @@ var init_dist = __esm({
             if (width + widthExtra > truncationLimit) {
               truncationIndex = Math.min(truncationIndex, Math.max(unmatchedStart, indexPrev) + lengthExtra);
             }
-            if (width + widthExtra > LIMIT) {
+            if (width + widthExtra > LIMIT2) {
               truncationEnabled = true;
               break outer;
             }
@@ -2418,7 +2942,7 @@ var init_dist = __esm({
             if (width + widthExtra > truncationLimit) {
               truncationIndex = Math.min(truncationIndex, index + Math.floor((truncationLimit - width) / BLOCK_WIDTH));
             }
-            if (width + widthExtra > LIMIT) {
+            if (width + widthExtra > LIMIT2) {
               truncationEnabled = true;
               break outer;
             }
@@ -2435,7 +2959,7 @@ var init_dist = __esm({
         width: truncationEnabled ? truncationLimit : width,
         index: truncationEnabled ? truncationIndex : length,
         truncated: truncationEnabled,
-        ellipsed: truncationEnabled && LIMIT >= ELLIPSIS_WIDTH
+        ellipsed: truncationEnabled && LIMIT2 >= ELLIPSIS_WIDTH
       };
     };
     dist_default = getStringTruncatedWidth;
@@ -2796,8 +3320,8 @@ function block({
       return;
     }
     if (!o) return;
-    const i2 = a2 === "return" ? 0 : -1, m = a2 === "return" ? -1 : 0;
-    l.moveCursor(r2, i2, m, () => {
+    const i2 = a2 === "return" ? 0 : -1, m2 = a2 === "return" ? -1 : 0;
+    l.moveCursor(r2, i2, m2, () => {
       l.clearLine(r2, 1, () => {
         e.once("keypress", t2);
       });
@@ -2813,9 +3337,9 @@ function wrapTextWithPrefix(e, r2, o, n3 = o, s = o, t2) {
     hard: true,
     trim: false
   }).split(`
-`).map((c2, i2, m) => {
+`).map((c2, i2, m2) => {
     const d = t2 ? t2(c2, i2) : c2;
-    return i2 === 0 ? `${n3}${d}` : i2 === m.length - 1 ? `${s}${d}` : `${o}${d}`;
+    return i2 === 0 ? `${n3}${d}` : i2 === m2.length - 1 ? `${s}${d}` : `${o}${d}`;
   }).join(`
 `);
 }
@@ -2826,7 +3350,7 @@ function runValidation(e, a2) {
   }
   return e(a2);
 }
-var import_sisteransi, a$1, t, settings, R, CANCEL_SYMBOL, getColumns, getRows, y, r, n$1, n2;
+var import_sisteransi, a$1, t, settings, R, CANCEL_SYMBOL, getColumns, getRows, y, r, a, n$1, n2;
 var init_dist3 = __esm({
   "node_modules/@clack/core/dist/index.mjs"() {
     init_main();
@@ -3072,6 +3596,56 @@ var init_dist3 = __esm({
         });
       }
     };
+    a = class extends y {
+      options;
+      cursor = 0;
+      get _value() {
+        return this.options[this.cursor]?.value;
+      }
+      get _enabledOptions() {
+        return this.options.filter((e) => e.disabled !== true);
+      }
+      toggleAll() {
+        const e = this._enabledOptions, i2 = this.value !== void 0 && this.value.length === e.length;
+        this.value = i2 ? [] : e.map((t2) => t2.value);
+      }
+      toggleInvert() {
+        const e = this.value;
+        if (!e)
+          return;
+        const i2 = this._enabledOptions.filter((t2) => !e.includes(t2.value));
+        this.value = i2.map((t2) => t2.value);
+      }
+      toggleValue() {
+        this.value === void 0 && (this.value = []);
+        const e = this.value.includes(this._value);
+        this.value = e ? this.value.filter((i2) => i2 !== this._value) : [...this.value, this._value];
+      }
+      constructor(e) {
+        super(e, false), this.options = e.options, this.value = [...e.initialValues ?? []];
+        const i2 = Math.max(
+          this.options.findIndex(({ value: t2 }) => t2 === e.cursorAt),
+          0
+        );
+        this.cursor = this.options[i2]?.disabled ? findCursor(i2, 1, this.options) : i2, this.on("key", (t2, l2) => {
+          l2.name === "a" && this.toggleAll(), l2.name === "i" && this.toggleInvert();
+        }), this.on("cursor", (t2) => {
+          switch (t2) {
+            case "left":
+            case "up":
+              this.cursor = findCursor(this.cursor, -1, this.options);
+              break;
+            case "down":
+            case "right":
+              this.cursor = findCursor(this.cursor, 1, this.options);
+              break;
+            case "space":
+              this.toggleValue();
+              break;
+          }
+        });
+      }
+    };
     n$1 = class n extends y {
       options;
       cursor = 0;
@@ -3140,7 +3714,7 @@ function formatInstructionFooter(o, e) {
   const r2 = [`${e ? `${styleText2("cyan", S_BAR)}  ` : ""}${o.join(" \u2022 ")}`];
   return e && r2.push(styleText2("cyan", S_BAR_END)), r2;
 }
-var import_sisteransi2, unicode, isCI, unicodeOr, S_STEP_ACTIVE, S_STEP_CANCEL, S_STEP_ERROR, S_STEP_SUBMIT, S_BAR_START, S_BAR, S_BAR_END, S_BAR_START_RIGHT, S_BAR_END_RIGHT, S_RADIO_ACTIVE, S_RADIO_INACTIVE, S_CHECKBOX_ACTIVE, S_CHECKBOX_SELECTED, S_CHECKBOX_INACTIVE, S_PASSWORD_MASK, S_BAR_H, S_CORNER_TOP_RIGHT, S_CONNECT_LEFT, S_CORNER_BOTTOM_RIGHT, S_CORNER_BOTTOM_LEFT, S_CORNER_TOP_LEFT, S_INFO, S_SUCCESS, S_WARN, S_ERROR, symbol2, symbolBar, I, limitOptions, confirm, MULTISELECT_INSTRUCTIONS, intro, outro, W$1, C, note, W, spinner, u2, SELECT_INSTRUCTIONS, c, select, i, text2;
+var import_sisteransi2, unicode, isCI, unicodeOr, S_STEP_ACTIVE, S_STEP_CANCEL, S_STEP_ERROR, S_STEP_SUBMIT, S_BAR_START, S_BAR, S_BAR_END, S_BAR_START_RIGHT, S_BAR_END_RIGHT, S_RADIO_ACTIVE, S_RADIO_INACTIVE, S_CHECKBOX_ACTIVE, S_CHECKBOX_SELECTED, S_CHECKBOX_INACTIVE, S_PASSWORD_MASK, S_BAR_H, S_CORNER_TOP_RIGHT, S_CONNECT_LEFT, S_CORNER_BOTTOM_RIGHT, S_CORNER_BOTTOM_LEFT, S_CORNER_TOP_LEFT, S_INFO, S_SUCCESS, S_WARN, S_ERROR, symbol2, symbolBar, I, limitOptions, confirm, MULTISELECT_INSTRUCTIONS, m, multiselect, intro, outro, W$1, C, note, W, spinner, u2, SELECT_INSTRUCTIONS, c, select, i, text2;
 var init_dist4 = __esm({
   "node_modules/@clack/prompts/dist/index.mjs"() {
     init_dist3();
@@ -3208,13 +3782,13 @@ var init_dist4 = __esm({
       let r2 = e, O = 0;
       if (C2)
         for (let i2 = p - 1; i2 >= w; i2--) {
-          const m = l2[i2];
-          if (m && (r2 -= m.length), O++, r2 <= b) break;
+          const m2 = l2[i2];
+          if (m2 && (r2 -= m2.length), O++, r2 <= b) break;
         }
       else
         for (let i2 = w; i2 < p; i2++) {
-          const m = l2[i2];
-          if (m && (r2 -= m.length), O++, r2 <= b) break;
+          const m2 = l2[i2];
+          if (m2 && (r2 -= m2.length), O++, r2 <= b) break;
         }
       return { lineCount: r2, removals: O };
     };
@@ -3227,7 +3801,7 @@ var init_dist4 = __esm({
       columnPadding: C2 = 0,
       rowPadding: r2 = 4
     }) => {
-      const i2 = getColumns(p) - C2, m = getRows(p), M = styleText2("dim", "..."), v = Math.max(m - r2, 0), a2 = Math.max(Math.min(b, v), 5);
+      const i2 = getColumns(p) - C2, m2 = getRows(p), M = styleText2("dim", "..."), v = Math.max(m2 - r2, 0), a2 = Math.max(Math.min(b, v), 5);
       let f = 0;
       l2 >= a2 - 3 && (f = Math.max(
         Math.min(l2 - a2 + 3, e.length - a2),
@@ -3315,6 +3889,113 @@ ${g}
       `${styleText2("dim", "Space:")} select`,
       `${styleText2("dim", "Enter:")} confirm`
     ];
+    m = (i2, u3) => i2.split(`
+`).map((d) => u3(d)).join(`
+`);
+    multiselect = (i2) => {
+      const u3 = (t2, a2) => {
+        const r2 = t2.label ?? String(t2.value);
+        return a2 === "disabled" ? `${styleText2("gray", S_CHECKBOX_INACTIVE)} ${m(r2, (o) => styleText2(["strikethrough", "gray"], o))}${t2.hint ? ` ${styleText2("dim", `(${t2.hint ?? "disabled"})`)}` : ""}` : a2 === "active" ? `${styleText2("cyan", S_CHECKBOX_ACTIVE)} ${r2}${t2.hint ? ` ${styleText2("dim", `(${t2.hint})`)}` : ""}` : a2 === "selected" ? `${styleText2("green", S_CHECKBOX_SELECTED)} ${m(r2, (o) => styleText2("dim", o))}${t2.hint ? ` ${styleText2("dim", `(${t2.hint})`)}` : ""}` : a2 === "cancelled" ? `${m(r2, (o) => styleText2(["strikethrough", "dim"], o))}` : a2 === "active-selected" ? `${styleText2("green", S_CHECKBOX_SELECTED)} ${r2}${t2.hint ? ` ${styleText2("dim", `(${t2.hint})`)}` : ""}` : a2 === "submitted" ? `${m(r2, (o) => styleText2("dim", o))}` : `${styleText2("dim", S_CHECKBOX_INACTIVE)} ${m(r2, (o) => styleText2("dim", o))}`;
+      }, d = i2.required ?? true, x = i2.showInstructions ?? true;
+      return new a({
+        options: i2.options,
+        signal: i2.signal,
+        input: i2.input,
+        output: i2.output,
+        initialValues: i2.initialValues,
+        required: d,
+        cursorAt: i2.cursorAt,
+        validate(t2) {
+          if (d && (t2 === void 0 || t2.length === 0))
+            return `Please select at least one option.
+${styleText2(
+              "reset",
+              styleText2(
+                "dim",
+                `Press ${styleText2(["gray", "bgWhite", "inverse"], " space ")} to select, ${styleText2(
+                  "gray",
+                  styleText2("bgWhite", styleText2("inverse", " enter "))
+                )} to submit`
+              )
+            )}`;
+        },
+        render() {
+          const t2 = i2.withGuide ?? settings.withGuide, a2 = wrapTextWithPrefix(
+            i2.output,
+            i2.message,
+            t2 ? `${symbolBar(this.state)}  ` : "",
+            `${symbol2(this.state)}  `
+          ), r2 = `${t2 ? `${styleText2("gray", S_BAR)}
+` : ""}${a2}
+`, o = this.value ?? [], g = (n3, l2) => {
+            if (n3.disabled)
+              return u3(n3, "disabled");
+            const s = o.includes(n3.value);
+            return l2 && s ? u3(n3, "active-selected") : s ? u3(n3, "selected") : u3(n3, l2 ? "active" : "inactive");
+          };
+          switch (this.state) {
+            case "submit": {
+              const n3 = this.options.filter(({ value: s }) => o.includes(s)).map((s) => u3(s, "submitted")).join(styleText2("dim", ", ")) || styleText2("dim", "none"), l2 = wrapTextWithPrefix(
+                i2.output,
+                n3,
+                t2 ? `${styleText2("gray", S_BAR)}  ` : ""
+              );
+              return `${r2}${l2}`;
+            }
+            case "cancel": {
+              const n3 = this.options.filter(({ value: s }) => o.includes(s)).map((s) => u3(s, "cancelled")).join(styleText2("dim", ", "));
+              if (n3.trim() === "")
+                return `${r2}${styleText2("gray", S_BAR)}`;
+              const l2 = wrapTextWithPrefix(
+                i2.output,
+                n3,
+                t2 ? `${styleText2("gray", S_BAR)}  ` : ""
+              );
+              return `${r2}${l2}${t2 ? `
+${styleText2("gray", S_BAR)}` : ""}`;
+            }
+            case "error": {
+              const n3 = t2 ? `${styleText2("yellow", S_BAR)}  ` : "", l2 = this.error.split(`
+`).map(
+                ($, v) => v === 0 ? `${t2 ? `${styleText2("yellow", S_BAR_END)}  ` : ""}${styleText2("yellow", $)}` : `   ${$}`
+              ).join(`
+`), s = r2.split(`
+`).length, h2 = l2.split(`
+`).length + 1;
+              return `${r2}${n3}${limitOptions({
+                output: i2.output,
+                options: this.options,
+                cursor: this.cursor,
+                maxItems: i2.maxItems,
+                columnPadding: n3.length,
+                rowPadding: s + h2,
+                style: g
+              }).join(`
+${n3}`)}
+${l2}
+`;
+            }
+            default: {
+              const n3 = t2 ? `${styleText2("cyan", S_BAR)}  ` : "", l2 = r2.split(`
+`).length, s = x ? formatInstructionFooter(MULTISELECT_INSTRUCTIONS, t2) : t2 ? [styleText2("cyan", S_BAR_END)] : [], h2 = s.join(`
+`), $ = s.length + 1;
+              return `${r2}${n3}${limitOptions({
+                output: i2.output,
+                options: this.options,
+                cursor: this.cursor,
+                maxItems: i2.maxItems,
+                columnPadding: n3.length,
+                rowPadding: l2 + $,
+                style: g
+              }).join(`
+${n3}`)}
+${h2}
+`;
+            }
+          }
+        }
+      }).prompt();
+    };
     intro = (o = "", t2) => {
       const i2 = t2?.output ?? process.stdout, e = t2?.withGuide ?? settings.withGuide ? `${styleText2("gray", S_BAR_START)}  ` : "";
       i2.write(`${e}${o}
@@ -3339,13 +4020,13 @@ ${styleText2("gray", S_BAR_END)}  ` : "";
     note = (o = "", e = "", s) => {
       const a2 = s?.output ?? process$1.stdout, i2 = s?.withGuide ?? settings.withGuide, c2 = s?.format ?? W$1, g = ["", ...C(o, getColumns(a2) - 6, c2).split(`
 `).map(c2), ""], n3 = dist_default2(e), t2 = Math.max(
-        g.reduce((m, F) => {
+        g.reduce((m2, F) => {
           const O = dist_default2(F);
-          return O > m ? O : m;
+          return O > m2 ? O : m2;
         }, 0),
         n3
       ) + 2, h2 = g.map(
-        (m) => `${styleText2("gray", S_BAR)}  ${m}${" ".repeat(t2 - dist_default2(m))}${styleText2("gray", S_BAR)}`
+        (m2) => `${styleText2("gray", S_BAR)}  ${m2}${" ".repeat(t2 - dist_default2(m2))}${styleText2("gray", S_BAR)}`
       ).join(`
 `), T = i2 ? `${styleText2("gray", S_BAR)}
 ` : "", l$1 = i2 ? S_CONNECT_LEFT : S_CORNER_BOTTOM_LEFT;
@@ -3368,7 +4049,7 @@ ${styleText2("gray", l$1 + S_BAR_H.repeat(t2 + 2) + S_CORNER_BOTTOM_RIGHT)}
       errorMessage: O,
       frames: E = unicode ? ["\u25D2", "\u25D0", "\u25D3", "\u25D1"] : ["\u2022", "o", "O", "0"],
       delay: F = unicode ? 80 : 120,
-      signal: m,
+      signal: m2,
       ...I2
     } = {}) => {
       const u3 = isCI();
@@ -3377,9 +4058,9 @@ ${styleText2("gray", l$1 + S_BAR_H.repeat(t2 + 2) + S_CORNER_BOTTOM_RIGHT)}
         const r2 = e > 1 ? O ?? settings.messages.error : G ?? settings.messages.cancel;
         S = e === 1, d && (a2(r2, e), S && typeof h2 == "function" && h2());
       }, f = () => g(2), i2 = () => g(1), A = () => {
-        process.on("uncaughtExceptionMonitor", f), process.on("unhandledRejection", f), process.on("SIGINT", i2), process.on("SIGTERM", i2), process.on("exit", g), m && m.addEventListener("abort", i2);
+        process.on("uncaughtExceptionMonitor", f), process.on("unhandledRejection", f), process.on("SIGINT", i2), process.on("SIGTERM", i2), process.on("exit", g), m2 && m2.addEventListener("abort", i2);
       }, H = () => {
-        process.removeListener("uncaughtExceptionMonitor", f), process.removeListener("unhandledRejection", f), process.removeListener("SIGINT", i2), process.removeListener("SIGTERM", i2), process.removeListener("exit", g), m && m.removeEventListener("abort", i2);
+        process.removeListener("uncaughtExceptionMonitor", f), process.removeListener("unhandledRejection", f), process.removeListener("SIGINT", i2), process.removeListener("SIGTERM", i2), process.removeListener("exit", g), m2 && m2.removeEventListener("abort", i2);
       }, y2 = () => {
         if (p === void 0) return;
         u3 && n3.write(`
@@ -3453,11 +4134,11 @@ ${styleText2("gray", l$1 + S_BAR_H.repeat(t2 + 2) + S_CORNER_BOTTOM_RIGHT)}
 `).map((d) => o(d)).join(`
 `) : o(t2);
     select = (t2) => {
-      const o = (n3, m) => {
+      const o = (n3, m2) => {
         if (n3 === void 0)
           return "";
         const s = n3.label ?? String(n3.value);
-        switch (m) {
+        switch (m2) {
           case "disabled":
             return `${styleText2("gray", S_RADIO_INACTIVE)} ${c(s, (i2) => styleText2("gray", i2))}${n3.hint ? ` ${styleText2("dim", `(${n3.hint ?? "disabled"})`)}` : ""}`;
           case "selected":
@@ -3477,11 +4158,11 @@ ${styleText2("gray", l$1 + S_BAR_H.repeat(t2 + 2) + S_CORNER_BOTTOM_RIGHT)}
         output: t2.output,
         initialValue: t2.initialValue,
         render() {
-          const n3 = t2.withGuide ?? settings.withGuide, m = `${symbol2(this.state)}  `, s = `${symbolBar(this.state)}  `, i2 = wrapTextWithPrefix(
+          const n3 = t2.withGuide ?? settings.withGuide, m2 = `${symbol2(this.state)}  `, s = `${symbolBar(this.state)}  `, i2 = wrapTextWithPrefix(
             t2.output,
             t2.message,
             s,
-            m
+            m2
           ), u3 = `${n3 ? `${styleText2("gray", S_BAR)}
 ` : ""}${i2}
 `;
@@ -3598,6 +4279,14 @@ function clackPrompter() {
       })
     ),
     text: async (o) => wrap(await text2({ message: o.message, initialValue: o.initial, validate: o.validate })),
+    multiselect: async (o) => wrap(
+      await multiselect({
+        message: o.message,
+        options: o.options,
+        initialValues: o.initial,
+        required: false
+      })
+    ),
     isCancel: (value) => value === CANCEL || isCancel(value)
   };
 }
@@ -3613,7 +4302,7 @@ var run_exports = {};
 __export(run_exports, {
   main: () => main
 });
-import { join as join16 } from "node:path";
+import { join as join19 } from "node:path";
 function pickProfile(options, activeBefore, ready2, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
     if (!names.includes(options.profile)) {
@@ -3633,8 +4322,26 @@ function requiredToolErrors(ctx, detection, options) {
   const needed = ["python3", ...options.skipNpm ? [] : ["npm"]];
   return needed.filter((tool) => !toolPath(detection, tool)).map((tool) => `${tool} is required but was not found on PATH; install it with: ${installHint(ctx.platform, tool)}`);
 }
+function extraRows(ctx, options, saved, detection, manifest) {
+  const flags = flagMap(options);
+  return (root) => {
+    const detected = detectDefaults(ctx, detection, root);
+    const initial = resolveComponents({ flags, saved: manifest?.components, current: currentState(ctx), detected, interactive: true });
+    return COMPONENTS.map((def) => {
+      const why = available(def.id, ctx);
+      return {
+        id: def.id,
+        label: def.label,
+        hint: hintFor(def, initial[def.id].on),
+        initial: initial[def.id].on,
+        unavailable: why === true ? void 0 : why,
+        fixed: def.id in flags
+      };
+    });
+  };
+}
 function resolveAll(ctx, options, detection, saved, answers, manifest) {
-  const piDir = join16(ctx.home, ".pi", "agent");
+  const piDir = join19(ctx.home, ".pi", "agent");
   const settings2 = resolveSettings({
     flagUser: answers.user ?? options.user,
     flagRoot: answers.root ?? options.reposRoot,
@@ -3652,19 +4359,54 @@ function resolveAll(ctx, options, detection, saved, answers, manifest) {
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
   const choice = pickProfile(asked, activeBefore, ready2, profiles, names, options.dryRun || options.plan);
   const profile2 = profiles.find((p) => p.name === choice.name);
-  const { actions, conflicts } = reconcile(
-    buildPlan({ repoDir: ctx.repoDir, home: ctx.home, settings: settings2, overlay: overlayFor(ctx.repoDir, choice.name, settings2) }),
+  const components = resolveComponents({
+    flags: flagMap(options),
+    answers: answers.components,
+    saved: manifest?.components,
+    current: currentState(ctx),
+    detected: detectDefaults(ctx, detection, settings2.reposRoot),
+    interactive: Boolean(answers.components) || isInteractive(options, ctx.env, ctx.stdinTTY, ctx.stdoutTTY)
+  });
+  const componentNotes = [];
+  const notes = [];
+  for (const def of COMPONENTS) {
+    const why = available(def.id, ctx);
+    if (why === true) continue;
+    if (components[def.id].on && components[def.id].source === "flag") notes.push(`warning: ${def.label} is not available here (${why})`);
+    components[def.id] = { on: false, source: components[def.id].source };
+  }
+  const on = Object.fromEntries(Object.entries(components).map(([id, c2]) => [id, c2.on]));
+  const built = reconcile(
+    buildPlan({
+      repoDir: ctx.repoDir,
+      home: ctx.home,
+      settings: settings2,
+      overlay: overlayFor(ctx.repoDir, choice.name, settings2),
+      components: on,
+      which: ctx.which,
+      notes,
+      activate: COMPONENTS.map((c2) => c2.id).filter((id) => on[id] && !wasOn(manifest, currentState(ctx), id))
+    }),
     manifest,
     ctx.home
   );
+  const { conflicts } = built;
+  const serviceOn = Object.fromEntries(Object.entries(on).filter(([id]) => isService(id)));
+  const services = planServices(ctx, manifest, serviceOn);
+  const actions = [...built.actions, ...services.actions];
+  const records = { ...services.records };
+  for (const def of COMPONENTS.filter((c2) => !c2.service)) records[def.id] = { on: on[def.id] };
+  componentNotes.push(...notes, ...services.notes);
+  if (on.codescene) componentNotes.push(...codesceneNotes(ctx));
   const kimi = options.dryRun || options.plan ? void 0 : kimiNote(profile2, ready2);
   const warnings = [
     ...settings2.warnings,
+    ...componentNotes.filter((n3) => n3.startsWith("warning:")).map((n3) => n3.slice(9)),
     ...detection.warnings,
-    ...pinWarnings(pinnedModels(join16(profilesDir(ctx.repoDir), choice.name)), ready2, detection.catalog),
+    ...pinWarnings(pinnedModels(join19(profilesDir(ctx.repoDir), choice.name)), ready2, detection.catalog),
     ...kimi ? [kimi] : []
   ];
-  return { settings: settings2, choice, actions, warnings, profile: profile2, ready: ready2, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts };
+  return { settings: settings2, choice, actions, warnings, profile: profile2, ready: ready2, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
 }
 function jsonReport(r2, detection, exitCode) {
   return JSON.stringify({
@@ -3707,8 +4449,8 @@ async function runCommand(ctx, options, prompter, baseCtx) {
   return backupsCommand(ctx, options.sub, options.keep, options.dryRun);
 }
 async function execute(ctx, options, prompter, baseCtx) {
-  const piDir = join16(ctx.home, ".pi", "agent");
-  const saved = readSettings(join16(piDir, "user.json"));
+  const piDir = join19(ctx.home, ".pi", "agent");
+  const saved = readSettings(join19(piDir, "user.json"));
   const manifest = readManifest(piDir);
   const readOnly = options.dryRun || options.plan;
   const names = profileNames(ctx.repoDir);
@@ -3735,7 +4477,16 @@ async function execute(ctx, options, prompter, baseCtx) {
     const profiles = loadProfiles(ctx.repoDir);
     const activeBefore = readActive(piDir);
     const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, names);
-    const result3 = await collectChoices(prompter, { options, saved, detection, profiles, initial, home: ctx.home, repoDir: ctx.repoDir });
+    const result3 = await collectChoices(prompter, {
+      options,
+      saved,
+      detection,
+      profiles,
+      initial,
+      home: ctx.home,
+      repoDir: ctx.repoDir,
+      extras: extraRows(ctx, options, saved, detection, manifest)
+    });
     if (result3 === CANCEL) return cancelled(ctx);
     answers = result3;
   }
@@ -3751,7 +4502,7 @@ async function execute(ctx, options, prompter, baseCtx) {
   }
   r2.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r2.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
-  const summary = summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly });
+  const summary = summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly, components: r2.components, componentNotes: r2.componentNotes });
   if (options.plan) return finish(ctx, baseCtx, options, r2, detection, summary, 0);
   if (prompter && !await confirmApply(prompter, summary)) return cancelled(ctx);
   const applyOptions = {
@@ -3761,10 +4512,14 @@ async function execute(ctx, options, prompter, baseCtx) {
     inheritNpm: !prompter && !options.json,
     profile: r2.choice.name,
     activeBefore: r2.activeBefore,
-    spinner: prompter?.spinner()
+    spinner: prompter?.spinner(),
+    components: r2.records
   };
-  const result2 = await apply(ctx, r2.actions, applyOptions, manifest);
-  const shown = prompter || options.json ? [] : summary.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:") || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no"));
+  const off = COMPONENTS.map((c2) => c2.id).filter((id) => !r2.components[id].on && wasOn(manifest, currentState(ctx), id));
+  const live = await retire(ctx, piDir, manifest, off, options.dryRun);
+  const result2 = await apply(ctx, r2.actions, applyOptions, live);
+  if (result2.code === 0) await syncServices(ctx, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);
+  const shown = prompter || options.json ? [] : summary.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:") || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no") || r2.componentNotes.includes(l2));
   if (result2.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
   return finish(ctx, baseCtx, options, r2, detection, shown, result2.code, prompter, result2.wrote);
 }
@@ -3789,7 +4544,7 @@ function finish(ctx, baseCtx, options, r2, detection, lines2, code, prompter, wr
   }
   return code;
 }
-var savedString2;
+var savedString2, flagMap;
 var init_run = __esm({
   "src/run.ts"() {
     init_apply();
@@ -3800,6 +4555,9 @@ var init_run = __esm({
     init_manifest();
     init_reconcile();
     init_uninstall();
+    init_components();
+    init_retire();
+    init_services();
     init_doctor();
     init_update();
     init_profiles();
@@ -3808,11 +4566,15 @@ var init_run = __esm({
     init_types();
     init_wizard();
     savedString2 = (saved, key) => typeof saved[key] === "string" ? saved[key] : "";
+    flagMap = (options) => ({
+      ...Object.fromEntries(options.with.map((id) => [id, true])),
+      ...Object.fromEntries(options.without.map((id) => [id, false]))
+    });
   }
 });
 
 // src/cli.ts
-import { dirname as dirname7, join as join17 } from "node:path";
+import { dirname as dirname7, join as join20 } from "node:path";
 import { fileURLToPath } from "node:url";
 var MIN = [22, 19, 0];
 function nodeTooOld(version) {
@@ -3827,7 +4589,7 @@ if (nodeTooOld(process.version)) {
 `);
   process.exit(1);
 }
-var repoDir = join17(dirname7(fileURLToPath(import.meta.url)), "..", "..");
+var repoDir = join20(dirname7(fileURLToPath(import.meta.url)), "..", "..");
 var { realContext: realContext2 } = await Promise.resolve().then(() => (init_context(), context_exports));
 var { main: main2 } = await Promise.resolve().then(() => (init_run(), run_exports));
 process.exitCode = await main2(process.argv.slice(2), realContext2(repoDir));

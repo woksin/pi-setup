@@ -10,12 +10,13 @@ import {
 } from "./manifest.ts";
 import type { JsonEntry, Manifest } from "./manifest.ts";
 import { deepEqual } from "./settings.ts";
+import { reloadSystemd, unloadLine, unloadService } from "./services.ts";
 import type { Ctx, JsonOp, Prompter } from "./types.ts";
 import { SetupError } from "./types.ts";
 
-interface Step {
+export interface Step {
   line: string;
-  run: () => void;
+  run: () => void | Promise<void>;
 }
 
 const sameLink = (path: string, target: string): boolean => {
@@ -68,6 +69,10 @@ class Plan {
   }
 
   build(): Step[] {
+    for (const c of Object.values(this.m.components ?? {})) {
+      const svc = c.service;
+      if (svc?.managed) this.add(unloadLine(svc), () => unloadService(this.ctx, svc));
+    }
     const deleted = new Set<string>();
     for (const [rel, entry] of Object.entries(this.m.files)) if (this.file(rel, entry)) deleted.add(rel);
     for (const [rel, sha] of Object.entries(this.m.pendingNew ?? {})) {
@@ -79,6 +84,10 @@ class Plan {
     for (const [rel, entry] of Object.entries(this.m.json)) {
       if (deleted.has(rel)) delete this.remaining.json[rel];
       else this.json(rel, entry);
+    }
+    for (const c of Object.values(this.m.components ?? {})) {
+      const svc = c.service;
+      if (svc?.managed && svc.kind === "systemd") this.add("reload systemd (systemctl --user daemon-reload)", () => reloadSystemd(this.ctx, svc));
     }
     return this.steps;
   }
@@ -177,7 +186,7 @@ class Plan {
   }
 }
 
-function undo(data: Record<string, unknown>, op: JsonOp): boolean {
+export function undo(data: Record<string, unknown>, op: JsonOp): boolean {
   if (op.op === "set") {
     if (!(op.key in data) || !deepEqual(data[op.key], op.after)) return false;
     if (op.before.present) data[op.key] = op.before.value;
@@ -209,6 +218,66 @@ function rmdirIfEmpty(path: string): void {
   }
 }
 
+/**
+ * The removal steps for some of the tracked files only (a component turned off), by the same rules as uninstall.
+ * Updates `m` in place: removed files leave the manifest, files you changed stay with a line.
+ */
+export function retireFiles(ctx: Ctx, piDir: string, m: Manifest, rels: string[]): Step[] {
+  const sub: Manifest = {
+    ...structuredClone(m), files: {}, json: {}, symlinks: {}, dirs: [], pendingNew: undefined, components: undefined,
+  };
+  for (const rel of rels) if (m.files[rel]) sub.files[rel] = structuredClone(m.files[rel]);
+  const plan = new Plan(ctx, piDir, sub);
+  const steps = plan.build();
+  for (const rel of rels) {
+    if (!(rel in sub.files)) continue;
+    if (rel in plan.remaining.files) m.files[rel] = plan.remaining.files[rel];
+    else delete m.files[rel];
+  }
+  return steps;
+}
+
+/**
+ * Revert only the JSON ops that `match`, keeping the others. An op that cannot be undone because you changed
+ * the value stays, with a line. The file is never deleted. Returns the lines to print.
+ */
+export function revertOps(ctx: Ctx, m: Manifest, rel: string, match: (op: JsonOp) => boolean, dryRun: boolean): string[] {
+  const entry = m.json[rel];
+  const mine = entry?.ops.filter(match) ?? [];
+  if (!entry || mine.length === 0) return [];
+  const path = fromHomeRel(ctx.home, rel);
+  const lines: string[] = [];
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not an object");
+  } catch {
+    if (!existsSync(path)) {
+      entry.ops = entry.ops.filter((o) => !match(o));
+      if (!entry.ops.length) delete m.json[rel];
+      return [];
+    }
+    return [`left (cannot read as JSON): ${path}`];
+  }
+  const left: JsonOp[] = [];
+  for (const op of [...mine].reverse()) if (!undo(data, op)) left.push(op);
+  for (const op of left) lines.push(`left (changed by you): ${op.key} in ${path}`);
+  const done = mine.length - left.length;
+  if (done > 0) lines.push(`${dryRun ? "would revert" : "revert"} ${done} change(s) made by pi-setup in ${path}`);
+  if (dryRun) return lines;
+  if (done > 0) {
+    const tracked = m.files[rel];
+    const wasTracked = Boolean(tracked) && fileSha(path) === tracked.sha256;
+    atomicWrite(path, `${JSON.stringify(data, null, 2)}\n`, statSync(path).mode & 0o7777);
+    const sha = sha256(readFileSync(path));
+    entry.sha256After = sha;
+    if (wasTracked) tracked.sha256 = sha;
+  }
+  entry.ops = entry.ops.filter((o) => !match(o) || left.includes(o));
+  if (!entry.ops.length) delete m.json[rel];
+  return lines;
+}
+
 export async function runUninstall(ctx: Ctx, options: Options, prompter: Prompter | undefined): Promise<number> {
   const piDir = join(ctx.home, ".pi", "agent");
   const manifest = readManifest(piDir);
@@ -234,7 +303,8 @@ export async function runUninstall(ctx: Ctx, options: Options, prompter: Prompte
   } else if (!options.yes) {
     throw new SetupError("uninstall changes files; pass --yes to run it without a prompt (or --dry-run to preview)");
   }
-  for (const step of steps) step.run();
+  for (const step of steps) await step.run();
+  delete plan.remaining.components;
   finalize(ctx, piDir, manifest, plan.remaining);
   return 0;
 }

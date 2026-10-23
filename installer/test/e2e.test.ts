@@ -16,7 +16,7 @@ after(() => {
   for (const box of boxes) rmSync(box.root, { recursive: true, force: true });
 });
 
-const ARGS = (box: Sandbox) => ["--yes", "--user", "einari", "--repos-root", join(box.root, "repos")];
+const ARGS = (box: Sandbox) => ["--yes", "--with", "cratis", "--user", "einari", "--repos-root", join(box.root, "repos")];
 const profileCalls = (box: Sandbox) => stubLog(box).filter((l) => l.startsWith("python3") && l.includes("pi-profile"));
 
 describe("install (e2e)", () => {

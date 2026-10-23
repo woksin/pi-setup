@@ -125,6 +125,11 @@ export interface Prompter {
     initial?: string;
     validate?: (value: string) => string | undefined;
   }): Promise<string | typeof CANCEL>;
+  multiselect<T extends string>(options: {
+    message: string;
+    options: { value: T; label: string; hint?: string }[];
+    initial: T[];
+  }): Promise<T[] | typeof CANCEL>;
   isCancel(value: unknown): boolean;
 }
 

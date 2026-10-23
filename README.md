@@ -38,6 +38,8 @@ For build performance and disk cleanup, use `~/.pi/agent/bin/dev-doctor`; doctor
 
 `settings.json`, `models.json` and the other JSON configs are only written when they don't exist yet. `efficiency.json` and `context-budget.json` follow the same rule. Restart pi afterwards.
 
+Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" question) turn on `docker-guardian`, `cleanup`, `secret-sweep`, `codescene`, `cratis` or `web`. Your choice is saved in the manifest and reused on later runs; turning one off removes what pi-setup added and leaves files you changed. The schedules (`docker-guardian`, `cleanup`, `secret-sweep`) are never installed without an explicit choice: on macOS they are written to `~/Library/LaunchAgents/com.<user>.<name>.plist` and loaded with `launchctl bootstrap`; `cleanup` on Linux uses a systemd user timer. `codescene` needs `cs-mcp` on PATH and `CS_ACCESS_TOKEN` in your shell profile; pi-setup never stores the token.
+
 Optional, macOS only: `agent/launchd/*.plist` are templates for the `docker-guardian`, `pi-cleanup` and `secret-sweep` schedules. They are not installed by `install.sh`. Replace `__HOME__` with your home directory, create `~/.pi/agent/logs` (they write stderr there), copy them to `~/Library/LaunchAgents/`, then `launchctl load` them.
 
 `settings.json` lists the packages I load. Local checkouts are mapped to their npm packages (`npm:@woksin/pi-jobs`, `npm:@woksin/pi-recover`, `npm:@woksin/pi-context-budget`, `npm:@woksin/pi-orch`). Remove the ones you don't want.

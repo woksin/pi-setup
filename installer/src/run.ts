@@ -11,6 +11,12 @@ import type { Manifest } from "./manifest.ts";
 import { applyTakes, diffText, reconcile } from "./reconcile.ts";
 import type { KeepAction } from "./reconcile.ts";
 import { runUninstall } from "./uninstall.ts";
+import { available, codesceneNotes, COMPONENTS, currentState, detectDefaults, hintFor, resolveComponents } from "./components.ts";
+import type { ComponentChoice } from "./components.ts";
+import { retire, wasOn } from "./retire.ts";
+import { isService, planServices, syncServices } from "./services.ts";
+import type { ComponentRecord } from "./manifest.ts";
+import type { ExtraRow } from "./wizard.ts";
 import { installSummary, runDoctor } from "./doctor.ts";
 import { runUpdate } from "./update.ts";
 import {
@@ -63,11 +69,38 @@ interface Resolved {
   piDir: string;
   npm: boolean;
   conflicts: KeepAction[];
+  components: ComponentChoice;
+  records: Record<string, ComponentRecord>;
+  componentNotes: string[];
+}
+
+const flagMap = (options: Options): Record<string, boolean> => ({
+  ...Object.fromEntries(options.with.map((id) => [id, true])),
+  ...Object.fromEntries(options.without.map((id) => [id, false])),
+});
+
+/** Initial values for the wizard question and the rows for components that cannot be chosen here. */
+function extraRows(
+  ctx: Ctx, options: Options, saved: Record<string, unknown>, detection: Detection, manifest: Manifest | undefined,
+): (root: string) => ExtraRow[] {
+  const flags = flagMap(options);
+  return (root) => {
+    const detected = detectDefaults(ctx, detection, root);
+    const initial = resolveComponents({ flags, saved: manifest?.components, current: currentState(ctx), detected, interactive: true });
+    return COMPONENTS.map((def) => {
+      const why = available(def.id, ctx);
+      return {
+        id: def.id, label: def.label, hint: hintFor(def, initial[def.id].on), initial: initial[def.id].on,
+        unavailable: why === true ? undefined : why, fixed: def.id in flags,
+      };
+    });
+  };
 }
 
 function resolveAll(
   ctx: Ctx, options: Options, detection: Detection,
-  saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string }, manifest: Manifest | undefined,
+  saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean> },
+  manifest: Manifest | undefined,
 ): Resolved {
   const piDir = join(ctx.home, ".pi", "agent");
   const settings = resolveSettings({
@@ -87,18 +120,44 @@ function resolveAll(
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
   const choice = pickProfile(asked, activeBefore, ready, profiles, names, options.dryRun || options.plan);
   const profile = profiles.find((p) => p.name === choice.name);
-  const { actions, conflicts } = reconcile(
-    buildPlan({ repoDir: ctx.repoDir, home: ctx.home, settings, overlay: overlayFor(ctx.repoDir, choice.name, settings) }),
+  const components = resolveComponents({
+    flags: flagMap(options), answers: answers.components, saved: manifest?.components, current: currentState(ctx),
+    detected: detectDefaults(ctx, detection, settings.reposRoot), interactive: Boolean(answers.components) || isInteractive(options, ctx.env, ctx.stdinTTY, ctx.stdoutTTY),
+  });
+  const componentNotes: string[] = [];
+  const notes: string[] = [];
+  for (const def of COMPONENTS) {
+    const why = available(def.id, ctx);
+    if (why === true) continue;
+    if (components[def.id].on && components[def.id].source === "flag") notes.push(`warning: ${def.label} is not available here (${why})`);
+    components[def.id] = { on: false, source: components[def.id].source };
+  }
+  const on = Object.fromEntries(Object.entries(components).map(([id, c]) => [id, c.on]));
+  const built = reconcile(
+    buildPlan({
+      repoDir: ctx.repoDir, home: ctx.home, settings, overlay: overlayFor(ctx.repoDir, choice.name, settings),
+      components: on, which: ctx.which, notes,
+      activate: COMPONENTS.map((c) => c.id).filter((id) => on[id] && !wasOn(manifest, currentState(ctx), id)),
+    }),
     manifest, ctx.home,
   );
+  const { conflicts } = built;
+  const serviceOn = Object.fromEntries(Object.entries(on).filter(([id]) => isService(id)));
+  const services = planServices(ctx, manifest, serviceOn);
+  const actions = [...built.actions, ...services.actions];
+  const records: Record<string, ComponentRecord> = { ...services.records };
+  for (const def of COMPONENTS.filter((c) => !c.service)) records[def.id] = { on: on[def.id] };
+  componentNotes.push(...notes, ...services.notes);
+  if (on.codescene) componentNotes.push(...codesceneNotes(ctx));
   const kimi = options.dryRun || options.plan ? undefined : kimiNote(profile, ready);
   const warnings = [
     ...settings.warnings,
+    ...componentNotes.filter((n) => n.startsWith("warning:")).map((n) => n.slice(9)),
     ...detection.warnings,
     ...pinWarnings(pinnedModels(join(profilesDir(ctx.repoDir), choice.name)), ready, detection.catalog),
     ...(kimi ? [kimi] : []),
   ];
-  return { settings, choice, actions, warnings, profile, ready, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts };
+  return { settings, choice, actions, warnings, profile, ready, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts, components, records, componentNotes: componentNotes.filter((n) => !n.startsWith("warning:")) };
 }
 
 function jsonReport(r: Resolved, detection: Detection, exitCode: number): string {
@@ -169,12 +228,13 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const toolErrors = requiredToolErrors(ctx, detection, options);
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
 
-  let answers: { user?: string; root?: string; profile?: string } = {};
+  let answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean> } = {};
   if (prompter) {
     const profiles = loadProfiles(ctx.repoDir);
     const activeBefore = readActive(piDir);
     const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, names);
-    const result = await collectChoices(prompter, { options, saved, detection, profiles, initial, home: ctx.home, repoDir: ctx.repoDir });
+    const result = await collectChoices(prompter, { options, saved, detection, profiles, initial, home: ctx.home, repoDir: ctx.repoDir,
+      extras: extraRows(ctx, options, saved, detection, manifest) });
     if (result === CANCEL) return cancelled(ctx);
     answers = result;
   }
@@ -190,7 +250,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   }
   r.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
-  const summary = summaryLines({ ...r, detection, kimi: readOnly ? undefined : kimiNote(r.profile, r.ready), skipNpm: options.skipNpm, probed: !readOnly });
+  const summary = summaryLines({ ...r, detection, kimi: readOnly ? undefined : kimiNote(r.profile, r.ready), skipNpm: options.skipNpm, probed: !readOnly, components: r.components, componentNotes: r.componentNotes });
   if (options.plan) return finish(ctx, baseCtx, options, r, detection, summary, 0);
   if (prompter && !(await confirmApply(prompter, summary))) return cancelled(ctx);
 
@@ -202,9 +262,13 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     profile: r.choice.name,
     activeBefore: r.activeBefore,
     spinner: prompter?.spinner(),
+    components: r.records,
   };
-  const result = await apply(ctx, r.actions, applyOptions, manifest);
-  const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no"));
+  const off = COMPONENTS.map((c) => c.id).filter((id) => !r.components[id].on && wasOn(manifest, currentState(ctx), id));
+  const live = await retire(ctx, piDir, manifest, off, options.dryRun);
+  const result = await apply(ctx, r.actions, applyOptions, live);
+  if (result.code === 0) await syncServices(ctx, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
+  const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l));
   if (result.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
   return finish(ctx, baseCtx, options, r, detection, shown, result.code, prompter, result.wrote);
 }

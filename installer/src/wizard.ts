@@ -13,9 +13,24 @@ export interface WizardInput {
   initial: Choice;
   home: string;
   repoDir: string;
+  /** The extras for a repositories root: initial value and why, or the reason one is unavailable. Omitted: no question. */
+  extras?: (root: string) => ExtraRow[];
+}
+
+export interface ExtraRow {
+  id: string;
+  label: string;
+  hint: string;
+  initial: boolean;
+  /** Why it cannot be chosen here. */
+  unavailable?: string;
+  /** Set by --with / --without: not asked. */
+  fixed?: boolean;
 }
 
 export interface WizardResult {
+  /** Extras the user chose; only the ids that were asked. */
+  components?: Record<string, boolean>;
   user?: string;
   root?: string;
   profile?: string;
@@ -92,6 +107,22 @@ async function askProfile(p: Prompter, input: WizardInput): Promise<Answer<strin
   return p.isCancel(chosen) ? CANCEL : chosen;
 }
 
+async function askComponents(p: Prompter, input: WizardInput, root: string): Promise<Answer<Record<string, boolean> | undefined>> {
+  const rows = input.extras?.(root) ?? [];
+  const missing = rows.filter((r) => r.unavailable && !r.fixed);
+  if (missing.length) p.note(missing.map((r) => `${r.label}: not available (${r.unavailable})`).join("\n"), "Extras not available here");
+  const asked = rows.filter((r) => !r.unavailable && !r.fixed);
+  if (asked.length === 0) return undefined;
+  const picked = await p.multiselect<string>({
+    message: "Extras",
+    options: asked.map((r) => ({ value: r.id, label: r.label, hint: r.hint })),
+    initial: asked.filter((r) => r.initial).map((r) => r.id),
+  });
+  if (p.isCancel(picked)) return CANCEL;
+  const chosen = new Set(picked as string[]);
+  return Object.fromEntries(asked.map((r) => [r.id, chosen.has(r.id)]));
+}
+
 /** Ask only what detection and flags could not settle. Returns CANCEL when the user backs out. */
 export async function collectChoices(p: Prompter, input: WizardInput): Promise<Answer<WizardResult>> {
   p.note(detectionLines(input.detection).join("\n"), "What I found");
@@ -101,7 +132,14 @@ export async function collectChoices(p: Prompter, input: WizardInput): Promise<A
   if (p.isCancel(root)) return CANCEL;
   const profile = await askProfile(p, input);
   if (p.isCancel(profile)) return CANCEL;
-  return { user: user as string | undefined, root: root as string | undefined, profile: profile as string | undefined };
+  const reposRoot = (root as string | undefined) || input.options.reposRoot || savedString(input.saved, "reposRoot") ||
+    input.detection.candidates[0]?.path || `${input.home}/repos`;
+  const components = await askComponents(p, input, reposRoot);
+  if (p.isCancel(components)) return CANCEL;
+  return {
+    user: user as string | undefined, root: root as string | undefined, profile: profile as string | undefined,
+    ...(components ? { components: components as Record<string, boolean> } : {}),
+  };
 }
 
 export async function confirmApply(p: Prompter, summary: string[]): Promise<boolean> {
