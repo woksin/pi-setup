@@ -12,10 +12,43 @@ export interface LiveSession { sessionId: string; lane?: string }
 export interface Entry {
 	item: Item;
 	h: HistoryEntry;
-	/** Receipt recipient key: "asker" or "cc:<entry>". Stable across restarts of the asker. */
+	/** Receipt recipient key: "asker", "for:<entry>" or "cc:<entry>". Stable across restarts of the asker. */
 	recipient: string;
-	role: "asker" | "cc";
+	role: "asker" | "cc" | "for";
 	mode: "wake" | "notice";
+}
+
+interface Routing { me: Me; live: LiveSession[]; now: number; orphanOk?: boolean }
+
+function matchesRecipient(id: string, me: Me): boolean {
+	return id === me.sessionId || (!!me.lane && id === me.lane);
+}
+
+function askerRecipient(item: Item, { me, live }: Routing): boolean {
+	if (item.asker.sessionId === me.sessionId) return true;
+	if (!me.lane) return false;
+	if (item.asker.lane !== me.lane) return false;
+	return !live.some(s => s.sessionId === item.asker.sessionId);
+}
+
+function askerOrLaneLive(item: Item, session: LiveSession): boolean {
+	if (session.sessionId === item.asker.sessionId) return true;
+	return !!item.asker.lane && session.lane === item.asker.lane;
+}
+
+function orphanRecipient(item: Item, h: HistoryEntry, ctx: Routing): boolean {
+	if (!ctx.orphanOk) return false;
+	if (item.repo === null || item.repo !== ctx.me.repo) return false;
+	if (!(ctx.now - Date.parse(h.at) >= ORPHAN_MIN_AGE_MS)) return false;
+	return !ctx.live.some(s => askerOrLaneLive(item, s));
+}
+
+function askerMode(item: Item, h: HistoryEntry, ctx: Routing): Entry["mode"] | undefined {
+	// A for-recipient gets the wake, not a second copy as the asker or an orphan.
+	if (item.for?.some(id => matchesRecipient(id, ctx.me))) return undefined;
+	if (askerRecipient(item, ctx)) return item.for?.length ? "notice" : "wake";
+	if (orphanRecipient(item, h, ctx)) return "notice";
+	return undefined;
 }
 
 /**
@@ -30,23 +63,18 @@ export function pending(
 	opts: { orphanOk?: boolean; receiptName: (id: string, seq: number, recipient: string) => string },
 ): Entry[] {
 	const out: Entry[] = [];
+	const routing = { me, live, now, orphanOk: opts.orphanOk };
 	for (const item of items) {
-		const askerLive = live.some(s => s.sessionId === item.asker.sessionId);
-		const laneLive = !!item.asker.lane && live.some(s => s.lane === item.asker.lane);
+		const matches = (id: string) => matchesRecipient(id, me);
 		for (const h of item.history) {
 			if (!isDeliverable(h)) continue;
-			const push = (recipient: string, role: "asker" | "cc", mode: "wake" | "notice") => {
+			const push = (recipient: string, role: Entry["role"], mode: Entry["mode"]) => {
 				if (!receipts.has(opts.receiptName(item.id, h.seq, recipient))) out.push({ item, h, recipient, role, mode });
 			};
-			if (item.asker.sessionId === me.sessionId) push("asker", "asker", "wake");
-			else if (me.lane && item.asker.lane === me.lane && !askerLive) push("asker", "asker", "wake");
-			else if (
-				opts.orphanOk && !askerLive && !laneLive && item.repo !== null && item.repo === me.repo
-				&& now - Date.parse(h.at) >= ORPHAN_MIN_AGE_MS
-			) push("asker", "asker", "notice");
-			for (const c of item.cc) {
-				if (c === me.sessionId || (me.lane && c === me.lane)) push(`cc:${c}`, "cc", "wake");
-			}
+			const mode = askerMode(item, h, routing);
+			if (mode) push("asker", "asker", mode);
+			for (const id of (item.for ?? []).filter(matches)) push(`for:${id}`, "for", "wake");
+			for (const id of item.cc.filter(matches)) push(`cc:${id}`, "cc", "wake");
 		}
 	}
 	return out;

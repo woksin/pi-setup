@@ -20,7 +20,7 @@ test("default export is an extension factory; the tool and commands are register
 	const { root, home } = env(t);
 	const s = session(t, { root, home, sessionId: "s1" });
 	assert.deepEqual([...s.tools.keys()], ["user_questions"]);
-	assert.deepEqual([...s.commands.keys()].sort(), ["answer", "close", "decide", "defer", "q", "questions"]);
+	assert.deepEqual([...s.commands.keys()].sort(), ["answer", "close", "decide", "defer", "lane", "q", "questions"]);
 	assert.match(s.tools.get("user_questions").description, /end your turn.*Do not poll/is);
 	assert.equal(s.tools.get("user_questions").parameters.type, "object");
 });

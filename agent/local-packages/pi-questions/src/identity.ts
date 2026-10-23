@@ -3,7 +3,9 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { userInfo, homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { pidAlive, agentDir } from "./store.ts";
+import { LANE_NAME_RE, mappedLane } from "./lanes.ts";
+export { LANE_NAME_RE } from "./lanes.ts";
+import { pidAlive, agentDir, readSessions, resolveHome } from "./store.ts";
 
 /** Owner/Name from an ssh, scp-style or https remote URL; null if it has no such path. */
 export function parseRemote(url: string): string | null {
@@ -47,17 +49,48 @@ export function repoOf(cwd: string): string | null {
 	return repo;
 }
 
-export const LANE_NAME_RE = /^[A-Z][A-Z0-9-]{1,15}$/;
+function ttyOfPid(pid: number): string | undefined {
+	try {
+		const tty = execFileSync("ps", ["-p", String(pid), "-o", "tty="], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+		return tty && tty !== "?" && tty !== "??" ? tty : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+type LaneSelector = { pid?: number; tty?: string };
+type TtyOf = (pid: number) => string | undefined;
+
+function selectorMatches(s: { pid: number }, selector: LaneSelector, ttyOf: TtyOf): boolean {
+	if (selector.pid !== undefined) return s.pid === selector.pid;
+	const tty = selector.tty?.replace(/^\/dev\//, "");
+	return !!tty && ttyOf(s.pid) === tty;
+}
+
+/** Resolve a running session through its heartbeat; never guess between several matches. */
+export function resolveLaneSession(
+	home: string, selector: LaneSelector, ttyOf: TtyOf = ttyOfPid,
+): string {
+	const matches = readSessions(home).filter(s => liveness(s, s.mtimeMs, Date.now()))
+		.filter(s => selectorMatches(s, selector, ttyOf));
+	const ids = [...new Set(matches.map(s => s.sessionId))];
+	const label = selector.pid !== undefined ? `pid ${selector.pid}` : `tty ${selector.tty}`;
+	if (!ids.length) throw new Error(`no live session matches ${label}`);
+	if (ids.length > 1) throw new Error(`multiple live sessions match ${label}: ${ids.join(", ")}; use --session`);
+	return ids[0];
+}
 
 export function orchHome(env: Record<string, string | undefined> = process.env): string {
 	return env.ORCH_HOME || join(homedir(), ".pi", "orch");
 }
 
-/** Lane id: PI_ORCH_ID, then the pi-orch heartbeat for this session, then the session name. */
+/** Lane id: PI_ORCH_ID, the session map, the pi-orch heartbeat, then the session name. */
 export function laneOf(
-	env: Record<string, string | undefined>, sessionId: string, sessionName: string | undefined, orch = orchHome(env),
+	env: Record<string, string | undefined>, sessionId: string, sessionName: string | undefined, orch = orchHome(env), home = resolveHome(env),
 ): string | undefined {
 	if (env.PI_ORCH_ID) return env.PI_ORCH_ID;
+	const mapped = mappedLane(home, sessionId);
+	if (mapped) return mapped.lane;
 	try {
 		const dir = join(orch, "heartbeats");
 		for (const f of readdirSync(dir)) {

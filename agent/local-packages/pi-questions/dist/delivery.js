@@ -12,11 +12,44 @@ export const ORPHAN_MIN_AGE_MS = 60_000;
                         
 	           
 	                
-	                                                                                           
+	                                                                                                          
 	                  
-	                     
+	                             
 	                        
  
+
+                                                                                  
+
+function matchesRecipient(id        , me    )          {
+	return id === me.sessionId || (!!me.lane && id === me.lane);
+}
+
+function askerRecipient(item      , { me, live }         )          {
+	if (item.asker.sessionId === me.sessionId) return true;
+	if (!me.lane) return false;
+	if (item.asker.lane !== me.lane) return false;
+	return !live.some(s => s.sessionId === item.asker.sessionId);
+}
+
+function askerOrLaneLive(item      , session             )          {
+	if (session.sessionId === item.asker.sessionId) return true;
+	return !!item.asker.lane && session.lane === item.asker.lane;
+}
+
+function orphanRecipient(item      , h              , ctx         )          {
+	if (!ctx.orphanOk) return false;
+	if (item.repo === null || item.repo !== ctx.me.repo) return false;
+	if (!(ctx.now - Date.parse(h.at) >= ORPHAN_MIN_AGE_MS)) return false;
+	return !ctx.live.some(s => askerOrLaneLive(item, s));
+}
+
+function askerMode(item      , h              , ctx         )                            {
+	// A for-recipient gets the wake, not a second copy as the asker or an orphan.
+	if (item.for?.some(id => matchesRecipient(id, ctx.me))) return undefined;
+	if (askerRecipient(item, ctx)) return item.for?.length ? "notice" : "wake";
+	if (orphanRecipient(item, h, ctx)) return "notice";
+	return undefined;
+}
 
 /**
  * What session `me` may deliver now, split by mode.
@@ -30,23 +63,18 @@ export function pending(
 	opts                                                                                             ,
 )          {
 	const out          = [];
+	const routing = { me, live, now, orphanOk: opts.orphanOk };
 	for (const item of items) {
-		const askerLive = live.some(s => s.sessionId === item.asker.sessionId);
-		const laneLive = !!item.asker.lane && live.some(s => s.lane === item.asker.lane);
+		const matches = (id        ) => matchesRecipient(id, me);
 		for (const h of item.history) {
 			if (!isDeliverable(h)) continue;
-			const push = (recipient        , role                , mode                   ) => {
+			const push = (recipient        , role               , mode               ) => {
 				if (!receipts.has(opts.receiptName(item.id, h.seq, recipient))) out.push({ item, h, recipient, role, mode });
 			};
-			if (item.asker.sessionId === me.sessionId) push("asker", "asker", "wake");
-			else if (me.lane && item.asker.lane === me.lane && !askerLive) push("asker", "asker", "wake");
-			else if (
-				opts.orphanOk && !askerLive && !laneLive && item.repo !== null && item.repo === me.repo
-				&& now - Date.parse(h.at) >= ORPHAN_MIN_AGE_MS
-			) push("asker", "asker", "notice");
-			for (const c of item.cc) {
-				if (c === me.sessionId || (me.lane && c === me.lane)) push(`cc:${c}`, "cc", "wake");
-			}
+			const mode = askerMode(item, h, routing);
+			if (mode) push("asker", "asker", mode);
+			for (const id of (item.for ?? []).filter(matches)) push(`for:${id}`, "for", "wake");
+			for (const id of item.cc.filter(matches)) push(`cc:${id}`, "cc", "wake");
 		}
 	}
 	return out;

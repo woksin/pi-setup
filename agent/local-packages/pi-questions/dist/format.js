@@ -58,6 +58,7 @@ function itemLines(item      , now        , showAsker         )           {
 	meta.push(item.repo ?? "global");
 	if (item.project) meta.push(`project ${item.project}`);
 	if (showAsker) meta.push(`asker ${askerName(item)}`);
+	if (item.for?.length) meta.push(`for ${item.for.join(", ")}`);
 	meta.push(ageOf(item.createdAt, now));
 	if (item.blocking) meta.push(`blocks: ${item.blocking}`);
 	return [...wrap(head, WIDTH, "      "), ...wrap(`    ${meta.join(", ")}`, WIDTH, "      ")];
@@ -147,18 +148,19 @@ export function renderCandidates(found          , nearMisses           = [])    
 	return plain(lines);
 }
 
-export function statusText(counts                                                                      )                     {
-	if (!counts.open && !counts.answered) return undefined;
+export function statusText(counts                                                                                                               )                     {
+	if (!(counts.open + counts.answered + (counts.answeredForLane ?? 0))) return undefined;
 	const parts = [`Q ${counts.open} open`];
 	if (counts.blocking) parts.push(`${counts.blocking} blocking`);
 	if (counts.answered) parts.push(`${counts.answered} answered for you`);
+	if (counts.answeredForLane) parts.push(`${counts.answeredForLane} answered for ${counts.lane}`);
 	return parts.join(", ") + (counts.held ? " (delivery held)" : "");
 }
 
 const VIA = (h              , item      ) => (h.type === "answered" || h.type === "decided") && item.answer ? item.answer.via : undefined;
 
 /** One delivered history entry as a sentence. The user's words are quoted verbatim, never wrapped. */
-export function deliveryLine(item      , h              , role                )         {
+export function deliveryLine(item      , h              , role                        )         {
 	const who = h.actor.name ?? (h.actor.kind === "user" ? "the user" : "an agent");
 	const subject = role === "asker" ? `your question: ${item.title}` : `${item.title}`;
 	const via = VIA(h, item);
