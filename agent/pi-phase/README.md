@@ -53,6 +53,14 @@ Admission uses one deadline-bounded process-list snapshot per scan outside the s
 
 On queue-timeout exit 75, the command did not start: it is not a failed code/test attempt. Do not loop short requeues: each retry joins the back of the queue. Continue code work and retry the phase **once**, in the background (`job_start`), with a queue budget sized to the queue: `pi-phase status` showing several phases running or queued ahead is the concrete basis for `--queue-timeout 3600 --approved-long-timeout` (up to 7200 for integration). Add `--priority low` when nothing waits on the result. If that long wait also times out, report `gate not run: queue saturated`. The timeout message does not include counts or rank: run `pi-phase status` once at that checkpoint for running/queued entries and waiter ranks. For a duplicate CI watcher (also 75), reuse the existing watch instead of retrying.
 
+## .NET worker lifetime and orchestration guard
+
+For MSBuild-backed `build`, `test`, `publish`, `pack`, `msbuild`, and `restore`, the dotnet shim also injects `-p:UseSharedCompilation=false` and `-nodeReuse:false`. These defaults prevent shared compiler/MSBuild nodes from outliving a phase. Explicit caller properties/node-reuse flags win; `PI_PHASE_SHARED_COMPILATION=1` opts out of both lifetime defaults without removing the CPU cap. `dotnet run`, metadata commands, assembly-based tests and Microsoft.Testing.Platform tests are unchanged.
+
+In orchestrated sessions only, the `dotnet` guard rejects definite unwrapped `dotnet build|test|publish|pack|msbuild|run` commands and suggests a complete `pi-phase run` replacement (test kind for `test`, build otherwise, with bounded queue/execution timers). Phase-wrapped commands, metadata/tooling/format commands, quoted mentions and uncertain shell syntax remain allowed. `/guards off dotnet` disables the guard through the normal guard registry; ordinary non-orchestrated sessions are unaffected.
+
+`renice-builders` also lowers below-target testhost/vstest.console and `dotnet exec ... MSBuild.dll` workers outside a pi-phase process ancestry. Existing shared compiler/build-server handling is unchanged.
+
 ## EPERM after producer success
 
 `Passed!` followed by `Operation not permitted` and exit 125 is a wrapper/cleanup failure, not a passing gate. Keep the full producer log and wrapper diagnostics; inspect `pi-phase status` and the recorded process group once for remaining descendants. Do not delete state, suppress cleanup errors, or infer the producer's exit code from its output. If no owned processes remain, request owner approval for a bounded direct rerun of the exact producer command under `job_start` with a full log and its actual exit code; report that fallback separately from the wrapper failure. Do not bypass the heavy-command wrapper policy without that approval. Do not rerun while descendants remain or ownership is unknown.

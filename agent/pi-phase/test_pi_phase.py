@@ -1449,5 +1449,73 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(self.done(job)[0], 125)
 
 
+class DotnetShimTests(unittest.TestCase):
+    """Compiler/node lifetime controls, independently of phase scheduling."""
+
+    def setUp(self):
+        self.owned = tempfile.TemporaryDirectory(prefix="dotnet-shim-test-", dir=AI_WORK)
+        self.addCleanup(self.owned.cleanup)
+        self.root = Path(self.owned.name)
+        self.real = self.root / "real"
+        self.real.mkdir()
+        dotnet = self.real / "dotnet"
+        dotnet.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        dotnet.chmod(0o755)
+        self.shim = self.root / "shim"
+        self.shim.mkdir()
+        self.env = pi_phase.shim_environment(self.shim, 3)
+        self.env["PI_PHASE_ORIGINAL_PATH"] = str(self.real) + os.pathsep + os.environ["PATH"]
+        self.env.pop("PI_PHASE_SHARED_COMPILATION", None)
+
+    def invoke(self, *args, escape=False):
+        env = dict(self.env)
+        if escape:
+            env["PI_PHASE_SHARED_COMPILATION"] = "1"
+        result = subprocess.run([str(self.shim / "dotnet"), *args], env=env, cwd=self.root,
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.splitlines()
+
+    def test_build_subcommands_disable_shared_compilers_and_node_reuse(self):
+        for command in ("build", "test", "publish", "pack", "msbuild", "restore"):
+            with self.subTest(command=command):
+                self.assertEqual(self.invoke(command, "a.csproj"),
+                                 [command, "-m:3", "-p:UseSharedCompilation=false",
+                                  "-nodeReuse:false", "a.csproj"])
+
+    def test_explicit_cpu_cap_does_not_disable_lifetime_controls(self):
+        self.assertEqual(self.invoke("build", "-m:1"),
+                         ["build", "-p:UseSharedCompilation=false", "-nodeReuse:false", "-m:1"])
+
+    def test_caller_property_overrides_in_all_msbuild_spellings(self):
+        for arg in ("-p:UseSharedCompilation=true", "/P:USESHAREDCOMPILATION=false",
+                    "--property:UseSharedCompilation=true", "-property:UseSharedCompilation=true",
+                    "/property:Other=1;UseSharedCompilation=true", "--property:Other=1,UseSharedCompilation=true"):
+            with self.subTest(arg=arg):
+                self.assertEqual(self.invoke("build", arg), ["build", "-m:3", "-nodeReuse:false", arg])
+        self.assertEqual(self.invoke("build", "--property", "UseSharedCompilation=true"),
+                         ["build", "-m:3", "-nodeReuse:false", "--property", "UseSharedCompilation=true"])
+        self.assertEqual(self.invoke("build", "-p:NotUseSharedCompilation=true"),
+                         ["build", "-m:3", "-p:UseSharedCompilation=false", "-nodeReuse:false",
+                          "-p:NotUseSharedCompilation=true"])
+        self.assertEqual(self.invoke("build", "/P:UseSharedCompilation=true", "/NR:true"),
+                         ["build", "-m:3", "/P:UseSharedCompilation=true", "/NR:true"])
+
+    def test_caller_node_reuse_overrides(self):
+        for arg in ("-nodeReuse:true", "/NODEREUSE:false", "--nodereuse:true", "-nr:true", "/NR:false", "-nr"):
+            with self.subTest(arg=arg):
+                self.assertEqual(self.invoke("build", arg), ["build", "-m:3", "-p:UseSharedCompilation=false", arg])
+
+    def test_escape_hatch_leaves_cpu_cap_and_run_is_untouched(self):
+        self.assertEqual(self.invoke("build", "a.csproj", escape=True), ["build", "-m:3", "a.csproj"])
+        self.assertEqual(self.invoke("run", "--project", "a.csproj"), ["run", "--project", "a.csproj"])
+        self.assertEqual(self.invoke("--info"), ["--info"])
+
+    def test_non_msbuild_test_runners_are_untouched(self):
+        self.assertEqual(self.invoke("test", "a.dll"), ["test", "a.dll"])
+        (self.root / "global.json").write_text('{"test":{"runner":"Microsoft.Testing.Platform"}}')
+        self.assertEqual(self.invoke("test", "a.csproj"), ["test", "a.csproj"])
+
+
 if __name__ == "__main__":
     unittest.main()

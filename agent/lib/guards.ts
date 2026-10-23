@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-export const GUARD_NAMES = ["cratis", "mcp", "wait", "subagent-results", "context", "lane-policy", "secrets"] as const;
+export const GUARD_NAMES = ["cratis", "mcp", "wait", "subagent-results", "context", "lane-policy", "secrets", "dotnet"] as const;
 export type GuardName = (typeof GUARD_NAMES)[number];
 type Values = Partial<Record<GuardName, boolean>>;
 export interface GuardMeta { at?: string; reason?: string }

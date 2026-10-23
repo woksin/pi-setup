@@ -4,12 +4,15 @@
 The Roslyn compiler server (VBCSCompiler) and reusable MSBuild nodes are shared by every build of
 the user, whoever started them. When an interactive `dotnet run` starts them at nice 0, every
 pi-phase build compiles through them at nice 0 too, and `phase_nice` no longer protects Docker and
-agents. docker-guardian runs this on every pass.
+agents. docker-guardian runs this on every pass. Test workers (testhost/vstest.console) and
+`dotnet exec ... MSBuild.dll` workers outside a pi-phase ancestry are lowered too; phase children
+keep the priority chosen by their phase. Existing shared-server handling is unchanged.
 
 Never raises a priority, never kills, needs no sudo; only processes of the current user are touched
 (setpriority refuses others). Prints one summary line when something changed. Exit status is always 0.
 """
 import os
+import shlex
 import subprocess
 import sys
 
@@ -22,7 +25,61 @@ def is_build_server(args: str) -> bool:
     return "MSBuild.dll" in args and "/nodemode:" in args.lower()
 
 
+def command_words(args: str):
+    try:
+        return shlex.split(args)
+    except ValueError:
+        return []
+
+
+def is_build_worker(args: str) -> bool:
+    words = command_words(args)
+    if not words:
+        return False
+    program = os.path.basename(words[0]).lower()
+    workers = {"testhost", "testhost.exe", "testhost.dll",
+               "vstest.console", "vstest.console.exe", "vstest.console.dll"}
+    if program in workers:
+        return True
+    if program != "dotnet":
+        return False
+    words = words[1:]
+    executing = bool(words and words[0] == "exec")
+    if executing:
+        words = words[1:]
+    while words and words[0].startswith("--"):
+        option = words.pop(0)
+        if option not in {"--runtimeconfig", "--depsfile", "--additionalprobingpath",
+                          "--additional-deps", "--fx-version", "--roll-forward"} or not words:
+            return False
+        words.pop(0)
+    if not words:
+        return False
+    assembly = os.path.basename(words[0]).lower()
+    return assembly in workers or (executing and assembly == "msbuild.dll")
+
+
+def is_phase(args: str) -> bool:
+    words = command_words(args)
+    if words and os.path.basename(words[0]).startswith("python"):
+        words = words[1:]
+    return (len(words) > 1 and os.path.basename(words[0]) in {"pi-phase", "pi_phase.py"}
+            and words[1] == "run")
+
+
+def has_phase_ancestor(pid: int, processes: dict) -> bool:
+    seen = set()
+    while pid in processes and pid not in seen:
+        seen.add(pid)
+        _, parent, args = processes[pid]
+        if is_phase(args):
+            return True
+        pid = parent
+    return False
+
+
 def candidates(listing: str, target: int = TARGET_NICE):
+    processes = {}
     for line in listing.splitlines():
         parts = line.split(None, 2)
         if len(parts) < 3:
@@ -31,13 +88,21 @@ def candidates(listing: str, target: int = TARGET_NICE):
             pid, nice = int(parts[0]), int(parts[1])
         except ValueError:
             continue
-        if nice < target and is_build_server(parts[2]):
+        # Accept older pid/ni/args snapshots too; new snapshots include the parent PID.
+        rest = parts[2].split(None, 1)
+        has_parent = rest[0].isdigit() and len(rest) == 2
+        parent = int(rest[0]) if has_parent else 0
+        args = rest[1] if has_parent else parts[2]
+        processes[pid] = nice, parent, args
+    for pid, (nice, parent, args) in processes.items():
+        if nice < target and (is_build_server(args) or
+                              (is_build_worker(args) and not has_phase_ancestor(parent, processes))):
             yield pid, nice
 
 
 def main(run=subprocess.run, setpriority=os.setpriority, target: int = TARGET_NICE) -> int:
     try:
-        listing = run(["ps", "-x", "-o", "pid=,ni=,args="], capture_output=True, text=True, timeout=5).stdout
+        listing = run(["ps", "-x", "-o", "pid=,ni=,ppid=,args="], capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
         return 0
     changed = []
