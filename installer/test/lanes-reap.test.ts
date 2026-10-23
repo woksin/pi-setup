@@ -56,6 +56,12 @@ function subagentStatus(f: ReturnType<typeof fixture>, overrides: Record<string,
     at: f.now.toISOString(), ...overrides,
   }));
 }
+function agentLaunch(agentId = "agent1", callId = "call1"): string {
+  return [
+    { role: "assistant", content: [{ type: "toolCall", name: "Agent", id: callId, arguments: { subagent_type: "reviewer", prompt: "review" } }] },
+    { role: "toolResult", toolName: "Agent", toolCallId: callId, details: { status: "background", agentId } },
+  ].map(entry => JSON.stringify({ type: "message", message: entry })).join("\n") + "\n";
+}
 function foregroundProbe({ args, foreground, busy }: { args: string[]; foreground: boolean; busy: string }): string | undefined {
   if (args.includes("pgid=,tpgid=")) return "101 101\n";
   if (args.includes("pid=,ppid=,pgid=,command=")) return `101 1 101 ${foreground ? "pi" : "bash"}\n${busy.replace(/^(\d+) (\d+) /gm, "$1 $2 102 ")}`;
@@ -180,13 +186,14 @@ test("whole-session folding retains early jobs, watches and pending calls beyond
   const result = (toolName: string, details: object) => JSON.stringify({ type: "message", message: { role: "toolResult", toolName, details } });
   const call = JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "pending", name: "subagent" }] } });
   const padding = `${JSON.stringify({ padding: "x".repeat(1024) })}\n`.repeat(34000);
-  const history = `${result("job_watch", job)}\n${call}\n${padding}`;
+  const history = `${agentLaunch()}${result("job_watch", job)}\n${call}\n${padding}`;
   f.put(f.sessionFile, history, 120);
   const active = await evidence(f);
-  assert.deepEqual(active.asks, []); assert.ok(active.keeps.includes("job/watch running (session snapshot)"));
+  assert.deepEqual(active.asks, ["subagent launched without completion"]); assert.ok(active.keeps.includes("job/watch running (session snapshot)"));
   assert.ok(active.keeps.includes("subagent tool call pending")); assert.equal(active.inboxWatch, true);
   assert.deepEqual(active.inboxAliases, ["R-AI"]);
-  f.put(f.sessionFile, `${history}${result("job_output", { id: job.id, status: "completed" })}\n${JSON.stringify({ role: "toolResult", toolCallId: "pending" })}\n`, 120);
+  const notification = JSON.stringify({ customType: "subagent-notification", details: { status: "completed", id: "agent1" } });
+  f.put(f.sessionFile, `${history}${result("job_output", { id: job.id, status: "completed" })}\n${JSON.stringify({ role: "toolResult", toolCallId: "pending" })}\n${notification}\n`, 120);
   const completed = await evidence(f); assert.deepEqual(completed.asks, []);
   assert.ok(!completed.keeps.some(reason => /job\/watch|tool call pending/.test(reason)));
 });
@@ -246,48 +253,65 @@ test("ended children are history even with unknown timestamps; active fresh and 
     assert.deepEqual((await evidence(f)).keeps, ["subagent running"]);
   }
 });
-test("stale, future and unparseable active child states ask once per lane", async () => {
+test("stale legacy and invalid status records are history, not doubt or liveness", async () => {
   const f = fixture();
   for (const at of ["2020-01-01T00:00:00Z", "unknown", undefined, new Date(f.now.getTime() + 1000).toISOString()]) {
-    subagentStatus(f, { at }); assert.deepEqual((await evidence(f)).asks, ["subagent state unknown"]);
+    subagentStatus(f, { at }); const s = await evidence(f);
+    assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, []);
   }
-  for (let i = 0; i < 20; i++) subagentStatus(f, { at: "unknown" }, `unknown${i}`);
+  for (let i = 0; i < 20; i++) subagentStatus(f, { primarySessionId: "s1", at: "unknown" }, `unknown${i}`);
   for (let i = 0; i < 20; i++) subagentStatus(f, { state: "active" }, `fresh${i}`);
-  const s = await evidence(f); assert.deepEqual(s.asks, ["subagent state unknown"]); assert.deepEqual(s.keeps, ["subagent running"]);
+  const s = await evidence(f); assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, ["subagent running"]);
 });
-test("matching session, file and agent completion evidence settles stale children", async () => {
+test("Agent launches without matching completion notifications ask once per lane", async () => {
+  const f = fixture(); f.put(f.sessionFile, agentLaunch() + agentLaunch("agent2", "call2"), 120);
+  subagentStatus(f, { at: "2020-01-01T00:00:00Z", state: "ended" });
+  assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+  f.put(f.sessionFile, JSON.stringify({ role: "assistant", content: [{ type: "toolCall", name: "Agent", id: "call1" }] }), 120);
+  assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
+});
+test("matching terminal task notifications settle Agent launches by exact agent id", async () => {
   const f = fixture();
   const completions = [
-    { type: "custom_message", customType: "subagent-notification", details: { status: "completed", sessionId: "child-session" } },
-    { role: "custom", customType: "subagent-notification", details: { status: "completed", sessionFile: "/sessions/child.jsonl" } },
-    { role: "toolResult", toolName: "subagent", details: { status: "completed", sessionId: "child-session" } },
+    { type: "custom_message", customType: "subagent-notification", details: { status: "completed", id: "agent&1" } },
+    { role: "custom", customType: "subagent-notification", details: { status: "failed", agentId: "agent&1" } },
     { type: "custom_message", customType: "subagent-notification", content: "<task-notification><task-id>agent&amp;1</task-id><status>Done</status></task-notification>" },
+    { type: "custom_message", customType: "subagent-notification", content: [{ type: "text", text: "<task-notification><task-id>agent&amp;1</task-id><status>Aborted</status></task-notification>" }] },
   ];
   for (const completion of completions) {
-    subagentStatus(f, { at: "2020-01-01T00:00:00Z", agentId: "agent&1" });
-    f.put(f.sessionFile, JSON.stringify(completion), 120);
+    f.put(f.sessionFile, agentLaunch("agent&1") + JSON.stringify(completion), 120);
     const s = await evidence(f); assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, []);
   }
 });
-test("unrelated, failed and quoted notifications do not settle a stale child", async () => {
-  const f = fixture(); subagentStatus(f, { at: "2020-01-01T00:00:00Z", agentId: "agent1" });
+test("unrelated, running, quoted and tool-receipt messages are not Agent completion notifications", async () => {
+  const f = fixture();
   const completions = [
-    { type: "custom_message", customType: "subagent-notification", details: { status: "completed", sessionId: "child-session-other" } },
+    { type: "custom_message", customType: "subagent-notification", details: { status: "completed", id: "agent10" } },
     { type: "custom_message", customType: "subagent-notification", content: "<task-notification><task-id>agent1</task-id><status>Running</status></task-notification>" },
-    { type: "custom_message", customType: "subagent-notification", details: { status: "failed", sessionId: "child-session" } },
+    { role: "toolResult", toolName: "get_subagent_result", details: { status: "completed", agentId: "agent1" } },
     { role: "user", content: "<task-notification><task-id>agent1</task-id><status>Done</status></task-notification>" },
   ];
   for (const completion of completions) {
-    f.put(f.sessionFile, JSON.stringify(completion), 120);
-    assert.deepEqual((await evidence(f)).asks, ["subagent state unknown"]);
+    f.put(f.sessionFile, agentLaunch() + JSON.stringify(completion), 120);
+    assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"]);
   }
 });
-test("completion does not excuse an invalid timestamp or a partial history scan", async () => {
-  const f = fixture(); const completion = JSON.stringify({ type: "custom_message", customType: "subagent-notification", details: { status: "completed", sessionId: "child-session" } });
-  subagentStatus(f, { at: "unknown" }); f.put(f.sessionFile, completion, 120);
-  assert.deepEqual((await evidence(f)).asks, ["subagent state unknown"]);
-  subagentStatus(f, { at: "2020-01-01T00:00:00Z" }); f.put(f.sessionFile, `${completion}\n{broken`, 120);
-  assert.deepEqual((await evidence(f)).asks, ["session work history malformed", "subagent state unknown"]);
+test("Agent text receipts expose ids, launch failures do not leave pending work, partial scans still ask", async () => {
+  const f = fixture(); const call = JSON.stringify({ role: "assistant", content: [{ type: "toolCall", name: "Agent", id: "call1" }] }) + "\n";
+  const receipt = { role: "toolResult", toolName: "Agent", toolCallId: "call1", content: [{ type: "text", text: "Agent started in background.\nAgent ID: agent1\n" }] };
+  f.put(f.sessionFile, call + JSON.stringify(receipt) + "\n" + JSON.stringify({ customType: "subagent-notification", details: { status: "completed", id: "agent1" } }), 120);
+  assert.deepEqual((await evidence(f)).asks, []);
+  f.put(f.sessionFile, call + JSON.stringify({ ...receipt, isError: true }), 120);
+  assert.deepEqual((await evidence(f)).asks, []);
+  f.put(f.sessionFile, agentLaunch() + "{broken", 120);
+  assert.deepEqual((await evidence(f)).asks, ["session work history malformed"]);
+});
+test("fresh subagent activity keeps a lane while unmatched launches and claim doubts remain notes", async () => {
+  const f = fixture(); f.put(f.sessionFile, agentLaunch(), 120); subagentStatus(f); f.claim("blocked");
+  const output: string[] = []; f.ctx.out = text => output.push(text);
+  await f.invoke("reap"); const row = JSON.parse(readFileSync(join(f.root, ".state/reap-plan.json"), "utf8")).rows[0]; assert.equal(row.verdict, "keep");
+  assert.ok(row.notes.includes("subagent launched without completion")); assert.ok(row.notes.some((note: string) => note.includes("claim")));
+  assert.ok(output.some(line => line.includes("[notes: subagent launched without completion")));
 });
 test("job snapshots cover sleeping watches and terminal updates clear them", async () => {
   const f = fixture(); const snapshot = { id: "j1", command: "inbox-watch L1", status: "running", cwd: f.cwd, startedAt: f.now.getTime() - 120000, timeoutSeconds: 3600 };
@@ -297,6 +321,12 @@ test("job snapshots cover sleeping watches and terminal updates clear them", asy
   lines.push({ type: "message", message: { role: "toolResult", toolName: "job_output", details: { ...snapshot, status: "matched" } } });
   f.put(f.sessionFile, lines.map(line => JSON.stringify(line)).join("\n"), 120);
   assert.ok(!(await evidence(f)).keeps.some(reason => reason.startsWith("job/watch")));
+});
+test("keep beats ask and retains all uncertainty as deduplicated notes", () => {
+  for (const keep of ["subagent running", "busy child process", "job/watch running (log open)", "job/watch running (session snapshot)"]) {
+    const decision = verdict({ asks: ["doubt", "doubt", "claim"], keeps: [keep], finished: true, takeover: true });
+    assert.equal(decision.verdict, "keep"); assert.equal(decision.ground, undefined); assert.deepEqual(decision.notes, ["doubt", "claim"]);
+  }
 });
 test("reason classes are deduplicated without history counts", () => {
   assert.equal(verdict({ asks: ["uncertain", "uncertain", "claim", "claim"], keeps: [], finished: false, takeover: false }).reason, "uncertain; claim");

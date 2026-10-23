@@ -17,7 +17,7 @@ export interface Claim {
 export interface Signals extends DecisionSignals {
   id: string; cwd: string; pid?: number; pids: number[]; sessionId?: string; sessionFile?: string;
   lastWrite?: number; procStart?: string; tty?: string;
-  claims: Claim[]; git: GitEvidence; unread: string[]; status?: string; notes?: string[]; inboxWatch?: boolean; inboxAliases?: string[]; completedSubagents?: string[];
+  claims: Claim[]; git: GitEvidence; unread: string[]; status?: string; notes?: string[]; inboxWatch?: boolean; inboxAliases?: string[];
 }
 export interface EvidenceContext { c: Config; lane: Lane; root: string; ctx: LanesCtx; minutes: number }
 export type CommandEnv = Pick<EvidenceContext, "c" | "root" | "ctx">;

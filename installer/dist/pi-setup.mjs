@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: de19de5beea4720009b1f4ef976bad1c5f4b3196cc5439538fad5fae1a3d1965
+// pi-setup-source-sha256: 4e53d9f4140b2a3bd44e8939847e0082dd60d620ff532f23c629d7a7570a6c92
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -199,8 +199,8 @@ function pick(choices) {
   return choices.find(([value]) => value) ?? ["", choices[choices.length - 1][1]];
 }
 function render(buf, settings2) {
-  const text3 = buf.toString("utf8").split("{{GITHUB_USER}}").join(settings2.githubUser).split("{{REPOS_ROOT}}").join(settings2.reposRoot);
-  return Buffer.from(text3, "utf8");
+  const text4 = buf.toString("utf8").split("{{GITHUB_USER}}").join(settings2.githubUser).split("{{REPOS_ROOT}}").join(settings2.reposRoot);
+  return Buffer.from(text4, "utf8");
 }
 function hasTokens(buf) {
   return buf.includes("{{GITHUB_USER}}") || buf.includes("{{REPOS_ROOT}}");
@@ -485,14 +485,14 @@ function defaults(root, home, reposRoot) {
 }
 function preapprovalDefault(templatesDir) {
   const path2 = join5(dirname2(templatesDir), "defaults.json");
-  let text3;
+  let text4;
   try {
-    text3 = readFileSync3(path2, "utf8");
+    text4 = readFileSync3(path2, "utf8");
   } catch {
     return false;
   }
   try {
-    const value = JSON.parse(text3);
+    const value = JSON.parse(text4);
     if (typeof value?.launch?.preapproveMcp !== "boolean") throw new Error("invalid launch.preapproveMcp");
     return value.launch.preapproveMcp;
   } catch (e) {
@@ -504,37 +504,37 @@ function validate(value, root = process.cwd(), home = homedir3()) {
   const require2 = (ok, key) => {
     if (!ok) throw new UsageError(`invalid ${key}`);
   };
-  const text3 = (v) => typeof v === "string" && v.length > 0;
+  const text4 = (v) => typeof v === "string" && v.length > 0;
   require2(c2 && typeof c2 === "object", "config");
   require2(c2.version === 1, "version (expected 1)");
-  for (const key of ["reposRoot", "worktreesDir", "baseBranch"]) require2(text3(c2[key]), key);
-  require2(c2.repos && typeof c2.repos === "object" && !Array.isArray(c2.repos) && Object.values(c2.repos).every(text3), "repos");
-  require2(c2.messages && text3(c2.messages.dir), "messages.dir");
+  for (const key of ["reposRoot", "worktreesDir", "baseBranch"]) require2(text4(c2[key]), key);
+  require2(c2.repos && typeof c2.repos === "object" && !Array.isArray(c2.repos) && Object.values(c2.repos).every(text4), "repos");
+  require2(c2.messages && text4(c2.messages.dir), "messages.dir");
   require2(c2.messages && typeof c2.messages.broadcast === "string" && validId(c2.messages.broadcast), "messages.broadcast");
   if (c2.messages.retention !== void 0) {
     const r2 = c2.messages.retention;
     require2(r2 && typeof r2 === "object" && !Array.isArray(r2), "messages.retention");
     require2(["keep", "archive", "delete"].includes(r2.mode), "messages.retention.mode");
     require2(Number.isInteger(r2.maxAgeDays) && r2.maxAgeDays >= 1, "messages.retention.maxAgeDays");
-    require2(r2.archiveDir === void 0 || text3(r2.archiveDir), "messages.retention.archiveDir");
+    require2(r2.archiveDir === void 0 || text4(r2.archiveDir), "messages.retention.archiveDir");
     require2(r2.archiveMaxAgeDays === null || Number.isInteger(r2.archiveMaxAgeDays) && r2.archiveMaxAgeDays >= 1, "messages.retention.archiveMaxAgeDays");
     require2(typeof r2.keepUnread === "boolean", "messages.retention.keepUnread");
     require2(typeof r2.auto === "boolean", "messages.retention.auto");
     archiveDir(c2, root, home);
   }
   require2(c2.coordinator && typeof c2.coordinator.id === "string" && validId(c2.coordinator.id) && !["ALL", c2.messages.broadcast].includes(c2.coordinator.id), "coordinator.id");
-  require2(text3(c2.coordinator.cwd), "coordinator.cwd");
-  require2(text3(c2.coordinator.prompt), "coordinator.prompt");
+  require2(text4(c2.coordinator.cwd), "coordinator.cwd");
+  require2(text4(c2.coordinator.prompt), "coordinator.prompt");
   require2(Number.isInteger(c2.coordinator.maxRunning) && c2.coordinator.maxRunning > 0, "coordinator.maxRunning");
   require2(c2.terminal && BACKENDS.includes(c2.terminal.backend), "terminal.backend");
-  require2(c2.launch && text3(c2.launch.wrapper), "launch.wrapper");
+  require2(c2.launch && text4(c2.launch.wrapper), "launch.wrapper");
   require2(typeof c2.launch.preapproveMcp === "boolean", "launch.preapproveMcp");
   require2(Array.isArray(c2.launch.unsetEnv) && c2.launch.unsetEnv.every((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s)), "launch.unsetEnv");
   if (c2.idle !== void 0) require2(c2.idle && Number.isInteger(c2.idle.minutes) && c2.idle.minutes > 0, "idle.minutes");
   if (c2.github !== void 0) {
     require2(c2.github && Array.isArray(c2.github.repos) && c2.github.repos.every((r2) => typeof r2 === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(r2)), "github.repos");
     require2(typeof c2.github.author === "string" && /^@?[A-Za-z0-9-]+$/.test(c2.github.author), "github.author");
-    require2(Array.isArray(c2.github.excludeLabels) && c2.github.excludeLabels.every(text3), "github.excludeLabels");
+    require2(Array.isArray(c2.github.excludeLabels) && c2.github.excludeLabels.every(text4), "github.excludeLabels");
   }
   require2(Array.isArray(c2.lanes), "lanes");
   const ids = /* @__PURE__ */ new Set([c2.coordinator.id, "ALL", c2.messages.broadcast]);
@@ -543,12 +543,12 @@ function validate(value, root = process.cwd(), home = homedir3()) {
     require2(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id), `${key}.id`);
     ids.add(lane.id);
     require2(absentCwdIdentity(lane, lane.repo) || typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo), `${key}.repo`);
-    require2(absentCwdIdentity(lane, lane.branch) || text3(lane.branch), `${key}.branch`);
-    require2(text3(lane.prompt), `${key}.prompt`);
-    require2(text3(lane.worktree) && !/[\\/]/.test(lane.worktree) && ![".", ".."].includes(lane.worktree), `${key}.worktree`);
+    require2(absentCwdIdentity(lane, lane.branch) || text4(lane.branch), `${key}.branch`);
+    require2(text4(lane.prompt), `${key}.prompt`);
+    require2(text4(lane.worktree) && !/[\\/]/.test(lane.worktree) && ![".", ".."].includes(lane.worktree), `${key}.worktree`);
     require2(lane.group === null || typeof lane.group === "string" && validId(lane.group) && !["ALL", c2.messages.broadcast].includes(lane.group), `${key}.group`);
     require2(lane.issue === void 0 || Number.isInteger(lane.issue) && lane.issue > 0, `${key}.issue`);
-    require2(lane.goal === void 0 || text3(lane.goal), `${key}.goal`);
+    require2(lane.goal === void 0 || text4(lane.goal), `${key}.goal`);
     validateHierarchyFields(lane, c2, key);
   }
   validateHierarchy(c2, root, home);
@@ -783,8 +783,8 @@ function treeDigest(input) {
   for (const path2 of input.paths) hash.update(JSON.stringify(path2)).update(contents(below(input.cwd, path2)));
   return hash.digest("hex");
 }
-function commitList(text3) {
-  const commits = text3.trim().split(/\s+/).filter(Boolean);
+function commitList(text4) {
+  const commits = text4.trim().split(/\s+/).filter(Boolean);
   if (!commits.every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) throw new Error("unpushed commits unknown");
   return commits;
 }
@@ -850,9 +850,9 @@ var init_git = __esm({
 });
 
 // src/lanes/reap/foreground.ts
-function processTable(text3) {
+function processTable(text4) {
   const rows = [];
-  for (const line of text3.split("\n").filter((l2) => l2.trim())) {
+  for (const line of text4.split("\n").filter((l2) => l2.trim())) {
     const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
     if (!match) return void 0;
     rows.push({ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), command: match[4] });
@@ -869,8 +869,8 @@ function ancestors(pid, table) {
   }
   return family;
 }
-function expectedForeground(pid, pgid, text3) {
-  const rows = processTable(text3);
+function expectedForeground(pid, pgid, text4) {
+  const rows = processTable(text4);
   if (!rows) return false;
   const table = new Map(rows.map((row) => [row.pid, row]));
   const pi = table.get(pid);
@@ -890,8 +890,8 @@ import { join as join7, normalize } from "node:path";
 function absolute(ctx, path2) {
   return normalize(ctx.realpath(path2));
 }
-function requireProbe(result2, message) {
-  if (result2.code !== 0 || result2.timedOut) throw new Error(message);
+function requireProbe(result3, message) {
+  if (result3.code !== 0 || result3.timedOut) throw new Error(message);
 }
 async function processCwd(ctx, pid) {
   if (ctx.readCwd) return canonicalCwd(ctx, await ctx.readCwd(pid));
@@ -1004,36 +1004,52 @@ var init_session_scan = __esm({
 });
 
 // src/lanes/reap/subagent-completions.ts
-function subagentKeys(record2) {
-  const fields = { sessionId: "session", sessionFile: "file", agentId: "agent", id: "agent" };
-  return Object.entries(fields).flatMap(([field2, kind]) => typeof record2[field2] === "string" && record2[field2] ? [`${kind}:${record2[field2]}`] : []);
+function text(content) {
+  if (typeof content === "string") return content;
+  return Array.isArray(content) ? content.filter((part) => part.type === "text").map((part) => part.text).join("\n") : "";
 }
-function completed(status2) {
-  return typeof status2 === "string" && /^(done|completed)$/i.test(status2.trim());
+function agentId(message) {
+  const id = message.details?.agentId ?? message.details?.id;
+  if (typeof id === "string" && id) return id;
+  return /\bAgent ID:\s*(\S+)/.exec(text(message.content))?.[1];
 }
-function structured(out, record2) {
-  if (record2 && completed(record2.status)) for (const key of subagentKeys(record2)) out.add(key);
+function agentCall(part) {
+  return part.type === "toolCall" && part.name === "Agent" && typeof part.id === "string";
+}
+function launch(work, part) {
+  if (agentCall(part)) work.launches.set(part.id, void 0);
+}
+function calls(work, message) {
+  if (message.role === "toolCall") launch(work, { ...message, type: "toolCall" });
+  if (message.role !== "assistant" || !Array.isArray(message.content)) return;
+  for (const part of message.content) launch(work, part);
+}
+function agentResult(message) {
+  return message.role === "toolResult" && message.toolName === "Agent";
+}
+function result(work, message) {
+  if (!agentResult(message) || !work.launches.has(message.toolCallId)) return;
+  if (message.isError) work.launches.delete(message.toolCallId);
+  else work.launches.set(message.toolCallId, agentId(message));
+}
+function terminal(status2) {
+  return typeof status2 === "string" && /^(done|completed|failed|error|aborted|stopped|wrapped up)\b/i.test(status2.trim());
+}
+function completion(work, record2) {
+  if (!record2 || !terminal(record2.status)) return;
+  const id = record2.agentId ?? record2.id;
+  if (typeof id === "string" && id) work.completed.add(id);
 }
 function notificationRecord(block2) {
-  const record2 = { status: /<status>([^<]+)<\/status>/.exec(block2)?.[1] };
-  for (const [tag, field2] of Object.entries({ "task-id": "id", "agent-id": "agentId", "session-id": "sessionId", "session-file": "sessionFile" })) {
-    const value = new RegExp(`<${tag}>([^<]+)</${tag}>`).exec(block2)?.[1];
-    if (value) record2[field2] = decode(value);
-  }
-  return record2;
+  const id = /<(?:task-id|agent-id)>([^<]+)<\/(?:task-id|agent-id)>/.exec(block2)?.[1];
+  return { id: id && decode(id), status: /<status>([^<]+)<\/status>/.exec(block2)?.[1] };
 }
-function notifications(out, content) {
-  const text3 = typeof content === "string" ? content : "";
-  for (const block2 of text3.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) structured(out, notificationRecord(block2[1]));
-}
-function foldSubagentCompletions(out, message) {
-  if (message.customType === "subagent-notification") {
-    structured(out, message.details);
-    notifications(out, message.content);
-  }
-  if (message.role === "toolResult" && /^(subagent|get_subagent_result|wait_subagent)$/.test(message.toolName ?? "")) {
-    structured(out, message.details);
-  }
+function foldSubagentWork(work, message) {
+  calls(work, message);
+  result(work, message);
+  if (message.customType !== "subagent-notification") return;
+  completion(work, message.details);
+  for (const block2 of text(message.content).matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) completion(work, notificationRecord(block2[1]));
 }
 var decode;
 var init_subagent_completions = __esm({
@@ -1053,7 +1069,7 @@ function foldJobs(jobs, message) {
 }
 function completions(jobs, message) {
   if (message.customType !== "pi-jobs") return;
-  for (const completion of message.details?.completions ?? []) record(jobs, completion?.job);
+  for (const completion2 of message.details?.completions ?? []) record(jobs, completion2?.job);
 }
 function watch(command, s) {
   if (typeof command !== "string") return;
@@ -1106,7 +1122,7 @@ function runningJob(job, s, ctx) {
 async function sessionWork(s, ctx) {
   const jobs = /* @__PURE__ */ new Map();
   const pending2 = /* @__PURE__ */ new Map();
-  const completedSubagents = /* @__PURE__ */ new Set();
+  const agents = { launches: /* @__PURE__ */ new Map(), completed: /* @__PURE__ */ new Set() };
   try {
     await scanSession(s.sessionFile, (line) => {
       const entry2 = JSON.parse(line);
@@ -1115,13 +1131,13 @@ async function sessionWork(s, ctx) {
       completions(jobs, message);
       toolCalls(pending2, message, s);
       toolResult(pending2, message, s);
-      foldSubagentCompletions(completedSubagents, message);
+      foldSubagentWork(agents, message);
     });
   } catch (error) {
     s.asks.push(error.message === "session scan incomplete" ? "session scan incomplete" : "session work history malformed");
     return;
   }
-  s.completedSubagents = [...completedSubagents];
+  if ([...agents.launches.values()].some((id) => id === void 0 || !agents.completed.has(id))) s.asks.push("subagent launched without completion");
   for (const tool of pending2.values()) s.keeps.push(`${tool} tool call pending`);
   for (const job of jobs.values()) runningJob(job, s, ctx);
 }
@@ -1251,7 +1267,7 @@ function closedLine(to, reason, now) {
 var clean;
 var init_status_line = __esm({
   "src/lanes/status-line.ts"() {
-    clean = (text3) => text3.replace(/"/g, "'").replace(/\s+/g, " ").trim();
+    clean = (text4) => text4.replace(/"/g, "'").replace(/\s+/g, " ").trim();
   }
 });
 
@@ -1331,24 +1347,18 @@ function owned(status2, s) {
   if (status2.primarySessionId !== void 0) return status2.primarySessionId === s.sessionId;
   return s.pid !== void 0 && status2.pid === s.pid;
 }
-function evidence(status2, completed2, now) {
-  if (status2.state === "ended") return "history";
+function fresh(status2, now) {
+  if (status2.state === "ended") return false;
   const age = typeof status2.at === "string" ? now - Date.parse(status2.at) : NaN;
-  if (!Number.isFinite(age) || age < 0) return "unknown";
-  if (age <= 6e5) return "running";
-  return subagentKeys(status2).some((key) => completed2.has(key)) ? "history" : "unknown";
+  return Number.isFinite(age) && age >= 0 && age <= 6e5;
 }
 function subagents(s, ctx) {
-  const statuses = jsonFiles(join10(ctx.piAgentDir, "context-budget/status")).filter((status2) => owned(status2, s));
-  const completed2 = new Set(s.completedSubagents);
-  const states = new Set(statuses.map((status2) => evidence(status2, completed2, ctx.now().getTime())));
-  if (states.has("running")) s.keeps.push("subagent running");
-  if (states.has("unknown")) s.asks.push("subagent state unknown");
+  const statuses = jsonFiles(join10(ctx.piAgentDir, "context-budget/status"));
+  if (statuses.some((status2) => owned(status2, s) && fresh(status2, ctx.now().getTime()))) s.keeps.push("subagent running");
 }
 var init_subagents = __esm({
   "src/lanes/reap/subagents.ts"() {
     init_files();
-    init_subagent_completions();
   }
 });
 
@@ -1377,31 +1387,31 @@ function statusFiles(base) {
   }
   return files2;
 }
-function field(text3, name) {
-  return new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.+)$`, "mi").exec(text3)?.[1].trim().replace(/^`|`$/g, "");
+function field(text4, name) {
+  return new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.+)$`, "mi").exec(text4)?.[1].trim().replace(/^`|`$/g, "");
 }
-function exactOwner(text3, s, lane) {
-  if (field(text3, "Session") === s.sessionId || field(text3, "SessionId") === s.sessionId) return true;
-  if ([field(text3, "Cwd"), field(text3, "Worktree")].includes(s.cwd)) return true;
-  const repo = field(text3, "Repo");
+function exactOwner(text4, s, lane) {
+  if (field(text4, "Session") === s.sessionId || field(text4, "SessionId") === s.sessionId) return true;
+  if ([field(text4, "Cwd"), field(text4, "Worktree")].includes(s.cwd)) return true;
+  const repo = field(text4, "Repo");
   if (repo && repo.toLowerCase() !== lane.repo?.toLowerCase()) return false;
-  return Boolean(lane.branch && field(text3, "Branch") === lane.branch);
+  return Boolean(lane.branch && field(text4, "Branch") === lane.branch);
 }
-function issueOwner(text3, path2, lane, base) {
+function issueOwner(text4, path2, lane, base) {
   if (!lane.repo || !lane.issue) return false;
-  const issue = field(text3, "Issue");
+  const issue = field(text4, "Issue");
   const ref = `${lane.repo}#${lane.issue}`.toLowerCase();
   if (issue?.toLowerCase() === ref) return true;
-  if (field(text3, "Repo")?.toLowerCase() === lane.repo.toLowerCase() && issue === `#${lane.issue}`) return true;
+  if (field(text4, "Repo")?.toLowerCase() === lane.repo.toLowerCase() && issue === `#${lane.issue}`) return true;
   return relative3(base, path2).toLowerCase() === `${lane.repo}/${lane.issue}/status.md`.toLowerCase();
 }
 function localClaims(s, env) {
   const bases = [.../* @__PURE__ */ new Set([env.root, s.cwd])].map((root) => join11(root, ".ai-work/issue-work"));
   for (const base of bases) for (const path2 of statusFiles(base)) {
-    const text3 = optionalText(path2);
-    if (field(text3, "State")?.toLowerCase() !== "in-progress") continue;
-    if (exactOwner(text3, s, env.lane) || issueOwner(text3, path2, env.lane, base)) s.keeps.push("in-progress local claim");
-    else if (!field(text3, "Repo") || field(text3, "Repo")?.toLowerCase() === env.lane.repo?.toLowerCase()) {
+    const text4 = optionalText(path2);
+    if (field(text4, "State")?.toLowerCase() !== "in-progress") continue;
+    if (exactOwner(text4, s, env.lane) || issueOwner(text4, path2, env.lane, base)) s.keeps.push("in-progress local claim");
+    else if (!field(text4, "Repo") || field(text4, "Repo")?.toLowerCase() === env.lane.repo?.toLowerCase()) {
       s.asks.push("local claim ownership unknown");
     }
   }
@@ -1414,9 +1424,9 @@ var init_local_claims = __esm({
 
 // src/lanes/reap/ownership.ts
 import { join as join12 } from "node:path";
-function registry(text3) {
+function registry(text4) {
   const folded = /* @__PURE__ */ new Map();
-  for (const line of text3.split("\n").filter((l2) => l2.trim())) {
+  for (const line of text4.split("\n").filter((l2) => l2.trim())) {
     let ev;
     try {
       ev = JSON.parse(line);
@@ -1460,8 +1470,8 @@ function claimMapsToLane(claim, s, lane) {
   return claim.sessionId === s.sessionId || claim.cwd === s.cwd || claim.worktree === s.cwd || Boolean(claim.branch && claim.branch === lane.branch);
 }
 async function claimsAndOwnership(s, env) {
-  const text3 = optionalText(join12(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
-  const claims = registry(text3 || "").filter((claim) => claimMapsToLane(claim, s, env.lane));
+  const text4 = optionalText(join12(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
+  const claims = registry(text4 || "").filter((claim) => claimMapsToLane(claim, s, env.lane));
   for (const claim of claims) classifyClaim(claim, s);
   localClaims(s, env);
   namedNotes(s, env);
@@ -1486,9 +1496,9 @@ var init_ownership = __esm({
 // src/lanes/reap/signals.ts
 import { join as join13 } from "node:path";
 function snooze(s, env) {
-  const text3 = optionalText(join13(env.root, ".state/snooze", s.id));
-  if (text3 === void 0) return;
-  const until2 = Date.parse(text3.trim());
+  const text4 = optionalText(join13(env.root, ".state/snooze", s.id));
+  if (text4 === void 0) return;
+  const until2 = Date.parse(text4.trim());
   if (!Number.isFinite(until2)) throw new Error("cannot read snooze");
   if (until2 > env.ctx.now().getTime()) s.keeps.push("snoozed");
 }
@@ -1678,9 +1688,9 @@ function packPath(env) {
   return join15(env.root, ".state/handoffs", env.lane.id);
 }
 function readPack(env) {
-  const text3 = optionalText(join15(packPath(env), "handoff.json"));
-  if (text3 === void 0) return void 0;
-  const value = JSON.parse(text3);
+  const text4 = optionalText(join15(packPath(env), "handoff.json"));
+  if (text4 === void 0) return void 0;
+  const value = JSON.parse(text4);
   if (!validPack(value, env.lane.id)) throw new Error("invalid handoff pack");
   return value;
 }
@@ -1850,18 +1860,18 @@ function mapped(claim, signals, env) {
   });
 }
 function summary(signals, env) {
-  const result2 = [];
+  const result3 = [];
   const dir = expand(env.c.messages.dir, env.c, env.root, env.ctx.home);
   const names = existsSync6(dir) ? readdirSync7(dir).filter((name) => name.endsWith(".md") && !parseMessageName(name)) : [];
-  if (names.length) result2.push({ label: "Unparseable messages", names });
-  const text3 = optionalText(join17(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
+  if (names.length) result3.push({ label: "Unparseable messages", names });
+  const text4 = optionalText(join17(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
   try {
-    const foreign = registry(text3 ?? "").filter((claim) => !mapped(claim, signals, env));
-    if (foreign.length) result2.push({ label: "Foreign claims", names: foreign.map((claim) => `${claim.repo}#${claim.issue}`) });
+    const foreign = registry(text4 ?? "").filter((claim) => !mapped(claim, signals, env));
+    if (foreign.length) result3.push({ label: "Foreign claims", names: foreign.map((claim) => `${claim.repo}#${claim.issue}`) });
   } catch {
-    result2.push({ label: "Claim summary unavailable", names: ["cannot read issue-work registry"] });
+    result3.push({ label: "Claim summary unavailable", names: ["cannot read issue-work registry"] });
   }
-  return result2;
+  return result3;
 }
 var init_summary = __esm({
   "src/lanes/reap/summary.ts"() {
@@ -1915,9 +1925,9 @@ end tell`];
       }
       args.push(`sh -c ${shellQuote(command)}`);
     }
-    const result2 = await ctx.run(cmd, args, { timeoutMs: 3e4 });
-    if (result2.code !== 0) {
-      ctx.err(`${cmd} failed: ${result2.stderr.trim()}`);
+    const result3 = await ctx.run(cmd, args, { timeoutMs: 3e4 });
+    if (result3.code !== 0) {
+      ctx.err(`${cmd} failed: ${result3.stderr.trim()}`);
       ctx.out(command);
       return 1;
     }
@@ -1925,7 +1935,7 @@ end tell`];
     return 0;
   } };
 }
-async function nudgeTerminal(name, ctx, { tty, text: text3 }, beforeSend) {
+async function nudgeTerminal(name, ctx, { tty, text: text4 }, beforeSend) {
   if (!/^[A-Za-z0-9/]+$/.test(tty)) throw new UsageError("invalid tty");
   if (name === "print") return "not-found";
   if (name === "tmux") {
@@ -1934,12 +1944,12 @@ async function nudgeTerminal(name, ctx, { tty, text: text3 }, beforeSend) {
     const pane = panes.stdout.split("\n").map((s) => s.trim().split(/\s+/)).find(([t2]) => t2 === `/dev/${tty}`)?.[1];
     if (!pane) return "not-found";
     await guardQuit(beforeSend);
-    for (const args of [["send-keys", "-t", pane, "-l", "--", text3], ["send-keys", "-t", pane, "Enter"]]) {
+    for (const args of [["send-keys", "-t", pane, "-l", "--", text4], ["send-keys", "-t", pane, "Enter"]]) {
       if ((await ctx.run("tmux", args, { timeoutMs: 1e4 })).code !== 0) throw new Error("tmux send-keys failed");
     }
     return "sent";
   }
-  const escaped = appleScriptString(text3);
+  const escaped = appleScriptString(text4);
   const script = name === "terminal-app" ? `tell application "Terminal"
 repeat with w in windows
 repeat with t in tabs of w
@@ -1964,9 +1974,9 @@ end repeat
 return "not-found"
 end tell`;
   await guardQuit(beforeSend);
-  const result2 = await ctx.run("osascript", ["-e", script], { timeoutMs: 1e4 });
-  if (result2.code !== 0) throw new Error(`osascript failed: ${result2.stderr.trim()}`);
-  return result2.stdout.trim() === "sent" ? "sent" : "not-found";
+  const result3 = await ctx.run("osascript", ["-e", script], { timeoutMs: 1e4 });
+  if (result3.code !== 0) throw new Error(`osascript failed: ${result3.stderr.trim()}`);
+  return result3.stdout.trim() === "sent" ? "sent" : "not-found";
 }
 async function guardQuit(guard) {
   if (guard) await guard();
@@ -1983,15 +1993,15 @@ var init_terminal = __esm({
 // src/lanes/reap/context-format.ts
 import { createHash as createHash3 } from "node:crypto";
 import { lstatSync as lstatSync2, readFileSync as readFileSync10 } from "node:fs";
-function sections(text3) {
-  const matches = [...text3.matchAll(/^##\s+([^\r\n]+)\r?$/gm)];
-  const result2 = /* @__PURE__ */ new Map();
+function sections(text4) {
+  const matches = [...text4.matchAll(/^##\s+([^\r\n]+)\r?$/gm)];
+  const result3 = /* @__PURE__ */ new Map();
   for (let i2 = 0; i2 < matches.length; i2++) {
     const match = matches[i2];
-    const end = matches[i2 + 1]?.index ?? text3.length;
-    result2.set(match[1].trim().toLowerCase(), text3.slice(match.index + match[0].length, end).trim());
+    const end = matches[i2 + 1]?.index ?? text4.length;
+    result3.set(match[1].trim().toLowerCase(), text4.slice(match.index + match[0].length, end).trim());
   }
-  return result2;
+  return result3;
 }
 function snapshotSection(section) {
   const json = section?.match(/^```json\s*\n([\s\S]*?)\n```\s*$/)?.[1];
@@ -2014,16 +2024,16 @@ function validSnapshot(s) {
 function readContext(path2) {
   const stat2 = lstatSync2(path2);
   if (!stat2.isFile()) throw new Error("lane handoff must be a regular file");
-  const text3 = readFileSync10(path2, "utf8");
-  const parts = sections(text3);
+  const text4 = readFileSync10(path2, "utf8");
+  const parts = sections(text4);
   for (const heading of HEADINGS) {
     if (!parts.get(heading.toLowerCase())) throw new Error(`lane handoff missing ${heading}`);
   }
   return {
-    text: text3,
+    text: text4,
     snapshot: snapshotSection(parts.get("snapshot")),
     mtime: stat2.mtimeMs,
-    digest: createHash3("sha256").update(text3).digest("hex")
+    digest: createHash3("sha256").update(text4).digest("hex")
   };
 }
 function expectedSnapshot(env, s) {
@@ -2091,9 +2101,9 @@ function version(s) {
   return createHash4("sha256").update(JSON.stringify(state2)).digest("hex");
 }
 function cached(env, s) {
-  const text3 = optionalText(receiptPath(env));
-  if (text3 === void 0) return false;
-  const receipt = JSON.parse(text3);
+  const text4 = optionalText(receiptPath(env));
+  if (text4 === void 0) return false;
+  const receipt = JSON.parse(text4);
   if (receipt.version !== version(s)) return false;
   const file = readContext(contextPath(env));
   validateContext(file, expectedSnapshot(env, s));
@@ -2104,12 +2114,12 @@ async function request(env, s) {
   if (!s.tty) throw new Error("lane handoff TTY unknown");
   const backend = terminalBackend(detectBackend("auto", env.ctx));
   let at = env.ctx.now().getTime();
-  const text3 = `Write your own context handoff to ${contextPath(env)}. Use nonempty ## sections: ${HEADINGS.join(", ")}. Preserve user constraints verbatim. Add ## Snapshot with a fenced json object matching ${JSON.stringify(expectedSnapshot(env, s))}. Account for every dirty path, outstanding acknowledgement, candidate and CI run. Do not quit.`;
-  const result2 = await backend.nudge(env.ctx, { tty: s.tty, text: text3 }, async () => {
+  const text4 = `Write your own context handoff to ${contextPath(env)}. Use nonempty ## sections: ${HEADINGS.join(", ")}. Preserve user constraints verbatim. Add ## Snapshot with a fenced json object matching ${JSON.stringify(expectedSnapshot(env, s))}. Account for every dirty path, outstanding acknowledgement, candidate and CI run. Do not quit.`;
+  const result3 = await backend.nudge(env.ctx, { tty: s.tty, text: text4 }, async () => {
     await unchanged(env, s);
     at = env.ctx.now().getTime();
   });
-  if (result2 !== "sent") throw new Error("could not request lane's own handoff through its terminal");
+  if (result3 !== "sent") throw new Error("could not request lane's own handoff through its terminal");
   return at;
 }
 async function unchanged(env, s) {
@@ -2163,10 +2173,10 @@ function ready(s, env) {
 }
 async function revalidate(env, s, to) {
   await recipient(env, to);
-  const fresh = await collect(env);
-  if (fresh.asks.length || fresh.keeps.length) throw new Error("quit refused: safety evidence changed");
-  if (fingerprint(fresh) !== fingerprint(s)) throw new Error("quit refused: safety evidence changed");
-  verifyOwnContext(env, fresh);
+  const fresh2 = await collect(env);
+  if (fresh2.asks.length || fresh2.keeps.length) throw new Error("quit refused: safety evidence changed");
+  if (fingerprint(fresh2) !== fingerprint(s)) throw new Error("quit refused: safety evidence changed");
+  verifyOwnContext(env, fresh2);
 }
 async function exited(env, pid) {
   const probe = await env.ctx.run("ps", ["-p", String(pid)], { timeoutMs: 2e3 });
@@ -2338,9 +2348,17 @@ var init_archive = __esm({
 function topReasons(reasons) {
   return [...new Set(reasons)].slice(0, 3).join("; ");
 }
+function liveActivity(reasons) {
+  const live = /* @__PURE__ */ new Set(["subagent running", "busy child process", "job/watch running (log open)", "job/watch running (session snapshot)"]);
+  return reasons.some((reason) => live.has(reason));
+}
+function keep(s) {
+  return { verdict: "keep", reason: topReasons(s.keeps), notes: [...new Set(s.asks)] };
+}
 function verdict(s) {
+  if (liveActivity(s.keeps)) return keep(s);
   if (s.asks.length) return { verdict: "ask", reason: topReasons(s.asks) };
-  if (s.keeps.length) return { verdict: "keep", reason: topReasons(s.keeps) };
+  if (s.keeps.length) return keep(s);
   if (s.finished) return { verdict: "retire", ground: "finished", reason: "finished: all machine evidence proves completion" };
   if (s.takeover) return { verdict: "retire", ground: "takeover", reason: "takeover validated" };
   return { verdict: "handoff", reason: "idle; delivery acknowledgements and candidate ownership unknown; takeover required" };
@@ -2390,6 +2408,9 @@ async function planRow(env, opts) {
   }
   return row;
 }
+function noteText(notes) {
+  return notes?.length ? ` [notes: ${notes.join("; ")}]` : "";
+}
 function display(rows, json, ctx) {
   if (json) {
     ctx.out(JSON.stringify(rows));
@@ -2397,7 +2418,8 @@ function display(rows, json, ctx) {
   }
   ctx.out("LANE	VERDICT	REASON");
   for (const row of rows) {
-    ctx.out(`${row.id}	${row.verdict}${row.ground ? ` (${row.ground})` : ""}	${row.reason}`);
+    const notes = noteText(row.notes);
+    ctx.out(`${row.id}	${row.verdict}${row.ground ? ` (${row.ground})` : ""}	${row.reason}${notes}`);
   }
 }
 async function reap(args, opts, env) {
@@ -2482,8 +2504,8 @@ var init_snooze = __esm({
 // src/lanes/templates.ts
 import { readFileSync as readFileSync12 } from "node:fs";
 import { join as join24 } from "node:path";
-function renderTemplate(text3, vars) {
-  return text3.replace(/\{\{(\w+)\}\}/g, (token, name) => Object.hasOwn(vars, name) ? String(vars[name]) : token);
+function renderTemplate(text4, vars) {
+  return text4.replace(/\{\{(\w+)\}\}/g, (token, name) => Object.hasOwn(vars, name) ? String(vars[name]) : token);
 }
 function readTemplate(ctx, name) {
   return readFileSync12(join24(ctx.templatesDir, name), "utf8");
@@ -2543,10 +2565,10 @@ async function init(args, opts, ctx) {
   mkdirSync7(status2, { recursive: true });
   ctx.out(`${hadStatus ? "kept" : "created"} ${status2}`);
   const ignore = join25(root, ".gitignore");
-  const text3 = existsSync8(ignore) ? readFileSync13(ignore, "utf8") : "";
-  const missing = [".state/", "messages/"].filter((s) => !text3.split(/\r?\n/).includes(s));
+  const text4 = existsSync8(ignore) ? readFileSync13(ignore, "utf8") : "";
+  const missing = [".state/", "messages/"].filter((s) => !text4.split(/\r?\n/).includes(s));
   if (missing.length) {
-    writeFileSync6(ignore, `${text3}${text3 && !text3.endsWith("\n") ? "\n" : ""}${missing.join("\n")}
+    writeFileSync6(ignore, `${text4}${text4 && !text4.endsWith("\n") ? "\n" : ""}${missing.join("\n")}
 `);
     ctx.out(`created ${ignore}`);
   } else ctx.out(`kept ${ignore}`);
@@ -2561,10 +2583,10 @@ var init_init = __esm({
 
 // src/lanes/processes.ts
 async function runningPi(ctx) {
-  const result2 = await ctx.run("pgrep", ["-x", "pi"], { timeoutMs: 1e4 });
-  if (result2.code !== 0) return [];
+  const result3 = await ctx.run("pgrep", ["-x", "pi"], { timeoutMs: 1e4 });
+  if (result3.code !== 0) return [];
   const found = [];
-  for (const token of result2.stdout.trim().split(/\s+/)) {
+  for (const token of result3.stdout.trim().split(/\s+/)) {
     if (!/^\d+$/.test(token)) continue;
     const pid = Number(token);
     const cwd = await processCwd2(ctx, pid);
@@ -2692,9 +2714,9 @@ async function identify(row, entries, ctx) {
   applyInventory(row, map, candidates);
 }
 function identityMap(sessionId, ctx) {
-  const text3 = optionalText(join26(ctx.piAgentDir, "user-questions/lanes", `${sessionId}.json`));
-  if (text3 === void 0) return void 0;
-  const map = JSON.parse(text3);
+  const text4 = optionalText(join26(ctx.piAgentDir, "user-questions/lanes", `${sessionId}.json`));
+  if (text4 === void 0) return void 0;
+  const map = JSON.parse(text4);
   if (!validIdentity(map, sessionId)) throw new Error("conflict: invalid lane identity map");
   return map;
 }
@@ -2770,15 +2792,15 @@ function requestedRoles(value, coordinatorId) {
   return roles;
 }
 function requestedOrchestrates(value, coordinatorId) {
-  const result2 = /* @__PURE__ */ new Map();
+  const result3 = /* @__PURE__ */ new Map();
   for (const assignment of value?.split(";") ?? []) {
     const [id, repos, extra] = assignment.split("=");
     if (!validId(id) || id === coordinatorId || !repos || extra !== void 0 || !repos.split(",").every(validRepo)) {
       throw new UsageError("invalid --orchestrates; expected ID=owner/repo,owner/repo for a repo-orch");
     }
-    result2.set(id, [.../* @__PURE__ */ new Set([...result2.get(id) ?? [], ...repos.split(",")])]);
+    result3.set(id, [.../* @__PURE__ */ new Set([...result3.get(id) ?? [], ...repos.split(",")])]);
   }
-  return result2;
+  return result3;
 }
 function roleAssignment(value) {
   const [id, role, extra] = value.split("=");
@@ -3613,9 +3635,9 @@ var init_idle_check = __esm({
 });
 
 // src/lanes/commands/nudge.ts
-async function nudge(id, text3, opts, c2, root, ctx) {
-  text3 = text3.replace(/[\x00-\x1f\x7f]/g, " ").trim();
-  if (!text3 || text3.length > 2e3) throw new UsageError("nudge text must be between 1 and 2000 characters");
+async function nudge(id, text4, opts, c2, root, ctx) {
+  text4 = text4.replace(/[\x00-\x1f\x7f]/g, " ").trim();
+  if (!text4 || text4.length > 2e3) throw new UsageError("nudge text must be between 1 and 2000 characters");
   const target = laneTarget(id, c2, root, ctx);
   const refuse = (why) => {
     ctx.err(`NOT SENT: ${why}`);
@@ -3629,10 +3651,10 @@ async function nudge(id, text3, opts, c2, root, ctx) {
   if (!await foregroundPi(ctx, tty, pid, target.cwd)) return refuse(`no foreground pi on ${tty} (lane stopped or busy in a subshell)`);
   const backend = detectBackend(opts.terminal || c2.terminal.backend, ctx);
   if (backend === "print") {
-    ctx.out(`nudge ${target.id} (tty ${tty}): type this into its pi session: ${text3}`);
+    ctx.out(`nudge ${target.id} (tty ${tty}): type this into its pi session: ${text4}`);
     return 4;
   }
-  if (await terminalBackend(backend).nudge(ctx, { tty, text: text3 }) !== "sent") return 4;
+  if (await terminalBackend(backend).nudge(ctx, { tty, text: text4 }) !== "sent") return 4;
   ctx.out(`nudged ${target.id}`);
   return 0;
 }
@@ -3650,8 +3672,8 @@ var init_nudge = __esm({
 // src/lanes/joblogs.ts
 import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync11, statSync as statSync10 } from "node:fs";
 import { join as join33 } from "node:path";
-function parseWatches(text3) {
-  return text3.split(/\r?\n/).flatMap((line) => {
+function parseWatches(text4) {
+  return text4.split(/\r?\n/).flatMap((line) => {
     const [tag, label, until2, interval, ...check3] = line.split("|");
     if (tag !== "WATCH") return [];
     if (!label || !until2 || !/^\d+$/.test(interval) || Number(interval) <= 0 || !check3.join("|")) throw new Error("invalid WATCH line");
@@ -3702,9 +3724,9 @@ var init_joblogs = __esm({
 // src/lanes/commands/resume-check.ts
 import { existsSync as existsSync15, readFileSync as readFileSync18, statSync as statSync11 } from "node:fs";
 import { join as join34 } from "node:path";
-async function livePrs(text3, ctx) {
+async function livePrs(text4, ctx) {
   if (!ctx.which("gh")) return;
-  const refs = new Set(text3.match(/\bPR [A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+/g));
+  const refs = new Set(text4.match(/\bPR [A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+/g));
   for (const ref of refs) {
     const [repo, n3] = ref.slice(3).split("#");
     let state2 = "unknown";
@@ -4549,9 +4571,9 @@ function pruneEmptyDirs(dir) {
   for (const e of readdirSync13(dir, { withFileTypes: true })) if (e.isDirectory()) pruneEmptyDirs(join39(dir, e.name));
   if (readdirSync13(dir).length === 0) rmdirSync(dir);
 }
-function prune2(piDir, keep, pinned, dryRun) {
+function prune2(piDir, keep2, pinned, dryRun) {
   const removed = [];
-  for (const info of listBackups(piDir, pinned).slice(keep)) {
+  for (const info of listBackups(piDir, pinned).slice(keep2)) {
     if (!info.pinned) {
       removed.push(info.path);
       if (!dryRun) rmSync(info.path, { recursive: true, force: true });
@@ -4574,7 +4596,7 @@ function tidy(piDir) {
   const data = dirname10(base);
   if (existsSync21(data) && readdirSync13(data).length === 0) rmdirSync(data);
 }
-function backupsCommand(ctx, sub, keep, dryRun) {
+function backupsCommand(ctx, sub, keep2, dryRun) {
   const piDir = join39(ctx.home, ".pi", "agent");
   const pinned = pinnedBackups(readManifest(piDir));
   if (sub === "list") {
@@ -4583,7 +4605,7 @@ function backupsCommand(ctx, sub, keep, dryRun) {
     for (const b of all) ctx.out(`${b.name}  ${b.files.length} file(s)${b.pinned ? "  (pinned: uninstall restores from it)" : ""}`);
     return 0;
   }
-  const removed = prune2(piDir, keep, pinned, dryRun);
+  const removed = prune2(piDir, keep2, pinned, dryRun);
   for (const path2 of removed) ctx.out(`${dryRun ? "would remove" : "remove"} ${path2}`);
   ctx.out(removed.length === 0 ? "Nothing to prune." : dryRun ? "Nothing was removed." : `Removed ${removed.length} item(s).`);
   return 0;
@@ -4726,10 +4748,10 @@ async function runNpm(ctx, actions, options, piDir, manifest) {
   const args = ["install", "--legacy-peer-deps"];
   const cwd = join40(piDir, "npm");
   options.spinner?.start("Installing npm packages");
-  const result2 = await ctx.run("npm", args, { cwd, inherit: options.inheritNpm });
-  options.spinner?.stop(result2.code === 0 ? "npm packages installed" : "npm install failed");
-  if (result2.code === 0) return { code: 0, ran: true };
-  if (!options.inheritNpm) ctx.err((result2.stdout + result2.stderr).trim().split("\n").slice(-15).join("\n"));
+  const result3 = await ctx.run("npm", args, { cwd, inherit: options.inheritNpm });
+  options.spinner?.stop(result3.code === 0 ? "npm packages installed" : "npm install failed");
+  if (result3.code === 0) return { code: 0, ran: true };
+  if (!options.inheritNpm) ctx.err((result3.stdout + result3.stderr).trim().split("\n").slice(-15).join("\n"));
   ctx.err("Files installed; npm install failed: (cd ~/.pi/agent/npm && npm install --legacy-peer-deps)");
   return { code: 1, ran: true };
 }
@@ -4990,28 +5012,28 @@ function isCratisFile(rel) {
   return rel === "extensions/cratis-cli-guard.ts" || rel === "lib/cratis-cli-guard.test.ts" || rel === "agents/cratis-cli.md" || rel === "bin/cratis-local-run" || /^profiles\/[^/]+\/agents\/cratis-cli\.md$/.test(rel);
 }
 function dropGuardExtension(content) {
-  const text3 = content.toString("utf8");
-  const fm = /^---\n[\s\S]*?\n---/.exec(text3);
+  const text4 = content.toString("utf8");
+  const fm = /^---\n[\s\S]*?\n---/.exec(text4);
   if (!fm) return content;
   const head = fm[0].replace(/^(extensions:\s*\[)([^\]\n]*)(\])/m, (_m, a2, list, b) => `${a2}${list.split(",").map((s) => s.trim()).filter((s) => s && s !== "cratis-cli-guard").join(", ")}${b}`);
-  return head === fm[0] ? content : Buffer.from(head + text3.slice(fm[0].length), "utf8");
+  return head === fm[0] ? content : Buffer.from(head + text4.slice(fm[0].length), "utf8");
 }
 function stripSections(buf, offIds) {
-  let text3 = buf.toString("utf8");
+  let text4 = buf.toString("utf8");
   const warnings = [];
   for (const id of offIds) {
-    const s = markerRe(id, "start").exec(text3);
-    const e = markerRe(id, "end").exec(text3);
+    const s = markerRe(id, "start").exec(text4);
+    const e = markerRe(id, "end").exec(text4);
     if (!s || !e || e.index < s.index) {
       warnings.push(`AGENTS.md has no pi-setup:${id} markers; its ${id} section stays`);
       continue;
     }
-    let end = text3.indexOf("\n", e.index);
-    end = end < 0 ? text3.length : end + 1;
-    if (text3[end] === "\n") end += 1;
-    text3 = text3.slice(0, s.index) + text3.slice(end);
+    let end = text4.indexOf("\n", e.index);
+    end = end < 0 ? text4.length : end + 1;
+    if (text4[end] === "\n") end += 1;
+    text4 = text4.slice(0, s.index) + text4.slice(end);
   }
-  return { content: Buffer.from(text3, "utf8"), warnings };
+  return { content: Buffer.from(text4, "utf8"), warnings };
 }
 function codesceneNotes(ctx) {
   return [
@@ -5189,8 +5211,8 @@ var init_args = __esm({
 // src/detect.ts
 import { existsSync as existsSync24 } from "node:fs";
 import { join as join42 } from "node:path";
-function parseAuthStatus(text3) {
-  const match = /Logged in to (\S+) account (\S+)/.exec(text3);
+function parseAuthStatus(text4) {
+  const match = /Logged in to (\S+) account (\S+)/.exec(text4);
   return match ? { host: match[1], login: match[2] } : {};
 }
 function parseProviderCheck(stdout2) {
@@ -5221,14 +5243,14 @@ function parseModelTable(stdout2) {
 async function probeTool(ctx, name) {
   const path2 = ctx.which(name);
   if (!path2) return { name };
-  const result2 = await ctx.run(name, ["--version"], { timeoutMs: name === "pi" ? PI_MS : SHORT_MS });
-  const first = result2.stdout.trim().split("\n")[0] || result2.stderr.trim().split("\n")[0];
-  return { name, path: path2, version: result2.timedOut || !first ? void 0 : first };
+  const result3 = await ctx.run(name, ["--version"], { timeoutMs: name === "pi" ? PI_MS : SHORT_MS });
+  const first = result3.stdout.trim().split("\n")[0] || result3.stderr.trim().split("\n")[0];
+  return { name, path: path2, version: result3.timedOut || !first ? void 0 : first };
 }
 async function lines(ctx, args) {
-  const result2 = await ctx.run("gh", args, { timeoutMs: SHORT_MS });
-  if (result2.code !== 0) return void 0;
-  return result2.stdout.split("\n").map((l2) => l2.trim()).filter(Boolean);
+  const result3 = await ctx.run("gh", args, { timeoutMs: SHORT_MS });
+  if (result3.code !== 0) return void 0;
+  return result3.stdout.split("\n").map((l2) => l2.trim()).filter(Boolean);
 }
 async function probeGithub(ctx, request2) {
   const state2 = { orgs: [] };
@@ -5244,15 +5266,15 @@ ${(await status2)?.stderr ?? ""}`);
   return state2;
 }
 async function probeProvider(ctx, id) {
-  const result2 = await ctx.run("pi", ["auth", "check", "--provider", id, "--no-refresh", "--json"], { timeoutMs: PI_MS });
-  return result2.timedOut ? { status: "unknown" } : parseProviderCheck(result2.stdout);
+  const result3 = await ctx.run("pi", ["auth", "check", "--provider", id, "--no-refresh", "--json"], { timeoutMs: PI_MS });
+  return result3.timedOut ? { status: "unknown" } : parseProviderCheck(result3.stdout);
 }
 async function listModels(ctx) {
-  const result2 = await ctx.run("pi", ["--offline", "--list-models"], { timeoutMs: PI_MS });
-  const text3 = `${result2.stdout}
-${result2.stderr}`;
-  const catalog = result2.timedOut ? null : /No models available/i.test(text3) ? /* @__PURE__ */ new Set() : parseModelTable(result2.stdout);
-  return { catalog, code: result2.code, timedOut: result2.timedOut, stderr: result2.stderr.split("\n").slice(0, 3).join("\n") };
+  const result3 = await ctx.run("pi", ["--offline", "--list-models"], { timeoutMs: PI_MS });
+  const text4 = `${result3.stdout}
+${result3.stderr}`;
+  const catalog = result3.timedOut ? null : /No models available/i.test(text4) ? /* @__PURE__ */ new Set() : parseModelTable(result3.stdout);
+  return { catalog, code: result3.code, timedOut: result3.timedOut, stderr: result3.stderr.split("\n").slice(0, 3).join("\n") };
 }
 async function probeCatalog(ctx) {
   return (await listModels(ctx)).catalog;
@@ -5363,8 +5385,8 @@ function kimiNote(profile2, ready3) {
 function pinnedModels(profileDir) {
   const pins = /* @__PURE__ */ new Set();
   for (const file of listFiles(join43(profileDir, "agents")).filter((f) => f.endsWith(".md"))) {
-    const text3 = readFileSync23(join43(profileDir, "agents", file), "utf8");
-    const match = /^model:\s*(\S+)/m.exec(text3);
+    const text4 = readFileSync23(join43(profileDir, "agents", file), "utf8");
+    const match = /^model:\s*(\S+)/m.exec(text4);
     if (match) pins.add(match[1]);
   }
   return [...pins].sort();
@@ -5385,27 +5407,27 @@ function overlayFor(repoDir2, name, settings2) {
   const routingPath = join43(base, "routing.md");
   return { sources, routing: existsSync25(routingPath) ? render(readFileSync23(routingPath), settings2) : void 0 };
 }
-function markerLines(text3) {
-  const start2 = text3.indexOf(START);
-  const end = text3.indexOf(END);
+function markerLines(text4) {
+  const start2 = text4.indexOf(START);
+  const end = text4.indexOf(END);
   if (start2 < 0 || end < 0 || end < start2) return void 0;
-  const bodyStart = text3.indexOf("\n", start2) + 1;
+  const bodyStart = text4.indexOf("\n", start2) + 1;
   if (bodyStart === 0 || bodyStart > end) return void 0;
-  const nl = text3.indexOf("\n", end);
-  return { start: start2, bodyStart, end, endLineEnd: nl < 0 ? text3.length : nl };
+  const nl = text4.indexOf("\n", end);
+  return { start: start2, bodyStart, end, endLineEnd: nl < 0 ? text4.length : nl };
 }
 function hasRoutingMarkers(content) {
   return markerLines(content.toString("utf8")) !== void 0;
 }
 function spliceRouting(agentsMd2, routing, live) {
-  const text3 = agentsMd2.toString("utf8");
-  const m2 = markerLines(text3);
+  const text4 = agentsMd2.toString("utf8");
+  const m2 = markerLines(text4);
   if (!m2) throw new SetupError("routing markers not found in AGENTS.md");
   const l2 = live ? markerLines(live.toString("utf8")) : void 0;
   const liveText = live?.toString("utf8") ?? "";
-  const startLine = l2 ? liveText.slice(l2.start, l2.bodyStart) : text3.slice(m2.start, m2.bodyStart);
-  const endLine = l2 ? liveText.slice(l2.end, l2.endLineEnd) : text3.slice(m2.end, m2.endLineEnd);
-  return Buffer.from(text3.slice(0, m2.start) + startLine + routing.toString("utf8") + endLine + text3.slice(m2.endLineEnd), "utf8");
+  const startLine = l2 ? liveText.slice(l2.start, l2.bodyStart) : text4.slice(m2.start, m2.bodyStart);
+  const endLine = l2 ? liveText.slice(l2.end, l2.endLineEnd) : text4.slice(m2.end, m2.endLineEnd);
+  return Buffer.from(text4.slice(0, m2.start) + startLine + routing.toString("utf8") + endLine + text4.slice(m2.endLineEnd), "utf8");
 }
 var START, END, FALLBACK_PROFILE;
 var init_profiles = __esm({
@@ -5511,34 +5533,34 @@ function registerJson(actions, path2, edit) {
     actions.push({ op: "register", path: path2, content: next, mode, existed: true, jsonOps });
   }
 }
-function addPackage(data, value, fresh, ops, allow) {
+function addPackage(data, value, fresh2, ops, allow) {
   const list = Array.isArray(data.packages) ? data.packages : void 0;
   const has = list?.includes(value) ?? false;
-  if (has && !fresh || !has && !allow) return;
+  if (has && !fresh2 || !has && !allow) return;
   if (!has) data.packages = [...list ?? [], value];
   ops.push({ op: "array-add", key: "packages", value, keyCreated: !list });
 }
 function settingsEdit(web, activate, drop) {
-  return (data, fresh) => {
+  return (data, fresh2) => {
     const ops = [];
-    if (fresh && web !== true && Array.isArray(data.packages)) {
+    if (fresh2 && web !== true && Array.isArray(data.packages)) {
       if (web === false) data.packages = data.packages.filter((p) => !WEB_PACKAGES.includes(p));
     }
     if (web === false && drop.length && Array.isArray(data.packages)) data.packages = data.packages.filter((p) => !drop.includes(p));
     addPackage(data, PACKAGE, false, ops, true);
-    if (web === true) for (const p of WEB_PACKAGES) addPackage(data, p, fresh, ops, fresh || activate);
+    if (web === true) for (const p of WEB_PACKAGES) addPackage(data, p, fresh2, ops, fresh2 || activate);
     return ops;
   };
 }
 function mcpEdit(codescene, activate, which) {
-  return (data, fresh) => {
+  return (data, fresh2) => {
     const servers = typeof data.mcpServers === "object" && data.mcpServers !== null && !Array.isArray(data.mcpServers) ? data.mcpServers : void 0;
     const has = Boolean(servers && "codescene" in servers);
     if (codescene !== true) {
-      if (fresh && codescene === false && servers) delete servers.codescene;
+      if (fresh2 && codescene === false && servers) delete servers.codescene;
       return [];
     }
-    if (has && !fresh || !has && !fresh && !activate) return [];
+    if (has && !fresh2 || !has && !fresh2 && !activate) return [];
     const stripped = { ...servers };
     delete stripped.codescene;
     const entry2 = { command: which("cs-mcp") ?? "cs-mcp", args: [], lifecycle: "lazy-keep-alive" };
@@ -5662,7 +5684,7 @@ function reconcile(actions, manifest, home) {
       if (fileSha(action.path) === entry2.sha256) return { ...action, decision: "update" };
     }
     const newPath = `${action.path}.pi-setup-new`;
-    const keep = {
+    const keep2 = {
       op: "keep",
       path: action.path,
       newPath,
@@ -5672,8 +5694,8 @@ function reconcile(actions, manifest, home) {
       write: newVersionNeedsWrite(newPath, action.content),
       ...action.noMarkers ? { noMarkers: true } : {}
     };
-    conflicts.push(keep);
-    return keep;
+    conflicts.push(keep2);
+    return keep2;
   });
   return { actions: out, conflicts };
 }
@@ -5685,9 +5707,9 @@ async function diffText(ctx, conflict) {
   try {
     const tmp = join45(dir, "new");
     writeFileSync10(tmp, conflict.content);
-    const result2 = await ctx.run("diff", ["-u", conflict.path, tmp], { timeoutMs: 1e4 });
-    if (result2.code === null || result2.code > 1) return `(diff is not available; the new version is in ${conflict.newPath})`;
-    const lines2 = result2.stdout.split("\n");
+    const result3 = await ctx.run("diff", ["-u", conflict.path, tmp], { timeoutMs: 1e4 });
+    if (result3.code === null || result3.code > 1) return `(diff is not available; the new version is in ${conflict.newPath})`;
+    const lines2 = result3.stdout.split("\n");
     if (lines2.length <= 1) return "(no differences)";
     return lines2.slice(0, DIFF_LINES).join("\n") + (lines2.length > DIFF_LINES ? `
 \u2026 ${lines2.length - DIFF_LINES} more lines` : "");
@@ -5729,8 +5751,8 @@ function launchdUnit(ctx, id) {
   const src = join46(ctx.repoDir, "agent", "launchd", `com.example.${name}.plist`);
   if (!name || !existsSync28(src)) return void 0;
   const user = serviceUser(ctx.env);
-  const text3 = readFileSync26(src, "utf8").split("__HOME__").join(xml(ctx.home)).split("com.example.").join(`com.${user}.`);
-  return { unit: { path: join46(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text3) }, label: `com.${user}.${name}` };
+  const text4 = readFileSync26(src, "utf8").split("__HOME__").join(xml(ctx.home)).split("com.example.").join(`com.${user}.`);
+  return { unit: { path: join46(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text4) }, label: `com.${user}.${name}` };
 }
 function expectedUnit(ctx, id) {
   if (ctx.platform === "darwin") {
@@ -5833,16 +5855,16 @@ async function unloadService(ctx, svc) {
   if (!svc.managed) return;
   const [cmd, args] = svc.kind === "launchd" ? ["launchctl", ["bootout", `gui/${uid()}/${svc.label}`]] : ["systemctl", ["--user", "disable", "--now", svc.label]];
   if (svc.kind === "systemd" && !ctx.which("systemctl")) return;
-  let text3;
+  let text4;
   try {
     const r2 = await ctx.run(cmd, args, { timeoutMs: TIMEOUT });
     if (r2.code === 0 && !r2.timedOut) return;
-    text3 = r2.timedOut ? "timed out" : `${r2.stdout}${r2.stderr}`.trim();
-    if (!r2.timedOut && (NOT_LOADED.test(text3) || svc.kind === "launchd" && [3, 113].includes(r2.code))) return;
+    text4 = r2.timedOut ? "timed out" : `${r2.stdout}${r2.stderr}`.trim();
+    if (!r2.timedOut && (NOT_LOADED.test(text4) || svc.kind === "launchd" && [3, 113].includes(r2.code))) return;
   } catch (error) {
-    text3 = error.message;
+    text4 = error.message;
   }
-  ctx.err(`warning: could not stop ${svc.label} (${text3.split("\n")[0] || "failed"}); remove it by hand: ${cmd} ${args.join(" ")}`);
+  ctx.err(`warning: could not stop ${svc.label} (${text4.split("\n")[0] || "failed"}); remove it by hand: ${cmd} ${args.join(" ")}`);
 }
 async function reloadSystemd(ctx, svc) {
   if (svc.managed && svc.kind === "systemd" && ctx.which("systemctl")) await sh(ctx, "systemctl", ["--user", "daemon-reload"]);
@@ -6281,7 +6303,7 @@ function livePins(piDir, settings2) {
   const pins = /* @__PURE__ */ new Map();
   const dir = join49(piDir, "agents");
   if (existsSync31(dir)) for (const file of readdirSync17(dir).filter((f) => f.endsWith(".md"))) {
-    const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text(join49(dir, file)))?.[1] ?? "";
+    const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text2(join49(dir, file)))?.[1] ?? "";
     const model = /^model:\s*(\S+)/m.exec(front)?.[1];
     if (!model) continue;
     const extensions = /^extensions:\s*([^\n]*(?:\n[ \t]+[^\n]*)*)/m.exec(front)?.[1] ?? "";
@@ -6297,7 +6319,7 @@ function livePins(piDir, settings2) {
 }
 function state(ctx, facts) {
   const piDir = join49(ctx.home, ".pi", "agent");
-  const s = { ctx, facts, piDir, setup: setupCmd(ctx), profile: text(join49(piDir, "profiles/ACTIVE")), settings: readJson2(join49(piDir, "settings.json")) ?? {}, pins: [], missing: [], changed: [], modes: [] };
+  const s = { ctx, facts, piDir, setup: setupCmd(ctx), profile: text2(join49(piDir, "profiles/ACTIVE")), settings: readJson2(join49(piDir, "settings.json")) ?? {}, pins: [], missing: [], changed: [], modes: [] };
   try {
     s.manifest = readManifest(piDir);
     if (s.manifest) validateManifest(ctx.home, s.manifest);
@@ -6345,16 +6367,16 @@ function npm(s) {
   const deps = pkg?.dependencies && typeof pkg.dependencies === "object" ? Object.keys(pkg.dependencies) : [];
   const installed = (name) => existsSync31(join49(s.piDir, "npm/node_modules", name, "package.json"));
   const missing = deps.filter((n3) => !installed(n3));
-  const result2 = [{ ...check("npm", missing.length ? "fail" : "ok", missing.length ? `${missing.length} missing dependencies` : "dependencies present", "(cd ~/.pi/agent/npm && npm install --legacy-peer-deps)", missing), ...missing.length ? { fixable: "npm" } : {} }];
+  const result3 = [{ ...check("npm", missing.length ? "fail" : "ok", missing.length ? `${missing.length} missing dependencies` : "dependencies present", "(cd ~/.pi/agent/npm && npm install --legacy-peer-deps)", missing), ...missing.length ? { fixable: "npm" } : {} }];
   for (const spec of packages(s)) {
     if (spec.startsWith("npm:")) {
       const full = spec.slice(4);
       const at = full.indexOf("@", 1);
       const name = at < 0 ? full : full.slice(0, at);
-      if (!installed(name)) result2.push(check(`package:${name}`, "warn", `${spec} is missing`, `pi install npm:${name}`));
-    } else if (spec.startsWith(".") && !existsSync31(resolve11(s.piDir, spec))) result2.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
+      if (!installed(name)) result3.push(check(`package:${name}`, "warn", `${spec} is missing`, `pi install npm:${name}`));
+    } else if (spec.startsWith(".") && !existsSync31(resolve11(s.piDir, spec))) result3.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
   }
-  return result2;
+  return result3;
 }
 function profile(s) {
   if (!s.profile) return check("profile", "warn", "no ACTIVE profile", `${s.setup} --profile auto`);
@@ -6383,19 +6405,19 @@ function fallback(s) {
   const chains = config.chains && typeof config.chains === "object" ? config.chains : {};
   const targets = (pin) => Array.isArray(chains[pin]) ? chains[pin].filter((v) => typeof v === "string") : pairs.filter((p) => p.includes(pin)).map((p) => p[0] === pin ? p[1] : p[0]);
   const available2 = (pin) => ready2(s, pin) && (!s.facts.catalog?.size || s.facts.catalog.has(pin));
-  const result2 = [];
+  const result3 = [];
   for (const pin of s.pins.filter((p) => providerStatus(s, p.model) === "not_ready")) {
     const target = targets(pin.model).find(available2);
     const safe = config.enabled === true && target && pin.agents.every((a2) => a2.fallback);
     const label = PROVIDER_LABELS[pin.model.split("/")[0]] ?? pin.model.split("/")[0];
     const choice = chooseProfile(new Set(Object.keys(s.facts.providers).filter((p) => ready2(s, `${p}/`))), loadProfiles(s.ctx.repoDir));
-    result2.push(check(`fallback:${pin.model}`, safe ? "warn" : "fail", `${pin.agents.map((a2) => a2.name).join(", ")} pin ${pin.model} but ${label} has no login: subagents may run on the parent model or fail before fallback switches${target ? ` to ${target}` : "; no ready target"}${!safe ? " (fallback unavailable)" : ""}`, `run \`pi\`, type /login and choose ${label}; or \`${s.setup} --profile auto\` (would pick ${choice.name})`));
+    result3.push(check(`fallback:${pin.model}`, safe ? "warn" : "fail", `${pin.agents.map((a2) => a2.name).join(", ")} pin ${pin.model} but ${label} has no login: subagents may run on the parent model or fail before fallback switches${target ? ` to ${target}` : "; no ready target"}${!safe ? " (fallback unavailable)" : ""}`, `run \`pi\`, type /login and choose ${label}; or \`${s.setup} --profile auto\` (would pick ${choice.name})`));
   }
   const sources = /* @__PURE__ */ new Set([...Object.keys(chains), ...pairs.flat()]);
   const unavailable = [...sources].filter((p) => ready2(s, p) && !targets(p).some(available2));
-  if (config.enabled === true && unavailable.length) result2.push(check("fallback-targets", "warn", "fallback sources have no ready target", "edit ~/.pi/agent/provider-fallback.json", unavailable));
-  if (!result2.length) result2.push(check("fallback", "ok", "fallback targets ready"));
-  return result2;
+  if (config.enabled === true && unavailable.length) result3.push(check("fallback-targets", "warn", "fallback sources have no ready target", "edit ~/.pi/agent/provider-fallback.json", unavailable));
+  if (!result3.length) result3.push(check("fallback", "ok", "fallback targets ready"));
+  return result3;
 }
 function guards(s) {
   const path2 = join49(s.piDir, "guards.json");
@@ -6415,26 +6437,26 @@ function path(s) {
   const onPath = (s.ctx.env.PATH ?? "").split(delimiter2).some((p) => resolve11(s.ctx.cwd, p) === bin);
   const shell = basename5(s.ctx.env.SHELL ?? "");
   const rc = shell === "zsh" ? "zshrc" : shell === "bash" ? "bashrc" : "profile";
-  const result2 = [check("path", onPath ? "ok" : "warn", onPath ? "~/.local/bin is on PATH" : "~/.local/bin is not on PATH", `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.${rc}`)];
+  const result3 = [check("path", onPath ? "ok" : "warn", onPath ? "~/.local/bin is on PATH" : "~/.local/bin is not on PATH", `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.${rc}`)];
   for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"]]) {
     if (!packages(s).some((p) => p.includes(pkg))) continue;
     const target = `~/.pi/agent/npm/node_modules/@woksin/${pkg}/bin/${cmd}`;
     const fix = existsSync31(join49(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
-    result2.push(check(`path:${cmd}`, s.ctx.which(cmd) ? "ok" : "warn", s.ctx.which(cmd) ? `${cmd} found` : `${cmd} is missing`, fix));
+    result3.push(check(`path:${cmd}`, s.ctx.which(cmd) ? "ok" : "warn", s.ctx.which(cmd) ? `${cmd} found` : `${cmd} is missing`, fix));
   }
-  return result2;
+  return result3;
 }
 function localChecks(ctx, facts) {
   const s = state(ctx, facts);
   return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), ...providers(s), models(s), ...fallback(s), guards(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
 }
-var text, present, providerStatus, ready2, check, packages;
+var text2, present, providerStatus, ready2, check, packages;
 var init_doctor_checks = __esm({
   "src/doctor-checks.ts"() {
     init_manifest();
     init_profiles();
     init_types();
-    text = (path2) => {
+    text2 = (path2) => {
       try {
         return readFileSync29(path2, "utf8").trim();
       } catch {
@@ -6531,8 +6553,8 @@ async function runUpdate(ctx, options, prompter) {
   const args = [join50(ctx.repoDir, "installer", "dist", "pi-setup.mjs"), "install"];
   if (options.yes || !prompter) args.push("--yes");
   if (options.skipNpm) args.push("--skip-npm");
-  const result2 = await ctx.run(ctx.nodePath ?? process.execPath, args, { inherit: true });
-  return result2.code ?? 1;
+  const result3 = await ctx.run(ctx.nodePath ?? process.execPath, args, { inherit: true });
+  return result3.code ?? 1;
 }
 var TAG;
 var init_update = __esm({
@@ -6554,7 +6576,7 @@ function plists(ctx) {
   });
 }
 async function disk(ctx) {
-  const unknown = () => [result("disk", "warn", "disk not checked", "df -h ~")];
+  const unknown = () => [result2("disk", "warn", "disk not checked", "df -h ~")];
   const script = join51(ctx.home, ".pi/agent/bin/dev-doctor");
   if (!existsSync33(script)) return unknown();
   const r2 = await ctx.run("python3", [script, "--only", "disk", "--json"], { timeoutMs: 6e3, env: { PYTHONDONTWRITEBYTECODE: "1" } });
@@ -6564,7 +6586,7 @@ async function disk(ctx) {
     if (!Array.isArray(findings)) return unknown();
     const checks = findings.filter((f) => f?.id === "disk").map((f) => {
       if (typeof f.evidence !== "string" || f.evidence.startsWith("Skipped:") || !["info", "warn", "high"].includes(f.severity)) return unknown()[0];
-      return result("disk", f.severity === "high" ? "fail" : f.severity === "warn" ? "warn" : "ok", f.evidence, typeof f.suggest === "string" ? f.suggest : "df -h ~");
+      return result2("disk", f.severity === "high" ? "fail" : f.severity === "warn" ? "warn" : "ok", f.evidence, typeof f.suggest === "string" ? f.suggest : "df -h ~");
     });
     return checks.length ? checks : unknown();
   } catch {
@@ -6572,7 +6594,7 @@ async function disk(ctx) {
   }
 }
 async function update(ctx, manifest) {
-  const skip = (reason) => result("update", "ok", `update check skipped (${reason})`);
+  const skip = (reason) => result2("update", "ok", `update check skipped (${reason})`);
   if (!existsSync33(join51(ctx.repoDir, ".git"))) return skip("not a git checkout");
   const path2 = join51(ctx.home, ".pi/agent/.pi-setup/update-check.json");
   const cache = readJson2(path2);
@@ -6597,7 +6619,7 @@ async function update(ctx, manifest) {
     current = r2.stdout.trim();
   }
   if (!latestTag([current])) return skip("installed release unknown");
-  return result("update", compareTags(latest, current) > 0 ? "warn" : "ok", compareTags(latest, current) > 0 ? `${latest} available (installed ${current})` : `up to date (${current})`, `${setupCmd(ctx)} update`);
+  return result2("update", compareTags(latest, current) > 0 ? "warn" : "ok", compareTags(latest, current) > 0 ? `${latest} available (installed ${current})` : `up to date (${current})`, `${setupCmd(ctx)} update`);
 }
 async function gatherFacts(baseCtx, manifest) {
   const ctx = { ...baseCtx, run: (cmd, args, options) => baseCtx.run(cmd, cmd === "git" ? ["--no-optional-locks", ...args] : args, options) };
@@ -6616,32 +6638,32 @@ async function gatherFacts(baseCtx, manifest) {
     disk(ctx),
     Promise.all(agents.map(async (p) => {
       const r2 = await ctx.run("launchctl", ["list", p.label], { timeoutMs: 3e3 });
-      return result(`launchd:${p.label}`, r2.code === 0 && !r2.timedOut ? "ok" : "warn", `${p.label}: ${r2.code === 0 && !r2.timedOut ? "loaded" : "not loaded"}`, `launchctl load -w ~/Library/LaunchAgents/${p.file}`);
+      return result2(`launchd:${p.label}`, r2.code === 0 && !r2.timedOut ? "ok" : "warn", `${p.label}: ${r2.code === 0 && !r2.timedOut ? "loaded" : "not loaded"}`, `launchctl load -w ~/Library/LaunchAgents/${p.file}`);
     })),
     guardian ? ctx.run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 5e3 }) : Promise.resolve(void 0),
     update(ctx, manifest)
   ]);
   let pi;
-  if (!hasPi) pi = result("pi", "fail", "not on PATH", installHint(ctx.platform, "pi"));
-  else if (models2.timedOut || version2.timedOut) pi = result("pi", "warn", "timed out", `${setupCmd(ctx)} doctor`);
-  else if (models2.code !== 0 || version2.code !== 0) pi = result("pi", "fail", models2.stderr.split("\n")[0] || version2.stderr.split("\n")[0] || "pi did not load", "run `pi` and read the startup errors");
-  else pi = result("pi", "ok", `pi ${version2.stdout.trim().split("\n")[0]}`);
+  if (!hasPi) pi = result2("pi", "fail", "not on PATH", installHint(ctx.platform, "pi"));
+  else if (models2.timedOut || version2.timedOut) pi = result2("pi", "warn", "timed out", `${setupCmd(ctx)} doctor`);
+  else if (models2.code !== 0 || version2.code !== 0) pi = result2("pi", "fail", models2.stderr.split("\n")[0] || version2.stderr.split("\n")[0] || "pi did not load", "run `pi` and read the startup errors");
+  else pi = result2("pi", "ok", `pi ${version2.stdout.trim().split("\n")[0]}`);
   const github = parseAuthStatus(`${gh.stdout}
 ${gh.stderr}`);
-  const ghCheck = !ctx.which("gh") ? result("gh", "warn", "not on PATH", installHint(ctx.platform, "gh")) : !github.host ? result("gh", "warn", "not logged in", "gh auth login") : result("gh", "ok", `${github.login}@${github.host}`);
+  const ghCheck = !ctx.which("gh") ? result2("gh", "warn", "not on PATH", installHint(ctx.platform, "gh")) : !github.host ? result2("gh", "warn", "not logged in", "gh auth login") : result2("gh", "ok", `${github.login}@${github.host}`);
   return {
     facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i2) => [id, providers2[i2]])), catalog: models2.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : void 0, checkoutClean: checkout.code === 0 && !checkout.timedOut ? !checkout.stdout.trim() : void 0, github: { ...github, orgs: [] }, summary: false },
-    checks: [pi, ghCheck, ...disks, ...launchd.length ? launchd : [result("launchd", "skip", "no managed launch agents")], docker ? result("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result("docker", "skip", "no docker guardian"), updates]
+    checks: [pi, ghCheck, ...disks, ...launchd.length ? launchd : [result2("launchd", "skip", "no managed launch agents")], docker ? result2("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result2("docker", "skip", "no docker guardian"), updates]
   };
 }
-var result, skippedRun;
+var result2, skippedRun;
 var init_doctor_probes = __esm({
   "src/doctor-probes.ts"() {
     init_detect();
     init_doctor_checks();
     init_update();
     init_types();
-    result = (id, status2, detail, fix) => ({ id, title: id, status: status2, detail, ...fix ? { fix } : {} });
+    result2 = (id, status2, detail, fix) => ({ id, title: id, status: status2, detail, ...fix ? { fix } : {} });
     skippedRun = { code: null, stdout: "", stderr: "", timedOut: false };
   }
 });
@@ -6904,9 +6926,9 @@ async function askLogin(p, input) {
   if (input.options.user) return void 0;
   const known = savedString(input.saved, "githubUser") || input.detection.github.login || "";
   if (known) {
-    const keep = await p.confirm({ message: `Use GitHub login ${known}?`, initial: true });
-    if (p.isCancel(keep)) return CANCEL;
-    if (keep === true) return known;
+    const keep2 = await p.confirm({ message: `Use GitHub login ${known}?`, initial: true });
+    if (p.isCancel(keep2)) return CANCEL;
+    if (keep2 === true) return known;
   }
   const typed = await p.text({
     message: "GitHub login",
@@ -7922,7 +7944,7 @@ function formatInstructionFooter(o, e) {
   const r2 = [`${e ? `${styleText2("cyan", S_BAR)}  ` : ""}${o.join(" \u2022 ")}`];
   return e && r2.push(styleText2("cyan", S_BAR_END)), r2;
 }
-var import_sisteransi2, unicode, isCI, unicodeOr, S_STEP_ACTIVE, S_STEP_CANCEL, S_STEP_ERROR, S_STEP_SUBMIT, S_BAR_START, S_BAR, S_BAR_END, S_BAR_START_RIGHT, S_BAR_END_RIGHT, S_RADIO_ACTIVE, S_RADIO_INACTIVE, S_CHECKBOX_ACTIVE, S_CHECKBOX_SELECTED, S_CHECKBOX_INACTIVE, S_PASSWORD_MASK, S_BAR_H, S_CORNER_TOP_RIGHT, S_CONNECT_LEFT, S_CORNER_BOTTOM_RIGHT, S_CORNER_BOTTOM_LEFT, S_CORNER_TOP_LEFT, S_INFO, S_SUCCESS, S_WARN, S_ERROR, symbol2, symbolBar, I, limitOptions, confirm, MULTISELECT_INSTRUCTIONS, m, multiselect, intro, outro, W$1, C, note, W, spinner, u2, SELECT_INSTRUCTIONS, c, select, i, text2;
+var import_sisteransi2, unicode, isCI, unicodeOr, S_STEP_ACTIVE, S_STEP_CANCEL, S_STEP_ERROR, S_STEP_SUBMIT, S_BAR_START, S_BAR, S_BAR_END, S_BAR_START_RIGHT, S_BAR_END_RIGHT, S_RADIO_ACTIVE, S_RADIO_INACTIVE, S_CHECKBOX_ACTIVE, S_CHECKBOX_SELECTED, S_CHECKBOX_INACTIVE, S_PASSWORD_MASK, S_BAR_H, S_CORNER_TOP_RIGHT, S_CONNECT_LEFT, S_CORNER_BOTTOM_RIGHT, S_CORNER_BOTTOM_LEFT, S_CORNER_TOP_LEFT, S_INFO, S_SUCCESS, S_WARN, S_ERROR, symbol2, symbolBar, I, limitOptions, confirm, MULTISELECT_INSTRUCTIONS, m, multiselect, intro, outro, W$1, C, note, W, spinner, u2, SELECT_INSTRUCTIONS, c, select, i, text3;
 var init_dist4 = __esm({
   "node_modules/@clack/prompts/dist/index.mjs"() {
     init_dist3();
@@ -8414,7 +8436,7 @@ ${f}
       }).prompt();
     };
     i = `${styleText2("gray", S_BAR)}  `;
-    text2 = (t2) => new n2({
+    text3 = (t2) => new n2({
       validate: t2.validate,
       placeholder: t2.placeholder,
       defaultValue: t2.defaultValue,
@@ -8486,7 +8508,7 @@ function clackPrompter() {
         initialValue: o.initial
       })
     ),
-    text: async (o) => wrap(await text2({ message: o.message, initialValue: o.initial, validate: o.validate })),
+    text: async (o) => wrap(await text3({ message: o.message, initialValue: o.initial, validate: o.validate })),
     multiselect: async (o) => wrap(
       await multiselect({
         message: o.message,
@@ -8692,7 +8714,7 @@ async function execute(ctx, options, prompter, baseCtx) {
     const profiles = loadProfiles(ctx.repoDir);
     const activeBefore = readActive(piDir);
     const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, names);
-    const result3 = await collectChoices(prompter, {
+    const result4 = await collectChoices(prompter, {
       options,
       saved,
       detection,
@@ -8703,8 +8725,8 @@ async function execute(ctx, options, prompter, baseCtx) {
       extras: extraRows(ctx, options, saved, detection, manifest),
       preapproveMcp: savedPreapproval(ctx)
     });
-    if (result3 === CANCEL) return cancelled(ctx);
-    answers = result3;
+    if (result4 === CANCEL) return cancelled(ctx);
+    answers = result4;
   }
   const r2 = resolveAll(ctx, options, detection, saved, answers, manifest);
   if (prompter && r2.conflicts.length) {
@@ -8733,11 +8755,11 @@ async function execute(ctx, options, prompter, baseCtx) {
   };
   const off = COMPONENTS.map((c2) => c2.id).filter((id) => !r2.components[id].on && wasOn(manifest, currentState(ctx), id));
   const live = await retire(ctx, piDir, manifest, off, options.dryRun);
-  const result2 = await apply(ctx, r2.actions, applyOptions, live);
-  if (result2.code === 0) await syncServices(ctx, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);
+  const result3 = await apply(ctx, r2.actions, applyOptions, live);
+  if (result3.code === 0) await syncServices(ctx, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);
   const shown = prompter || options.json ? [] : summary2.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:") || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no") || r2.componentNotes.includes(l2));
-  if (result2.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
-  if (prompter && result2.code === 0 && !options.dryRun && !options.plan && r2.components.lanes.on && !existsSync35(join54(r2.settings.reposRoot, ".lanes/lanes.json"))) {
+  if (result3.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
+  if (prompter && result3.code === 0 && !options.dryRun && !options.plan && r2.components.lanes.on && !existsSync35(join54(r2.settings.reposRoot, ".lanes/lanes.json"))) {
     const answer = await prompter.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
     if (!prompter.isCancel(answer) && answer === true) {
       try {
@@ -8747,7 +8769,7 @@ async function execute(ctx, options, prompter, baseCtx) {
       }
     }
   }
-  return finish(ctx, baseCtx, options, r2, detection, shown, result2.code, prompter, result2.wrote);
+  return finish(ctx, baseCtx, options, r2, detection, shown, result3.code, prompter, result3.wrote);
 }
 function cancelled(ctx) {
   ctx.err("Cancelled; nothing written.");

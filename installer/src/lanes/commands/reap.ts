@@ -36,11 +36,15 @@ async function planRow(env: EvidenceContext, opts: Record<string, string>): Prom
   catch (e) { row.verdict = "ask"; row.reason = (e as Error).message; row.failed = true; }
   return row;
 }
+function noteText(notes: string[] | undefined): string {
+  return notes?.length ? ` [notes: ${notes.join("; ")}]` : "";
+}
 function display(rows: Row[], json: boolean, ctx: LanesCtx): void {
   if (json) { ctx.out(JSON.stringify(rows)); return; }
   ctx.out("LANE\tVERDICT\tREASON");
   for (const row of rows) {
-    ctx.out(`${row.id}\t${row.verdict}${row.ground ? ` (${row.ground})` : ""}\t${row.reason}`);
+    const notes = noteText(row.notes);
+    ctx.out(`${row.id}\t${row.verdict}${row.ground ? ` (${row.ground})` : ""}\t${row.reason}${notes}`);
   }
 }
 export async function reap(args: string[], opts: Record<string, string>, env: CommandEnv): Promise<number> {

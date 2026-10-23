@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: de19de5beea4720009b1f4ef976bad1c5f4b3196cc5439538fad5fae1a3d1965
+// pi-setup-source-sha256: 4e53d9f4140b2a3bd44e8939847e0082dd60d620ff532f23c629d7a7570a6c92
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -75,9 +75,9 @@ function realLanesCtx() {
     err: (s) => console.error(s),
     stdinTTY: Boolean(process.stdin.isTTY),
     readStdin: async () => {
-      let text = "";
-      for await (const chunk2 of process.stdin) text += chunk2;
-      return text;
+      let text2 = "";
+      for await (const chunk2 of process.stdin) text2 += chunk2;
+      return text2;
     },
     templatesDir: [process.env.LANES_TEMPLATES, join2(dir, "templates"), join2(dir, "../lanes/templates")].find((p) => p && existsSync(p)) || join2(dir, "templates"),
     piAgentDir: process.env.PI_CODING_AGENT_DIR || join2(home, ".pi/agent"),
@@ -168,14 +168,14 @@ function defaults(root, home, reposRoot) {
 }
 function preapprovalDefault(templatesDir) {
   const path = join4(dirname2(templatesDir), "defaults.json");
-  let text;
+  let text2;
   try {
-    text = readFileSync(path, "utf8");
+    text2 = readFileSync(path, "utf8");
   } catch {
     return false;
   }
   try {
-    const value = JSON.parse(text);
+    const value = JSON.parse(text2);
     if (typeof value?.launch?.preapproveMcp !== "boolean") throw new Error("invalid launch.preapproveMcp");
     return value.launch.preapproveMcp;
   } catch (e) {
@@ -187,37 +187,37 @@ function validate(value, root = process.cwd(), home = homedir2()) {
   const require2 = (ok, key) => {
     if (!ok) throw new UsageError(`invalid ${key}`);
   };
-  const text = (v) => typeof v === "string" && v.length > 0;
+  const text2 = (v) => typeof v === "string" && v.length > 0;
   require2(c && typeof c === "object", "config");
   require2(c.version === 1, "version (expected 1)");
-  for (const key of ["reposRoot", "worktreesDir", "baseBranch"]) require2(text(c[key]), key);
-  require2(c.repos && typeof c.repos === "object" && !Array.isArray(c.repos) && Object.values(c.repos).every(text), "repos");
-  require2(c.messages && text(c.messages.dir), "messages.dir");
+  for (const key of ["reposRoot", "worktreesDir", "baseBranch"]) require2(text2(c[key]), key);
+  require2(c.repos && typeof c.repos === "object" && !Array.isArray(c.repos) && Object.values(c.repos).every(text2), "repos");
+  require2(c.messages && text2(c.messages.dir), "messages.dir");
   require2(c.messages && typeof c.messages.broadcast === "string" && validId(c.messages.broadcast), "messages.broadcast");
   if (c.messages.retention !== void 0) {
     const r = c.messages.retention;
     require2(r && typeof r === "object" && !Array.isArray(r), "messages.retention");
     require2(["keep", "archive", "delete"].includes(r.mode), "messages.retention.mode");
     require2(Number.isInteger(r.maxAgeDays) && r.maxAgeDays >= 1, "messages.retention.maxAgeDays");
-    require2(r.archiveDir === void 0 || text(r.archiveDir), "messages.retention.archiveDir");
+    require2(r.archiveDir === void 0 || text2(r.archiveDir), "messages.retention.archiveDir");
     require2(r.archiveMaxAgeDays === null || Number.isInteger(r.archiveMaxAgeDays) && r.archiveMaxAgeDays >= 1, "messages.retention.archiveMaxAgeDays");
     require2(typeof r.keepUnread === "boolean", "messages.retention.keepUnread");
     require2(typeof r.auto === "boolean", "messages.retention.auto");
     archiveDir(c, root, home);
   }
   require2(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !["ALL", c.messages.broadcast].includes(c.coordinator.id), "coordinator.id");
-  require2(text(c.coordinator.cwd), "coordinator.cwd");
-  require2(text(c.coordinator.prompt), "coordinator.prompt");
+  require2(text2(c.coordinator.cwd), "coordinator.cwd");
+  require2(text2(c.coordinator.prompt), "coordinator.prompt");
   require2(Number.isInteger(c.coordinator.maxRunning) && c.coordinator.maxRunning > 0, "coordinator.maxRunning");
   require2(c.terminal && BACKENDS.includes(c.terminal.backend), "terminal.backend");
-  require2(c.launch && text(c.launch.wrapper), "launch.wrapper");
+  require2(c.launch && text2(c.launch.wrapper), "launch.wrapper");
   require2(typeof c.launch.preapproveMcp === "boolean", "launch.preapproveMcp");
   require2(Array.isArray(c.launch.unsetEnv) && c.launch.unsetEnv.every((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s)), "launch.unsetEnv");
   if (c.idle !== void 0) require2(c.idle && Number.isInteger(c.idle.minutes) && c.idle.minutes > 0, "idle.minutes");
   if (c.github !== void 0) {
     require2(c.github && Array.isArray(c.github.repos) && c.github.repos.every((r) => typeof r === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(r)), "github.repos");
     require2(typeof c.github.author === "string" && /^@?[A-Za-z0-9-]+$/.test(c.github.author), "github.author");
-    require2(Array.isArray(c.github.excludeLabels) && c.github.excludeLabels.every(text), "github.excludeLabels");
+    require2(Array.isArray(c.github.excludeLabels) && c.github.excludeLabels.every(text2), "github.excludeLabels");
   }
   require2(Array.isArray(c.lanes), "lanes");
   const ids = /* @__PURE__ */ new Set([c.coordinator.id, "ALL", c.messages.broadcast]);
@@ -226,12 +226,12 @@ function validate(value, root = process.cwd(), home = homedir2()) {
     require2(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id), `${key}.id`);
     ids.add(lane.id);
     require2(absentCwdIdentity(lane, lane.repo) || typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo), `${key}.repo`);
-    require2(absentCwdIdentity(lane, lane.branch) || text(lane.branch), `${key}.branch`);
-    require2(text(lane.prompt), `${key}.prompt`);
-    require2(text(lane.worktree) && !/[\\/]/.test(lane.worktree) && ![".", ".."].includes(lane.worktree), `${key}.worktree`);
+    require2(absentCwdIdentity(lane, lane.branch) || text2(lane.branch), `${key}.branch`);
+    require2(text2(lane.prompt), `${key}.prompt`);
+    require2(text2(lane.worktree) && !/[\\/]/.test(lane.worktree) && ![".", ".."].includes(lane.worktree), `${key}.worktree`);
     require2(lane.group === null || typeof lane.group === "string" && validId(lane.group) && !["ALL", c.messages.broadcast].includes(lane.group), `${key}.group`);
     require2(lane.issue === void 0 || Number.isInteger(lane.issue) && lane.issue > 0, `${key}.issue`);
-    require2(lane.goal === void 0 || text(lane.goal), `${key}.goal`);
+    require2(lane.goal === void 0 || text2(lane.goal), `${key}.goal`);
     validateHierarchyFields(lane, c, key);
   }
   validateHierarchy(c, root, home);
@@ -456,8 +456,8 @@ function treeDigest(input) {
   for (const path of input.paths) hash.update(JSON.stringify(path)).update(contents(below(input.cwd, path)));
   return hash.digest("hex");
 }
-function commitList(text) {
-  const commits = text.trim().split(/\s+/).filter(Boolean);
+function commitList(text2) {
+  const commits = text2.trim().split(/\s+/).filter(Boolean);
   if (!commits.every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) throw new Error("unpushed commits unknown");
   return commits;
 }
@@ -518,9 +518,9 @@ import { readFileSync as readFileSync4 } from "node:fs";
 import { join as join6, normalize } from "node:path";
 
 // src/lanes/reap/foreground.ts
-function processTable(text) {
+function processTable(text2) {
   const rows = [];
-  for (const line of text.split("\n").filter((l) => l.trim())) {
+  for (const line of text2.split("\n").filter((l) => l.trim())) {
     const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
     if (!match) return void 0;
     rows.push({ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), command: match[4] });
@@ -537,8 +537,8 @@ function ancestors(pid, table) {
   }
   return family;
 }
-function expectedForeground(pid, pgid, text) {
-  const rows = processTable(text);
+function expectedForeground(pid, pgid, text2) {
+  const rows = processTable(text2);
   if (!rows) return false;
   const table = new Map(rows.map((row) => [row.pid, row]));
   const pi = table.get(pid);
@@ -552,8 +552,8 @@ function expectedForeground(pid, pgid, text) {
 function absolute(ctx, path) {
   return normalize(ctx.realpath(path));
 }
-function requireProbe(result, message) {
-  if (result.code !== 0 || result.timedOut) throw new Error(message);
+function requireProbe(result2, message) {
+  if (result2.code !== 0 || result2.timedOut) throw new Error(message);
 }
 async function processCwd(ctx, pid) {
   if (ctx.readCwd) return canonicalCwd(ctx, await ctx.readCwd(pid));
@@ -660,37 +660,53 @@ async function scanSession(path, consume, limits = { bytes: 256 * 1024 * 1024, m
 }
 
 // src/lanes/reap/subagent-completions.ts
-function subagentKeys(record2) {
-  const fields = { sessionId: "session", sessionFile: "file", agentId: "agent", id: "agent" };
-  return Object.entries(fields).flatMap(([field2, kind]) => typeof record2[field2] === "string" && record2[field2] ? [`${kind}:${record2[field2]}`] : []);
+function text(content) {
+  if (typeof content === "string") return content;
+  return Array.isArray(content) ? content.filter((part) => part.type === "text").map((part) => part.text).join("\n") : "";
 }
-function completed(status2) {
-  return typeof status2 === "string" && /^(done|completed)$/i.test(status2.trim());
+function agentId(message) {
+  const id = message.details?.agentId ?? message.details?.id;
+  if (typeof id === "string" && id) return id;
+  return /\bAgent ID:\s*(\S+)/.exec(text(message.content))?.[1];
 }
-function structured(out, record2) {
-  if (record2 && completed(record2.status)) for (const key of subagentKeys(record2)) out.add(key);
+function agentCall(part) {
+  return part.type === "toolCall" && part.name === "Agent" && typeof part.id === "string";
+}
+function launch(work, part) {
+  if (agentCall(part)) work.launches.set(part.id, void 0);
+}
+function calls(work, message) {
+  if (message.role === "toolCall") launch(work, { ...message, type: "toolCall" });
+  if (message.role !== "assistant" || !Array.isArray(message.content)) return;
+  for (const part of message.content) launch(work, part);
+}
+function agentResult(message) {
+  return message.role === "toolResult" && message.toolName === "Agent";
+}
+function result(work, message) {
+  if (!agentResult(message) || !work.launches.has(message.toolCallId)) return;
+  if (message.isError) work.launches.delete(message.toolCallId);
+  else work.launches.set(message.toolCallId, agentId(message));
+}
+function terminal(status2) {
+  return typeof status2 === "string" && /^(done|completed|failed|error|aborted|stopped|wrapped up)\b/i.test(status2.trim());
+}
+function completion(work, record2) {
+  if (!record2 || !terminal(record2.status)) return;
+  const id = record2.agentId ?? record2.id;
+  if (typeof id === "string" && id) work.completed.add(id);
 }
 var decode = (value) => value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
 function notificationRecord(block) {
-  const record2 = { status: /<status>([^<]+)<\/status>/.exec(block)?.[1] };
-  for (const [tag, field2] of Object.entries({ "task-id": "id", "agent-id": "agentId", "session-id": "sessionId", "session-file": "sessionFile" })) {
-    const value = new RegExp(`<${tag}>([^<]+)</${tag}>`).exec(block)?.[1];
-    if (value) record2[field2] = decode(value);
-  }
-  return record2;
+  const id = /<(?:task-id|agent-id)>([^<]+)<\/(?:task-id|agent-id)>/.exec(block)?.[1];
+  return { id: id && decode(id), status: /<status>([^<]+)<\/status>/.exec(block)?.[1] };
 }
-function notifications(out, content) {
-  const text = typeof content === "string" ? content : "";
-  for (const block of text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) structured(out, notificationRecord(block[1]));
-}
-function foldSubagentCompletions(out, message) {
-  if (message.customType === "subagent-notification") {
-    structured(out, message.details);
-    notifications(out, message.content);
-  }
-  if (message.role === "toolResult" && /^(subagent|get_subagent_result|wait_subagent)$/.test(message.toolName ?? "")) {
-    structured(out, message.details);
-  }
+function foldSubagentWork(work, message) {
+  calls(work, message);
+  result(work, message);
+  if (message.customType !== "subagent-notification") return;
+  completion(work, message.details);
+  for (const block of text(message.content).matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) completion(work, notificationRecord(block[1]));
 }
 
 // src/lanes/reap/session-work.ts
@@ -705,7 +721,7 @@ function foldJobs(jobs, message) {
 }
 function completions(jobs, message) {
   if (message.customType !== "pi-jobs") return;
-  for (const completion of message.details?.completions ?? []) record(jobs, completion?.job);
+  for (const completion2 of message.details?.completions ?? []) record(jobs, completion2?.job);
 }
 function watch(command, s) {
   if (typeof command !== "string") return;
@@ -758,7 +774,7 @@ function runningJob(job, s, ctx) {
 async function sessionWork(s, ctx) {
   const jobs = /* @__PURE__ */ new Map();
   const pending = /* @__PURE__ */ new Map();
-  const completedSubagents = /* @__PURE__ */ new Set();
+  const agents = { launches: /* @__PURE__ */ new Map(), completed: /* @__PURE__ */ new Set() };
   try {
     await scanSession(s.sessionFile, (line) => {
       const entry2 = JSON.parse(line);
@@ -767,13 +783,13 @@ async function sessionWork(s, ctx) {
       completions(jobs, message);
       toolCalls(pending, message, s);
       toolResult(pending, message, s);
-      foldSubagentCompletions(completedSubagents, message);
+      foldSubagentWork(agents, message);
     });
   } catch (error) {
     s.asks.push(error.message === "session scan incomplete" ? "session scan incomplete" : "session work history malformed");
     return;
   }
-  s.completedSubagents = [...completedSubagents];
+  if ([...agents.launches.values()].some((id) => id === void 0 || !agents.completed.has(id))) s.asks.push("subagent launched without completion");
   for (const tool of pending.values()) s.keeps.push(`${tool} tool call pending`);
   for (const job of jobs.values()) runningJob(job, s, ctx);
 }
@@ -883,7 +899,7 @@ function suppressed(line, now) {
   const status2 = parseStatus(line);
   return (status2.kind === "waiting-on" || status2.kind === "barred-by") && (status2.until ?? 0) > now.getTime();
 }
-var clean = (text) => text.replace(/"/g, "'").replace(/\s+/g, " ").trim();
+var clean = (text2) => text2.replace(/"/g, "'").replace(/\s+/g, " ").trim();
 function closedLine(to, reason, now) {
   return `closed${to ? ` reassigned-to ${to}` : ""} at ${now.toISOString()}${reason ? ` reason "${clean(reason)}"` : ""}`;
 }
@@ -957,19 +973,14 @@ function owned(status2, s) {
   if (status2.primarySessionId !== void 0) return status2.primarySessionId === s.sessionId;
   return s.pid !== void 0 && status2.pid === s.pid;
 }
-function evidence(status2, completed2, now) {
-  if (status2.state === "ended") return "history";
+function fresh(status2, now) {
+  if (status2.state === "ended") return false;
   const age = typeof status2.at === "string" ? now - Date.parse(status2.at) : NaN;
-  if (!Number.isFinite(age) || age < 0) return "unknown";
-  if (age <= 6e5) return "running";
-  return subagentKeys(status2).some((key) => completed2.has(key)) ? "history" : "unknown";
+  return Number.isFinite(age) && age >= 0 && age <= 6e5;
 }
 function subagents(s, ctx) {
-  const statuses = jsonFiles(join9(ctx.piAgentDir, "context-budget/status")).filter((status2) => owned(status2, s));
-  const completed2 = new Set(s.completedSubagents);
-  const states = new Set(statuses.map((status2) => evidence(status2, completed2, ctx.now().getTime())));
-  if (states.has("running")) s.keeps.push("subagent running");
-  if (states.has("unknown")) s.asks.push("subagent state unknown");
+  const statuses = jsonFiles(join9(ctx.piAgentDir, "context-budget/status"));
+  if (statuses.some((status2) => owned(status2, s) && fresh(status2, ctx.now().getTime()))) s.keeps.push("subagent running");
 }
 
 // src/lanes/reap/local-claims.ts
@@ -997,40 +1008,40 @@ function statusFiles(base) {
   }
   return files;
 }
-function field(text, name) {
-  return new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.+)$`, "mi").exec(text)?.[1].trim().replace(/^`|`$/g, "");
+function field(text2, name) {
+  return new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.+)$`, "mi").exec(text2)?.[1].trim().replace(/^`|`$/g, "");
 }
-function exactOwner(text, s, lane) {
-  if (field(text, "Session") === s.sessionId || field(text, "SessionId") === s.sessionId) return true;
-  if ([field(text, "Cwd"), field(text, "Worktree")].includes(s.cwd)) return true;
-  const repo = field(text, "Repo");
+function exactOwner(text2, s, lane) {
+  if (field(text2, "Session") === s.sessionId || field(text2, "SessionId") === s.sessionId) return true;
+  if ([field(text2, "Cwd"), field(text2, "Worktree")].includes(s.cwd)) return true;
+  const repo = field(text2, "Repo");
   if (repo && repo.toLowerCase() !== lane.repo?.toLowerCase()) return false;
-  return Boolean(lane.branch && field(text, "Branch") === lane.branch);
+  return Boolean(lane.branch && field(text2, "Branch") === lane.branch);
 }
-function issueOwner(text, path, lane, base) {
+function issueOwner(text2, path, lane, base) {
   if (!lane.repo || !lane.issue) return false;
-  const issue = field(text, "Issue");
+  const issue = field(text2, "Issue");
   const ref = `${lane.repo}#${lane.issue}`.toLowerCase();
   if (issue?.toLowerCase() === ref) return true;
-  if (field(text, "Repo")?.toLowerCase() === lane.repo.toLowerCase() && issue === `#${lane.issue}`) return true;
+  if (field(text2, "Repo")?.toLowerCase() === lane.repo.toLowerCase() && issue === `#${lane.issue}`) return true;
   return relative3(base, path).toLowerCase() === `${lane.repo}/${lane.issue}/status.md`.toLowerCase();
 }
 function localClaims(s, env) {
   const bases = [.../* @__PURE__ */ new Set([env.root, s.cwd])].map((root) => join10(root, ".ai-work/issue-work"));
   for (const base of bases) for (const path of statusFiles(base)) {
-    const text = optionalText(path);
-    if (field(text, "State")?.toLowerCase() !== "in-progress") continue;
-    if (exactOwner(text, s, env.lane) || issueOwner(text, path, env.lane, base)) s.keeps.push("in-progress local claim");
-    else if (!field(text, "Repo") || field(text, "Repo")?.toLowerCase() === env.lane.repo?.toLowerCase()) {
+    const text2 = optionalText(path);
+    if (field(text2, "State")?.toLowerCase() !== "in-progress") continue;
+    if (exactOwner(text2, s, env.lane) || issueOwner(text2, path, env.lane, base)) s.keeps.push("in-progress local claim");
+    else if (!field(text2, "Repo") || field(text2, "Repo")?.toLowerCase() === env.lane.repo?.toLowerCase()) {
       s.asks.push("local claim ownership unknown");
     }
   }
 }
 
 // src/lanes/reap/ownership.ts
-function registry(text) {
+function registry(text2) {
   const folded = /* @__PURE__ */ new Map();
-  for (const line of text.split("\n").filter((l) => l.trim())) {
+  for (const line of text2.split("\n").filter((l) => l.trim())) {
     let ev;
     try {
       ev = JSON.parse(line);
@@ -1074,8 +1085,8 @@ function claimMapsToLane(claim, s, lane) {
   return claim.sessionId === s.sessionId || claim.cwd === s.cwd || claim.worktree === s.cwd || Boolean(claim.branch && claim.branch === lane.branch);
 }
 async function claimsAndOwnership(s, env) {
-  const text = optionalText(join11(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
-  const claims = registry(text || "").filter((claim) => claimMapsToLane(claim, s, env.lane));
+  const text2 = optionalText(join11(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
+  const claims = registry(text2 || "").filter((claim) => claimMapsToLane(claim, s, env.lane));
   for (const claim of claims) classifyClaim(claim, s);
   localClaims(s, env);
   namedNotes(s, env);
@@ -1092,9 +1103,9 @@ function activeUnnoted(claim) {
 
 // src/lanes/reap/signals.ts
 function snooze(s, env) {
-  const text = optionalText(join12(env.root, ".state/snooze", s.id));
-  if (text === void 0) return;
-  const until2 = Date.parse(text.trim());
+  const text2 = optionalText(join12(env.root, ".state/snooze", s.id));
+  if (text2 === void 0) return;
+  const until2 = Date.parse(text2.trim());
   if (!Number.isFinite(until2)) throw new Error("cannot read snooze");
   if (until2 > env.ctx.now().getTime()) s.keeps.push("snoozed");
 }
@@ -1268,9 +1279,9 @@ function packPath(env) {
   return join14(env.root, ".state/handoffs", env.lane.id);
 }
 function readPack(env) {
-  const text = optionalText(join14(packPath(env), "handoff.json"));
-  if (text === void 0) return void 0;
-  const value = JSON.parse(text);
+  const text2 = optionalText(join14(packPath(env), "handoff.json"));
+  if (text2 === void 0) return void 0;
+  const value = JSON.parse(text2);
   if (!validPack(value, env.lane.id)) throw new Error("invalid handoff pack");
   return value;
 }
@@ -1425,18 +1436,18 @@ function mapped(claim, signals, env) {
   });
 }
 function summary(signals, env) {
-  const result = [];
+  const result2 = [];
   const dir = expand(env.c.messages.dir, env.c, env.root, env.ctx.home);
   const names = existsSync4(dir) ? readdirSync6(dir).filter((name) => name.endsWith(".md") && !parseMessageName(name)) : [];
-  if (names.length) result.push({ label: "Unparseable messages", names });
-  const text = optionalText(join16(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
+  if (names.length) result2.push({ label: "Unparseable messages", names });
+  const text2 = optionalText(join16(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
   try {
-    const foreign = registry(text ?? "").filter((claim) => !mapped(claim, signals, env));
-    if (foreign.length) result.push({ label: "Foreign claims", names: foreign.map((claim) => `${claim.repo}#${claim.issue}`) });
+    const foreign = registry(text2 ?? "").filter((claim) => !mapped(claim, signals, env));
+    if (foreign.length) result2.push({ label: "Foreign claims", names: foreign.map((claim) => `${claim.repo}#${claim.issue}`) });
   } catch {
-    result.push({ label: "Claim summary unavailable", names: ["cannot read issue-work registry"] });
+    result2.push({ label: "Claim summary unavailable", names: ["cannot read issue-work registry"] });
   }
-  return result;
+  return result2;
 }
 
 // src/lanes/reap/own-context.ts
@@ -1488,9 +1499,9 @@ end tell`];
       }
       args.push(`sh -c ${shellQuote(command)}`);
     }
-    const result = await ctx.run(cmd, args, { timeoutMs: 3e4 });
-    if (result.code !== 0) {
-      ctx.err(`${cmd} failed: ${result.stderr.trim()}`);
+    const result2 = await ctx.run(cmd, args, { timeoutMs: 3e4 });
+    if (result2.code !== 0) {
+      ctx.err(`${cmd} failed: ${result2.stderr.trim()}`);
       ctx.out(command);
       return 1;
     }
@@ -1498,7 +1509,7 @@ end tell`];
     return 0;
   } };
 }
-async function nudgeTerminal(name, ctx, { tty, text }, beforeSend) {
+async function nudgeTerminal(name, ctx, { tty, text: text2 }, beforeSend) {
   if (!/^[A-Za-z0-9/]+$/.test(tty)) throw new UsageError("invalid tty");
   if (name === "print") return "not-found";
   if (name === "tmux") {
@@ -1507,12 +1518,12 @@ async function nudgeTerminal(name, ctx, { tty, text }, beforeSend) {
     const pane = panes.stdout.split("\n").map((s) => s.trim().split(/\s+/)).find(([t]) => t === `/dev/${tty}`)?.[1];
     if (!pane) return "not-found";
     await guardQuit(beforeSend);
-    for (const args of [["send-keys", "-t", pane, "-l", "--", text], ["send-keys", "-t", pane, "Enter"]]) {
+    for (const args of [["send-keys", "-t", pane, "-l", "--", text2], ["send-keys", "-t", pane, "Enter"]]) {
       if ((await ctx.run("tmux", args, { timeoutMs: 1e4 })).code !== 0) throw new Error("tmux send-keys failed");
     }
     return "sent";
   }
-  const escaped = appleScriptString(text);
+  const escaped = appleScriptString(text2);
   const script = name === "terminal-app" ? `tell application "Terminal"
 repeat with w in windows
 repeat with t in tabs of w
@@ -1537,9 +1548,9 @@ end repeat
 return "not-found"
 end tell`;
   await guardQuit(beforeSend);
-  const result = await ctx.run("osascript", ["-e", script], { timeoutMs: 1e4 });
-  if (result.code !== 0) throw new Error(`osascript failed: ${result.stderr.trim()}`);
-  return result.stdout.trim() === "sent" ? "sent" : "not-found";
+  const result2 = await ctx.run("osascript", ["-e", script], { timeoutMs: 1e4 });
+  if (result2.code !== 0) throw new Error(`osascript failed: ${result2.stderr.trim()}`);
+  return result2.stdout.trim() === "sent" ? "sent" : "not-found";
 }
 async function guardQuit(guard) {
   if (guard) await guard();
@@ -1563,15 +1574,15 @@ var HEADINGS = [
   "Open items",
   "Launch prompt"
 ];
-function sections(text) {
-  const matches = [...text.matchAll(/^##\s+([^\r\n]+)\r?$/gm)];
-  const result = /* @__PURE__ */ new Map();
+function sections(text2) {
+  const matches = [...text2.matchAll(/^##\s+([^\r\n]+)\r?$/gm)];
+  const result2 = /* @__PURE__ */ new Map();
   for (let i = 0; i < matches.length; i++) {
     const match = matches[i];
-    const end = matches[i + 1]?.index ?? text.length;
-    result.set(match[1].trim().toLowerCase(), text.slice(match.index + match[0].length, end).trim());
+    const end = matches[i + 1]?.index ?? text2.length;
+    result2.set(match[1].trim().toLowerCase(), text2.slice(match.index + match[0].length, end).trim());
   }
-  return result;
+  return result2;
 }
 function snapshotSection(section) {
   const json = section?.match(/^```json\s*\n([\s\S]*?)\n```\s*$/)?.[1];
@@ -1594,16 +1605,16 @@ function validSnapshot(s) {
 function readContext(path) {
   const stat2 = lstatSync2(path);
   if (!stat2.isFile()) throw new Error("lane handoff must be a regular file");
-  const text = readFileSync8(path, "utf8");
-  const parts = sections(text);
+  const text2 = readFileSync8(path, "utf8");
+  const parts = sections(text2);
   for (const heading of HEADINGS) {
     if (!parts.get(heading.toLowerCase())) throw new Error(`lane handoff missing ${heading}`);
   }
   return {
-    text,
+    text: text2,
     snapshot: snapshotSection(parts.get("snapshot")),
     mtime: stat2.mtimeMs,
-    digest: createHash3("sha256").update(text).digest("hex")
+    digest: createHash3("sha256").update(text2).digest("hex")
   };
 }
 function expectedSnapshot(env, s) {
@@ -1649,9 +1660,9 @@ function version(s) {
   return createHash4("sha256").update(JSON.stringify(state)).digest("hex");
 }
 function cached(env, s) {
-  const text = optionalText(receiptPath(env));
-  if (text === void 0) return false;
-  const receipt = JSON.parse(text);
+  const text2 = optionalText(receiptPath(env));
+  if (text2 === void 0) return false;
+  const receipt = JSON.parse(text2);
   if (receipt.version !== version(s)) return false;
   const file = readContext(contextPath(env));
   validateContext(file, expectedSnapshot(env, s));
@@ -1662,12 +1673,12 @@ async function request(env, s) {
   if (!s.tty) throw new Error("lane handoff TTY unknown");
   const backend = terminalBackend(detectBackend("auto", env.ctx));
   let at = env.ctx.now().getTime();
-  const text = `Write your own context handoff to ${contextPath(env)}. Use nonempty ## sections: ${HEADINGS.join(", ")}. Preserve user constraints verbatim. Add ## Snapshot with a fenced json object matching ${JSON.stringify(expectedSnapshot(env, s))}. Account for every dirty path, outstanding acknowledgement, candidate and CI run. Do not quit.`;
-  const result = await backend.nudge(env.ctx, { tty: s.tty, text }, async () => {
+  const text2 = `Write your own context handoff to ${contextPath(env)}. Use nonempty ## sections: ${HEADINGS.join(", ")}. Preserve user constraints verbatim. Add ## Snapshot with a fenced json object matching ${JSON.stringify(expectedSnapshot(env, s))}. Account for every dirty path, outstanding acknowledgement, candidate and CI run. Do not quit.`;
+  const result2 = await backend.nudge(env.ctx, { tty: s.tty, text: text2 }, async () => {
     await unchanged(env, s);
     at = env.ctx.now().getTime();
   });
-  if (result !== "sent") throw new Error("could not request lane's own handoff through its terminal");
+  if (result2 !== "sent") throw new Error("could not request lane's own handoff through its terminal");
   return at;
 }
 async function unchanged(env, s) {
@@ -1713,10 +1724,10 @@ function ready(s, env) {
 }
 async function revalidate(env, s, to) {
   await recipient(env, to);
-  const fresh = await collect(env);
-  if (fresh.asks.length || fresh.keeps.length) throw new Error("quit refused: safety evidence changed");
-  if (fingerprint(fresh) !== fingerprint(s)) throw new Error("quit refused: safety evidence changed");
-  verifyOwnContext(env, fresh);
+  const fresh2 = await collect(env);
+  if (fresh2.asks.length || fresh2.keeps.length) throw new Error("quit refused: safety evidence changed");
+  if (fingerprint(fresh2) !== fingerprint(s)) throw new Error("quit refused: safety evidence changed");
+  verifyOwnContext(env, fresh2);
 }
 async function exited(env, pid) {
   const probe = await env.ctx.run("ps", ["-p", String(pid)], { timeoutMs: 2e3 });
@@ -1863,9 +1874,17 @@ function laneAddressed(parsed, lane) {
 function topReasons(reasons) {
   return [...new Set(reasons)].slice(0, 3).join("; ");
 }
+function liveActivity(reasons) {
+  const live = /* @__PURE__ */ new Set(["subagent running", "busy child process", "job/watch running (log open)", "job/watch running (session snapshot)"]);
+  return reasons.some((reason) => live.has(reason));
+}
+function keep(s) {
+  return { verdict: "keep", reason: topReasons(s.keeps), notes: [...new Set(s.asks)] };
+}
 function verdict(s) {
+  if (liveActivity(s.keeps)) return keep(s);
   if (s.asks.length) return { verdict: "ask", reason: topReasons(s.asks) };
-  if (s.keeps.length) return { verdict: "keep", reason: topReasons(s.keeps) };
+  if (s.keeps.length) return keep(s);
   if (s.finished) return { verdict: "retire", ground: "finished", reason: "finished: all machine evidence proves completion" };
   if (s.takeover) return { verdict: "retire", ground: "takeover", reason: "takeover validated" };
   return { verdict: "handoff", reason: "idle; delivery acknowledgements and candidate ownership unknown; takeover required" };
@@ -1910,6 +1929,9 @@ async function planRow(env, opts) {
   }
   return row;
 }
+function noteText(notes) {
+  return notes?.length ? ` [notes: ${notes.join("; ")}]` : "";
+}
 function display(rows, json, ctx) {
   if (json) {
     ctx.out(JSON.stringify(rows));
@@ -1917,7 +1939,8 @@ function display(rows, json, ctx) {
   }
   ctx.out("LANE	VERDICT	REASON");
   for (const row of rows) {
-    ctx.out(`${row.id}	${row.verdict}${row.ground ? ` (${row.ground})` : ""}	${row.reason}`);
+    const notes = noteText(row.notes);
+    ctx.out(`${row.id}	${row.verdict}${row.ground ? ` (${row.ground})` : ""}	${row.reason}${notes}`);
   }
 }
 async function reap(args, opts, env) {
@@ -1988,8 +2011,8 @@ import { dirname as dirname5, join as join24, resolve as resolve6 } from "node:p
 // src/lanes/templates.ts
 import { readFileSync as readFileSync10 } from "node:fs";
 import { join as join23 } from "node:path";
-function renderTemplate(text, vars) {
-  return text.replace(/\{\{(\w+)\}\}/g, (token, name) => Object.hasOwn(vars, name) ? String(vars[name]) : token);
+function renderTemplate(text2, vars) {
+  return text2.replace(/\{\{(\w+)\}\}/g, (token, name) => Object.hasOwn(vars, name) ? String(vars[name]) : token);
 }
 function readTemplate(ctx, name) {
   return readFileSync10(join23(ctx.templatesDir, name), "utf8");
@@ -2041,10 +2064,10 @@ async function init(args, opts, ctx) {
   mkdirSync7(status2, { recursive: true });
   ctx.out(`${hadStatus ? "kept" : "created"} ${status2}`);
   const ignore = join24(root, ".gitignore");
-  const text = existsSync6(ignore) ? readFileSync11(ignore, "utf8") : "";
-  const missing = [".state/", "messages/"].filter((s) => !text.split(/\r?\n/).includes(s));
+  const text2 = existsSync6(ignore) ? readFileSync11(ignore, "utf8") : "";
+  const missing = [".state/", "messages/"].filter((s) => !text2.split(/\r?\n/).includes(s));
   if (missing.length) {
-    writeFileSync6(ignore, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${missing.join("\n")}
+    writeFileSync6(ignore, `${text2}${text2 && !text2.endsWith("\n") ? "\n" : ""}${missing.join("\n")}
 `);
     ctx.out(`created ${ignore}`);
   } else ctx.out(`kept ${ignore}`);
@@ -2060,10 +2083,10 @@ import { basename as basename2, join as join25 } from "node:path";
 
 // src/lanes/processes.ts
 async function runningPi(ctx) {
-  const result = await ctx.run("pgrep", ["-x", "pi"], { timeoutMs: 1e4 });
-  if (result.code !== 0) return [];
+  const result2 = await ctx.run("pgrep", ["-x", "pi"], { timeoutMs: 1e4 });
+  if (result2.code !== 0) return [];
   const found = [];
-  for (const token of result.stdout.trim().split(/\s+/)) {
+  for (const token of result2.stdout.trim().split(/\s+/)) {
     if (!/^\d+$/.test(token)) continue;
     const pid = Number(token);
     const cwd = await processCwd2(ctx, pid);
@@ -2186,9 +2209,9 @@ async function identify(row, entries, ctx) {
   applyInventory(row, map, candidates);
 }
 function identityMap(sessionId, ctx) {
-  const text = optionalText(join25(ctx.piAgentDir, "user-questions/lanes", `${sessionId}.json`));
-  if (text === void 0) return void 0;
-  const map = JSON.parse(text);
+  const text2 = optionalText(join25(ctx.piAgentDir, "user-questions/lanes", `${sessionId}.json`));
+  if (text2 === void 0) return void 0;
+  const map = JSON.parse(text2);
   if (!validIdentity(map, sessionId)) throw new Error("conflict: invalid lane identity map");
   return map;
 }
@@ -2251,15 +2274,15 @@ function requestedRoles(value, coordinatorId) {
   return roles;
 }
 function requestedOrchestrates(value, coordinatorId) {
-  const result = /* @__PURE__ */ new Map();
+  const result2 = /* @__PURE__ */ new Map();
   for (const assignment of value?.split(";") ?? []) {
     const [id, repos, extra] = assignment.split("=");
     if (!validId(id) || id === coordinatorId || !repos || extra !== void 0 || !repos.split(",").every(validRepo)) {
       throw new UsageError("invalid --orchestrates; expected ID=owner/repo,owner/repo for a repo-orch");
     }
-    result.set(id, [.../* @__PURE__ */ new Set([...result.get(id) ?? [], ...repos.split(",")])]);
+    result2.set(id, [.../* @__PURE__ */ new Set([...result2.get(id) ?? [], ...repos.split(",")])]);
   }
-  return result;
+  return result2;
 }
 function roleAssignment(value) {
   const [id, role, extra] = value.split("=");
@@ -3010,9 +3033,9 @@ async function idleCheck(opts, c, root, ctx) {
 }
 
 // src/lanes/commands/nudge.ts
-async function nudge(id, text, opts, c, root, ctx) {
-  text = text.replace(/[\x00-\x1f\x7f]/g, " ").trim();
-  if (!text || text.length > 2e3) throw new UsageError("nudge text must be between 1 and 2000 characters");
+async function nudge(id, text2, opts, c, root, ctx) {
+  text2 = text2.replace(/[\x00-\x1f\x7f]/g, " ").trim();
+  if (!text2 || text2.length > 2e3) throw new UsageError("nudge text must be between 1 and 2000 characters");
   const target = laneTarget(id, c, root, ctx);
   const refuse = (why) => {
     ctx.err(`NOT SENT: ${why}`);
@@ -3026,10 +3049,10 @@ async function nudge(id, text, opts, c, root, ctx) {
   if (!await foregroundPi(ctx, tty, pid, target.cwd)) return refuse(`no foreground pi on ${tty} (lane stopped or busy in a subshell)`);
   const backend = detectBackend(opts.terminal || c.terminal.backend, ctx);
   if (backend === "print") {
-    ctx.out(`nudge ${target.id} (tty ${tty}): type this into its pi session: ${text}`);
+    ctx.out(`nudge ${target.id} (tty ${tty}): type this into its pi session: ${text2}`);
     return 4;
   }
-  if (await terminalBackend(backend).nudge(ctx, { tty, text }) !== "sent") return 4;
+  if (await terminalBackend(backend).nudge(ctx, { tty, text: text2 }) !== "sent") return 4;
   ctx.out(`nudged ${target.id}`);
   return 0;
 }
@@ -3041,8 +3064,8 @@ import { join as join33 } from "node:path";
 // src/lanes/joblogs.ts
 import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync10, statSync as statSync9 } from "node:fs";
 import { join as join32 } from "node:path";
-function parseWatches(text) {
-  return text.split(/\r?\n/).flatMap((line) => {
+function parseWatches(text2) {
+  return text2.split(/\r?\n/).flatMap((line) => {
     const [tag, label, until2, interval, ...check] = line.split("|");
     if (tag !== "WATCH") return [];
     if (!label || !until2 || !/^\d+$/.test(interval) || Number(interval) <= 0 || !check.join("|")) throw new Error("invalid WATCH line");
@@ -3087,9 +3110,9 @@ function liveWatch(jobs, watch2, now) {
 }
 
 // src/lanes/commands/resume-check.ts
-async function livePrs(text, ctx) {
+async function livePrs(text2, ctx) {
   if (!ctx.which("gh")) return;
-  const refs = new Set(text.match(/\bPR [A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+/g));
+  const refs = new Set(text2.match(/\bPR [A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+/g));
   for (const ref of refs) {
     const [repo, n] = ref.slice(3).split("#");
     let state = "unknown";

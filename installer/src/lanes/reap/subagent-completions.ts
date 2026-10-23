@@ -1,34 +1,50 @@
-type RecordLike = Record<string, any>;
-export function subagentKeys(record: RecordLike): string[] {
-  const fields = { sessionId: "session", sessionFile: "file", agentId: "agent", id: "agent" };
-  return Object.entries(fields).flatMap(([field, kind]) =>
-    typeof record[field] === "string" && record[field] ? [`${kind}:${record[field]}`] : []);
+type Snapshot = Record<string, any>;
+export interface SubagentWork { launches: Map<string, string | undefined>; completed: Set<string> }
+function text(content: unknown): string {
+  if (typeof content === "string") return content;
+  return Array.isArray(content) ? content.filter(part => part.type === "text").map(part => part.text).join("\n") : "";
 }
-function completed(status: unknown): boolean {
-  return typeof status === "string" && /^(done|completed)$/i.test(status.trim());
+function agentId(message: Snapshot): string | undefined {
+  const id = message.details?.agentId ?? message.details?.id;
+  if (typeof id === "string" && id) return id;
+  return /\bAgent ID:\s*(\S+)/.exec(text(message.content))?.[1];
 }
-function structured(out: Set<string>, record: RecordLike | undefined): void {
-  if (record && completed(record.status)) for (const key of subagentKeys(record)) out.add(key);
+function agentCall(part: Snapshot): boolean {
+  return part.type === "toolCall" && part.name === "Agent" && typeof part.id === "string";
+}
+function launch(work: SubagentWork, part: Snapshot): void {
+  if (agentCall(part)) work.launches.set(part.id, undefined);
+}
+function calls(work: SubagentWork, message: Snapshot): void {
+  if (message.role === "toolCall") launch(work, { ...message, type: "toolCall" });
+  if (message.role !== "assistant" || !Array.isArray(message.content)) return;
+  for (const part of message.content) launch(work, part);
+}
+function agentResult(message: Snapshot): boolean {
+  return message.role === "toolResult" && message.toolName === "Agent";
+}
+function result(work: SubagentWork, message: Snapshot): void {
+  if (!agentResult(message) || !work.launches.has(message.toolCallId)) return;
+  if (message.isError) work.launches.delete(message.toolCallId);
+  else work.launches.set(message.toolCallId, agentId(message));
+}
+function terminal(status: unknown): boolean {
+  return typeof status === "string" && /^(done|completed|failed|error|aborted|stopped|wrapped up)\b/i.test(status.trim());
+}
+function completion(work: SubagentWork, record: Snapshot | undefined): void {
+  if (!record || !terminal(record.status)) return;
+  const id = record.agentId ?? record.id;
+  if (typeof id === "string" && id) work.completed.add(id);
 }
 const decode = (value: string) => value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
-function notificationRecord(block: string): RecordLike {
-  const record: RecordLike = { status: /<status>([^<]+)<\/status>/.exec(block)?.[1] };
-  for (const [tag, field] of Object.entries({ "task-id": "id", "agent-id": "agentId", "session-id": "sessionId", "session-file": "sessionFile" })) {
-    const value = new RegExp(`<${tag}>([^<]+)</${tag}>`).exec(block)?.[1];
-    if (value) record[field] = decode(value);
-  }
-  return record;
+function notificationRecord(block: string): Snapshot {
+  const id = /<(?:task-id|agent-id)>([^<]+)<\/(?:task-id|agent-id)>/.exec(block)?.[1];
+  return { id: id && decode(id), status: /<status>([^<]+)<\/status>/.exec(block)?.[1] };
 }
-function notifications(out: Set<string>, content: unknown): void {
-  const text = typeof content === "string" ? content : "";
-  for (const block of text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) structured(out, notificationRecord(block[1]));
-}
-/** Trust only subagent completion channels, never quoted user/assistant text. */
-export function foldSubagentCompletions(out: Set<string>, message: RecordLike): void {
-  if (message.customType === "subagent-notification") {
-    structured(out, message.details); notifications(out, message.content);
-  }
-  if (message.role === "toolResult" && /^(subagent|get_subagent_result|wait_subagent)$/.test(message.toolName ?? "")) {
-    structured(out, message.details);
-  }
+/** Only completion notifications settle launches; quoted text and tool receipts do not. */
+export function foldSubagentWork(work: SubagentWork, message: Snapshot): void {
+  calls(work, message); result(work, message);
+  if (message.customType !== "subagent-notification") return;
+  completion(work, message.details);
+  for (const block of text(message.content).matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) completion(work, notificationRecord(block[1]));
 }
