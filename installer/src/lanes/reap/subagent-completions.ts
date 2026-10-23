@@ -45,8 +45,9 @@ function result(work: SubagentWork, message: Snapshot): void {
   if (message.isError || ended) work.launches.delete(message.toolCallId);
   else if (work.launches.has(message.toolCallId)) work.launches.set(message.toolCallId, record.id ?? work.launches.get(message.toolCallId));
 }
-function terminal(status: unknown): boolean {
-  return typeof status === "string" && /^(done|completed|failed|error|aborted|stopped|wrapped up)\b/i.test(status.trim());
+// Terminal outcomes reported by pi-subagents and pi-jobs; anything else (running, queued, background, unknown) stays pending.
+export function terminal(status: unknown): boolean {
+  return typeof status === "string" && /^(done|completed|success|steered|failed|error|aborted|stopped|killed|cancell?ed|ended|wrapped up)\b/i.test(status.trim());
 }
 function completion(work: SubagentWork, record: Snapshot | undefined): boolean {
   if (!record || !terminal(record.status)) return false;

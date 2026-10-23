@@ -349,6 +349,20 @@ test("later terminal get_subagent_result receipts settle background agents by ex
     assert.deepEqual((await evidence(f)).asks, []);
   }
 });
+test("every native terminal status settles foreground receipts and text-only result fetches", async () => {
+  const f = fixture();
+  for (const status of ["steered", "stopped", "aborted", "killed", "failed", "error", "cancelled"]) {
+    f.put(f.sessionFile, agentReceipt({ content: [], details: { status, agentId: "agent1" }, isError: false }), 120);
+    assert.deepEqual((await evidence(f)).asks, [], `foreground ${status}`);
+    const header = `Agent: agent1\nType: Reviewer | Status: ${status} | Tool uses: 1\nDescription: Review`;
+    f.put(f.sessionFile, agentLaunch() + JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "get_subagent_result", toolCallId: "fetch1", content: [{ type: "text", text: header }], isError: false } }), 120);
+    assert.deepEqual((await evidence(f)).asks, [], `fetched ${status}`);
+  }
+  for (const status of ["running", "queued", "background"]) {
+    f.put(f.sessionFile, agentLaunch() + JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "get_subagent_result", toolCallId: "fetch1", details: { agentId: "agent1", status }, isError: false } }), 120);
+    assert.deepEqual((await evidence(f)).asks, ["subagent launched without completion"], `fetched ${status}`);
+  }
+});
 test("resuming an already-cleaned agent does not manufacture a pending launch", async () => {
   const f = fixture();
   const cleaned = agentReceipt({ content: [{ type: "text", text: 'Agent not found: "agent1". It may have been cleaned up.' }], isError: false }, "agent1");

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 25c77ee85d6ef1a5a5946ec1606bb278065c7b21e55bec7f675504235fec7abe
+// pi-setup-source-sha256: 1eafa45013d6db16321cc28389347449519226ca5f7bc8d20c1bf80114e4ad69
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -1050,7 +1050,7 @@ function result(work, message) {
   else if (work.launches.has(message.toolCallId)) work.launches.set(message.toolCallId, record2.id ?? work.launches.get(message.toolCallId));
 }
 function terminal(status2) {
-  return typeof status2 === "string" && /^(done|completed|failed|error|aborted|stopped|wrapped up)\b/i.test(status2.trim());
+  return typeof status2 === "string" && /^(done|completed|success|steered|failed|error|aborted|stopped|killed|cancell?ed|ended|wrapped up)\b/i.test(status2.trim());
 }
 function completion(work, record2) {
   if (!record2 || !terminal(record2.status)) return false;
@@ -1369,7 +1369,7 @@ function owned(status2, s) {
   return s.pid !== void 0 && status2.pid === s.pid;
 }
 function fresh(status2, now) {
-  if (status2.state === "ended") return false;
+  if (terminal(status2.state)) return false;
   const age = typeof status2.at === "string" ? now - Date.parse(status2.at) : NaN;
   return Number.isFinite(age) && age >= 0 && age <= 6e5;
 }
@@ -1380,6 +1380,7 @@ function subagents(s, ctx) {
 var init_subagents = __esm({
   "src/lanes/reap/subagents.ts"() {
     init_files();
+    init_subagent_completions();
   }
 });
 
