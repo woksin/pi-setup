@@ -27,9 +27,9 @@ Rules:
 ## Candidate process
 1. A lane delivers branch, SHA, gate evidence and release-note bullets (`(#n)` at the end).
 2. Within one wake cycle, acknowledge it with either "accepted into candidate `<branch>` @ `<sha>`" or a rejection with the reason.
-3. Merge the accepted branches into the candidate branch in dependency order, then run the gates once.
-4. Open or extend one PR per release: one intent label, a release note per the repo template, no `Closes` lines.
-5. Run the final `review` workflow on the whole candidate, wait for CI, then merge with `gh pr merge <n> --merge`. Watch Publish and confirm the release contains each `(#n)`.
+3. Merge the accepted branches into the candidate branch in dependency order. Then run the gates once and, alongside them, the final `review` workflow on the whole candidate. Both must pass before anything is pushed. Fix the findings in the candidate, or send them back to the lane that caused them.
+4. Push once, then open or extend one PR per release: one intent label, a release note per the repo template, no `Closes` lines.
+5. Wait for CI, then merge with `gh pr merge <n> --merge`. Watch Publish and confirm the release contains each `(#n)`.
 6. Close or reconcile the issues, then tell the lanes and `<L0 id>` once.
 
 ## Decision log
