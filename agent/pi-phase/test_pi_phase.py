@@ -116,9 +116,9 @@ class PhaseTests(unittest.TestCase):
     def intervals(self, *names):
         return [json.loads((self.root / f"{name}.json").read_text()) for name in names]
 
-    def waiter(self, label, priority="normal", kind="build"):
+    def waiter(self, label, priority="normal", kind="build", fast=False):
         self.state.mkdir(exist_ok=True)
-        args = SimpleNamespace(priority=priority, kind=kind, label=label)
+        args = SimpleNamespace(priority=priority, kind=kind, label=label, fast=fast)
         ready, fd = pi_phase.register_waiter(self.state, args, label)
         self.assertTrue(ready)
         self.addCleanup(os.close, fd)
@@ -519,7 +519,7 @@ class PhaseTests(unittest.TestCase):
         record = records[0]
         self.assertEqual(set(record), {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
-                                      "head", "dirty", "argvHash", "stack", "envHash", "verified"})
+                                      "head", "dirty", "argvHash", "stack", "envHash", "verified", "fingerprint", "fast"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
@@ -981,7 +981,8 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(settings, (2, 1))
         self.assertEqual(settings.options, dict(msbuild_max_cpu=0, container_test_detection="hint",
                                                 cold_worktree_hint=True, memory_admission=False, phase_nice=0,
-                                                rss_cap_mb=12288, skip_passed_integration=False, max_high=3))
+                                                rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
+                                                fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"])))
         for cores, slots, expected in ((12, 2, 6), (12, 4, 3), (1, 4, 2), (None, 2, 2)):
             with self.subTest(cores=cores, slots=slots), patch.object(pi_phase.os, "cpu_count", return_value=cores):
                 self.assertEqual(pi_phase.msbuild_cap("auto", slots), expected)
@@ -1008,7 +1009,8 @@ class PhaseTests(unittest.TestCase):
         self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
         self.assertEqual(pi_phase.config(self.config).options,
                          dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0,
-                              rss_cap_mb=12288, skip_passed_integration=False, max_high=3))
+                              rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
+                              fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"])))
 
     def test_dotnet_shim_insertion_and_passthrough(self):
         # Real shell execution, including spaces, empty arguments and a shim PATH alias.
@@ -1700,6 +1702,308 @@ class PhaseTests(unittest.TestCase):
             self.assertEqual(claim.call_args.args[-1], 2)
             self.assertEqual(claim.call_args.args[-3], (2, 2))
 
+    def fast_records(self, durations, **fields):
+        now = datetime.now(timezone.utc)
+        records = [dict(v=1, ts=now.isoformat(), kind="build", stack="other", startedAt=now.isoformat(),
+                        waitS=0, runS=n, outcome="passed", fingerprint="fingerprint") for n in durations]
+        for record in records:
+            record.update(fields)
+            pi_phase.append_ledger(self.state, record)
+
+    def fast_args(self, **fields):
+        return SimpleNamespace(**dict(dict(kind="build", expect_fast=False), **fields))
+
+    def fast_settings(self):
+        return pi_phase.config(self.config).options["fast_lane"]
+
+    def fast_admit(self, token, **fields):
+        settings = pi_phase.config(self.config)
+        held = pi_phase.claim(self.state, pi_phase.slot_paths(self.state, "build", 1, 1, ()),
+                              time.monotonic() + 2, lambda: False, token,
+                              pi_phase.PhaseConfig(1, 1, settings.options), **fields)
+        if held:
+            self.addCleanup(lambda: [os.close(fd) for _, fd in held])
+        return held
+
+    def hold_fast_slot(self, name="fast-0"):
+        self.state.mkdir(exist_ok=True)
+        fd = pi_phase.lock_file(self.state / f"{name}.lock")
+        self.addCleanup(os.close, fd)
+        return fd
+
+    def test_fast_config_defaults_overrides_disabled_invalid(self):
+        self.assertEqual(self.fast_settings(), dict(slots=2, max_expected_s=90, kinds=["build", "test"]))
+        self.configure(fast_lane=dict(slots=1, max_expected_s=12.5, kinds=["test"]))
+        self.assertEqual(self.fast_settings(), dict(slots=1, max_expected_s=12.5, kinds=["test"]))
+        self.configure(fast_lane=False)
+        self.assertIs(self.fast_settings(), False)
+        self.configure(fast_lane=dict(slots=True, max_expected_s=float("inf"), kinds=["integration"], typo=1))
+        with patch.object(pi_phase, "note") as note:
+            self.assertEqual(self.fast_settings(), dict(slots=2, max_expected_s=90, kinds=["build", "test"]))
+            self.assertEqual(note.call_count, 4)
+        self.configure(fast_lane=None)
+        with patch.object(pi_phase, "note"):
+            self.assertEqual(self.fast_settings()["slots"], 2)
+
+    def test_fast_history_requires_three_runs_and_p90_at_boundary(self):
+        args, settings = self.fast_args(), self.fast_settings()
+        self.fast_records([1, 2])
+        self.assertFalse(pi_phase.fast_phase(self.state, args, settings, "fingerprint"))
+        self.fast_records([90])
+        self.assertTrue(pi_phase.fast_phase(self.state, args, settings, "fingerprint"))
+        self.fast_records([91])
+        self.assertFalse(pi_phase.fast_phase(self.state, args, settings, "fingerprint"))
+
+    def test_fast_hint_unknown_sparse_and_known_slow(self):
+        args, settings = self.fast_args(expect_fast=True), self.fast_settings()
+        self.assertTrue(pi_phase.fast_phase(self.state, args, settings, "unknown"))
+        self.fast_records([1])
+        self.assertTrue(pi_phase.fast_phase(self.state, args, settings, "fingerprint"))
+        self.fast_records([91])
+        with patch.object(pi_phase, "note") as note:
+            self.assertFalse(pi_phase.fast_phase(self.state, args, settings, "fingerprint"))
+            self.assertIn("history says", note.call_args.args[0])
+
+    def test_fast_history_ignores_old_malformed_unstarted_and_other_fingerprints(self):
+        self.fast_records([1, 2, 3], fingerprint="other")
+        self.fast_records([1, 2, 3], ts=(datetime.now(timezone.utc) - timedelta(days=8)).isoformat())
+        self.fast_records([1, 2, 3], startedAt=None)
+        self.fast_records([1, 2, 3], outcome="cancelled")
+        self.fast_records([1, 2, 3], runS="invalid")
+        self.assertFalse(pi_phase.fast_phase(self.state, self.fast_args(), self.fast_settings(), "fingerprint"))
+        self.assertTrue(pi_phase.fast_phase(self.state, self.fast_args(expect_fast=True), self.fast_settings(), "fingerprint"))
+
+    def test_fast_fingerprint_realpath_exact_command_and_additive_ledger(self):
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        command = [sys.executable, "-c", "pass"]
+        fp = pi_phase.test_fingerprint(self.root, command)
+        self.assertEqual(fp, pi_phase.test_fingerprint(alias, command))
+        self.assertNotEqual(fp, pi_phase.test_fingerprint(self.root, command + ["arg"]))
+        self.assertNotEqual(fp, pi_phase.test_fingerprint(self.state, command))
+        args = SimpleNamespace(kind="build", label="fingerprint", priority="normal", command=command)
+        with patch.object(pi_phase.os, "getcwd", return_value=str(alias)):
+            ledger = pi_phase.PhaseLedger(args)
+        self.assertEqual(ledger.record["fingerprint"], fp)
+        self.assertEqual(ledger.record["v"], 1)
+
+    def test_fast_never_integration_ci_or_disabled_kind(self):
+        for kind in ("integration", "ci"):
+            self.assertFalse(pi_phase.fast_phase(self.state, self.fast_args(kind=kind, expect_fast=True),
+                                                 self.fast_settings(), "unknown"))
+        self.assertFalse(pi_phase.fast_phase(self.state, self.fast_args(expect_fast=True), False, "unknown"))
+        self.configure(fast_lane=dict(kinds=["test"]))
+        self.assertFalse(pi_phase.fast_phase(self.state, self.fast_args(expect_fast=True), self.fast_settings(), "unknown"))
+
+    def test_fast_preferred_even_with_older_heavy_and_no_heavy_leases(self):
+        self.waiter("heavy")
+        fast = self.waiter("fast", fast=True)
+        held = self.fast_admit(fast)
+        self.assertEqual([path.name for path, _ in held], ["fast-0.lock"])
+        fd = pi_phase.lock_file(self.state / "heavy-0.lock")
+        self.assertIsNotNone(fd)
+        pi_phase.unlock(fd)
+        self.assertFalse((self.state / "fast-waiters" / f"{fast}.json").exists())
+
+    def test_fast_with_heavy_full_and_heavy_cannot_take_fast(self):
+        self.hold_fast_slot("heavy-0")
+        fast = self.waiter("fast", fast=True)
+        self.assertEqual(self.fast_admit(fast)[0][0].name, "fast-0.lock")
+        heavy = self.waiter("heavy")
+        self.assertIsNone(self.fast_admit(heavy))
+
+    def test_fast_falls_back_to_heavy_with_normal_fifo(self):
+        self.configure(fast_lane=dict(slots=1))
+        self.hold_fast_slot()
+        older = self.waiter("older")
+        later = self.waiter("later", fast=True)
+        self.assertIsNone(self.fast_admit(later))
+        self.assertEqual(self.fast_admit(older)[0][0].name, "heavy-0.lock")
+
+    def test_fast_fallback_obeys_priority_and_can_take_heavy(self):
+        self.configure(fast_lane=dict(slots=1))
+        self.hold_fast_slot()
+        self.waiter("low", priority="low")
+        fast = self.waiter("fast", fast=True)
+        self.assertEqual(self.fast_admit(fast)[0][0].name, "heavy-0.lock")
+
+    def test_fast_waiters_invisible_to_old_heavy_scan_and_stale_cleaned(self):
+        fast = self.waiter("fast", fast=True)
+        heavy = self.waiter("heavy")
+        self.assertEqual([w["token"] for w in pi_phase.live_waiters(self.state)], [heavy])
+        stale = self.state / "fast-waiters" / "stale.json"
+        stale.write_text(json.dumps(dict(token="stale", kind="build", priority="high", enqueued=0, seq=0)))
+        self.assertEqual({w["token"] for w in pi_phase.all_waiters(self.state)}, {fast, heavy})
+        self.assertFalse(stale.exists())
+        args = SimpleNamespace(kind="build", label="cancel", priority="normal", fast=True)
+        _, fd = pi_phase.register_waiter(self.state, args, "cancel")
+        pi_phase.deregister_waiter(self.state, "cancel", fd)
+        self.assertFalse((self.state / "fast-waiters" / "cancel.json").exists())
+
+    def test_fast_high_count_queued_running_deduplicated_and_cap(self):
+        self.configure(max_high=1)
+        self.assertEqual(self.done(self.start("grant-priority"))[0], 0)
+        high = self.waiter("high", priority="high", fast=True)
+        held = self.fast_admit(high)
+        pi_phase.publish(held, dict(token=high, priority="high", fast=True))
+        self.assertEqual(pi_phase.high_count(self.state), 1)
+        self.assertEqual(self.done(self.start("grant-priority"))[0], 0)
+        args = SimpleNamespace(kind="build", label="downgraded", priority="high", fast=True, max_high=1)
+        _, fd = pi_phase.register_waiter(self.state, args, "downgraded")
+        self.addCleanup(os.close, fd)
+        data = pi_phase.metadata(self.state / "fast-waiters" / "downgraded.json")
+        self.assertEqual(data["priority"], "normal")
+        self.assertEqual(pi_phase.high_count(self.state), 1)
+
+    def test_fast_memory_gate_and_starvation_counts_fast_owners(self):
+        self.configure(fast_lane=dict(slots=1))
+        self.hold_fast_slot()
+        fast = self.waiter("fast", fast=True)
+        admission = pi_phase.MemoryAdmission(dict(min_free_percent=30, min_swap_free_mb=500))
+        with patch.object(pi_phase, "read_host_memory", return_value=(10, 0)):
+            self.assertIsNone(self.fast_admit(fast, admission=admission))
+        admission.checked = None
+        with patch.object(pi_phase, "read_host_memory", return_value=(80, 1000)):
+            self.assertEqual(self.fast_admit(fast, admission=admission)[0][0].name, "heavy-0.lock")
+
+    def test_fast_orphan_counts_as_running_and_blocks_reuse(self):
+        self.configure(fast_lane=dict(slots=1))
+        self.hold_fast_slot("heavy-0")
+        (self.state / "fast-0.lock").touch()
+        pi_phase.save(self.state / "fast-0.json", dict(token="orphan", pgid=4242))
+        fast = self.waiter("fast", fast=True)
+        with patch.object(pi_phase, "live_groups", return_value={4242}):
+            self.assertIsNone(self.fast_admit(fast))
+        with patch.object(pi_phase, "live_groups", return_value=set()):
+            self.assertEqual(self.fast_admit(fast)[0][0].name, "fast-0.lock")
+
+    def test_fast_activity_does_not_consume_integration_burst_permits(self):
+        self.hold_fast_slot()
+        self.configure(memory_admission=dict(integration_burst={}))
+        options = pi_phase.config(self.config).options["memory_admission"]
+        burst = pi_phase.IntegrationBurst(pi_phase.MemoryAdmission(options), options["integration_burst"])
+        with patch.object(pi_phase, "live_groups", return_value=set()), \
+                patch.object(pi_phase, "read_host_memory", return_value=(80, None)), \
+                patch.object(pi_phase.os, "getloadavg", return_value=(0, 0, 0)), \
+                patch.object(pi_phase, "read_docker_memory_percent", return_value=0):
+            ceiling = burst.effective(1, time.monotonic() + 2)
+        self.assertEqual(ceiling, 2)
+        self.hold_fast_slot("integration-0")
+        candidates = pi_phase.slot_paths(self.state, "integration", 2, ceiling, ())
+        held = pi_phase.claim(self.state, candidates, time.monotonic() + 2, lambda: False,
+                              integration_ceiling=ceiling)
+        self.addCleanup(lambda: [os.close(fd) for _, fd in held])
+        self.assertEqual(held[1][0].name, "integration-1.lock")
+        self.assertTrue(pi_phase.phases_running(self.state, {}, {}, set()))
+
+    def test_fast_status_and_eta_include_fast_queue_and_occupancy(self):
+        self.seed_ledger()
+        self.configure(fast_lane=dict(slots=1))
+        high = self.waiter("fast", fast=True)
+        held = self.fast_admit(high)
+        pi_phase.publish(held, dict(token=high, kind="build", label="fast", priority="normal", fast=True, started=time.time()))
+        self.waiter("queued-fast", fast=True)
+        code, out = self.done(self.start("status"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("fast=1/1 queued=1", out)
+        self.assertIn("queued priority=normal kind=build", out)
+        with patch("builtins.print") as output:
+            pi_phase.wait_eta(self.state, self.config, "build")
+        self.assertIn("ahead=1 running=1", output.call_args.args[0])
+
+    def test_fast_budget_limit_and_timeout_demotes_fingerprint(self):
+        self.assertEqual(pi_phase.fast_budget(self.fast_settings()), 270)
+        self.assertEqual(pi_phase.fast_budget(dict(max_expected_s=1)), 120)
+        command = [sys.executable, "-c", "import time; time.sleep(2)"]
+        with patch.object(pi_phase, "fast_budget", return_value=.15), patch.object(pi_phase, "note") as note:
+            code = pi_phase.main(["run", "--kind", "build", "--label", "overrun", "--expect-fast",
+                                  "--timeout", "2", "--", *command], state=self.state, configuration=self.config)
+        self.assertEqual(code, 124)
+        self.assertTrue(any("rerun without --expect-fast" in call.args[0] for call in note.call_args_list))
+        record = self.ledger_records()[0]
+        self.assertTrue(record["fastBudgetExceeded"])
+        self.assertEqual(record["outcome"], "timeout")
+        self.assertFalse(pi_phase.fast_phase(self.state, self.fast_args(expect_fast=True),
+                                             self.fast_settings(), pi_phase.test_fingerprint(os.getcwd(), command)))
+
+    def test_fast_shorter_user_timeout_and_producer_124_do_not_demote(self):
+        with patch.object(pi_phase, "note"):
+            code = pi_phase.main(["run", "--kind", "build", "--label", "timeout", "--expect-fast",
+                                  "--timeout", ".1", "--", sys.executable, "-c", "import time;time.sleep(2)"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, 124)
+        self.assertNotIn("fastBudgetExceeded", self.ledger_records()[0])
+        job = self.run_phase(extra=("--expect-fast",), command=[sys.executable, "-c", "raise SystemExit(124)"])
+        code, out = self.done(job)
+        self.assertEqual(code, 124, out)
+        self.assertFalse(any(r.get("fastBudgetExceeded") for r in self.ledger_records()))
+
+    def test_fast_disabled_run_ignores_hint_and_uses_heavy(self):
+        self.configure(fast_lane=False)
+        job = self.run_phase(extra=("--expect-fast",), command=[sys.executable, "-c", "import time;time.sleep(.4)"])
+        self.wait_for(lambda: (self.state / "heavy-0.json").exists())
+        self.assertFalse(list(self.state.glob("fast-*.json")))
+        code, out = self.done(job)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("fast lane (budget", out)
+        self.assertFalse(self.ledger_records()[0]["fast"])
+
+    def test_fast_ledger_additions_and_legacy_records_tolerated(self):
+        self.seed_ledger()
+        self.fast_records([1, 2, 3])
+        records, skipped = pi_phase.read_ledger(self.state)
+        self.assertEqual((len(records), skipped), (15, 2))
+        self.assertEqual(len(pi_phase.fast_history(self.state, "fingerprint")), 3)
+        self.assertTrue(pi_phase.fast_phase(self.state, self.fast_args(), self.fast_settings(), "fingerprint"))
+
+    def test_fast_auto_run_and_promoted_test_never_fast(self):
+        command = [sys.executable, "-c", "pass"]
+        fingerprint = pi_phase.test_fingerprint(os.getcwd(), command)
+        self.fast_records([1, 2, 3], fingerprint=fingerprint)
+        with patch.object(pi_phase, "note"):
+            self.assertEqual(pi_phase.main(["run", "--kind", "build", "--label", "auto", "--", *command],
+                                          state=self.state, configuration=self.config), 0)
+        self.assertTrue(self.ledger_records()[-1]["fast"])
+        pi_phase.save(self.state / "container-tests.json", {fingerprint: True})
+        self.configure(container_test_detection="promote")
+        with patch.object(pi_phase, "note"):
+            self.assertEqual(pi_phase.main(["run", "--kind", "test", "--label", "promoted", "--expect-fast",
+                                           "--", *command], state=self.state, configuration=self.config), 0)
+        self.assertFalse(self.ledger_records()[-1]["fast"])
+
+    def test_fast_starts_while_real_heavy_process_holds_only_slot(self):
+        self.config.write_text('{"heavy_slots":1}')
+        active = self.run_phase(timeout="4", command=self.marker_job("heavy", 1.5))
+        self.wait_for(lambda: (self.state / "heavy-0.json").exists())
+        code, out = self.done(self.run_phase(extra=("--expect-fast",), command=self.marker_job("fast", .1)))
+        self.assertEqual(code, 0, out)
+        self.assertIsNone(active.poll())
+        self.assertEqual(self.done(active)[0], 0)
+        heavy, fast = self.intervals("heavy", "fast")
+        self.assertLess(fast[1], heavy[1])
+
+    def test_fast_rss_cap_uses_existing_process_group_cleanup(self):
+        self.configure(rss_cap_mb=100)
+        with patch.object(pi_phase.RunningMemory, "offender", return_value=(1, 200, "producer")), \
+                patch.object(pi_phase, "MEMORY_SAMPLE_INTERVAL", .02), patch.object(pi_phase, "note"):
+            code = pi_phase.main(["run", "--kind", "build", "--label", "rss", "--expect-fast", "--",
+                                  sys.executable, "-c", "import time;time.sleep(2)"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, pi_phase.EXIT_RSS_CAP)
+        self.assertFalse(list(self.state.glob("fast-*.json")))
+
+    def test_fast_run_preserves_nice_msbuild_rss_and_cancellation_cleanup(self):
+        self.configure(phase_nice=10, msbuild_max_cpu=1, rss_cap_mb=100)
+        job = self.run_phase(extra=("--expect-fast",), command=[sys.executable, "-c", "import time;time.sleep(5)"])
+        self.wait_for(lambda: (self.state / "fast-0.json").exists())
+        job.send_signal(signal.SIGTERM)
+        code, out = self.done(job)
+        self.assertEqual(code, 143, out)
+        self.assertIn("msbuild cap -m:1", out)
+        self.assertIn("nice 10", out)
+        self.assertFalse(list(self.state.glob("fast-*.json")))
+        self.assertFalse(list((self.state / "fast-waiters").glob("*.json")))
+
     def test_fifo_including_equal_timestamps_and_sequence(self):
         with patch.object(pi_phase.time, "time", return_value=100):
             first = self.waiter("first")
@@ -2094,7 +2398,8 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(code, 143, output)
         self.assertIn("cancelled during admission", output)
         self.assertFalse(marker.exists())
-        self.assertEqual(self.done(self.start("status"))[1].strip(), "pi-phase: no active phases\npi-phase: high=0/3")
+        self.assertEqual(self.done(self.start("status"))[1].strip(),
+                         "pi-phase: no active phases\npi-phase: fast=0/2 queued=0\npi-phase: high=0/3")
 
     def test_cancel_after_metadata_before_gate_never_executes(self):
         patch = ("import os,signal\n"
@@ -2108,7 +2413,8 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(code, 143, output)
         self.assertIn("cancelled before execution", output)
         self.assertFalse(marker.exists())
-        self.assertEqual(self.done(self.start("status"))[1].strip(), "pi-phase: no active phases\npi-phase: high=0/3")
+        self.assertEqual(self.done(self.start("status"))[1].strip(),
+                         "pi-phase: no active phases\npi-phase: fast=0/2 queued=0\npi-phase: high=0/3")
 
     def test_many_orphans_use_one_bounded_snapshot_per_scan(self):
         pgid = self.orphan_slots()
@@ -2189,7 +2495,8 @@ class PhaseTests(unittest.TestCase):
         code, out = self.done(job)
         self.assertEqual(code, 124, out)
         self.assertIn("timed out", out)
-        self.assertEqual(self.done(self.start("status"))[1].strip(), "pi-phase: no active phases\npi-phase: high=0/3")
+        self.assertEqual(self.done(self.start("status"))[1].strip(),
+                         "pi-phase: no active phases\npi-phase: fast=0/2 queued=0\npi-phase: high=0/3")
         # ps distinguishes a reparented zombie from a still-running descendant.
         pid = int(pidfile.read_text())
         info = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
@@ -2247,7 +2554,8 @@ class PhaseTests(unittest.TestCase):
         code, out = self.done(blocked)
         self.assertEqual(code, 75, out)
         self.assertFalse((self.root / "blocked.json").exists())
-        self.wait_for(lambda: self.done(self.start("status"))[1].strip() == "pi-phase: no active phases\npi-phase: high=0/3", seconds=4)
+        self.wait_for(lambda: self.done(self.start("status"))[1].strip() ==
+                      "pi-phase: no active phases\npi-phase: fast=0/2 queued=0\npi-phase: high=0/3", seconds=4)
         self.assertEqual(self.done(self.run_phase())[0], 0)
 
     def test_ci_rejects_non_normal_priority_without_touching_grant(self):

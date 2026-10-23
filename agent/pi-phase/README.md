@@ -32,6 +32,14 @@ The shipped config sets heavy capacity **4** (build/test/integration); without a
 {"heavy_slots": 2, "integration_slots": 1}
 ```
 
+### Fast lane
+
+Short builds/tests can bypass a busy heavy queue using separate fast permits (no heavy permit consumed). The default, even without a config key, is `"fast_lane": {"slots": 2, "max_expected_s": 90, "kinds": ["build", "test"]}`; set `"fast_lane": false` to disable it. Slots accept 1–32, the threshold accepts positive finite seconds, and kinds may contain only `build`/`test`. Integration, including container-promoted tests, and CI are never fast.
+
+Use `run --kind build --expect-fast ... -- COMMAND` for an unknown short command. Otherwise classification needs at least three completed (passed/failed/timed-out) ledger runs in the last seven days with p90 runtime ≤ the threshold. Fingerprints use the real cwd and exact command; legacy records without a fingerprint are ignored. Even a hint is ignored, with a note, when history has a slow p90. Fast execution is capped at `max(3 × max_expected_s, 120)` seconds, or the caller's shorter timeout. Exceeding that cap stops the owned process group with exit 124 and a rerun note; the fingerprint stays demoted while that overrun remains in the seven-day history (so many earlier short runs cannot hide it).
+
+Fast waiters use priority then FIFO. If fast permits are full, they may take a heavy permit, sharing heavy priority/FIFO reservations rather than jumping older eligible heavy waiters. Memory admission, HIGH caps, nice, MSBuild shims/caps, RSS checks, verified-pass skipping and cleanup are unchanged. `status` shows `fast=<running>/<slots> queued=<n>` and marks fast phases; `wait --eta` includes fast occupancy and fallback reservations. Fast waiters/leases use separate files, invisible to old heavy-only schedulers; new schedulers account for both lanes.
+
 ### Optional performance flags
 
 Config also accepts these keys (unknown keys are ignored and invalid values fall back to defaults, with a note, deduplicated per phase):
