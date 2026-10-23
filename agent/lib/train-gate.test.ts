@@ -40,6 +40,9 @@ test('recommendation considers only awaiting deliveries and includes the exact g
   assert.equal(cutRecommendation([{ ...item, eta: undefined }], gate, NOW).recommendation, 'cut');
   assert.equal(cutRecommendation([{ ...item, kind: 'folded', pending: [] }], gate, NOW).recommendation, 'cut');
   assert.equal(cutRecommendation([{ ...item, kind: 'folded', pending: ['merge'] }], gate, NOW).recommendation, 'hold');
+  for (const step of ['close', 'cancel', 'notes']) {
+    assert.equal(cutRecommendation([{ ...item, kind: 'folded', pending: [step], eta: '2026-10-23T11:00:00Z' }], gate, NOW).recommendation, 'cut');
+  }
   assert.equal(cutRecommendation([item], { gateSeconds: null }, NOW).recommendation, 'unknown');
 });
 
@@ -101,5 +104,17 @@ test('missing ledger is unknown; flag and manifest overrides need no history', a
   assert.equal(phaseState({ PI_PHASE_STATE: '/custom' }), '/custom');
   assert.deepEqual(await gateEstimate(f.ctx, f.api, { ...manifest, gateSeconds: 90 }), { gateSeconds: 90, gateSource: 'manifest', gateRuns: 0 });
   assert.deepEqual(await gateEstimate(f.ctx, f.api, { ...manifest, gateSeconds: 90 }, 120), { gateSeconds: 120, gateSource: 'flag', gateRuns: 0 });
-  await assert.rejects(gateEstimate(f.ctx, f.api, { ...manifest, gateSeconds: '90' }), /gateSeconds/);
+  const warnings: string[] = [];
+  const warned = { ...f.ctx, err: (line: string) => warnings.push(line) };
+  assert.deepEqual(await gateEstimate(warned, f.api, { ...manifest, gateSeconds: '90' }), { gateSeconds: null, gateSource: null, gateRuns: 0 });
+  assert.match(warnings.join('\n'), /gateSeconds/);
+});
+
+test('ledger files older than the window are not read, and one read serves every train in an invocation', async t => {
+  const f = await fixture(t); git(f.root, 'init');
+  await writeFile(join(f.state, 'ledger', '2026-10-14.jsonl'), JSON.stringify(run(f.root, 'build', 99999)));
+  await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), JSON.stringify(run(f.root, 'build', 60)));
+  assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree: f.root }), { gateSeconds: 60, gateSource: 'ledger', gateRuns: 1 });
+  await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), JSON.stringify(run(f.root, 'build', 600)));
+  assert.equal((await gateEstimate(f.ctx, f.api, { worktree: f.root })).gateSeconds, 60);
 });

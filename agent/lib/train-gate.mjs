@@ -1,13 +1,16 @@
 import { readFile, readdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { TrainError } from './train-gh.mjs';
 
 export const phaseState = env => env.PI_PHASE_STATE || join(env.HOME || homedir(), '.pi', 'agent', 'pi-phase', 'state');
 
-async function ledgerFiles(state) {
-  try { return (await readdir(join(state, 'ledger'))).filter(name => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)); }
-  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+const WINDOW_MS = 7 * 86400_000;
+
+// Ledger files are named by UTC day; one extra day covers records written just after midnight.
+async function ledgerFiles(state, now) {
+  const oldest = new Date(now - WINDOW_MS - 86400_000).toISOString().slice(0, 10);
+  try { return (await readdir(join(state, 'ledger'))).filter(name => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name) && name.slice(0, 10) >= oldest); }
+  catch { return []; } // An unreadable ledger is no gate history, never a status failure.
 }
 
 function parseLedgerLine(line) {
@@ -17,12 +20,12 @@ function parseLedgerLine(line) {
 
 async function readLedgerFile(path) {
   try { return await readFile(path, 'utf8'); }
-  catch (error) { if (error.code === 'ENOENT') return ''; throw error; }
+  catch { return ''; }
 }
 
-async function ledgerRecords(state) {
+async function ledgerRecords(state, now) {
   const records = [];
-  for (const file of await ledgerFiles(state)) {
+  for (const file of await ledgerFiles(state, now)) {
     const text = await readLedgerFile(join(state, 'ledger', file));
     records.push(...text.split('\n').map(parseLedgerLine));
   }
@@ -32,7 +35,7 @@ async function ledgerRecords(state) {
 function recentTiming(record, now) {
   if (![record.startedAt, record.endedAt].every(value => Number.isFinite(Date.parse(value)))) return false;
   const stamp = Date.parse(record.ts);
-  return stamp <= now && stamp >= now - 7 * 86400_000 && Number.isFinite(record.runS) && record.runS >= 0;
+  return stamp <= now && stamp >= now - WINDOW_MS && Number.isFinite(record.runS) && record.runS >= 0;
 }
 
 function completed(record, now) {
@@ -60,20 +63,35 @@ function repositoryIdentity(api) {
 
 const p90 = values => values.sort((a, b) => a - b)[Math.ceil(values.length * 0.9) - 1] ?? 0;
 
-function configuredGate(manifest, override) {
+function configuredGate(ctx, manifest, override) {
   if (override !== undefined) return { gateSeconds: override, gateSource: 'flag', gateRuns: 0 };
   if (manifest.gateSeconds === undefined) return null;
-  if (!Number.isFinite(manifest.gateSeconds) || manifest.gateSeconds <= 0) throw new TrainError('manifest gateSeconds must be a positive number', 2);
+  if (!Number.isFinite(manifest.gateSeconds) || manifest.gateSeconds <= 0) {
+    ctx.err?.(`warning: manifest gateSeconds must be a positive number; using ledger history (${manifest.worktree ?? 'train'})`);
+    return null;
+  }
   return { gateSeconds: manifest.gateSeconds, gateSource: 'manifest', gateRuns: 0 };
+}
+
+// One ledger read and one cwd -> repository cache per invocation, shared by every train in `status --all`.
+const shared = new WeakMap();
+
+function invocationCache(ctx, api, now) {
+  if (!shared.has(ctx)) shared.set(ctx, { identity: repositoryIdentity(api), records: new Map() });
+  const cache = shared.get(ctx);
+  const state = phaseState(ctx.env);
+  const key = `${state}\0${now}`;
+  if (!cache.records.has(key)) cache.records.set(key, ledgerRecords(state, now));
+  return { identity: cache.identity, records: cache.records.get(key) };
 }
 
 async function phaseDurations(ctx, api, manifest) {
   const groups = { build: [], test: [], integration: [] };
-  const identity = repositoryIdentity(api);
+  const now = Date.parse(ctx.now());
+  const { identity, records } = invocationCache(ctx, api, now);
   const repo = await identity(manifest.worktree);
   if (repo) {
-    const now = Date.parse(ctx.now());
-    for (const record of await ledgerRecords(phaseState(ctx.env))) {
+    for (const record of await records) {
       if (completed(record, now) && await identity(record.cwd) === repo) groups[record.kind].push(record.runS);
     }
   }
@@ -81,7 +99,7 @@ async function phaseDurations(ctx, api, manifest) {
 }
 
 export async function gateEstimate(ctx, api, manifest, override) {
-  const configured = configuredGate(manifest, override);
+  const configured = configuredGate(ctx, manifest, override);
   if (configured) return configured;
   const groups = await phaseDurations(ctx, api, manifest);
   const gateRuns = Object.values(groups).reduce((sum, values) => sum + values.length, 0);

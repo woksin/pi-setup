@@ -64,7 +64,8 @@ export async function setEta(ctx, repo, options, args) {
 
 export const durationText = seconds => seconds < 60 ? `${Math.ceil(seconds)}s` : `${Math.ceil(seconds / 60)}m`;
 export const deliveryName = item => item.pr ? `#${item.pr}` : item.branch;
-const awaiting = item => item.kind === 'planned' || item.kind === 'pending' || item.pending?.length;
+// Only an unmerged delivery is still on its way; leftover close/cancel/notes cleanup never holds a train.
+const awaiting = item => item.kind === 'planned' || item.kind === 'pending' || Boolean(item.pending?.includes('merge'));
 
 export function cutRecommendation(items, gate, now) {
   if (gate.gateSeconds === null) return { recommendation: 'unknown', recommendationText: 'recommendation: unknown — no gate history; pass --gate' };
