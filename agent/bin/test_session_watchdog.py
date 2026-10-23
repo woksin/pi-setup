@@ -1,4 +1,4 @@
-import importlib.machinery, importlib.util, json, os, subprocess, tempfile, time, unittest
+import importlib.machinery, importlib.util, json, os, shutil, subprocess, tempfile, time, unittest
 from datetime import datetime, timezone
 
 P = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-watchdog")
@@ -198,16 +198,17 @@ class Mapping(Base):
 
 
 class QueueWait(Base):
-    def phase_state(self, pid, status="waiters"):
+    def phase_state(self, pid, rel="waiters/w1.json"):
         d = os.path.join(self.tmp.name, "phase")
-        if status == "waiters":
-            os.makedirs(os.path.join(d, "waiters"), exist_ok=True)
-            p = os.path.join(d, "waiters", "w1.json")
-        else:
-            os.makedirs(d, exist_ok=True)
-            p = os.path.join(d, "heavy-0.json")
+        p = os.path.join(d, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        base = {"token": "t", "pid": pid, "cwd": self.cwd, "label": "i42 gate", "kind": "test", "priority": "normal", "policy": "queued"}
+        if "waiters/" in rel:
+            base.update(enqueued=NOW - 400, seq=7, source="flag", rank=2)
+        else:  # lease layout (publish() in pi_phase.py)
+            base.update(pgid=pid, started=NOW - 400, fast=rel.startswith("fast-"), source="flag", rank=2)
         with open(p, "w") as f:
-            json.dump({"pid": pid, "label": "i42 gate", "cwd": self.cwd, "enqueued": NOW - 400, "started": NOW - 400, "rank": 2}, f)
+            json.dump(base, f)
         return d
 
     def batch(self):
@@ -223,13 +224,15 @@ class QueueWait(Base):
     def test_live_queued_phase_is_waiting_not_stuck(self):
         self.batch()
         me = os.getpid()
-        for kind in ("waiters", "heavy"):
+        for kind in ("waiters/w1.json", "fast-waiters/w1.json", "heavy-0.json", "integration-0.json", "fast-0.json", "direct-t.json", "ci-abc.json"):
+            shutil.rmtree(os.path.join(self.tmp.name, "phase"), ignore_errors=True)  # only this layout may match
             self.assertEqual(self.run_wd(phase_state=self.phase_state(me, kind), ppids={me: 99, 99: 100}, inject_ttys={}), [])
             self.assertEqual(self.files(), [])
             with open(os.path.join(sw.STATE_DIR, "board.json")) as f:
                 row = json.load(f)["sessions"][0]
             self.assertEqual(row["state"], "waiting")
             self.assertIn("i42 gate", row["queue"])
+            self.assertIn("queued" if "waiters" in kind else "running", row["queue"])
             self.assertIn("rank 2", row["queue"])
             self.assertIn("6m40s", row["queue"])
 

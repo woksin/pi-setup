@@ -198,7 +198,11 @@ def ppid_map():
 def phase_entries(state_dir=PHASE_STATE, now=None):
     """Live pi-phase processes: queued waiters (waiters/*.json) and running phases (heavy-*.json), pid alive."""
     out = []
-    for kind, pat in (("queued", "waiters/*.json"), ("running", "heavy-*.json")):
+    # layouts per pi_phase.py: waiters/ and fast-waiters/ <token>.json (enqueued); leases {heavy,integration,fast,direct,ci}-N.json (started)
+    pats = (("queued", "waiters/*.json"), ("queued", "fast-waiters/*.json"), ("running", "heavy-*.json"),
+            ("running", "integration-*.json"), ("running", "fast-[0-9]*.json"), ("running", "direct-*.json"),
+            ("running", "ci-*.json"))
+    for kind, pat in pats:
         for p in glob.glob(os.path.join(state_dir, pat)):
             try:
                 with open(p) as f:
