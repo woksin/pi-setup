@@ -158,6 +158,17 @@ class BinSweepScenarios(CleanupConfigTests):
         self.phase = 'pi-phase: unknown orphan pid=? cwd=? elapsed=2s orphan-group\n'
         self.assertIn('cwd unknown', self.sweep()['reason'])
 
+    def test_current_suffixed_status_forms_keep_bins(self):
+        for suffix in (' policy=queued source=default', ' fast policy=direct source=cli'):
+            self.phase = f'pi-phase: build fake pid=12 cwd={self.root} elapsed=2s running{suffix}\n'
+            self.assertIn('phase cwd', self.sweep()['reason'])
+            self.assertTrue(self.output.exists())
+
+    def test_unknown_trailing_field_is_unknown_status(self):
+        self.phase = f'pi-phase: build fake pid=12 cwd={self.root} elapsed=2s running surprise=1\n'
+        self.assertIn('status unknown', self.sweep()['reason'])
+        self.assertTrue(self.output.exists())
+
     def test_phase_cwd_keeps_worktree_including_spaces(self):
         self.phase = f'pi-phase: build fake pid=12 cwd={self.root}/directory with spaces elapsed=2s running\n'
         self.assertIn('phase cwd', self.sweep()['reason'])

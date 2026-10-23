@@ -144,6 +144,35 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(doctor.check_oversubscription(Runner(ps=' 0 bash bash')), [])
         self.assertIn('Skipped', doctor.check_oversubscription(Runner())[0]['evidence'])
 
+    def test_phase_state_status_forms(self):
+        state = lambda text: doctor.phase_state(Runner(**{'pi-phase': text}))
+        self.assertEqual(state('pi-phase: test a pid=1 cwd=/x elapsed=1s running policy=queued source=default'), ['test'])
+        self.assertEqual(state('pi-phase: build a pid=1 cwd=/x elapsed=1s running fast policy=direct source=cli'), ['build'])
+        self.assertEqual(state('pi-phase: test a pid=1 cwd=/x elapsed=1s running'), ['test'])
+        self.assertEqual(state('pi-phase: unknown orphan pid=? cwd=? elapsed=2s orphan-group policy=queued source=default'), ['unknown'])
+        self.assertEqual(state('pi-phase: no active phases\nfast=0/2 queued=0'), [])
+        self.assertIsNone(state('pi-phase: test a pid=1 cwd=/x elapsed=1s running surprise=1'))
+        self.assertIsNone(state('garbage'))
+        self.assertIsNone(doctor.phase_state(Runner()))
+
+    def cap_finding(self, config, cores=12):
+        ps = '\n'.join([' 80 dotnet dotnet'] * 13)
+        with patch.object(doctor.os, 'cpu_count', return_value=cores), patch.object(doctor, 'read_json', return_value=config):
+            return doctor.check_oversubscription(Runner(ps=ps))[0]['evidence']
+
+    def test_oversubscription_reports_configured_msbuild_cap(self):
+        auto = self.cap_finding({'heavy_slots': 3, 'msbuild_max_cpu': 'auto'})
+        self.assertIn('3 heavy slots × 4 MSBuild nodes per build', auto)
+        self.assertIn('= 12 nodes', auto)
+        self.assertIn('configured potential', auto)
+        self.assertIn('3 heavy slots × 6 MSBuild nodes per build', self.cap_finding({'heavy_slots': 3, 'msbuild_max_cpu': 6}))
+        for config in ({'heavy_slots': 3, 'msbuild_max_cpu': 0}, {'heavy_slots': 3},
+                       {'heavy_slots': 3, 'msbuild_max_cpu': 'bad'}, {'heavy_slots': 3, 'msbuild_max_cpu': -1}):
+            text = self.cap_finding(config)
+            self.assertIn('3 heavy slots × 12 default MSBuild nodes per build (no cap) = 36 nodes', text)
+        self.assertIn('2 heavy slots × 12 default', self.cap_finding([]))  # malformed config
+        self.assertIn('2 heavy slots × 12 default', self.cap_finding({}))  # no config
+
     def test_msbuild_disabled_and_unset(self):
         with patch.dict(os.environ, {'MSBUILDDISABLENODEREUSE': '1'}):
             result = doctor.check_msbuild_env(Runner(ps=' 1 dotnet VBCSCompiler'))[0]

@@ -114,12 +114,8 @@ def phase_state(runner):
     output = runner([str(Path.home() / '.pi/agent/bin/pi-phase'), 'status'])
     if output is None:
         return None
-    lines = output.splitlines()
-    active = [line.removeprefix('pi-phase: ') for line in lines
-              if re.search(r'elapsed=\d+s (running|orphan-group)$', line)]
-    if active:
-        return [line.split()[0] for line in active]
-    return [] if 'pi-phase: no active phases' in lines else None
+    phases = runpy.run_path(str(Path(__file__).resolve().with_name('phase_status.py')))['active_phases'](output)
+    return None if phases is None else [phase['kind'] for phase in phases]
 
 
 def processes(runner):
@@ -273,15 +269,21 @@ def check_oversubscription(runner, **_):
                 for line in ps.splitlines())
     cores = os.cpu_count() or 1
     config = read_json(Path.home() / '.pi/agent/pi-phase/config.json', {})
-    slots = config.get('heavy_slots', 2) if isinstance(config, dict) else 2
-    slots = slots if type(slots) is int and slots > 0 else 2
+    config = config if isinstance(config, dict) else {}
+    slots = config.get('heavy_slots', 2)
+    slots = slots if type(slots) is int and 1 <= slots <= 32 else 2
+    cap = config.get('msbuild_max_cpu', 0)  # runner semantics: "auto", positive integer, else no cap
+    if cap == 'auto':
+        cap = max(2, cores // slots)
+    nodes = cap if type(cap) is int and cap > 0 else cores
+    nodes_label = f'{nodes} MSBuild nodes per build (msbuild_max_cpu)' if nodes == cap else f'{cores} default MSBuild nodes per build (no cap)'
     if count <= cores and (not count or slots <= 1):
         return []
     return [finding(id, 'warn', f'{count} build/tool processes across host (inside/outside pi-phase); '
-                    f'{cores} cores; {slots} heavy slots × {cores} default MSBuild nodes',
-                    'Configured potential is not actual parallelism; overlapping nodes and Docker can oversubscribe.',
-                    f'Set msbuild_max_cpu in ~/.pi/agent/pi-phase/config.json; '
-                    f'or pass -m:{max(2, cores // slots)} to dotnet build/test; '
+                    f'{cores} cores; configured potential {slots} heavy slots × {nodes_label} = {slots * nodes} nodes',
+                    'Configured potential, not observed concurrency; overlapping nodes and Docker can oversubscribe. '
+                    'An explicit -m on a dotnet command overrides the msbuild_max_cpu cap.',
+                    'Check msbuild_max_cpu in ~/.pi/agent/pi-phase/config.json against the cores; '
                     'reduce heavy_slots only when idle.')]
 
 

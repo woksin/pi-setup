@@ -46,13 +46,14 @@ snapshot(){ local f="${LOG%/*}/docker-guardian-snapshots.log"
   } >> "$f" 2>&1; }
 
 # Narrow image cleanup: no force/prune, fail closed on missing inventory or phase state.
-prune_superseded_images(){ python3 - "$S/pinned.txt" "$HOME/.pi/agent/bin/pi-phase" <<'PY'
+prune_superseded_images(){ python3 - "$S/pinned.txt" "$HOME/.pi/agent/bin/pi-phase" "$(cd "$(dirname "$0")" && pwd)/phase_status.py" <<'PY'
 import datetime as dt
 import fnmatch
 import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import time
@@ -73,9 +74,11 @@ def phases_safe():
     text = run([sys.argv[2], 'status'])
     if text is None:
         return False
-    active = re.findall(r'^pi-phase: (\S+) .*elapsed=\d+s (?:running|orphan-group)$', text, re.M)
-    return (all(kind in ('build', 'test', 'ci') for kind in active)
-            and (bool(active) or 'pi-phase: no active phases' in text.splitlines()))
+    try:
+        phases = runpy.run_path(sys.argv[3])['active_phases'](text)
+    except (OSError, KeyError, SyntaxError):
+        return False  # parser missing: state unknown
+    return phases is not None and all(phase['kind'] in ('build', 'test', 'ci') for phase in phases)
 
 def decode(output):
     try:

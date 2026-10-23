@@ -86,6 +86,7 @@ class GuardianCase(unittest.TestCase):
         self.bin = self.root / 'bin'  # lone copy: no sibling dev-doctor can be picked up
         self.bin.mkdir()
         shutil.copy(SCRIPT, self.bin / 'docker-guardian')
+        shutil.copy(SCRIPT.with_name('phase_status.py'), self.bin / 'phase_status.py')
         self.log = self.root / 'logs/docker-guardian.log'
         self.calls = self.stubs / 'calls.log'
         self.calls.touch()
@@ -370,6 +371,28 @@ class CleanupTests(GuardianCase):
         self.set_state('last-gc', 0)
         (self.home / '.pi/agent/bin/pi-phase').write_text(
             '#!/bin/sh\necho "pi-phase: integration x pid=1 cwd=/x elapsed=5s running"\n')
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), [])
+        self.assertIn('images: skipped (integration running or phase state unknown)', self.log_text())
+
+    def test_suffixed_status_lines_are_understood(self):
+        # Current pi-phase appends " fast policy=<p> source=<s>"; a busy integration phase must still block.
+        self.image_scenario()
+        stub = self.home / '.pi/agent/bin/pi-phase'
+        stub.write_text('#!/bin/sh\necho "pi-phase: integration x pid=1 cwd=/x elapsed=5s running policy=queued source=default"\n')
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), [])
+        self.assertIn('images: skipped (integration running or phase state unknown)', self.log_text())
+        stub.write_text('#!/bin/sh\necho "pi-phase: build x pid=1 cwd=/x elapsed=5s running fast policy=direct source=cli"\n')
+        self.set_state('last-gc', 0)
+        self.run_guardian()
+        self.assertNotEqual(self.call_lines('docker rmi'), [], self.log_text())
+
+    def test_unparseable_active_line_is_unknown_not_idle(self):
+        self.image_scenario()
+        (self.home / '.pi/agent/bin/pi-phase').write_text(
+            '#!/bin/sh\necho "pi-phase: integration x pid=1 cwd=/x elapsed=5s running surprise=1"\n'
+            'echo "pi-phase: no active phases"\n')
         self.run_guardian()
         self.assertEqual(self.call_lines('docker rmi'), [])
         self.assertIn('images: skipped (integration running or phase state unknown)', self.log_text())

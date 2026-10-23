@@ -4,6 +4,7 @@ import math
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import stat
 import time
@@ -49,15 +50,14 @@ def guards(runner):
     phases = runner([str(Path.home() / '.pi/agent/bin/pi-phase'), 'status'], timeout=10)
     if phases is None:
         return None, 'pi-phase status failed/unavailable'
-    active = []
-    for line in phases.splitlines():
-        if line.endswith((' running', ' orphan-group')):
-            match = re.search(r' cwd=(.+) elapsed=\S+ (?:running|orphan-group)$', line)
-            if not match or not os.path.isabs(match[1]):
-                return None, 'pi-phase cwd unknown'
-            active.append(match[1])
-    if not active and 'pi-phase: no active phases' not in phases.splitlines():
+    parsed = runpy.run_path(str(Path(__file__).resolve().with_name('phase_status.py')))['active_phases'](phases)
+    if parsed is None:
         return None, 'pi-phase status unknown'
+    active = []
+    for phase in parsed:
+        if not phase['cwd'] or not os.path.isabs(phase['cwd']):
+            return None, 'pi-phase cwd unknown'
+        active.append(phase['cwd'])
     return (busy, active, opened), None
 
 
