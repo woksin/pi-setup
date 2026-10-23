@@ -1,6 +1,7 @@
 /**
  * cratis-cli-guard — deterministic safety net for `cratis chronicle` commands.
- * Turn off with /guards off cratis (add --persist to keep it across processes).
+ * Disable confirmations with /guards off cratis (add --persist to keep it across processes).
+ * Production-target checks remain active: guard-off permits only non-production mutations.
  *
  * Scope matches the Cratis AI store-mutation hook (Cratis/AI v3.3.0): only the `chronicle`
  * group is guarded. Its read-only commands run freely; every other chronicle command —
@@ -34,7 +35,7 @@
  * port of the effective server is the local port of a running `kubectl port-forward`; a failing `ps` is
  * "unknown" and never denies by itself). A match is denied at once in orchestration; elsewhere the prompt shows it.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -552,6 +553,18 @@ async function productionCheck(target: string, context: string, config: Producti
 	return productionTarget(target, context, process.env, config, ports, explicit === undefined ? undefined : lookupCratisContext(explicit));
 }
 
+/** The confirmation switch cannot authorize production writes (including headless sessions). */
+async function withoutConfirmation(risky: CratisInvocation[], command: string, config: ProductionConfig, ctx: ExtensionContext) {
+	const target = [...risky.map(i => i.text), ...(command.match(/CHRONICLE_CONNECTION_STRING=\S+/g) ?? [])].join(" ");
+	const production = await productionCheck(target, await activeContext(), config);
+	if (production) return {
+		block: true,
+		reason: `cratis-cli-guard: state-changing cratis command(s) denied on production (/guards off cratis does not cover production). Matched rule: ${production}.\n${risky.map(i => `  ${i.text}`).join("\n")}`,
+	};
+	if (ctx.hasUI) ctx.ui.notify(`cratis-cli-guard off: allowed '${risky.map(i => i.text).join("; ").replace(/\s+/g, " ").slice(0, 180)}'`, "info");
+	return undefined;
+}
+
 /** Test seam: how the Cratis store-mutations script is run. */
 export let cratisRunner: CratisRunner = spawnRunner;
 export function setCratisRunner(run: CratisRunner): void { cratisRunner = run; }
@@ -572,10 +585,7 @@ export default function (pi: ExtensionAPI) {
 			if (invocations.length > 0 && isOrchestrated(process.env, ctx.cwd)) orchLog("cratis", "allow", `read-only: ${invocations.map(i => i.text).join("; ")}`);
 			return undefined;
 		}
-		if (isGuardOff("cratis")) {
-			if (ctx.hasUI) ctx.ui.notify(`cratis-cli-guard off: allowed '${risky.map(i => i.text).join("; ").replace(/\s+/g, " ").slice(0, 180)}'`, "info");
-			return undefined;
-		}
+		if (isGuardOff("cratis")) return withoutConfirmation(risky, command, config, ctx);
 
 		if (cratisActive) {
 			// Chronicle mutations belong to cratis-guard-store-mutations.sh: stand down only where it really blocks them.
