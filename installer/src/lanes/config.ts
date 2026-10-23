@@ -7,6 +7,7 @@ import { validId } from "./names.ts";
 export const BACKENDS = ["auto", "terminal-app", "iterm", "tmux", "print"];
 export interface Lane {
   id: string; repo: string; issue?: number; goal?: string; group: string | null;
+  role?: "lane" | "repo-orch" | "sub-orch"; parent?: string; retired?: boolean; stateFile?: string;
   worktree: string; branch: string; prompt: string; [key: string]: unknown;
 }
 export interface Retention {
@@ -93,8 +94,47 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
     require(lane.group === null || (typeof lane.group === "string" && validId(lane.group) && !["ALL", c.messages.broadcast].includes(lane.group)), `${key}.group`);
     require(lane.issue === undefined || (Number.isInteger(lane.issue) && lane.issue > 0), `${key}.issue`);
     require(lane.goal === undefined || text(lane.goal), `${key}.goal`);
+    validateHierarchyFields(lane, c, key);
+  }
+  validateHierarchy(c);
+}
+function requireField(ok: unknown, key: string): void {
+  if (!ok) throw new UsageError(`invalid ${key}`);
+}
+function validParent(lane: Lane, c: Config): boolean {
+  if (lane.parent === undefined || lane.parent === c.coordinator.id) return true;
+  return c.lanes.some(parent => parent.id === lane.parent && (lane.retired || !parent.retired));
+}
+function validOrchestratorParent(lane: Lane, c: Config): boolean {
+  if (lane.role !== "repo-orch") return true;
+  return lane.parent === undefined || lane.parent === c.coordinator.id;
+}
+function validateHierarchyFields(lane: Lane, c: Config, key: string): void {
+  requireField(lane.role === undefined || ["lane", "repo-orch", "sub-orch"].includes(lane.role), `${key}.role`);
+  requireField(lane.retired === undefined || typeof lane.retired === "boolean", `${key}.retired`);
+  requireField(validStateFile(lane.stateFile), `${key}.stateFile`);
+  requireField(validParent(lane, c), `${key}.parent`);
+  requireField(validOrchestratorParent(lane, c), `${key}.parent`);
+}
+function validStateFile(value: string | undefined): boolean {
+  return value === undefined || (typeof value === "string" && value.length > 0);
+}
+function validateHierarchy(c: Config): void {
+  const active = c.lanes.filter(l => !l.retired);
+  requireField(new Set(active.map(l => l.worktree)).size === active.length, "duplicate worktree");
+  const orchs = active.filter(l => l.role === "repo-orch");
+  requireField(new Set(orchs.map(l => l.repo)).size === orchs.length, "duplicate repo-orch");
+  for (const lane of active) validateParentChain(lane, c);
+}
+function validateParentChain(lane: Lane, c: Config): void {
+  const seen = new Set([lane.id]); let parent = effectiveParent(lane, c);
+  while (parent !== c.coordinator.id) {
+    requireField(!seen.has(parent), "parent cycle"); seen.add(parent);
+    const next = c.lanes.find(l => l.id === parent);
+    requireField(next, "parent"); parent = effectiveParent(next!, c);
   }
 }
+
 export function expand(value: string, c: Config, root: string, home: string, base = root): string {
   let out = value;
   for (let n = 0; n < 8; n++) {
@@ -147,4 +187,13 @@ export function saveConfig(root: string, c: Config): void {
   const tmp = join(root, `.lanes-${randomUUID()}.tmp`);
   writeFileSync(tmp, `${JSON.stringify(c, null, 2)}\n`, { flag: "wx" });
   renameSync(tmp, join(root, "lanes.json"));
+}
+
+export function effectiveParent(lane: Lane, c: Config): string {
+  return lane.parent ?? (lane.role === "repo-orch" ? c.coordinator.id : c.lanes.find(l => !l.retired && l.role === "repo-orch" && l.repo === lane.repo)?.id ?? c.coordinator.id);
+}
+export function laneTree(c: Config, all = false): { lane: Lane; depth: number }[] {
+  const lanes = c.lanes.filter(l => all || !l.retired); const rows: { lane: Lane; depth: number }[] = [];
+  const visit = (parent: string, depth: number) => { for (const lane of lanes.filter(l => effectiveParent(l, c) === parent)) { rows.push({ lane, depth }); visit(lane.id, depth + 1); } };
+  visit(c.coordinator.id, 0); return rows;
 }

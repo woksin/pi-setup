@@ -18,7 +18,7 @@ Use `lane-status set <ID> waiting-on "dependency" --until +90m` when blocked, an
 Stay within scope. Run heavy builds and tests through `pi-phase run` with bounded execution and queue timers. Use injected runners in tests; never start another agent session from a test. Do not bypass safety guards. Preserve other people's work.
 
 ## Finish and report
-Run the gates. Report verified facts, commit SHAs, exact check results, files changed and open questions to the coordinator with `lanes send {{coordinator_sh}} <topic> -m "report"`. Do not push, merge or remove worktrees without the shipping policy's permission.
+Run the gates. Report verified facts, commit SHAs, exact check results, files changed and open questions to your configured parent (repo-orch for multi-lane repositories; otherwise coordinator) with `lanes send {{coordinator_sh}} <topic> -m "report"`. Do not push, merge or remove worktrees without the shipping policy's permission.
 
 ## Stopping
 Stop and report if a design decision is needed, a blocker is outside scope, or repeated attempts yield no new evidence. Never remove a worktree automatically.
@@ -37,3 +37,6 @@ Keep NOW.md and STATE.md current, and follow `{{handoff}}`. Preserve constraints
 
 ## Repository notes
 <!-- Fill in: repository-specific conventions and constraints. -->
+
+## Safe lane retirement
+Silence, delivery text and an ended watch never prove completion. Use `lanes reap` dry-run before `--apply`. Keep explicit waits and snoozes current. Accept a handoff only after reviewing claims, branch/SHA, dirty work and pending acknowledgements; `lanes handoff ID --accept --from RECIPIENT` explicitly owns those next actions. Reap never marks claims done, removes worktrees or edits pi-questions identities. It sends only foreground /quit, then archives lane metadata after confirmed exit. The target must first write its own fresh `.state/handoffs/ID.md` with verbatim constraints, open items, a launch prompt and a JSON Snapshot accounting for HEAD, dirty paths and unpushed commits. The inactivity wait still applies after that write. After confirmed exit, unfinished claims are paused with the handoff path; reaped.log, STATE and the parent's lane-closed event record the closure. Restore with `lanes resume ID` or `lanes start NEW-ID --from-handoff ID`.

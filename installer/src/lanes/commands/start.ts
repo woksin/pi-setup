@@ -8,6 +8,7 @@ import { prune } from "../retention.ts";
 import { preapprove } from "../preapprove.ts";
 import { detectBackend, launchCommand, terminalBackend } from "../terminal.ts";
 export async function start(id: string, opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx): Promise<number> {
+  rejectRetired(id, c);
   const { coordinator, lane, cwd } = laneTarget(id, c, root, ctx);
   const prompt = expand(coordinator ? c.coordinator.prompt : lane!.prompt, c, root, ctx.home);
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`cwd not found: ${cwd}`);
@@ -29,4 +30,8 @@ export async function start(id: string, opts: Record<string, string>, c: Config,
   }
   const command = launchCommand(c, root, cwd, coordinator ? c.coordinator.id : id, prompt, wrapper, expand(c.messages.dir, c, root, ctx.home));
   return terminalBackend(backend).start(ctx, { id: coordinator ? c.coordinator.id : id, cwd, command });
+}
+
+function rejectRetired(id: string, c: Config): void {
+  if (c.lanes.find(l => l.id === id)?.retired) throw new Error(`lane ${id} is retired; add a fresh lane instead`);
 }

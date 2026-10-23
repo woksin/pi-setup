@@ -1,8 +1,11 @@
+import { handoff } from "./commands/handoff.ts";
+import { reap } from "./commands/reap.ts";
+import { snooze } from "./commands/snooze.ts";
 import { type LanesCtx } from "./ctx.ts";
-import { findRoot, loadConfig, UsageError } from "./config.ts";
+import { findRoot, loadConfig, UsageError, type Config } from "./config.ts";
 import { init } from "./commands/init.ts";
 import { add } from "./commands/add.ts";
-import { start } from "./commands/start.ts";
+import { resume, startCommand } from "./commands/resume.ts";
 import { send } from "./commands/send.ts";
 import { idleCheck } from "./commands/idle-check.ts";
 import { nudge } from "./commands/nudge.ts";
@@ -15,59 +18,141 @@ import { status } from "./commands/status.ts";
 export const HELP = `Usage: lanes [--dir root] <command> [options]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
-  start <ID>|coordinator [--terminal backend]
-  send <TO> <topic> [file|-] [-m text] [--from ID]
-  status
+    [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
+  start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
+  resume <ID> [--terminal backend]
+  send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
+  status [--all]
   messages prune [--dry-run] [--json]
   idle-check [--minutes n]
   nudge <ID|coordinator> <text> [--terminal backend]
   resume-check
   green-prs [--new | --ack]
+  reap [ID] [--minutes n] [--dry-run | --apply] [--handoff-to ID] [--json]
+  handoff <ID> --to ID | --accept --from ID
+  snooze <ID> --until ISO|+90m | --clear
   close <ID> [--reassign-to ID2] [--reason text] [--from ID] [--quit]
 Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
-const OPTIONS: Record<string, string[]> = { init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"], add: ["repo", "issue", "goal", "group", "branch", "base", "path"], start: ["terminal"], send: ["m", "from"], status: [], messages: ["dry-run", "json"], "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"], close: ["reassign-to", "reason", "from", "quit"] };
+const OPTIONS: Record<string, string[]> = {
+  init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"],
+  add: ["repo", "issue", "goal", "group", "branch", "base", "path",
+    "orchestrator", "orchestrator-id", "no-orchestrator"],
+  start: ["terminal", "from-handoff"], resume: ["terminal"], send: ["m", "from", "direct"],
+  status: ["all"], messages: ["dry-run", "json"],
+  "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"],
+  handoff: ["to", "accept", "from"], reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
+  snooze: ["until", "clear"],
+  close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"],
+};
+const FLAGS = ["preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all",
+  "no-orchestrator", "inactive", "clear", "apply", "accept"];
+interface Invocation { command: string; positional: string[]; opts: Record<string, string> }
+interface CommandEnv { c: Config; root: string; ctx: LanesCtx }
+interface ParsePosition { argv: string[]; index: number }
+
+function parseOption(argv: string[], i: number, opts: Record<string, string>): number {
+  const token = argv[i];
+  const { equals, key } = optionName({ argv, index: i });
+  if (FLAGS.includes(key)) {
+    if (equals >= 0) throw new UsageError(`unknown option ${token}`);
+    opts[key] = "true"; return i;
+  }
+  if (equals < 0) requireValue({ argv, index: i });
+  if (Object.hasOwn(opts, key)) throw new UsageError(`duplicate option ${token}`);
+  opts[key] = equals < 0 ? argv[++i] : token.slice(equals + 1);
+  return i;
+}
+function requireValue({ argv, index }: ParsePosition): void {
+  const value = argv[index + 1];
+  if (value === undefined || value.startsWith("--")) throw new UsageError(`missing value for ${argv[index]}`);
+}
+function parse(argv: string[]): Omit<Invocation, "command"> {
+  const positional: string[] = []; const opts: Record<string, string> = {};
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+    if (token === "--") { positional.push(...argv.slice(i + 1)); break; }
+    if (token.startsWith("--") || token === "-m") i = parseOption(argv, i, opts);
+    else appendPositional({ argv, index: i }, positional);
+  }
+  return { positional, opts };
+}
+function validateInvocation({ command, positional, opts }: Invocation): void {
+  if (!Object.hasOwn(OPTIONS, command)) throw new UsageError(HELP);
+  validateOptions({ command, opts });
+  const bounds: Record<string, [number, number]> = {
+    init: [0, 1], add: [1, 1], start: [1, 1], resume: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1],
+    "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], handoff: [1, 1],
+    reap: [0, 1], snooze: [1, 1], close: [opts.inactive ? 0 : 1, 1],
+  };
+  validateBounds(positional, bounds[command]);
+  if (command === "messages" && positional[0] !== "prune") throw new UsageError(HELP);
+  validateMinutes(opts.minutes);
+}
+function validateMinutes(minutes: string | undefined): void {
+  if (minutes === undefined) return;
+  if (invalidMinutes(minutes)) {
+    throw new UsageError("--minutes must be a positive integer");
+  }
+}
+async function dispatch(input: Invocation, env: CommandEnv): Promise<number> {
+  const { command, positional: args, opts } = input; const { c, root, ctx } = env;
+  const handlers: Record<string, () => number | Promise<number>> = {
+    add: () => add(args[0], opts, c, root, ctx), start: () => startCommand(args[0], opts, env),
+    resume: () => resume(args, opts, env),
+    messages: () => messagesPrune(opts, c, root, ctx), send: () => send(args, opts, c, root, ctx),
+    "idle-check": () => idleCheck(opts, c, root, ctx), nudge: () => nudge(args[0], args[1], opts, c, root, ctx),
+    "resume-check": () => resumeCheck(c, root, ctx), "green-prs": () => greenPrs(opts, c, root, ctx),
+    handoff: () => handoff(args, opts, env), snooze: () => snooze(args, opts, env),
+    reap: () => reap(args, opts, env), close: () => closeCommand(input, env),
+    status: () => status(c, root, ctx, Boolean(opts.all)),
+  };
+  return await handlers[command]();
+}
+function closeCommand({ positional, opts }: Invocation, env: CommandEnv): Promise<number> {
+  if (opts.inactive) return reap(positional, opts, env);
+  return close(positional[0], opts, env.c, env.root, env.ctx);
+}
+function errorCode({ e, command }: { e: unknown; command: string }): number {
+  return e instanceof UsageError || ["idle-check", "nudge", "resume-check", "green-prs", "close", "reap",
+    "snooze", "handoff"].includes(command) ? 2 : 1;
+}
 export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
   let command = "";
   try {
     if (argv.includes("--help") || argv.includes("-h")) { ctx.out(HELP); return 0; }
-    const positional: string[] = []; const opts: Record<string, string> = {};
-    for (let i = 0; i < argv.length; i++) {
-      const token = argv[i];
-      if (token === "--") { positional.push(...argv.slice(i + 1)); break; }
-      if (token.startsWith("--") || token === "-m") {
-        const equals = token.startsWith("--") ? token.indexOf("=") : -1;
-        const key = token === "-m" ? "m" : token.slice(2, equals < 0 ? undefined : equals);
-        if (["preapprove-mcp", "new", "ack", "quit", "dry-run", "json"].includes(key)) {
-          if (equals >= 0) throw new UsageError(`unknown option ${token}`);
-          opts[key] = "true"; continue;
-        }
-        if (equals < 0 && (argv[i + 1] === undefined || argv[i + 1].startsWith("--"))) throw new UsageError(`missing value for ${token}`);
-        if (Object.hasOwn(opts, key)) throw new UsageError(`duplicate option ${token}`);
-        opts[key] = equals < 0 ? argv[++i] : token.slice(equals + 1);
-      } else if (token.startsWith("-") && token !== "-") throw new UsageError(`unknown option ${token}`);
-      else positional.push(token);
-    }
-    command = positional.shift() || "";
-    if (!Object.hasOwn(OPTIONS, command)) throw new UsageError(HELP);
-    for (const key of Object.keys(opts)) if (key !== "dir" && !OPTIONS[command].includes(key)) throw new UsageError(`unknown option --${key}`);
-    const bounds: Record<string, [number, number]> = { init: [0, 1], add: [1, 1], start: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1], "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], close: [1, 1] };
-    if (positional.length < bounds[command][0] || positional.length > bounds[command][1]) throw new UsageError(HELP);
-    if (command === "messages" && positional[0] !== "prune") throw new UsageError(HELP);
-    if (opts.minutes !== undefined && (!/^\d+$/.test(opts.minutes) || !Number.isSafeInteger(Number(opts.minutes)) || Number(opts.minutes) <= 0)) throw new UsageError("--minutes must be a positive integer");
+    const { positional, opts } = parse(argv); command = positional.shift() || "";
+    const input = { command, positional, opts }; validateInvocation(input);
     if (command === "init") return await init(positional, opts, ctx);
     const root = findRoot(opts.dir, ctx.env, ctx.cwd); const c = loadConfig(root);
-    if (command === "add") return await add(positional[0], opts, c, root, ctx);
-    if (command === "start") return await start(positional[0], opts, c, root, ctx);
-    if (command === "messages") return messagesPrune(opts, c, root, ctx);
-    if (command === "send") return await send(positional, opts, c, root, ctx);
-    if (command === "idle-check") return await idleCheck(opts, c, root, ctx);
-    if (command === "nudge") return await nudge(positional[0], positional[1], opts, c, root, ctx);
-    if (command === "resume-check") return await resumeCheck(c, root, ctx);
-    if (command === "green-prs") return await greenPrs(opts, c, root, ctx);
-    if (command === "close") return await close(positional[0], opts, c, root, ctx);
-    return await status(c, root, ctx);
-  } catch (e) { ctx.err((e as Error).message); return e instanceof UsageError || ["idle-check", "nudge", "resume-check", "green-prs", "close"].includes(command) ? 2 : 1; }
+    return await dispatch(input, { c, root, ctx });
+  } catch (e) { ctx.err((e as Error).message); return errorCode({ e, command }); }
+}
+
+function optionName({ argv, index }: ParsePosition): { equals: number; key: string } {
+  const token = argv[index];
+  const equals = token.startsWith("--") ? token.indexOf("=") : -1;
+  const key = token === "-m" ? "m" : token.slice(2, equals < 0 ? undefined : equals);
+  return { equals, key };
+}
+function validateOptions({ command, opts }: Pick<Invocation, "command" | "opts">): void {
+  for (const key of Object.keys(opts)) {
+    if (key !== "dir" && !OPTIONS[command].includes(key)) throw new UsageError(`unknown option --${key}`);
+  }
+}
+function invalidMinutes(minutes: string): boolean {
+  if (!/^\d+$/.test(minutes)) return true;
+  return !Number.isSafeInteger(Number(minutes)) || Number(minutes) <= 0;
+}
+
+function validateBounds(args: string[], bounds: [number, number]): void {
+  if (args.length < bounds[0] || args.length > bounds[1]) throw new UsageError(HELP);
+}
+
+function appendPositional({ argv, index }: ParsePosition, positional: string[]): void {
+  const token = argv[index];
+  if (token.startsWith("-") && token !== "-") throw new UsageError(`unknown option ${token}`);
+  positional.push(token);
 }
