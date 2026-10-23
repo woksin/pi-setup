@@ -91,6 +91,39 @@ export interface CratisInvocation {
 	readOnly: boolean;
 }
 
+const STDIN_FILE_FLAGS = ["-F", "--file", "--body-file", "--notes-file", "--input"];
+function readsStdinFile(rest: string[]): boolean {
+	return rest.some((w, k) => (STDIN_FILE_FLAGS.includes(w) && rest[k + 1] === "-") || STDIN_FILE_FLAGS.some(f => w === `${f}=-`) || w === "-F-");
+}
+
+/**
+ * True only for git/gh forms known to treat stdin / a substituted argument as data (message, body, patch).
+ * `stdin` demands an explicit stdin-file flag; a `$( )` argument only needs the data-taking subcommand.
+ */
+function dataConsumer(head: string, args: string[], stdin: boolean): boolean {
+	if (head === "gh") {
+		const [sub, verb, ...rest] = args;
+		if (sub === "api") return !stdin || readsStdinFile(args.slice(1));
+		const verbs: Record<string, string[]> = { pr: ["create", "edit", "comment", "review"], issue: ["create", "edit", "comment"], release: ["create", "edit"] };
+		return !!verbs[sub]?.includes(verb) && (!stdin || readsStdinFile(rest));
+	}
+	let k = 0;
+	for (;;) {
+		const a = args[k];
+		if (a === "-C") k += 2;
+		else if (a === "-c") {
+			if (!args[k + 1] || /^(?:alias|core)\./i.test(args[k + 1])) return false;
+			k += 2;
+		} else if (a === "--no-pager" || a === "-P" || a === "-p") k++;
+		else break;
+	}
+	const [sub, second, ...more] = args.slice(k);
+	if (sub === "apply" || sub === "am") return true;
+	const rest = sub === "notes" ? more : [second, ...more].filter(w => w !== undefined);
+	if (sub === "notes") return second === "add" && (!stdin || readsStdinFile(rest));
+	return (sub === "commit" || sub === "tag") && (!stdin || readsStdinFile(rest));
+}
+
 /**
  * Recognize only a small literal file-writing grammar; all other headers keep the legacy scan.
  * Returns the written file names (cat's one redirect target, tee's files), or null.
@@ -114,6 +147,14 @@ function literalFileWriter(header: string): string[] | null {
 		} else tokens.push({ operator: match[1] });
 	}
 	const head = tokens.shift()?.literal;
+	// Only proven data-consuming git/gh forms (allowlist); every other subcommand keeps the legacy scan.
+	if (head === "git" || head === "gh") {
+		const args: string[] = [];
+		for (let k = 0; k < tokens.length; k++) {
+			if (tokens[k].operator) { if (!tokens[k].operator!.startsWith("<<")) return null; k++; } else args.push(tokens[k].literal ?? "");
+		}
+		return dataConsumer(head, args, true) ? [] : null;
+	}
 	const cat = ["cat", "/bin/cat", "/usr/bin/cat"].includes(head ?? "");
 	const tee = ["tee", "/bin/tee", "/usr/bin/tee"].includes(head ?? "");
 	if (!cat && !tee) return null;
@@ -132,7 +173,8 @@ function literalFileWriter(header: string): string[] | null {
 			if (item.literal !== "-a") { files++; targets.push(item.literal); }
 		}
 	}
-	return (cat ? redirects === 1 : files > 0) ? targets : null;
+	// cat without a redirect prints the heredoc to stdout: still data (a pipe to a shell is caught by the caller).
+	return (cat || files > 0) ? targets : null;
 }
 
 /** Split a shell command into simple commands (arrays of unquoted words), recursing into $( ) and backticks. */
@@ -160,6 +202,9 @@ function simpleCommands(input: string, out: string[][] = [], depth = 0, heredocs
 		word = "";
 		inWord = false;
 	};
+	// A $( ) inside git/gh arguments only supplies data to them, so its heredocs may be classified.
+	// Anywhere else (eval, sh -c, bash, ...) the output may be executed: keep the legacy scan.
+	const dataArgument = () => heredocs && (words[0] === "git" || words[0] === "gh") && dataConsumer(words[0], words.slice(1), false);
 	const endCommand = () => {
 		endWord();
 		if (words.length) out.push(words);
@@ -216,7 +261,7 @@ function simpleCommands(input: string, out: string[][] = [], depth = 0, heredocs
 				} else if (input[i] === "$" && input[i + 1] === "(") {
 					const end = closeParen(input, i + 2);
 					uncertain = true;
-					simpleCommands(input.slice(i + 2, end), out, depth + 1, false);
+					simpleCommands(input.slice(i + 2, end), out, depth + 1, dataArgument());
 					word += "$()";
 					i = end + 1;
 				} else if (input[i] === "`") {
@@ -232,7 +277,7 @@ function simpleCommands(input: string, out: string[][] = [], depth = 0, heredocs
 		} else if (c === "$" && input[i + 1] === "(") {
 			const end = closeParen(input, i + 2);
 			uncertain = true;
-			simpleCommands(input.slice(i + 2, end), out, depth + 1, false);
+			simpleCommands(input.slice(i + 2, end), out, depth + 1, dataArgument());
 			word += "$()";
 			inWord = true;
 			i = end + 1;
