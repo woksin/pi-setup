@@ -1,3 +1,5 @@
+import { reap } from "./commands/reap.ts";
+import { snooze } from "./commands/snooze.ts";
 import { type LanesCtx } from "./ctx.ts";
 import { findRoot, loadConfig, UsageError } from "./config.ts";
 import { init } from "./commands/init.ts";
@@ -24,12 +26,14 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
   nudge <ID|coordinator> <text> [--terminal backend]
   resume-check
   green-prs [--new | --ack]
+  reap [ID] [--minutes n] [--dry-run] [--json]
+  snooze <ID> --until ISO|+90m | --clear
   close <ID> [--reassign-to ID2] [--reason text] [--from ID] [--quit]
 Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
-const OPTIONS: Record<string, string[]> = { init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"], add: ["repo", "issue", "goal", "group", "branch", "base", "path", "orchestrator", "orchestrator-id", "no-orchestrator"], start: ["terminal"], send: ["m", "from", "direct"], status: ["all"], messages: ["dry-run", "json"], "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"], close: ["reassign-to", "reason", "from", "quit"] };
+const OPTIONS: Record<string, string[]> = { init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"], add: ["repo", "issue", "goal", "group", "branch", "base", "path", "orchestrator", "orchestrator-id", "no-orchestrator"], start: ["terminal"], send: ["m", "from", "direct"], status: ["all"], messages: ["dry-run", "json"], "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"], reap: ["minutes", "dry-run", "json"], snooze: ["until", "clear"], close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run"] };
 export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
   let command = "";
   try {
@@ -41,7 +45,7 @@ export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
       if (token.startsWith("--") || token === "-m") {
         const equals = token.startsWith("--") ? token.indexOf("=") : -1;
         const key = token === "-m" ? "m" : token.slice(2, equals < 0 ? undefined : equals);
-        if (["preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all", "no-orchestrator"].includes(key)) {
+        if (["preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all", "no-orchestrator", "inactive", "clear"].includes(key)) {
           if (equals >= 0) throw new UsageError(`unknown option ${token}`);
           opts[key] = "true"; continue;
         }
@@ -54,7 +58,7 @@ export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
     command = positional.shift() || "";
     if (!Object.hasOwn(OPTIONS, command)) throw new UsageError(HELP);
     for (const key of Object.keys(opts)) if (key !== "dir" && !OPTIONS[command].includes(key)) throw new UsageError(`unknown option --${key}`);
-    const bounds: Record<string, [number, number]> = { init: [0, 1], add: [1, 1], start: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1], "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], close: [1, 1] };
+    const bounds: Record<string, [number, number]> = { init: [0, 1], add: [1, 1], start: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1], "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], reap: [0, 1], snooze: [1, 1], close: [opts.inactive ? 0 : 1, 1] };
     if (positional.length < bounds[command][0] || positional.length > bounds[command][1]) throw new UsageError(HELP);
     if (command === "messages" && positional[0] !== "prune") throw new UsageError(HELP);
     if (opts.minutes !== undefined && (!/^\d+$/.test(opts.minutes) || !Number.isSafeInteger(Number(opts.minutes)) || Number(opts.minutes) <= 0)) throw new UsageError("--minutes must be a positive integer");
@@ -68,7 +72,9 @@ export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
     if (command === "nudge") return await nudge(positional[0], positional[1], opts, c, root, ctx);
     if (command === "resume-check") return await resumeCheck(c, root, ctx);
     if (command === "green-prs") return await greenPrs(opts, c, root, ctx);
+    if (command === "snooze") return await snooze(positional, opts, c, root, ctx);
+    if (command === "reap" || command === "close" && opts.inactive) return await reap(positional, opts, c, root, ctx);
     if (command === "close") return await close(positional[0], opts, c, root, ctx);
     return await status(c, root, ctx, Boolean(opts.all));
-  } catch (e) { ctx.err((e as Error).message); return e instanceof UsageError || ["idle-check", "nudge", "resume-check", "green-prs", "close"].includes(command) ? 2 : 1; }
+  } catch (e) { ctx.err((e as Error).message); return e instanceof UsageError || ["idle-check", "nudge", "resume-check", "green-prs", "close", "reap", "snooze"].includes(command) ? 2 : 1; }
 }
