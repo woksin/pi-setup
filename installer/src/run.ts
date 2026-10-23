@@ -11,6 +11,7 @@ import type { Manifest } from "./manifest.ts";
 import { applyTakes, diffText, reconcile } from "./reconcile.ts";
 import type { KeepAction } from "./reconcile.ts";
 import { runUninstall } from "./uninstall.ts";
+import { installSummary, runDoctor } from "./doctor.ts";
 import { runUpdate } from "./update.ts";
 import {
   chooseProfile, kimiNote, loadProfiles, overlayFor, pinnedModels, pinWarnings, profileNames, profilesDir,
@@ -115,7 +116,7 @@ export async function main(argv: string[], baseCtx: Ctx, injected?: Prompter): P
   const parsed = parseArgs(argv, baseCtx.cwd);
   if (!parsed.ok) {
     baseCtx.err(parsed.error);
-    return 1;
+    return (argv[0] === "install" ? argv[1] : argv[0]) === "doctor" ? 2 : 1;
   }
   const options = parsed.options;
   if (options.help) {
@@ -127,16 +128,17 @@ export async function main(argv: string[], baseCtx: Ctx, injected?: Prompter): P
   let prompter = injected;
   if (interactive && !prompter) prompter = (await import("./prompter-clack.ts")).clackPrompter();
   try {
-    if (options.command !== "install") return await runCommand(ctx, options, interactive ? prompter : undefined);
+    if (options.command !== "install") return await runCommand(ctx, options, interactive ? prompter : undefined, baseCtx);
     return await execute(ctx, options, interactive ? prompter : undefined, baseCtx);
   } catch (error) {
     if (!(error instanceof SetupError)) throw error;
     ctx.err(error.message.startsWith("pi-setup:") || error.message.startsWith("Missing value") ? error.message : `pi-setup: ${error.message}`);
-    return 1;
+    return options.command === "doctor" ? 2 : 1;
   }
 }
 
-async function runCommand(ctx: Ctx, options: Options, prompter: Prompter | undefined): Promise<number> {
+async function runCommand(ctx: Ctx, options: Options, prompter: Prompter | undefined, baseCtx: Ctx): Promise<number> {
+  if (options.command === "doctor") return runDoctor(ctx, options, baseCtx);
   if (options.command === "uninstall") return runUninstall(ctx, options, prompter);
   if (options.command === "update") return runUpdate(ctx, options, prompter);
   return backupsCommand(ctx, options.sub, options.keep, options.dryRun);
@@ -203,6 +205,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   };
   const result = await apply(ctx, r.actions, applyOptions, manifest);
   const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no"));
+  if (result.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
   return finish(ctx, baseCtx, options, r, detection, shown, result.code, prompter, result.wrote);
 }
 

@@ -26,8 +26,8 @@ async function git(ctx: Ctx, args: string[], timeoutMs = 30000): Promise<{ ok: b
   return { ok: r.code === 0, out: r.stdout.trim(), err: (r.stderr || r.stdout).trim() };
 }
 
-async function remoteTags(ctx: Ctx): Promise<string[]> {
-  const r = await git(ctx, ["ls-remote", "--tags", "--refs", "origin", "v*"]);
+export async function remoteTags(ctx: Ctx, timeoutMs = 30000): Promise<string[]> {
+  const r = await git(ctx, ["ls-remote", "--tags", "--refs", "origin", "v*"], timeoutMs);
   if (!r.ok) throw new SetupError(`git ls-remote failed: ${r.err}`);
   return r.out.split("\n").map((l) => l.split("\trefs/tags/")[1]).filter((t): t is string => Boolean(t));
 }

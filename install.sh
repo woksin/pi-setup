@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copy this setup into ~/.pi/agent (and ~/.agents/skills, ~/.local). A thin shim around installer/dist/pi-setup.mjs.
 # Flags: --dry-run  --plan  --json  --user <login>  --repos-root <dir>  --profile <name|auto>  --yes  --skip-npm  --help
-# Also: ./install.sh uninstall | update | backups [list|prune]. A manifest in ~/.pi/agent/.pi-setup/ tracks what was installed.
+# Also: ./install.sh uninstall | update | backups [list|prune] | doctor [--fix] [--json]. A manifest in ~/.pi/agent/.pi-setup/ tracks what was installed.
 # Files you changed since the last install are kept (new version in <file>.pi-setup-new); overwritten files are backed up to ~/.pi/agent/.pi-setup/backups/<timestamp>/.
 # settings.json, models.json and the other JSON configs are only written when absent.
 # npm install in ~/.pi/agent/npm runs automatically (--skip-npm to skip).

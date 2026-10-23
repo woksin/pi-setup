@@ -82,16 +82,20 @@ async function probeGithub(ctx: Ctx, request: DetectRequest): Promise<GithubStat
   return state;
 }
 
-async function probeProvider(ctx: Ctx, id: string): Promise<ProviderState> {
+export async function probeProvider(ctx: Ctx, id: string): Promise<ProviderState> {
   const result = await ctx.run("pi", ["auth", "check", "--provider", id, "--no-refresh", "--json"], { timeoutMs: PI_MS });
   return result.timedOut ? { status: "unknown" } : parseProviderCheck(result.stdout);
 }
 
-async function probeCatalog(ctx: Ctx): Promise<Set<string> | null> {
+export async function listModels(ctx: Ctx): Promise<{ catalog: Set<string> | null; code: number | null; timedOut: boolean; stderr: string }> {
   const result = await ctx.run("pi", ["--offline", "--list-models"], { timeoutMs: PI_MS });
-  if (result.timedOut) return null;
   const text = `${result.stdout}\n${result.stderr}`;
-  return /No models available/i.test(text) ? new Set() : parseModelTable(result.stdout);
+  const catalog = result.timedOut ? null : /No models available/i.test(text) ? new Set<string>() : parseModelTable(result.stdout);
+  return { catalog, code: result.code, timedOut: result.timedOut, stderr: result.stderr.split("\n").slice(0, 3).join("\n") };
+}
+
+async function probeCatalog(ctx: Ctx): Promise<Set<string> | null> {
+  return (await listModels(ctx)).catalog;
 }
 
 export async function detect(ctx: Ctx, request: DetectRequest): Promise<Detection> {

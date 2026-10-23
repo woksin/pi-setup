@@ -202,3 +202,11 @@ test("a backup run folder that is not pinned stays and its path is printed", asy
   assert.match(r.out, /Left in place .*backups prune --keep 0/);
   assert.ok(existsSync(join(s.pi, ".pi-setup/backups/20260101-000000/leftover.md")));
 });
+
+
+test("full uninstall removes the doctor update cache before tidying", async () => {
+  const s = setup();
+  s.put(".pi/agent/.pi-setup/update-check.json", '{"latest":"v1"}');
+  assert.equal((await s.run("--yes")).code, 0);
+  assert.equal(existsSync(join(s.pi, ".pi-setup")), false);
+});

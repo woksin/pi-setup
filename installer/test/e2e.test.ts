@@ -24,6 +24,7 @@ describe("install (e2e)", () => {
     const box = fresh();
     const run = install(box, ARGS(box));
     assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, /^Doctor: /m);
     const user = JSON.parse(readFileSync(piPath(box, "user.json"), "utf8"));
     assert.deepEqual(user, { githubUser: "einari", reposRoot: join(box.root, "repos") });
     assert.match(readFileSync(piPath(box, "AGENTS.md"), "utf8"), /--add-assignee einari/);
