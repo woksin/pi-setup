@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 # Tests the repository being released (agent/), not the live install; node_modules fall back to ~/.pi/agent/npm.
 agent/bin/pi-setup-tests "${PI_AGENT_DIR:-agent}"
 python3 -m unittest discover -s tests
+(cd agent/pi-phase && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s . -p 'test_*.py')
 (cd agent/local-packages/pi-questions && node --test --test-timeout=30000 'test/*.test.ts')
 npm --prefix installer ci --no-audit --no-fund
 npm --prefix installer run build

@@ -674,7 +674,8 @@ class PhaseTests(unittest.TestCase):
                 result = subprocess.run([str(shim / "dotnet"), *args], env=env,
                                         capture_output=True, text=True, timeout=3)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                expected = [*prefix, subcommand, "-m:3", "a b", "", "--no-build"]
+                expected = [*prefix, subcommand, "-m:3", "-p:UseSharedCompilation=false", "-nodeReuse:false",
+                            "a b", "", "--no-build"]
                 self.assertEqual(result.stdout.splitlines(), [f"<{arg}>" for arg in expected])
         cases = [["test", flag] for flag in ("-m", "-M:2", "/m", "/M:4", "-maxcpucount",
                  "-MaxCpuCount:8", "/MAXCPUCOUNT:2", "--maxcpucount=6")]
@@ -684,7 +685,9 @@ class PhaseTests(unittest.TestCase):
                 result = subprocess.run([str(shim / "dotnet"), *args], env=env,
                                         capture_output=True, text=True, timeout=3)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                expected = [f"<{arg}>" for arg in args] if args else ["<>"]
+                lifetime = ["-p:UseSharedCompilation=false", "-nodeReuse:false"] if args[:1] == ["test"] else []
+                shown = [*args[:1], *lifetime, *args[1:]]
+                expected = [f"<{arg}>" for arg in shown] if args else ["<>"]
                 self.assertEqual(result.stdout.splitlines(), expected)
         nested = self.root / "nested-shim"
         nested.mkdir()
@@ -693,7 +696,8 @@ class PhaseTests(unittest.TestCase):
         result = subprocess.run([str(nested / "dotnet"), "build"], env=nested_env,
                                 capture_output=True, text=True, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["<build>", "<-m:2>"])
+        self.assertEqual(result.stdout.splitlines(),
+                         ["<build>", "<-m:2>", "<-p:UseSharedCompilation=false>", "<-nodeReuse:false>"])
         env["PI_PHASE_ORIGINAL_PATH"] = str(alias)
         result = subprocess.run([str(shim / "dotnet"), "build"], env=env,
                                 capture_output=True, text=True, timeout=3)
@@ -868,7 +872,7 @@ class PhaseTests(unittest.TestCase):
         code, out = self.done(self.run_phase(kind="build", command=["sh", "-c", "dotnet build 'a b'"]))
         self.assertEqual(code, 0, out)
         self.assertIn("msbuild cap -m:4 (msbuild_max_cpu)", out)
-        self.assertIn("<build>\n<-m:4>\n<a b>", out)
+        self.assertIn("<build>\n<-m:4>\n<-p:UseSharedCompilation=false>\n<-nodeReuse:false>\n<a b>", out)
         self.assertEqual(list(self.state.glob("dotnet-shim-*")), [])
         for kind in ("test", "integration", "ci"):
             extra = ("--repo", "repo", "--pr", "1", "--commit", "abc") if kind == "ci" else ()
