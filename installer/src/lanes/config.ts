@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { validId } from "./names.ts";
@@ -67,9 +67,7 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
     require(r.archiveMaxAgeDays === null || (Number.isInteger(r.archiveMaxAgeDays) && r.archiveMaxAgeDays >= 1), "messages.retention.archiveMaxAgeDays");
     require(typeof r.keepUnread === "boolean", "messages.retention.keepUnread");
     require(typeof r.auto === "boolean", "messages.retention.auto");
-    try {
-      require(archiveDir(c, root, home) !== expand(c.messages.dir, c, root, home), "messages.retention.archiveDir (must not be messages.dir)");
-    } catch (e) { throw new UsageError(`invalid messages.retention.archiveDir: ${(e as Error).message}`); }
+    archiveDir(c, root, home);
   }
   require(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !["ALL", c.messages.broadcast].includes(c.coordinator.id), "coordinator.id");
   require(text(c.coordinator.cwd), "coordinator.cwd"); require(text(c.coordinator.prompt), "coordinator.prompt");
@@ -108,8 +106,25 @@ export function expand(value: string, c: Config, root: string, home: string, bas
   if (out === "~" || out.startsWith("~/")) out = join(home, out.slice(2));
   return isAbsolute(out) ? resolve(out) : resolve(base, out);
 }
+function physicalPath(path: string): string {
+  if (existsSync(path)) return realpathSync(path);
+  const parent = dirname(path);
+  return parent === path ? path : join(physicalPath(parent), basename(path));
+}
+function archiveBelow(dir: string, destination: string): boolean {
+  const path = relative(dir, destination);
+  return path !== "" && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path) && path.split(sep)[0] !== "status";
+}
 export function archiveDir(c: Config, root: string, home: string): string {
-  return expand(c.messages.retention?.archiveDir ?? "archive", c, root, home, expand(c.messages.dir, c, root, home));
+  try {
+    const value = c.messages.retention?.archiveDir ?? "archive";
+    const dir = expand(c.messages.dir, c, root, home);
+    const destination = expand(value, c, root, home, dir);
+    if (value.split(/[\\/]/).includes("..") || !archiveBelow(dir, destination) || !archiveBelow(physicalPath(dir), physicalPath(destination))) {
+      throw new Error("must be below messages.dir and outside status/");
+    }
+    return destination;
+  } catch (e) { throw new UsageError(`invalid messages.retention.archiveDir: ${(e as Error).message}`); }
 }
 export function findRoot(dir: string | undefined, env: Record<string, string | undefined>, cwd: string): string {
   if (dir || env.LANES_DIR) return resolve(cwd, dir || env.LANES_DIR!);

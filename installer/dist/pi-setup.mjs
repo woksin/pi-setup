@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: cd1c129f5a16c687212e0a2ffc43941b2ed4df8ee29ce5faab89d480e589c7e5
+// pi-setup-source-sha256: b95b5f229f1e9e4b3ccaf67032b67150a1146479183fe14af6e652bac04ee245
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -435,8 +435,8 @@ var init_names = __esm({
 });
 
 // src/lanes/config.ts
-import { existsSync as existsSync4, readFileSync as readFileSync3, renameSync, writeFileSync } from "node:fs";
-import { dirname as dirname2, isAbsolute as isAbsolute2, join as join5, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync3, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join5, relative, resolve as resolve3, sep } from "node:path";
 import { homedir as homedir3 } from "node:os";
 import { randomUUID } from "node:crypto";
 function defaults(root, home, reposRoot) {
@@ -498,11 +498,7 @@ function validate(value, root = process.cwd(), home = homedir3()) {
     require2(r2.archiveMaxAgeDays === null || Number.isInteger(r2.archiveMaxAgeDays) && r2.archiveMaxAgeDays >= 1, "messages.retention.archiveMaxAgeDays");
     require2(typeof r2.keepUnread === "boolean", "messages.retention.keepUnread");
     require2(typeof r2.auto === "boolean", "messages.retention.auto");
-    try {
-      require2(archiveDir(c2, root, home) !== expand(c2.messages.dir, c2, root, home), "messages.retention.archiveDir (must not be messages.dir)");
-    } catch (e) {
-      throw new UsageError(`invalid messages.retention.archiveDir: ${e.message}`);
-    }
+    archiveDir(c2, root, home);
   }
   require2(c2.coordinator && typeof c2.coordinator.id === "string" && validId(c2.coordinator.id) && !["ALL", c2.messages.broadcast].includes(c2.coordinator.id), "coordinator.id");
   require2(text3(c2.coordinator.cwd), "coordinator.cwd");
@@ -543,8 +539,27 @@ function expand(value, c2, root, home, base = root) {
   if (out === "~" || out.startsWith("~/")) out = join5(home, out.slice(2));
   return isAbsolute2(out) ? resolve3(out) : resolve3(base, out);
 }
+function physicalPath(path2) {
+  if (existsSync4(path2)) return realpathSync(path2);
+  const parent = dirname2(path2);
+  return parent === path2 ? path2 : join5(physicalPath(parent), basename(path2));
+}
+function archiveBelow(dir, destination) {
+  const path2 = relative(dir, destination);
+  return path2 !== "" && path2 !== ".." && !path2.startsWith(`..${sep}`) && !isAbsolute2(path2) && path2.split(sep)[0] !== "status";
+}
 function archiveDir(c2, root, home) {
-  return expand(c2.messages.retention?.archiveDir ?? "archive", c2, root, home, expand(c2.messages.dir, c2, root, home));
+  try {
+    const value = c2.messages.retention?.archiveDir ?? "archive";
+    const dir = expand(c2.messages.dir, c2, root, home);
+    const destination = expand(value, c2, root, home, dir);
+    if (value.split(/[\\/]/).includes("..") || !archiveBelow(dir, destination) || !archiveBelow(physicalPath(dir), physicalPath(destination))) {
+      throw new Error("must be below messages.dir and outside status/");
+    }
+    return destination;
+  } catch (e) {
+    throw new UsageError(`invalid messages.retention.archiveDir: ${e.message}`);
+  }
 }
 function findRoot(dir, env, cwd) {
   if (dir || env.LANES_DIR) return resolve3(cwd, dir || env.LANES_DIR);
@@ -1080,7 +1095,7 @@ var init_backend = __esm({
 });
 
 // src/lanes/retention.ts
-import { closeSync, copyFileSync, lstatSync, mkdirSync as mkdirSync4, openSync, readdirSync as readdirSync4, realpathSync, renameSync as renameSync3, unlinkSync, utimesSync } from "node:fs";
+import { closeSync, copyFileSync, lstatSync, mkdirSync as mkdirSync4, openSync, readdirSync as readdirSync4, renameSync as renameSync3, unlinkSync, utimesSync } from "node:fs";
 import { join as join13 } from "node:path";
 function stat(path2) {
   try {
@@ -1104,8 +1119,8 @@ function messages(dir) {
 }
 function unread(m2, c2, dir) {
   const broadcast = addressed(m2, "ALL") || addressed(m2, c2.messages.broadcast);
-  return [c2.coordinator.id, ...c2.lanes.map((lane) => lane.id)].some((id) => {
-    if (!broadcast && !addressed(m2, id)) return false;
+  return [{ id: c2.coordinator.id, group: null }, ...c2.lanes].some(({ id, group }) => {
+    if (!broadcast && ![id, ...group ? [group] : []].some((recipient) => addressed(m2, recipient))) return false;
     const marker = stat(join13(dir, `${id}-inbox.marker`));
     return marker?.isFile() === true && marker.mtimeMs < m2.info.mtimeMs;
   });
@@ -1143,9 +1158,6 @@ function prune(c2, root, ctx, dryRun = false) {
     return counts2;
   }
   const destination = archiveDir(c2, root, ctx.home);
-  if (destination === dir || stat(destination) && stat(dir) && realpathSync(destination) === realpathSync(dir)) {
-    throw new UsageError("invalid messages.retention.archiveDir (must not be messages.dir)");
-  }
   const destinationInfo = stat(destination);
   if (destinationInfo && (!destinationInfo.isDirectory() || destinationInfo.isSymbolicLink())) throw new Error(`not a regular directory: ${destination}`);
   const now = ctx.now().getTime();
@@ -1520,7 +1532,7 @@ var init_green_prs = __esm({
 });
 
 // src/lanes/commands/close.ts
-import { basename, dirname as dirname5 } from "node:path";
+import { basename as basename2, dirname as dirname5 } from "node:path";
 function closeBody(id, to, reason, unread2) {
   const body = [
     `Lane ${id} is closed.${to ? ` Reassigned to ${to}.` : ""}${reason ? ` Reason: ${clean(reason)}` : ""}`,
@@ -1535,7 +1547,7 @@ function closeBody(id, to, reason, unread2) {
 `;
 }
 async function quit(id, pid, cwd, c2, root, ctx) {
-  const busy = (await descendants(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename(cmd.split(/\s+/)[0])));
+  const busy = (await descendants(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename2(cmd.split(/\s+/)[0])));
   if (busy.length) {
     ctx.err(`REFUSED: busy children: ${busy.join(" ")}`);
     return false;
@@ -1878,7 +1890,7 @@ var init_fsx = __esm({
 // src/manifest.ts
 import { createHash } from "node:crypto";
 import { existsSync as existsSync14, lstatSync as lstatSync2, readFileSync as readFileSync11 } from "node:fs";
-import { isAbsolute as isAbsolute3, join as join20, relative } from "node:path";
+import { isAbsolute as isAbsolute3, join as join20, relative as relative2 } from "node:path";
 function sha256(buf) {
   return createHash("sha256").update(buf).digest("hex");
 }
@@ -1916,7 +1928,7 @@ function symlinkTarget(home, rel) {
   return join20(home, rel);
 }
 function homeRel(home, abs) {
-  const rel = relative(home, abs);
+  const rel = relative2(home, abs);
   if (rel === "" || rel.startsWith("..") || isAbsolute3(rel)) throw new SetupError(`${abs} is outside ${home}`);
   return rel.split("\\").join("/");
 }
@@ -2008,7 +2020,7 @@ var init_manifest = __esm({
 
 // src/backups.ts
 import { existsSync as existsSync15, mkdirSync as mkdirSync7, readdirSync as readdirSync7, rmdirSync, rmSync, statSync as statSync9, unlinkSync as unlinkSync2 } from "node:fs";
-import { dirname as dirname7, join as join21, relative as relative2 } from "node:path";
+import { dirname as dirname7, join as join21, relative as relative3 } from "node:path";
 function filesBelow(dir, base = "") {
   const out = [];
   for (const e of readdirSync7(join21(dir, base), { withFileTypes: true })) {
@@ -2096,13 +2108,13 @@ var init_backups = __esm({
       backup(abs) {
         const run = this.runDir();
         const inside = abs.startsWith(`${this.piDir}/`);
-        const rel = inside ? relative2(this.piDir, abs) : `_home/${relative2(this.home, abs)}`;
+        const rel = inside ? relative3(this.piDir, abs) : `_home/${relative3(this.home, abs)}`;
         const target = join21(run, rel);
         if (!existsSync15(target)) {
           mkdirSync7(dirname7(target), { recursive: true });
           backupCopy(abs, target);
         }
-        return `${relative2(backupsDir(this.piDir), run)}/${rel}`;
+        return `${relative3(backupsDir(this.piDir), run)}/${rel}`;
       }
       runDir() {
         if (this.dir) return this.dir;
@@ -3751,7 +3763,7 @@ var init_retire = __esm({
 
 // src/doctor-checks.ts
 import { existsSync as existsSync25, lstatSync as lstatSync6, readdirSync as readdirSync11, readFileSync as readFileSync20, readlinkSync as readlinkSync3 } from "node:fs";
-import { basename as basename2, delimiter as delimiter2, dirname as dirname10, join as join31, resolve as resolve7 } from "node:path";
+import { basename as basename3, delimiter as delimiter2, dirname as dirname10, join as join31, resolve as resolve7 } from "node:path";
 function setupCmd(ctx) {
   if (ctx.which("pi-setup")) return "pi-setup";
   const path2 = join31(ctx.repoDir, "install.sh");
@@ -3774,7 +3786,7 @@ function livePins(piDir, settings2) {
     if (!model) continue;
     const extensions = /^extensions:\s*([^\n]*(?:\n[ \t]+[^\n]*)*)/m.exec(front)?.[1] ?? "";
     const agents = pins.get(model) ?? [];
-    agents.push({ name: basename2(file, ".md"), fallback: /\bprovider-fallback\b/.test(extensions) });
+    agents.push({ name: basename3(file, ".md"), fallback: /\bprovider-fallback\b/.test(extensions) });
     pins.set(model, agents);
   }
   if (typeof settings2.defaultProvider === "string" && typeof settings2.defaultModel === "string") {
@@ -3901,7 +3913,7 @@ function guards(s) {
 function path(s) {
   const bin = join31(s.ctx.home, ".local/bin");
   const onPath = (s.ctx.env.PATH ?? "").split(delimiter2).some((p) => resolve7(s.ctx.cwd, p) === bin);
-  const shell = basename2(s.ctx.env.SHELL ?? "");
+  const shell = basename3(s.ctx.env.SHELL ?? "");
   const rc = shell === "zsh" ? "zshrc" : shell === "bash" ? "bashrc" : "profile";
   const result2 = [check("path", onPath ? "ok" : "warn", onPath ? "~/.local/bin is on PATH" : "~/.local/bin is not on PATH", `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.${rc}`)];
   for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"]]) {

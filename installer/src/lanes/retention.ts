@@ -1,7 +1,7 @@
-import { closeSync, copyFileSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, renameSync, unlinkSync, utimesSync } from "node:fs";
+import { closeSync, copyFileSync, lstatSync, mkdirSync, openSync, readdirSync, renameSync, unlinkSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { addressed } from "./backend.ts";
-import { archiveDir, expand, UsageError, type Config } from "./config.ts";
+import { archiveDir, expand, type Config } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
 import { parseMessageName } from "./names.ts";
 
@@ -24,8 +24,8 @@ function messages(dir: string) {
 }
 function unread(m: ReturnType<typeof messages>[number], c: Config, dir: string): boolean {
   const broadcast = addressed(m, "ALL") || addressed(m, c.messages.broadcast);
-  return [c.coordinator.id, ...c.lanes.map((lane) => lane.id)].some((id) => {
-    if (!broadcast && !addressed(m, id)) return false;
+  return [{ id: c.coordinator.id, group: null }, ...c.lanes].some(({ id, group }) => {
+    if (!broadcast && ![id, ...group ? [group] : []].some((recipient) => addressed(m, recipient))) return false;
     const marker = stat(join(dir, `${id}-inbox.marker`));
     return marker?.isFile() === true && marker.mtimeMs < m.info.mtimeMs;
   });
@@ -53,9 +53,6 @@ export function prune(c: Config, root: string, ctx: LanesCtx, dryRun = false): P
   const r = c.messages.retention;
   if (!r || (r.mode === "keep" && r.archiveMaxAgeDays === null)) { counts.kept = messages(dir).length; return counts; }
   const destination = archiveDir(c, root, ctx.home);
-  if (destination === dir || (stat(destination) && stat(dir) && realpathSync(destination) === realpathSync(dir))) {
-    throw new UsageError("invalid messages.retention.archiveDir (must not be messages.dir)");
-  }
   const destinationInfo = stat(destination);
   if (destinationInfo && (!destinationInfo.isDirectory() || destinationInfo.isSymbolicLink())) throw new Error(`not a regular directory: ${destination}`);
   const now = ctx.now().getTime();

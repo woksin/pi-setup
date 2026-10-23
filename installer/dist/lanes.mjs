@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: cd1c129f5a16c687212e0a2ffc43941b2ed4df8ee29ce5faab89d480e589c7e5
+// pi-setup-source-sha256: b95b5f229f1e9e4b3ccaf67032b67150a1146479183fe14af6e652bac04ee245
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -87,8 +87,8 @@ function realLanesCtx() {
 }
 
 // src/lanes/config.ts
-import { existsSync as existsSync2, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname as dirname2, isAbsolute, join as join4, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync2, readFileSync, realpathSync as realpathSync2, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname as dirname2, isAbsolute, join as join4, relative, resolve as resolve3, sep } from "node:path";
 import { homedir as homedir2 } from "node:os";
 import { randomUUID } from "node:crypto";
 
@@ -178,11 +178,7 @@ function validate(value, root = process.cwd(), home = homedir2()) {
     require2(r.archiveMaxAgeDays === null || Number.isInteger(r.archiveMaxAgeDays) && r.archiveMaxAgeDays >= 1, "messages.retention.archiveMaxAgeDays");
     require2(typeof r.keepUnread === "boolean", "messages.retention.keepUnread");
     require2(typeof r.auto === "boolean", "messages.retention.auto");
-    try {
-      require2(archiveDir(c, root, home) !== expand(c.messages.dir, c, root, home), "messages.retention.archiveDir (must not be messages.dir)");
-    } catch (e) {
-      throw new UsageError(`invalid messages.retention.archiveDir: ${e.message}`);
-    }
+    archiveDir(c, root, home);
   }
   require2(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !["ALL", c.messages.broadcast].includes(c.coordinator.id), "coordinator.id");
   require2(text(c.coordinator.cwd), "coordinator.cwd");
@@ -223,8 +219,27 @@ function expand(value, c, root, home, base = root) {
   if (out === "~" || out.startsWith("~/")) out = join4(home, out.slice(2));
   return isAbsolute(out) ? resolve3(out) : resolve3(base, out);
 }
+function physicalPath(path) {
+  if (existsSync2(path)) return realpathSync2(path);
+  const parent = dirname2(path);
+  return parent === path ? path : join4(physicalPath(parent), basename(path));
+}
+function archiveBelow(dir, destination) {
+  const path = relative(dir, destination);
+  return path !== "" && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path) && path.split(sep)[0] !== "status";
+}
 function archiveDir(c, root, home) {
-  return expand(c.messages.retention?.archiveDir ?? "archive", c, root, home, expand(c.messages.dir, c, root, home));
+  try {
+    const value = c.messages.retention?.archiveDir ?? "archive";
+    const dir = expand(c.messages.dir, c, root, home);
+    const destination = expand(value, c, root, home, dir);
+    if (value.split(/[\\/]/).includes("..") || !archiveBelow(dir, destination) || !archiveBelow(physicalPath(dir), physicalPath(destination))) {
+      throw new Error("must be below messages.dir and outside status/");
+    }
+    return destination;
+  } catch (e) {
+    throw new UsageError(`invalid messages.retention.archiveDir: ${e.message}`);
+  }
 }
 function findRoot(dir, env, cwd) {
   if (dir || env.LANES_DIR) return resolve3(cwd, dir || env.LANES_DIR);
@@ -621,7 +636,7 @@ async function piIn(cwd, ctx) {
 }
 
 // src/lanes/retention.ts
-import { closeSync, copyFileSync, lstatSync, mkdirSync as mkdirSync4, openSync, readdirSync as readdirSync3, realpathSync as realpathSync2, renameSync as renameSync3, unlinkSync, utimesSync } from "node:fs";
+import { closeSync, copyFileSync, lstatSync, mkdirSync as mkdirSync4, openSync, readdirSync as readdirSync3, renameSync as renameSync3, unlinkSync, utimesSync } from "node:fs";
 import { join as join12 } from "node:path";
 
 // src/lanes/backend.ts
@@ -739,8 +754,8 @@ function messages(dir) {
 }
 function unread(m, c, dir) {
   const broadcast = addressed(m, "ALL") || addressed(m, c.messages.broadcast);
-  return [c.coordinator.id, ...c.lanes.map((lane) => lane.id)].some((id) => {
-    if (!broadcast && !addressed(m, id)) return false;
+  return [{ id: c.coordinator.id, group: null }, ...c.lanes].some(({ id, group }) => {
+    if (!broadcast && ![id, ...group ? [group] : []].some((recipient) => addressed(m, recipient))) return false;
     const marker = stat(join12(dir, `${id}-inbox.marker`));
     return marker?.isFile() === true && marker.mtimeMs < m.info.mtimeMs;
   });
@@ -778,9 +793,6 @@ function prune(c, root, ctx, dryRun = false) {
     return counts;
   }
   const destination = archiveDir(c, root, ctx.home);
-  if (destination === dir || stat(destination) && stat(dir) && realpathSync2(destination) === realpathSync2(dir)) {
-    throw new UsageError("invalid messages.retention.archiveDir (must not be messages.dir)");
-  }
   const destinationInfo = stat(destination);
   if (destinationInfo && (!destinationInfo.isDirectory() || destinationInfo.isSymbolicLink())) throw new Error(`not a regular directory: ${destination}`);
   const now = ctx.now().getTime();
@@ -1092,7 +1104,7 @@ async function greenPrs(opts, c, root, ctx) {
 }
 
 // src/lanes/commands/close.ts
-import { basename, dirname as dirname5 } from "node:path";
+import { basename as basename2, dirname as dirname5 } from "node:path";
 function closeBody(id, to, reason, unread2) {
   const body = [
     `Lane ${id} is closed.${to ? ` Reassigned to ${to}.` : ""}${reason ? ` Reason: ${clean(reason)}` : ""}`,
@@ -1107,7 +1119,7 @@ function closeBody(id, to, reason, unread2) {
 `;
 }
 async function quit(id, pid, cwd, c, root, ctx) {
-  const busy = (await descendants(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename(cmd.split(/\s+/)[0])));
+  const busy = (await descendants(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename2(cmd.split(/\s+/)[0])));
   if (busy.length) {
     ctx.err(`REFUSED: busy children: ${busy.join(" ")}`);
     return false;

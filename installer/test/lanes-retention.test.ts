@@ -54,8 +54,8 @@ test("retention validation names each malformed key and defaults archiveDir", ()
   }
   delete f.r.archiveDir; assert.doesNotThrow(() => validate(f.c)); assert.equal(archiveDir(f.c, f.root, f.root), join(f.dir, "archive"));
   for (const path of [f.dir, "${root}/messages"]) { f.r.archiveDir = path; assert.throws(() => validate(f.c, f.root, f.root), /messages.retention.archiveDir/); }
-  f.r.archiveDir = "~/saved"; assert.equal(archiveDir(f.c, f.root, f.root), join(f.root, "saved"));
-  f.r.archiveDir = "${root}/saved"; assert.equal(archiveDir(f.c, f.root, f.root), join(f.root, "saved"));
+  f.r.archiveDir = "~/messages/saved"; assert.equal(archiveDir(f.c, f.root, f.root), join(f.dir, "saved"));
+  f.r.archiveDir = "${root}/messages/saved"; assert.equal(archiveDir(f.c, f.root, f.root), join(f.dir, "saved"));
 });
 
 for (const mode of ["archive", "delete"] as const) test(`${mode} protects unread addressed lanes, not read or missing markers`, () => {
@@ -66,6 +66,17 @@ for (const mode of ["archive", "delete"] as const) test(`${mode} protects unread
   const counts = prune(f.c, f.root, f.ctx); assert.equal(counts.skippedUnread, 4); assert.equal(counts[mode === "archive" ? "archived" : "deleted"], 2);
   f.r.keepUnread = false; assert.equal(prune(f.c, f.root, f.ctx).skippedUnread, 0);
 });
+
+for (const mode of ["archive", "delete"] as const) {
+  for (const [state, age] of [["unread", 20], ["read", 1]] as const) test(`${mode} protects ${state} group messages using the lane marker`, () => {
+    const f = fixture(); f.r.mode = mode; f.c.lanes[0].group = "G1";
+    const path = f.put("L0-to-G1-group-1200.md"); f.put("L1-inbox.marker", age);
+    const counts = prune(f.c, f.root, f.ctx);
+    assert.equal(counts.skippedUnread, state === "unread" ? 1 : 0);
+    assert.equal(counts[mode === "archive" ? "archived" : "deleted"], state === "read" ? 1 : 0);
+    assert.equal(existsSync(path), state === "unread");
+  });
+}
 
 test("missing markers do not protect configured recipients; equal marker is read", () => {
   const f = fixture(); f.put(); f.put("L1-to-L0-other-1200.md");
@@ -115,8 +126,44 @@ test("only top-level regular messages are touched; archive is absent from list, 
 });
 
 test("absolute archive paths work and symlink archives are refused", () => {
-  const f = fixture(); f.r.archiveDir = join(f.root, "saved"); f.put(); assert.equal(prune(f.c, f.root, f.ctx).archived, 1);
+  const f = fixture(); f.r.archiveDir = join(f.dir, "saved"); f.put(); assert.equal(prune(f.c, f.root, f.ctx).archived, 1);
   const g = fixture(); g.put(); symlinkSync(g.dir, join(g.dir, "archive")); assert.throws(() => prune(g.c, g.root, g.ctx), /archiveDir/);
+});
+
+test("archiveDir rejects traversal, outside paths, messages itself and status descendants", () => {
+  const f = fixture(); const source = f.put();
+  for (const path of ["..", "../saved", "archive/../saved", f.root, join(f.root, "messages-other"), f.dir, ".", "status", "status/archive", join(f.dir, "status/archive")]) {
+    f.r.archiveDir = path;
+    const invalid = (e: unknown) => e instanceof UsageError && e.message.includes("messages.retention.archiveDir");
+    assert.throws(() => validate(f.c, f.root, f.root), invalid);
+    assert.throws(() => prune(f.c, f.root, f.ctx), invalid);
+    assert.ok(existsSync(source));
+  }
+  for (const path of ["saved/nested", "status-archive", join(f.dir, "saved")]) {
+    f.r.archiveDir = path; assert.doesNotThrow(() => validate(f.c, f.root, f.root));
+  }
+});
+
+test("archiveDir resolves symlink ancestors before accepting a descendant", () => {
+  const f = fixture(); mkdirSync(join(f.dir, "status"));
+  symlinkSync(f.root, join(f.dir, "outside")); symlinkSync(join(f.dir, "status"), join(f.dir, "alias"));
+  for (const path of ["outside/saved", "alias/saved"]) {
+    f.r.archiveDir = path;
+    assert.throws(() => validate(f.c, f.root, f.root), /messages.retention.archiveDir/);
+    assert.throws(() => prune(f.c, f.root, f.ctx), /messages.retention.archiveDir/);
+  }
+});
+
+test("failed rename removes the reserved placeholder and preserves the source", (t) => {
+  const f = fixture(); const source = f.put();
+  const mocked = t.mock.method(fs, "renameSync", () => { throw Object.assign(new Error("rename denied"), { code: "EACCES" }); });
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => prune(f.c, f.root, f.ctx), /rename denied/);
+    assert.deepEqual(readdirSync(join(f.dir, "archive")), []);
+    assert.equal(readFileSync(source, "utf8"), "original");
+  } finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(prune(f.c, f.root, f.ctx).archived, 1);
 });
 
 test("EXDEV copies then unlinks, preserving message mtime", (t) => {
