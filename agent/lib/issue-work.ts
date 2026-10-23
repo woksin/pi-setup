@@ -601,6 +601,8 @@ export function errorText(e: unknown): string {
 interface IssueData { title: string; url: string; state: string; body: string; author?: string; association?: string; labels?: { name: string }[] }
 
 const trustedAssociation = (association?: string) => ["OWNER", "MEMBER", "COLLABORATOR"].includes(association ?? "");
+// GitHub App bots report association NONE; their `[bot]` logins cannot be taken by user accounts.
+const TRUSTED_BOTS = new Set(["github-actions[bot]", "dependabot[bot]", "renovate[bot]"]);
 const authorLabel = (author = "unknown", association = "UNKNOWN") => `${author} [${association}]${trustedAssociation(association) ? "" : " (outside author)"}`;
 
 async function issueAuthorship(d: Deps, repo: string, issue: number): Promise<Pick<IssueData, "author" | "association" | "labels">> {
@@ -960,7 +962,7 @@ export interface ClaimArgs { repo: string; issue: number; note?: string; force?:
 
 /** Label presence alone is not acceptance: verify the latest application and its actor's access. */
 async function requireAcceptedAuthor(d: Deps, a: ClaimArgs, data: IssueData): Promise<void> {
-	if (a.acceptOutsider === true || trustedAssociation(data.association)) return;
+	if (a.acceptOutsider === true || trustedAssociation(data.association) || TRUSTED_BOTS.has(data.author ?? "")) return;
 	if (await acceptedByCollaborator(d, a.repo, a.issue, data.labels ?? [])) return;
 	throw new Error(`${a.repo}#${a.issue} was opened by ${authorLabel(data.author, data.association)}; not claiming without an accepted/triaged label applied by an OWNER/MEMBER/COLLABORATOR, or user-approved acceptOutsider: true.`);
 }

@@ -11,6 +11,7 @@ const session: SessionInfo = { sessionId: "me", cwd: "/repo", branch: "feat/x", 
 const target = { repo: "o/r", issue: 5 };
 let dir: string;
 let association: string;
+let opener: string;
 let labels: { name: string }[];
 let events: any[];
 let permission: string;
@@ -25,7 +26,7 @@ function api(path: string): unknown {
 	if (path.endsWith("/permission") && permissionDenied) throw new Error("HTTP 403");
 	const routes: Record<string, unknown> = {
 		user: { login: "woksin" },
-		"repos/o/r/issues/5": { user: { login: "opener" }, author_association: association, labels },
+		"repos/o/r/issues/5": { user: { login: opener }, author_association: association, labels },
 		"repos/o/r/issues/5/comments": [comments],
 		"repos/o/r/issues/5/events": [events],
 		"repos/o/r/collaborators/maintainer/permission": { permission },
@@ -36,7 +37,7 @@ function api(path: string): unknown {
 
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "issue-authorship-"));
-	association = "OWNER"; labels = []; events = []; permission = "write"; permissionDenied = false;
+	association = "OWNER"; opener = "opener"; labels = []; events = []; permission = "write"; permissionDenied = false;
 	body = "Body"; comments = []; writes = 0; calls = [];
 	d = {
 		dataDir: dir, statusScript: "/fake/status.py", now: () => new Date(now), isPidAlive: () => false,
@@ -51,6 +52,16 @@ beforeEach(() => {
 	};
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+test("well-known GitHub App bots may be claimed", async () => {
+	association = "NONE"; opener = "dependabot[bot]";
+	assert.match(await claim(d, session, target), /Claimed/);
+});
+
+test("look-alike user logins of bots are still outside authors", async () => {
+	association = "NONE"; opener = "dependabot";
+	await assert.rejects(claim(d, session, { ...target, force: true }), /outside author/);
+});
 
 for (const value of ["NONE", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "CONTRIBUTOR", "MANNEQUIN", "UNKNOWN"]) {
 	test(`${value}: refuses without approval even with force; accepts explicit override`, async () => {
