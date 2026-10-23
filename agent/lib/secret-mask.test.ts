@@ -552,16 +552,21 @@ test("layering: Cratis extension not registered (untrusted project) or registere
 });
 
 for (const value of ["abcd", "abcde", "alphabetic", "lettersOnly", "abcdefg1", "1abcdefg"]) {
-	for (const input of [`PASSWORD=${value}`, `"token": "${value}"`, `API_KEY: ${value}`]) {
+	for (const input of [`PASSWORD=${value}`, `API_KEY=${value}`, `TOKEN=${value}`, `export DB_PASSWORD='${value}'`]) {
 		test(`assignment masks short/alphabetic value: ${input}`, () => {
 			assert.equal(scan(input).text, input.replace(value, "[REDACTED:connection-string]"));
+		});
+	}
+	for (const input of [`- name: PASSWORD\n  value: ${value}\n`, `- name: API_KEY\n  value: "${value}"\n`]) {
+		test(`env pair masks short/alphabetic value: ${input}`, () => {
+			assert.equal(scan(input).text, input.replace(value, "[REDACTED:env-value]"));
 		});
 	}
 }
 for (const key of ["PGPASSWORD", "MYSQL_PWD", "APP_PWD", "MYpasswdVALUE", "prefixPASSWORDsuffix", "passwordless"]) {
 	test(`glued credential key: ${key}`, () => {
 		assert.equal(isSecretKey(key), true);
-		assert.equal(scan(`${key}=abcd`).text, `${key}=[REDACTED:connection-string]`);
+		assert.equal(scan(`${key}=Pr0d!pass`).text, `${key}=[REDACTED:connection-string]`);
 	});
 }
 for (const command of [
@@ -593,9 +598,31 @@ for (const input of [
 	"SECRET_NAME=prod", "secret: none",
 	"tokenLength: four", "password_ttl: four", "secret: fail", "secret: pass", "secret: BEARER",
 ]) test(`non-credential assignment stays intact: ${input}`, () => assert.equal(scan(input).text, input));
-test("real password assignment remains redacted", () => {
-	assert.equal(scan("DB_PASSWORD=hunter2x").text, "DB_PASSWORD=[REDACTED:connection-string]");
+for (const [key, value] of [
+	["DB_PASSWORD", "hunter2x"], ["DB_PASSWORD", "hunter"], ["PGPASSWORD", "abc1"], ["MYSQL_PWD", "secret"],
+]) test(`real env password assignment remains redacted: ${key}`, () => {
+	assert.equal(scan(`${key}=${value}`).text, `${key}=[REDACTED:connection-string]`);
 });
+
+for (const input of [
+	'"token": "abcd"', "API_KEY: abcd", "passwordless=abcd",
+	"DB_PASSWORD = hunter", "DB_PASSWORD= hunter", "DB_PASSWORD =hunter", "DB_PASSWORD='two words'",
+	"DB_PASSWORD=two words", '"DB_PASSWORD"="hunter"', "db_password=hunter",
+	"\"token\": \"alphabetic\"", "API_KEY: alphabetic", "passwordless=alphabetic",
+	"const token = /(<<-?|1?>>?)|('[A-Za-z0-9_./:@%+=, \\t-]*'|…)/y;",
+	"function parseIssueRef(token: string): { repo?: string; issue: number } | undefined {",
+	'save(state / "test-generation.json", {"token": token})',
+	"proc = subprocess.Popen(launcher, pass_fds=[read_gate, *(fd for _, fd in held)],",
+	'"token": "orphan"}))', 'dict(pgid=4242, token="orphan")', 'dict(kind="integration", token="peer")',
+	'dict(token="stale", pid=os.getpid(), priority="high",',
+	'secret = "TOP_SECRET_COMMAND_ARGUMENT"',
+	'print("secret-sweep: could not write the redacted report", file=sys.stderr)',
+	'print(f"secret-sweep: {error}", file=sys.stderr)',
+	'const secretDump = secret && (outputs.some(output => output !== "name" …',
+	"const TOKEN_PATTERNS: [string, RegExp][] = [",
+	'return env[concern === "secrets" ? "CRATIS_HOOKS_ALLOW_SECRET_READS" : "CRATIS_HOOKS_ALLOW_STORE_MUTATIONS"] === "1";',
+	"command.match(/CHRONICLE_CONNECTION_STRING=\\S+/g)",
+]) test(`ordinary source and non-env short values stay intact: ${input}`, () => assert.equal(scan(input).text, input));
 for (const input of ["DB_PASSWORD=12345678", '"TOKEN": "12345678"', "- name: DB_PASSWORD\n  value: \"12345678\"\n"]) {
 	test(`numeric secret values stay redacted: ${JSON.stringify(input)}`, () => {
 		assert.notEqual(scan(input).text, input);

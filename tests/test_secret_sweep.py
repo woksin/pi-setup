@@ -31,7 +31,7 @@ class SecretSweepTests(unittest.TestCase):
         self.work.mkdir(parents=True)
         self.home.mkdir()
         self.env = {**os.environ, "HOME": str(self.home), "GITLEAKS_CONFIG": "",
-                    "GITLEAKS_CONFIG_TOML": ""}
+                    "GITLEAKS_CONFIG_TOML": "", "PI_SECRET_SWEEP_ROOTS": ""}
         self.secret = "gh" + "p_" + "9aQ2vX7nK4zR6bT8yW3mP5dF1jH0sL2cE4uN"
 
     def run_sweep(self, *args):
@@ -74,6 +74,24 @@ class SecretSweepTests(unittest.TestCase):
         (sessions / "session.jsonl").write_text(json.dumps({"text": self.secret}) + "\n")
         self.assertEqual(self.run_sweep().returncode, 1)
         self.assertIn("session.jsonl", self.report())
+
+    def test_roots_include_home_environment_and_repeatable_arguments(self):
+        for environment, arguments, expected in [
+            ("", [], [self.home]),
+            (str(self.root) + os.pathsep + os.pathsep + str(self.base / "extra"), [],
+             [self.home, self.root, self.base / "extra"]),
+            (str(self.root), ["--root", str(self.base / "cli"), "--root", str(self.base / "other")],
+             [self.home, self.root, self.base / "cli", self.base / "other"]),
+        ]:
+            with self.subTest(environment=environment, arguments=arguments):
+                with mock.patch.dict(os.environ, {**self.env, "PI_SECRET_SWEEP_ROOTS": environment}), \
+                        mock.patch.object(sys, "argv", [str(SCRIPT), *arguments]), \
+                        mock.patch.object(sweep.shutil, "which", return_value="gitleaks"), \
+                        mock.patch.object(sweep, "targets", return_value=[]) as targets, \
+                        mock.patch.object(sweep, "write_report"), mock.patch("builtins.print"):
+                    self.assertEqual(sweep.main(), 0)
+                self.assertEqual(targets.call_args.args[0], expected)
+                self.assertEqual(targets.call_args.args[1], self.home / ".pi/agent/sessions")
 
     def test_missing_gitleaks(self):
         self.env["PATH"] = str(self.base / "empty-path")
@@ -133,7 +151,7 @@ class SecretSweepTests(unittest.TestCase):
         self.require_gitleaks()
         (self.root / "zzz").mkdir()
         (self.work / "capped.txt").write_text(self.secret + "\n")
-        result = self.run_sweep("--max-directories", "3")
+        result = self.run_sweep("--max-directories", "4")
         self.assertEqual(result.returncode, 1, result.stderr)
         report = self.report()
         self.assertIn("Partial discovery:", report)

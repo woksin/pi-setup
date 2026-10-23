@@ -167,13 +167,19 @@ function nonCredentialValue(value: string): boolean {
 	return /^(?:none|null|true|false|fail|pass|bearer)$/i.test(value);
 }
 
-function secretValue(value: string, quoted: boolean, terminated: boolean): boolean {
+function secretValue(value: string, quoted: boolean, terminated: boolean, relaxed = false): boolean {
 	if (nonCredentialValue(value) || /^\*+$|^<[^>]*>$|^\$\{[^}]*\}$|^\$[A-Za-z_][A-Za-z0-9_]*$|^\[REDACTED:[^\]]+\]$/.test(value)
 		|| /^(?:REDACTED|changeme|example|null|true|false|string|number|boolean|undefined|any|unknown|never|void|object|symbol|bigint|Array|Record|Promise|Readonly|Date)(?:<.*>)?$/i.test(value)
 		|| /^(?:[\w$.]+\[|[A-Za-z_$][\w$]*<|\(|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\.|\())/.test(value)
 		|| (!quoted && /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*(\(.*\))?[;,]?$/.test(value)
-			&& (terminated || /[.();,]/.test(value) || /^(?:Bearer|process_env)$/.test(value)))) return false;
-	return true;
+			&& (terminated || /[.();,]/.test(value) || (!relaxed && !/[0-9]/.test(value))))) return false;
+	if (relaxed) return true;
+	if (!quoted && /^[A-Za-z0-9]+$/.test(value) && /[A-Za-z]/.test(value)) {
+		const digits = value.match(/[0-9]/g)?.length ?? 0;
+		const letters = value.length - digits;
+		return (digits >= 2 && letters >= 2) || (value.length >= 12 && digits >= 1);
+	}
+	return /[0-9+/=~!@#$%^&*-]/.test(value) || (value.length >= 20 && /[a-z]/.test(value) && /[A-Z]/.test(value));
 }
 
 function privateKeys(text: string, out: Candidate[]): void {
@@ -217,8 +223,21 @@ function envYaml(line: string, offset: number, previous: EnvField | undefined, o
 	return field;
 }
 
+/** Relax short/letters-only detection only for env/printenv/.env-style assignments. */
+function envAssignments(text: string, out: Candidate[]): void {
+	const fields = /(?:^|[ \t])(?:export[ \t]+)?([A-Z_][A-Z0-9_]*)=(?:"([^"\s]+)"|'([^'\s]+)'|([^\s"'`;,&|()[\]{}<>\\]+))(?=[ \t]*(?:#.*)?\r?$)/gmd;
+	for (const match of text.matchAll(fields)) {
+		if (!isSecretKey(match[1])) continue;
+		const group = match[2] !== undefined ? 2 : match[3] !== undefined ? 3 : 4;
+		const value = match[group];
+		if (value.length < 4 || !secretValue(value, group !== 4, false, true)) continue;
+		const [start, end] = match.indices![group]!;
+		out.push({ start, end, kind: "connection-string" });
+	}
+}
+
 function connections(text: string, out: Candidate[]): void {
-	const fields = /(?<![\w$.-])(["']?)([A-Za-z_$][\w$.-]{0,255})\1[ \t]*[=:][ \t]*(?:(["'])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s"';,&]{4,}))/gd;
+	const fields = /(?<![\w$.-])(["']?)([A-Za-z_$][\w$.-]{0,255})\1[ \t]*[=:][ \t]*(?:(["'])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s"';,&]{8,}))/gd;
 	for (const match of text.matchAll(fields)) {
 		if (!isSecretKey(match[2])) continue;
 		const group = match[3] ? 4 : 5;
@@ -226,10 +245,10 @@ function connections(text: string, out: Candidate[]): void {
 		const [start, end] = match.indices![group]!;
 		// The bare-value capture excludes delimiters; retain that code-expression signal.
 		const terminated = text[end] === ";" || text[end] === ",";
-		// Spaced, lowercase source assignments may be unquoted camelCase identifiers.
-		const expression = !match[3] && match[2] === match[2].toLowerCase()
-			&& /\s=/.test(match[0]) && /^[A-Za-z_$][\w$]*$/.test(value) && /[a-z][A-Z]/.test(value);
-		if (value.length < 4 || expression || !secretValue(value, !!match[3], terminated)) continue;
+		// A JS declaration's regex literal may contain quotes that truncate the capture.
+		const regexLiteral = !match[3] && value.startsWith("/")
+			&& /\b(?:const|let|var)[ \t]+$/.test(text.slice(text.lastIndexOf("\n", match.index) + 1, match.index));
+		if (value.length < 8 || regexLiteral || !secretValue(value, !!match[3], terminated)) continue;
 		out.push({ start, end, kind: "connection-string" });
 	}
 }
@@ -341,6 +360,7 @@ export function scan(text: string, allowlist: readonly string[] = []): Scan {
 	kubeCandidates(text, out);
 	values(text, /(\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]+:)([^\s@/]{3,})@/gi, "url-credentials", out);
 	connections(text, out);
+	envAssignments(text, out);
 	const allowed: RegExp[] = [];
 	for (const pattern of allowlist) { try { allowed.push(new RegExp(pattern)); } catch { /* invalid exemptions do not allow anything */ } }
 	// Prefer the whole containing value, then the more specific earlier recognizer on ties.
