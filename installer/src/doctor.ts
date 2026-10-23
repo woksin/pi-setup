@@ -48,7 +48,7 @@ export async function runDoctor(ctx: Ctx, options: Options, baseCtx: Ctx): Promi
       const r = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 120000 });
       if (r.code === 0 && !r.timedOut) fixed.push("npm");
     }
-    if (fixable.has("restore") && report.facts.head && report.facts.head === report.manifest?.source.commit) {
+    if (fixable.has("restore") && report.facts.checkoutClean === true && report.facts.head && report.facts.head === report.manifest?.source.commit) {
       const r = await ctx.run(ctx.nodePath ?? process.execPath, [join(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 120000 });
       if (r.code === 0 && !r.timedOut) fixed.push("restore");
     }

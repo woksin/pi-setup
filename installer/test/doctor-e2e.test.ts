@@ -1,16 +1,25 @@
 import { strict as assert } from "node:assert";
+import { execFileSync } from "node:child_process";
 import { after, test } from "node:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
-import { install, piPath, sandbox, snapshot } from "./helpers/home.ts";
+import { install, piPath, REPO, sandbox, snapshot } from "./helpers/home.ts";
 import type { Sandbox } from "./helpers/home.ts";
 
 const boxes: Sandbox[] = [];
 after(() => boxes.forEach(b => rmSync(b.root, { recursive: true, force: true })));
-function ready() {
+function ready(cleanCheckout = false) {
   const box = sandbox(); boxes.push(box);
+  let repo: string | undefined;
+  if (cleanCheckout) {
+    repo = join(box.root, "checkout"); mkdirSync(repo);
+    for (const path of ["agent", "skills", "tools", "install.sh", "installer/dist"]) cpSync(join(REPO, path), join(repo, path), { recursive: true });
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo!, ...args], { env: { ...process.env, HOME: box.home } });
+    git("init", "--quiet"); git("add", ".");
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture");
+  }
   mkdirSync(join(box.root, "repos"));
-  const run = install(box, ["--yes", "--skip-npm", "--user", "tester", "--repos-root", join(box.root, "repos")]);
+  const run = install(box, ["--yes", "--skip-npm", "--user", "tester", "--repos-root", join(box.root, "repos")], { repo, entry: repo ? "node" : "shim" });
   assert.equal(run.status, 0, run.stdout + run.stderr);
   writeFileSync(piPath(box, "dev-doctor.json"), '{"disk":{"build_floor_gib":0,"cleanup_trigger_gib":0}}');
   const bin = join(box.home, ".local/bin"); mkdirSync(bin, { recursive: true });
@@ -24,7 +33,7 @@ function ready() {
   const fallback = JSON.parse(readFileSync(piPath(box, "provider-fallback.json"), "utf8"));
   for (const pair of fallback.pairs) for (const model of pair) pins.add(model);
   for (const targets of Object.values(fallback.chains) as string[][]) for (const model of targets) pins.add(model);
-  const options = { path: [box.stubs, bin, dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter), env: { PI_OFFLINE: "1", STUB_MODELS: [...pins].map(p => p.replace("/", " ")).join("\n") } };
+  const options = { repo, entry: repo ? "node" as const : "shim" as const, path: [box.stubs, bin, dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter), env: { PI_OFFLINE: "1", STUB_MODELS: [...pins].map(p => p.replace("/", " ")).join("\n") } };
   return { box, options };
 }
 
@@ -54,7 +63,7 @@ test("no Kimi login warns honestly about ops/scout and parent-model risk", () =>
 });
 
 test("missing tracked file fails; safe restore succeeds", () => {
-  const { box, options } = ready();
+  const { box, options } = ready(true);
   const path = piPath(box, "agents/ops.md"); unlinkSync(path);
   const run = install(box, ["doctor"], options);
   assert.equal(run.status, 2, run.stdout + run.stderr);

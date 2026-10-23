@@ -36,7 +36,7 @@ function fixture() {
     let stdout = "";
     if (cmd === "pi") stdout = args[0] === "auth" ? JSON.stringify(facts.providers[args[3]]) : args[0] === "--version" ? "1.0" : "provider model\n" + [...facts.catalog!].map(p => p.replace("/", " ")).join("\n");
     if (cmd === "gh") stdout = "Logged in to github.com account tester";
-    if (cmd === "git") stdout = args.includes("rev-parse") ? "abc123" : args.includes("ls-remote") ? "hash\trefs/tags/v2" : "v1";
+    if (cmd === "git") stdout = args.includes("status") ? "" : args.includes("rev-parse") ? "abc123" : args.includes("ls-remote") ? "hash\trefs/tags/v2" : "v1";
     if (cmd === "python3") stdout = JSON.stringify([{ id: "disk", severity: "info", evidence: "plenty free", suggest: "df -h ~" }]);
     return { code: 0, stdout, stderr: "", timedOut: false };
   } }, out);
@@ -116,6 +116,30 @@ test("profile requirements, catalog and fallback readiness", () => {
   assert.equal(f.checks().find(c => c.id === "models")?.status, "skip");
 });
 
+for (const scenario of ["timeout", "error", "unparsable", "rejected"] as const) test(`unknown provider gets its own warning without a fallback risk: ${scenario}`, async () => {
+  const f = fixture();
+  f.facts.providers.anthropic = { status: "not_ready" };
+  const run = f.ctx.run;
+  f.ctx.run = async (cmd, args, opts) => {
+    if (cmd !== "pi" || args[0] !== "auth" || args[3] !== "kimi-coding") return run(cmd, args, opts);
+    if (scenario === "rejected") throw new Error("auth check failed");
+    return { code: scenario === "error" ? 1 : 0, stdout: scenario === "unparsable" ? "not JSON" : "", stderr: "", timedOut: scenario === "timeout" };
+  };
+  await main(["doctor"], f.ctx);
+  assert.ok(f.out.some(line => /^⚠ provider:kimi-coding: Kimi: could not determine$/.test(line)));
+  assert.ok(f.out.some(line => /^✖ profile:.*Claude has no login/.test(line)));
+  assert.ok(!f.out.some(line => /fallback:kimi-coding|Kimi has no login/.test(line)));
+});
+
+test("unknown or absent pinned providers do not produce a fallback risk", () => {
+  const f = fixture();
+  f.facts.providers["kimi-coding"] = { status: "unknown" };
+  assert.equal(f.checks().find(c => c.id === "provider:kimi-coding")?.status, "warn");
+  assert.ok(!f.checks().some(c => c.id.startsWith("fallback:")));
+  delete f.facts.providers["kimi-coding"];
+  assert.ok(!f.checks().some(c => c.id.startsWith("fallback:")));
+});
+
 test("guards and PATH user choices", () => {
   const f = fixture();
   f.put("guards.json", '{"off":{"mcp":true}}');
@@ -143,12 +167,29 @@ test("F1 and F3 repair only npm and unchanged file modes, then recheck", async (
   assert.deepEqual(JSON.parse(f.out[0]).fixed, ["npm", "chmod"]);
 });
 
-test("F2 restores only at the installed commit", async () => {
+for (const scenario of ["dirty", "untracked", "timeout", "error"] as const) test(`F2 refuses an unsafe checkout: ${scenario}`, async () => {
+  const f = fixture(); unlinkSync(f.file);
+  const run = f.ctx.run;
+  f.ctx.run = async (cmd, args, opts) => {
+    const r = await run(cmd, args, opts);
+    if (cmd !== "git" || !args.includes("status")) return r;
+    assert.deepEqual(args, ["-C", f.ctx.repoDir, "status", "--porcelain"]);
+    return { ...r, stdout: scenario === "dirty" ? " M installer/src/doctor.ts\n" : scenario === "untracked" ? "?? local.txt\n" : "", code: scenario === "error" ? 1 : 0, timedOut: scenario === "timeout" };
+  };
+  assert.equal(await main(["doctor", "--fix"], f.ctx), 2);
+  assert.ok(!f.calls.some(c => c.args.includes("--skip-npm")));
+  assert.ok(!existsSync(f.file));
+  if (scenario === "dirty" || scenario === "untracked") assert.ok(f.out.includes("  fix: commit or stash local changes, then rerun"));
+});
+
+test("F2 restores only in a clean checkout at the installed commit", async () => {
   const f = fixture(); unlinkSync(f.file);
   const run = f.ctx.run;
   f.ctx.run = async (cmd, args, opts) => { if (args.includes("--skip-npm")) { assert.equal(cmd, process.execPath); f.put("agents/ops.md", "---\nmodel: kimi-coding/k3-256k\nextensions: provider-fallback\n---\n"); chmodSync(f.file, 0o644); } return run(cmd, args, opts); };
   assert.equal(await main(["doctor", "--fix"], f.ctx), 0);
   assert.ok(existsSync(f.file));
+  assert.ok(f.calls.some(c => c.cmd === "git" && c.args.includes("status")));
+  assert.ok(f.calls.some(c => c.args.includes("--skip-npm")));
   unlinkSync(f.file); f.manifest.source.commit = "old"; f.save(); f.calls.length = 0;
   assert.equal(await main(["doctor", "--fix"], f.ctx), 2);
   assert.ok(!f.calls.some(c => c.args.includes("--skip-npm")));

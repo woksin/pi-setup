@@ -11,6 +11,7 @@ export interface DoctorFacts {
   providers: Record<string, ProviderState>;
   catalog: Set<string> | null;
   head?: string;
+  checkoutClean?: boolean;
   github?: GithubState;
   summary: boolean;
 }
@@ -37,7 +38,8 @@ export function readJson(path: string): Record<string, unknown> | undefined {
 }
 const text = (path: string): string => { try { return readFileSync(path, "utf8").trim(); } catch { return ""; } };
 const present = (path: string): boolean => { try { lstatSync(path); return true; } catch { return false; } };
-const ready = (s: State, model: string): boolean => s.facts.providers[model.split("/")[0]]?.status === "ready";
+const providerStatus = (s: State, model: string) => s.facts.providers[model.split("/")[0]]?.status;
+const ready = (s: State, model: string): boolean => providerStatus(s, model) === "ready";
 const check = (id: string, status: DoctorCheck["status"], detail: string, fix?: string, items?: string[]): DoctorCheck => ({ id, title: id, status, detail, ...(fix ? { fix } : {}), ...(items?.length ? { items } : {}) });
 
 function livePins(piDir: string, settings: Record<string, unknown>): Pin[] {
@@ -89,7 +91,7 @@ function files(s: State): DoctorCheck {
   const moved = s.manifest.source.commit && s.facts.head && s.manifest.source.commit !== s.facts.head;
   let detail = `${s.missing.length} missing, ${s.changed.length} changed by you`;
   if (moved) detail += `; checkout is at ${s.facts.head!.slice(0, 7)}, installed ${s.manifest.source.commit!.slice(0, 7)}; the checkout moved since the install; this would also update`;
-  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.setup, s.missing.length ? s.missing : s.changed), ...(s.missing.length ? { fixable: "restore" as const } : {}) };
+  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...(s.missing.length ? { fixable: "restore" as const } : {}) };
 }
 function pending(s: State): DoctorCheck {
   const paths = [...new Set([...Object.values(s.manifest?.files ?? {}).flatMap(e => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter(p => existsSync(fromHomeRel(s.ctx.home, p)));
@@ -124,6 +126,9 @@ function profile(s: State): DoctorCheck {
   if (unknown.length) return check("profile", "warn", `${unknown.map(p => PROVIDER_LABELS[p] ?? p).join(", ")}: could not check (pi auth check timed out)`, `${s.setup} doctor`);
   return check("profile", "ok", `${s.profile}; ready: ${Object.keys(s.facts.providers).filter(p => ready(s, `${p}/`)).map(p => PROVIDER_LABELS[p] ?? p).join(", ")}`);
 }
+function providers(s: State): DoctorCheck[] {
+  return Object.entries(s.facts.providers).filter(([, provider]) => provider.status === "unknown").map(([id]) => check(`provider:${id}`, "warn", `${PROVIDER_LABELS[id] ?? id}: could not determine`, `${s.setup} doctor`));
+}
 function models(s: State): DoctorCheck {
   if (!s.facts.catalog?.size) {
     if (s.facts.summary || !Object.values(s.facts.providers).some(p => p.status === "ready")) return check("models", "skip", "catalog not checked");
@@ -139,7 +144,7 @@ function fallback(s: State): DoctorCheck[] {
   const targets = (pin: string): string[] => Array.isArray(chains[pin]) ? (chains[pin] as unknown[]).filter((v): v is string => typeof v === "string") : pairs.filter(p => p.includes(pin)).map(p => p[0] === pin ? p[1] : p[0]);
   const available = (pin: string) => ready(s, pin) && (!s.facts.catalog?.size || s.facts.catalog.has(pin));
   const result: DoctorCheck[] = [];
-  for (const pin of s.pins.filter(p => !ready(s, p.model))) {
+  for (const pin of s.pins.filter(p => providerStatus(s, p.model) === "not_ready")) {
     const target = targets(pin.model).find(available);
     const safe = config.enabled === true && target && pin.agents.every(a => a.fallback);
     const label = PROVIDER_LABELS[pin.model.split("/")[0]] ?? pin.model.split("/")[0];
@@ -182,5 +187,5 @@ function path(s: State): DoctorCheck[] {
 
 export function localChecks(ctx: Ctx, facts: DoctorFacts): { checks: DoctorCheck[]; manifest?: Manifest; profile: string; modePaths: string[] } {
   const s = state(ctx, facts);
-  return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), models(s), ...fallback(s), guards(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
+  return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), ...providers(s), models(s), ...fallback(s), guards(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 4c959eab744c6aad423126856fa56d1615f12f956c74f7610cb04081a7a9431f
+// pi-setup-source-sha256: d73416c1968fe4a6cb9feb380252b04428ab85e23894bfd0a557aa5a5138641d
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -1055,7 +1055,7 @@ async function probeCatalog(ctx) {
 }
 async function detect(ctx, request) {
   const piPresent = Boolean(ctx.which("pi"));
-  const providers = {};
+  const providers2 = {};
   const probePi = request.probePi && piPresent;
   const [tools, github, states, catalog] = await Promise.all([
     Promise.all(TOOLS.map((t2) => t2 === "pi" && !request.probePi ? Promise.resolve({ name: t2, path: ctx.which(t2) }) : probeTool(ctx, t2))),
@@ -1064,7 +1064,7 @@ async function detect(ctx, request) {
     probePi ? probeCatalog(ctx) : Promise.resolve(null)
   ]);
   PROVIDER_IDS.forEach((id, i2) => {
-    providers[id] = states[i2];
+    providers2[id] = states[i2];
   });
   const warnings = [];
   if (probePi && catalog?.size === 0) warnings.push("pi reports no models yet; pinned models were not checked.");
@@ -1075,7 +1075,7 @@ async function detect(ctx, request) {
     os: ctx.platform,
     tools: [...tools, { name: "node", path: process.execPath, version: ctx.nodeVersion }],
     github,
-    providers,
+    providers: providers2,
     hints: {
       codexAuthFile: existsSync7(join7(ctx.home, ".codex", "auth.json")),
       claudeDir: existsSync7(join7(ctx.home, ".claude"))
@@ -1740,7 +1740,7 @@ function files(s) {
   const moved = s.manifest.source.commit && s.facts.head && s.manifest.source.commit !== s.facts.head;
   let detail = `${s.missing.length} missing, ${s.changed.length} changed by you`;
   if (moved) detail += `; checkout is at ${s.facts.head.slice(0, 7)}, installed ${s.manifest.source.commit.slice(0, 7)}; the checkout moved since the install; this would also update`;
-  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.setup, s.missing.length ? s.missing : s.changed), ...s.missing.length ? { fixable: "restore" } : {} };
+  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...s.missing.length ? { fixable: "restore" } : {} };
 }
 function pending(s) {
   const paths = [.../* @__PURE__ */ new Set([...Object.values(s.manifest?.files ?? {}).flatMap((e) => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter((p) => existsSync12(fromHomeRel(s.ctx.home, p)));
@@ -1776,6 +1776,9 @@ function profile(s) {
   if (unknown.length) return check("profile", "warn", `${unknown.map((p) => PROVIDER_LABELS[p] ?? p).join(", ")}: could not check (pi auth check timed out)`, `${s.setup} doctor`);
   return check("profile", "ok", `${s.profile}; ready: ${Object.keys(s.facts.providers).filter((p) => ready(s, `${p}/`)).map((p) => PROVIDER_LABELS[p] ?? p).join(", ")}`);
 }
+function providers(s) {
+  return Object.entries(s.facts.providers).filter(([, provider]) => provider.status === "unknown").map(([id]) => check(`provider:${id}`, "warn", `${PROVIDER_LABELS[id] ?? id}: could not determine`, `${s.setup} doctor`));
+}
 function models(s) {
   if (!s.facts.catalog?.size) {
     if (s.facts.summary || !Object.values(s.facts.providers).some((p) => p.status === "ready")) return check("models", "skip", "catalog not checked");
@@ -1791,7 +1794,7 @@ function fallback(s) {
   const targets = (pin) => Array.isArray(chains[pin]) ? chains[pin].filter((v) => typeof v === "string") : pairs.filter((p) => p.includes(pin)).map((p) => p[0] === pin ? p[1] : p[0]);
   const available = (pin) => ready(s, pin) && (!s.facts.catalog?.size || s.facts.catalog.has(pin));
   const result2 = [];
-  for (const pin of s.pins.filter((p) => !ready(s, p.model))) {
+  for (const pin of s.pins.filter((p) => providerStatus(s, p.model) === "not_ready")) {
     const target = targets(pin.model).find(available);
     const safe = config.enabled === true && target && pin.agents.every((a2) => a2.fallback);
     const label = PROVIDER_LABELS[pin.model.split("/")[0]] ?? pin.model.split("/")[0];
@@ -1833,9 +1836,9 @@ function path(s) {
 }
 function localChecks(ctx, facts) {
   const s = state(ctx, facts);
-  return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), models(s), ...fallback(s), guards(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
+  return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), ...providers(s), models(s), ...fallback(s), guards(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
 }
-var text, present, ready, check, packages;
+var text, present, providerStatus, ready, check, packages;
 var init_doctor_checks = __esm({
   "src/doctor-checks.ts"() {
     init_manifest();
@@ -1856,7 +1859,8 @@ var init_doctor_checks = __esm({
         return false;
       }
     };
-    ready = (s, model) => s.facts.providers[model.split("/")[0]]?.status === "ready";
+    providerStatus = (s, model) => s.facts.providers[model.split("/")[0]]?.status;
+    ready = (s, model) => providerStatus(s, model) === "ready";
     check = (id, status, detail, fix, items) => ({ id, title: id, status, detail, ...fix ? { fix } : {}, ...items?.length ? { items } : {} });
     packages = (s) => Array.isArray(s.settings.packages) ? s.settings.packages.filter((p) => typeof p === "string") : [];
   }
@@ -2009,12 +2013,13 @@ async function gatherFacts(ctx, manifest) {
   const hasPi = Boolean(ctx.which("pi"));
   const agents = plists(ctx);
   const guardian = agents.some((p) => p.label.endsWith(".docker-guardian"));
-  const [providers, models2, version, gh, head, disks, launchd, docker, updates] = await Promise.all([
-    Promise.all(PROVIDER_IDS.map((id) => hasPi ? probeProvider(ctx, id) : Promise.resolve({ status: "unknown" }))),
+  const [providers2, models2, version, gh, head, checkout, disks, launchd, docker, updates] = await Promise.all([
+    Promise.all(PROVIDER_IDS.map((id) => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" })) : Promise.resolve({ status: "unknown" }))),
     hasPi ? listModels(ctx) : Promise.resolve({ catalog: null, code: null, stderr: "", timedOut: false }),
     hasPi ? ctx.run("pi", ["--version"], { timeoutMs: 8e3 }) : Promise.resolve(skippedRun),
     ctx.which("gh") ? ctx.run("gh", ["auth", "status"], { timeoutMs: 3e3 }) : Promise.resolve(skippedRun),
     ctx.run("git", ["-C", ctx.repoDir, "rev-parse", "HEAD"], { timeoutMs: 3e3 }),
+    ctx.run("git", ["-C", ctx.repoDir, "status", "--porcelain"], { timeoutMs: 3e3 }),
     disk(ctx),
     Promise.all(agents.map(async (p) => {
       const r2 = await ctx.run("launchctl", ["list", p.label], { timeoutMs: 3e3 });
@@ -2032,7 +2037,7 @@ async function gatherFacts(ctx, manifest) {
 ${gh.stderr}`);
   const ghCheck = !ctx.which("gh") ? result("gh", "warn", "not on PATH", installHint(ctx.platform, "gh")) : !github.host ? result("gh", "warn", "not logged in", "gh auth login") : result("gh", "ok", `${github.login}@${github.host}`);
   return {
-    facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i2) => [id, providers[i2]])), catalog: models2.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : void 0, github: { ...github, orgs: [] }, summary: false },
+    facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i2) => [id, providers2[i2]])), catalog: models2.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : void 0, checkoutClean: checkout.code === 0 && !checkout.timedOut ? !checkout.stdout.trim() : void 0, github: { ...github, orgs: [] }, summary: false },
     checks: [pi, ghCheck, ...disks, ...launchd.length ? launchd : [result("launchd", "skip", "no managed launch agents")], docker ? result("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result("docker", "skip", "no docker guardian"), updates]
   };
 }
@@ -2082,7 +2087,7 @@ async function runDoctor(ctx, options, baseCtx) {
       const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join15(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("npm");
     }
-    if (fixable.has("restore") && report.facts.head && report.facts.head === report.manifest?.source.commit) {
+    if (fixable.has("restore") && report.facts.checkoutClean === true && report.facts.head && report.facts.head === report.manifest?.source.commit) {
       const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join15(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("restore");
     }

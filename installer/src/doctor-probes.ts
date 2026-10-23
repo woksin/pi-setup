@@ -70,12 +70,13 @@ export async function gatherFacts(ctx: Ctx, manifest?: Manifest): Promise<{ fact
   const hasPi = Boolean(ctx.which("pi"));
   const agents = plists(ctx);
   const guardian = agents.some(p => p.label.endsWith(".docker-guardian"));
-  const [providers, models, version, gh, head, disks, launchd, docker, updates] = await Promise.all([
-    Promise.all(PROVIDER_IDS.map(id => hasPi ? probeProvider(ctx, id) : Promise.resolve({ status: "unknown" as const }))),
+  const [providers, models, version, gh, head, checkout, disks, launchd, docker, updates] = await Promise.all([
+    Promise.all(PROVIDER_IDS.map(id => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" as const })) : Promise.resolve({ status: "unknown" as const }))),
     hasPi ? listModels(ctx) : Promise.resolve({ catalog: null, code: null, stderr: "", timedOut: false }),
     hasPi ? ctx.run("pi", ["--version"], { timeoutMs: 8000 }) : Promise.resolve(skippedRun),
     ctx.which("gh") ? ctx.run("gh", ["auth", "status"], { timeoutMs: 3000 }) : Promise.resolve(skippedRun),
     ctx.run("git", ["-C", ctx.repoDir, "rev-parse", "HEAD"], { timeoutMs: 3000 }),
+    ctx.run("git", ["-C", ctx.repoDir, "status", "--porcelain"], { timeoutMs: 3000 }),
     disk(ctx),
     Promise.all(agents.map(async p => {
       const r = await ctx.run("launchctl", ["list", p.label], { timeoutMs: 3000 });
@@ -92,7 +93,7 @@ export async function gatherFacts(ctx: Ctx, manifest?: Manifest): Promise<{ fact
   const github = parseAuthStatus(`${gh.stdout}\n${gh.stderr}`);
   const ghCheck = !ctx.which("gh") ? result("gh", "warn", "not on PATH", installHint(ctx.platform, "gh")) : !github.host ? result("gh", "warn", "not logged in", "gh auth login") : result("gh", "ok", `${github.login}@${github.host}`);
   return {
-    facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i) => [id, providers[i]])), catalog: models.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : undefined, github: { ...github, orgs: [] }, summary: false },
+    facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i) => [id, providers[i]])), catalog: models.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : undefined, checkoutClean: checkout.code === 0 && !checkout.timedOut ? !checkout.stdout.trim() : undefined, github: { ...github, orgs: [] }, summary: false },
     checks: [pi, ghCheck, ...disks, ...(launchd.length ? launchd : [result("launchd", "skip", "no managed launch agents")]), docker ? result("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result("docker", "skip", "no docker guardian"), updates],
   };
 }
