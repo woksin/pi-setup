@@ -8,7 +8,7 @@ import { contextPath } from "./own-context.ts";
 import type { EvidenceContext, Signals } from "./signals.ts";
 
 export interface Closure { id: string; ground: "takeover"; verdict: "retire"; ts: string; sha?: string;
-  sessionFile?: string; handoff: string; evidence: string; archive: string; to: string }
+  sessionFile?: string; handoff: string; evidence: string; archive: string; to: string; claimPauseError?: string }
 function pauseClaims(env: EvidenceContext, s: Signals, record: Closure): void {
   const path = join(env.ctx.piAgentDir, "issue-work/registry.jsonl");
   const latest = registry(optionalText(path) || "");
@@ -21,12 +21,19 @@ function pauseClaims(env: EvidenceContext, s: Signals, record: Closure): void {
     appendFileSync(path, `\n${JSON.stringify(event)}\n`);
   }
 }
+function tryPauseClaims(env: EvidenceContext, s: Signals, record: Closure): void {
+  try { pauseClaims(env, s, record); }
+  catch (e) {
+    record.claimPauseError = (e as Error).message;
+    env.ctx.err(`Warning: ${env.lane.id}: could not pause claims after exit: ${record.claimPauseError}`);
+  }
+}
 export async function recordClosure(env: EvidenceContext, s: Signals, target: { to: string; archive: string }): Promise<void> {
   const { root, lane, c, ctx } = env;
   const record: Closure = { id: lane.id, ground: "takeover", verdict: "retire", ts: ctx.now().toISOString(),
     sha: s.git.head, sessionFile: s.sessionFile, handoff: contextPath(env), archive: target.archive, to: target.to,
     evidence: `Accepted takeover; clean foreground /quit and exit confirmed; tree=${s.git.digest}` };
-  pauseClaims(env, s, record);
+  tryPauseClaims(env, s, record);
   mkdirSync(join(root, "coordinator"), { recursive: true });
   appendFileSync(join(root, "coordinator/STATE.md"),
     `\n- ${record.ts} ${lane.id}: takeover by ${target.to}; handoff ${record.handoff}; SHA ${record.sha}.\n`);

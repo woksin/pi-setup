@@ -4,6 +4,8 @@ import { expand, effectiveParent, saveConfig, validate, UsageError, type Lane } 
 import { validId } from "../names.ts";
 import { readContext, type Snapshot } from "../reap/context-format.ts";
 import type { CommandEnv } from "../reap/signals.ts";
+import { changedPaths, treeDigest } from "../reap/tree.ts";
+import { requireProbe } from "../reap/process.ts";
 import { start } from "./start.ts";
 
 type Options = Record<string, string>;
@@ -49,6 +51,29 @@ async function verifyWorktree(snapshot: Snapshot, env: CommandEnv): Promise<void
     { timeoutMs: 4000 });
   if (head.code || head.timedOut) throw new Error("handoff HEAD changed");
   if (head.stdout.trim() !== snapshot.head) throw new Error("handoff HEAD changed");
+  await warnDirtyDrift(snapshot, env);
+}
+async function dirtyTree(snapshot: Snapshot, { ctx }: CommandEnv): Promise<{ paths: string[]; digest: string }> {
+  const args = ["--no-optional-locks", "-C", snapshot.worktree];
+  const status = await ctx.run("git", [...args, "status", "--porcelain=v1", "--untracked-files=all", "-z"], { timeoutMs: 4000 });
+  requireProbe(status, "dirty paths unavailable");
+  const diff = await ctx.run("git", [...args, "diff", "--binary", "HEAD"], { timeoutMs: 4000 });
+  requireProbe(diff, "dirty digest unavailable");
+  const paths = changedPaths(status.stdout);
+  return { paths, digest: treeDigest({ cwd: snapshot.worktree, paths, status: status.stdout, diff: diff.stdout }) };
+}
+async function warnDirtyDrift(snapshot: Snapshot, env: CommandEnv): Promise<void> {
+  try {
+    const current = await dirtyTree(snapshot, env);
+    if (JSON.stringify(current.paths) !== JSON.stringify([...snapshot.paths].sort())) {
+      env.ctx.err("Warning: handoff dirty paths changed; continuing with the preserved worktree");
+    }
+    if (current.digest !== snapshot.digest) {
+      env.ctx.err("Warning: handoff dirty digest changed or missing; continuing with the preserved worktree");
+    }
+  } catch (e) {
+    env.ctx.err(`Warning: could not compare handoff dirty paths/digest: ${(e as Error).message}; continuing`);
+  }
 }
 async function fromHandoff(input: { id: string; opts: Options }, env: CommandEnv): Promise<number> {
   const { c, root, ctx } = env;

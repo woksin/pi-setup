@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: d420c3fe3cc62796fa948abc055004fc946d587c104eca8ee47b4df881186d42
+// pi-setup-source-sha256: 2e2f2a4e70379e6abdad845d001b77ae0154b805b8b6576565f8cc34ae3db1f3
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -1602,6 +1602,7 @@ function expectedSnapshot(env, s) {
   return {
     head: s.git.head,
     paths: s.git.paths,
+    digest: s.git.digest,
     unpushed: s.git.unpushed,
     repo: env.lane.repo,
     worktree: s.cwd,
@@ -1611,9 +1612,13 @@ function expectedSnapshot(env, s) {
 function validateContext(file, expected) {
   const actual = file.snapshot;
   if (actual.head !== expected.head) throw new Error("lane handoff HEAD differs from worktree");
-  if (!samePaths(actual.paths, expected.paths)) throw new Error("lane handoff has unaccounted dirty files");
+  validateDirty(actual, expected);
   if (!samePaths(actual.unpushed, expected.unpushed)) throw new Error("lane handoff unpushed commits differ");
   validateLocation(actual, expected);
+}
+function validateDirty(actual, expected) {
+  if (!samePaths(actual.paths, expected.paths)) throw new Error("lane handoff has unaccounted dirty files");
+  if (actual.digest !== expected.digest) throw new Error("lane handoff dirty digest differs from worktree");
 }
 function validateLocation(actual, expected) {
   for (const key of ["repo", "worktree", "branch"]) {
@@ -1654,15 +1659,7 @@ function receiptPath(env) {
   return join16(env.root, ".state/handoffs", `${env.lane.id}.request.json`);
 }
 function version(s) {
-  const state2 = {
-    pid: s.pid,
-    procStart: s.procStart,
-    sessionId: s.sessionId,
-    sessionFile: s.sessionFile,
-    lastWrite: s.lastWrite,
-    git: s.git,
-    claims: s.claims
-  };
+  const state2 = { pid: s.pid, procStart: s.procStart, sessionId: s.sessionId, git: s.git, claims: s.claims };
   return createHash4("sha256").update(JSON.stringify(state2)).digest("hex");
 }
 function cached(env, s) {
@@ -1795,6 +1792,14 @@ ${JSON.stringify(event)}
 `);
   }
 }
+function tryPauseClaims(env, s, record) {
+  try {
+    pauseClaims(env, s, record);
+  } catch (e) {
+    record.claimPauseError = e.message;
+    env.ctx.err(`Warning: ${env.lane.id}: could not pause claims after exit: ${record.claimPauseError}`);
+  }
+}
 async function recordClosure(env, s, target) {
   const { root, lane, c: c2, ctx } = env;
   const record = {
@@ -1809,7 +1814,7 @@ async function recordClosure(env, s, target) {
     to: target.to,
     evidence: `Accepted takeover; clean foreground /quit and exit confirmed; tree=${s.git.digest}`
   };
-  pauseClaims(env, s, record);
+  tryPauseClaims(env, s, record);
   mkdirSync4(join17(root, "coordinator"), { recursive: true });
   appendFileSync(
     join17(root, "coordinator/STATE.md"),
@@ -2689,6 +2694,29 @@ async function verifyWorktree(snapshot, env) {
   );
   if (head.code || head.timedOut) throw new Error("handoff HEAD changed");
   if (head.stdout.trim() !== snapshot.head) throw new Error("handoff HEAD changed");
+  await warnDirtyDrift(snapshot, env);
+}
+async function dirtyTree(snapshot, { ctx }) {
+  const args = ["--no-optional-locks", "-C", snapshot.worktree];
+  const status2 = await ctx.run("git", [...args, "status", "--porcelain=v1", "--untracked-files=all", "-z"], { timeoutMs: 4e3 });
+  requireProbe(status2, "dirty paths unavailable");
+  const diff = await ctx.run("git", [...args, "diff", "--binary", "HEAD"], { timeoutMs: 4e3 });
+  requireProbe(diff, "dirty digest unavailable");
+  const paths = changedPaths(status2.stdout);
+  return { paths, digest: treeDigest({ cwd: snapshot.worktree, paths, status: status2.stdout, diff: diff.stdout }) };
+}
+async function warnDirtyDrift(snapshot, env) {
+  try {
+    const current = await dirtyTree(snapshot, env);
+    if (JSON.stringify(current.paths) !== JSON.stringify([...snapshot.paths].sort())) {
+      env.ctx.err("Warning: handoff dirty paths changed; continuing with the preserved worktree");
+    }
+    if (current.digest !== snapshot.digest) {
+      env.ctx.err("Warning: handoff dirty digest changed or missing; continuing with the preserved worktree");
+    }
+  } catch (e) {
+    env.ctx.err(`Warning: could not compare handoff dirty paths/digest: ${e.message}; continuing`);
+  }
 }
 async function fromHandoff(input, env) {
   const { c: c2, root, ctx } = env;
@@ -2717,6 +2745,8 @@ var init_resume = __esm({
     init_config();
     init_names();
     init_context_format();
+    init_tree();
+    init_process();
     init_start();
   }
 });

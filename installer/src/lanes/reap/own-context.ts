@@ -13,8 +13,9 @@ function receiptPath(env: EvidenceContext): string {
   return join(env.root, ".state/handoffs", `${env.lane.id}.request.json`);
 }
 function version(s: Signals): string {
-  const state = { pid: s.pid, procStart: s.procStart, sessionId: s.sessionId, sessionFile: s.sessionFile,
-    lastWrite: s.lastWrite, git: s.git, claims: s.claims };
+  // Session logs may finish writing or rotate after the handoff appears. Bind the receipt
+  // to session identity and work, not log metadata; collect/safeQuit still enforce inactivity.
+  const state = { pid: s.pid, procStart: s.procStart, sessionId: s.sessionId, git: s.git, claims: s.claims };
   return createHash("sha256").update(JSON.stringify(state)).digest("hex");
 }
 function cached(env: EvidenceContext, s: Signals): boolean {

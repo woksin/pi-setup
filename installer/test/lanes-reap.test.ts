@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, w
 import { dirname, join } from "node:path";
 import { defaults, saveConfig } from "../src/lanes/config.ts";
 import { main } from "../src/lanes/main.ts";
+import { treeDigest } from "../src/lanes/reap/tree.ts";
 import { verdict } from "../src/lanes/reap/verdict.ts";
 import { sessionDirFor } from "../src/lanes/names.ts";
 import { tempDir, REPO } from "./helpers/home.ts";
@@ -181,10 +182,11 @@ test("late descendants and inbox activity prevent a quit after acceptance", asyn
 
 function ownContext(f: ReturnType<typeof fixture>, snapshot: Record<string, unknown> = {}) {
   const paths = f.getDirty() ? [f.getDirty().slice(3)] : [];
+  const digest = treeDigest({ cwd: f.cwd, paths, status: f.getDirty() ? f.getDirty() + "\0" : "", diff: f.head });
   const fields = ["Goal", "Repository", "Worktree", "Branch", "HEAD", "Dirty files", "Issue claims",
     "Open PRs or candidates", "External work", "Next step", "User constraints", "Open items", "Launch prompt"];
   return f.put(join(f.root, ".state/handoffs/L1.md"), fields.map(h => `## ${h}\n${h} context`).join("\n\n") +
-    `\n\n## Snapshot\n\`\`\`json\n${JSON.stringify({ head: f.head, paths, unpushed: [f.head], repo: "example/alpha", worktree: f.cwd, branch: "l1", ...snapshot })}\n\`\`\`\n`, -1 / 60000);
+    `\n\n## Snapshot\n\`\`\`json\n${JSON.stringify({ head: f.head, paths, digest, unpushed: [f.head], repo: "example/alpha", worktree: f.cwd, branch: "l1", ...snapshot })}\n\`\`\`\n`, -1 / 60000);
 }
 test("review 1: handoff records paths, HEAD, unpushed commits and dirty-content drift refuses quit", async () => {
   const f = fixture(); f.put(join(f.cwd, "dirty.txt"), "original"); f.setDirty(" M dirty.txt"); await accepted(f);
@@ -209,10 +211,10 @@ async function retired(f: ReturnType<typeof fixture>) {
   await accepted(f); quitRunner(f); assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 0);
   assert.equal(loadRetired(f), true);
 }
-test("review 3: reap-resume round trip launches the handoff in the preserved worktree", async () => {
+test("round 2: reap-resume round trip launches the handoff in the preserved worktree", async () => {
   const f = fixture(); await retired(f); f.ctx.env.TMUX = undefined;
-  assert.equal(await f.invoke("resume", "L1", "--terminal", "print"), 0);
-  const launch = f.out.at(-1)!; assert.match(launch, /handoffs\/L1\.md/); assert.ok(launch.includes(f.cwd));
+  assert.equal(await f.invoke("resume", "L1"), 0);
+  const launch = f.out.at(-1)!; assert.ok(launch.includes(`@${join(f.root, ".state/handoffs/L1.md")}`)); assert.ok(launch.includes(f.cwd));
   assert.equal(loadRetired(f), false);
   assert.equal(await f.invoke("start", "L1", "--from-handoff", join(f.root, ".state/handoffs/L1.md")), 0);
 });
@@ -269,9 +271,10 @@ test("review 2: a validated handoff cannot be replaced just before quit", async 
   assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 2); assert.equal(loadRetired(f), false);
   assert.ok(!f.calls.some(c => c.args.includes("/quit")));
 });
-test("review 3: start NEW from a handoff and refuse a missing file or changed HEAD", async () => {
+test("round 2: start NEW from a handoff and refuse a missing file or changed HEAD", async () => {
   const f = fixture(); await retired(f); f.ctx.env.TMUX = undefined;
   assert.equal(await f.invoke("start", "L2", "--terminal", "print", "--from-handoff", "L1"), 0);
+  assert.ok(f.out.at(-1)!.includes(`@${join(f.root, ".state/handoffs/L1.md")}`));
   assert.ok(f.out.at(-1)!.includes("PI_ORCH_ID=L2")); assert.ok(f.out.at(-1)!.includes(f.cwd));
   const g = fixture(); assert.equal(await g.invoke("resume", "L1", "--terminal", "print"), 1);
   ownContext(g, { head: "b".repeat(40) });
@@ -290,4 +293,61 @@ test("review minor: children precede their parent even when config lists the par
   const f = fixture(); f.c.lanes[0].role = "repo-orch";
   f.c.lanes.push({ ...f.c.lanes[0], id: "L2", role: "lane", worktree: "l2", parent: "L1" }); saveConfig(f.root, f.c);
   await f.invoke("reap", "--json"); assert.deepEqual(f.rows().map(row => row.id), ["L2", "L1"]);
+});
+
+test("round 2: receipt survives trailing session writes and rotation but still waits for idle", async () => {
+  const f = fixture(); f.setReceiver(); quitRunner(f);
+  assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 0);
+  const receiptPath = join(f.root, ".state/handoffs/L1.request.json");
+  const receipt = readFileSync(receiptPath, "utf8");
+  // The native turn keeps writing after ownContext has returned and saved its receipt.
+  f.now.setTime(f.now.getTime() + 1000); f.put(f.sessionFile, "trailing response");
+  f.now.setTime(f.now.getTime() + 1000);
+  const continued = f.put(join(dirname(f.sessionFile), "s1-continued.jsonl"), "turn complete");
+  const lease = JSON.parse(readFileSync(f.lease, "utf8")); lease.sessionFile = continued; f.put(f.lease, JSON.stringify(lease));
+  assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 0);
+  assert.equal(f.rows()[0].verdict, "keep"); assert.ok(!f.calls.some(c => c.args.includes("/quit")));
+  f.now.setTime(f.now.getTime() + 76 * 60000); await accepted(f);
+  assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 0); assert.equal(loadRetired(f), true);
+  assert.equal(f.calls.filter(c => c.args.at(-1)?.includes("Write your own context handoff")).length, 1);
+  assert.equal(readFileSync(receiptPath, "utf8"), receipt);
+});
+for (const drift of ["content", "claims"]) test(`round 2: receipt refuses genuine ${drift} drift`, async () => {
+  const f = fixture(); f.setReceiver(); f.put(join(f.cwd, "dirty.txt"), "original"); f.setDirty(" M dirty.txt");
+  f.claim("blocked", "original takeover"); quitRunner(f);
+  assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 0);
+  f.now.setTime(f.now.getTime() + 1000);
+  if (drift === "content") f.put(join(f.cwd, "dirty.txt"), "changed"); else f.claim("blocked", "changed takeover");
+  await accepted(f); quitRunner(f, true, undefined, false);
+  // Suppress the original terminal's automatic reply too: no new context is available.
+  const run = f.ctx.run; f.ctx.run = async (cmd, args, opts) =>
+    cmd === "tmux" && args.at(-1)?.includes("Write your own context handoff") ? f.result() : run(cmd, args, opts);
+  assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 2);
+  assert.equal(loadRetired(f), false); assert.ok(!f.calls.some(c => c.args.includes("/quit")));
+});
+for (const drift of ["paths", "digest"]) test(`round 2: resume warns and continues on dirty ${drift} drift`, async () => {
+  const f = fixture(); f.put(join(f.cwd, "dirty.txt"), "original"); f.setDirty(" M dirty.txt"); await retired(f);
+  const path = join(f.cwd, drift === "paths" ? "other.txt" : "dirty.txt"); f.put(path, "changed");
+  if (drift === "paths") f.setDirty("?? other.txt");
+  f.ctx.env.TMUX = undefined;
+  assert.equal(await f.invoke("resume", "L1"), 0);
+  assert.match(f.err.join("\n"), new RegExp(`warn.*dirty.*${drift}`, "i"));
+  assert.ok(f.out.at(-1)!.includes(`@${join(f.root, ".state/handoffs/L1.md")}`));
+  assert.ok(f.out.at(-1)!.includes(f.cwd)); assert.equal(readFileSync(path, "utf8"), "changed");
+});
+test("round 2: claim pause failure after exit is audited without leaving a half retirement", async () => {
+  const f = fixture(); f.claim("blocked", "ready for takeover"); await accepted(f);
+  const prompt = f.put(join(f.root, "prompts/L1.md"), "brief"); quitRunner(f);
+  const run = f.ctx.run; f.ctx.run = async (cmd, args, opts) => {
+    const result = await run(cmd, args, opts);
+    const exitProbe = cmd === "ps" && args.join(" ") === "-p 101";
+    if (exitProbe && result.code === 1)
+      f.put(join(f.ctx.piAgentDir, "issue-work/registry.jsonl"), "{partial registry write");
+    return result;
+  };
+  assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 0); assert.equal(loadRetired(f), true);
+  const record = JSON.parse(readFileSync(join(f.root, ".state/reaped.log"), "utf8").trim());
+  assert.match(record.claimPauseError, /registry/i); assert.match(f.err.join("\n"), /L1.*pause claims.*registry/i);
+  assert.ok(!existsSync(prompt)); assert.ok(existsSync(join(record.archive, "prompts/L1.md")));
+  assert.ok(existsSync(join(record.archive, "closure.json"))); assert.ok(existsSync(record.handoff));
 });
