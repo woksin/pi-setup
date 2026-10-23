@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: a963cb17bc42a54ec1fa1e383199d390100ff2b2a0e0f11b90645292929df19c
+// pi-setup-source-sha256: a8892ac9f1730ddc427bf2ecd90ad92fc85c359b6e012c5264406ab5616d05a6
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -152,14 +152,14 @@ function readSettings(path2) {
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
     throw new SetupError(`${path2}: expected a JSON object`);
   }
-  const record = data;
+  const record2 = data;
   for (const key of ["githubUser", "reposRoot"]) {
-    const value = record[key];
-    if (key in record && (typeof value !== "string" || !value.trim())) {
+    const value = record2[key];
+    if (key in record2 && (typeof value !== "string" || !value.trim())) {
       throw new SetupError(`${path2}: ${key} must be a nonempty string`);
     }
   }
-  return record;
+  return record2;
 }
 function validLogin(login) {
   return LOGIN.test(login);
@@ -413,25 +413,25 @@ function messageName(from, to, topic, at, collision = 1) {
   return `${from}-to-${to}-${topic}-${hhmm}${collision > 1 ? `-${collision}` : ""}.md`;
 }
 function parseMessageName(name) {
-  const hasTimestamp = /^\d{8}-\d{6}-/.test(name);
-  name = name.replace(/^\d{8}-\d{6}-/, "");
-  const timestamped = new RegExp(`^(${ID})-to-(${ID})-([a-z0-9][a-z0-9-]*)\\.md$`).exec(name);
-  const match = new RegExp(`^(${ID})-to-(${ID})-([a-z0-9][a-z0-9-]*?)-[0-9]{4}(?:-[0-9]+)?\\.md$`).exec(name);
-  if (match) return { from: match[1], to: [match[2]], topic: match[3] };
-  if (timestamped && directedName(timestamped, hasTimestamp)) {
-    return { from: timestamped[1], to: [timestamped[2]], topic: timestamped[3] };
-  }
-  const legacy = new RegExp(`^(${ID})-from-(${ID})-([a-z0-9].*)\\.md$`).exec(name);
-  if (legacy) return { from: legacy[2], to: [legacy[1]], topic: legacy[3] };
-  const prefix = new RegExp(`^(${ID})-([a-z0-9].*)\\.md$`).exec(name);
-  if (prefix) return { from: "", to: [prefix[1]], topic: prefix[2] };
-  return void 0;
+  if (!name.endsWith(".md")) return void 0;
+  const tokens = name.replace(/^(?:\d+-)+/, "").slice(0, -3).split("-");
+  const k = tokens.findIndex((t2) => t2 === "to" || t2 === "from");
+  const start2 = k < 0 ? 0 : k + 1;
+  let end = start2;
+  while (end < tokens.length && messageIdToken(tokens[end])) end++;
+  const topic = tokens.slice(end).join("-").replace(/-[0-9]{4}(?:-[0-9]+)?$/, "");
+  if (end === start2 || !topic) return void 0;
+  if (k < 0) return { from: "", to: [tokens.slice(0, end).join("-")], topic };
+  const left = tokens.slice(0, k);
+  if (!left.length || !left.every(messageIdToken)) return void 0;
+  const right = tokens.slice(start2, end).join("-");
+  return tokens[k] === "to" ? { from: left.join("-"), to: [right], topic } : { from: right, to: [left.join("-")], topic };
 }
-function directedName(match, hasTimestamp) {
-  return hasTimestamp || suffixedId(match[1]) || suffixedId(match[2]);
+function messageIdToken(token) {
+  return /^[A-Z]/.test(token) || /^ttys[0-9]+$/.test(token);
 }
-function suffixedId(id) {
-  return /[a-z]$/.test(id);
+function messageTokenMatch(name, id) {
+  return `-${name.replace(/\.md$/, "")}-`.includes(`-${id}-`);
 }
 function sessionDirFor(cwd, piAgentDir) {
   return join4(piAgentDir, "sessions", `--${resolve2(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
@@ -560,6 +560,7 @@ function validOrchestratorParent(lane, c2) {
 }
 function validateHierarchyFields(lane, c2, key) {
   requireField(lane.role === void 0 || ["lane", "repo-orch", "sub-orch"].includes(lane.role), `${key}.role`);
+  requireField(lane.orchestrates === void 0 || lane.role === "repo-orch" && Array.isArray(lane.orchestrates) && lane.orchestrates.every(validRepo), `${key}.orchestrates`);
   requireField(lane.retired === void 0 || typeof lane.retired === "boolean", `${key}.retired`);
   requireField(validStateFile(lane.stateFile), `${key}.stateFile`);
   requireField(lane.cwd === void 0 || typeof lane.cwd === "string" && isAbsolute2(lane.cwd), `${key}.cwd`);
@@ -572,8 +573,8 @@ function validStateFile(value) {
 function validateHierarchy(c2, root, home) {
   const active = c2.lanes.filter((l2) => !l2.retired);
   requireField(new Set(active.map((l2) => laneDir(l2, c2, root, { home }))).size === active.length, "duplicate worktree");
-  const orchs = active.filter((l2) => l2.role === "repo-orch" && l2.repo);
-  requireField(new Set(orchs.map((l2) => l2.repo)).size === orchs.length, "duplicate repo-orch");
+  const repos = active.flatMap(orchestratedRepos).map((repo) => repo.toLowerCase());
+  requireField(new Set(repos).size === repos.length, "duplicate repo-orch");
   for (const lane of active) validateParentChain(lane, c2);
 }
 function validateParentChain(lane, c2) {
@@ -650,8 +651,17 @@ function saveConfig(root, c2) {
 `, { flag: "wx" });
   renameSync(tmp, join5(root, "lanes.json"));
 }
+function validRepo(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value) && !value.split("/").some((part) => [".", ".."].includes(part));
+}
+function orchestratedRepos(lane) {
+  return lane.role === "repo-orch" ? [...new Set([lane.repo, ...lane.orchestrates ?? []].filter((repo) => Boolean(repo)))] : [];
+}
+function repoOrchestrator(c2, repo) {
+  return repo ? c2.lanes.find((l2) => !l2.retired && orchestratedRepos(l2).some((r2) => r2.toLowerCase() === repo.toLowerCase())) : void 0;
+}
 function effectiveParent(lane, c2) {
-  return lane.parent ?? (lane.role === "repo-orch" || !lane.repo ? c2.coordinator.id : c2.lanes.find((l2) => !l2.retired && l2.role === "repo-orch" && l2.repo === lane.repo)?.id ?? c2.coordinator.id);
+  return lane.parent ?? (lane.role === "repo-orch" ? c2.coordinator.id : repoOrchestrator(c2, lane.repo)?.id ?? c2.coordinator.id);
 }
 function laneTree(c2, all = false) {
   const lanes = c2.lanes.filter((l2) => all || !l2.retired);
@@ -728,11 +738,11 @@ function changedPaths(status2) {
   const records = status2.split("\0");
   const paths = [];
   for (let i2 = 0; i2 < records.length; i2++) {
-    const record = records[i2];
-    if (!record) continue;
-    if (!/^[ MADRCU?!]{2} /.test(record)) throw new Error("git status paths unknown");
-    paths.push(record.slice(3));
-    if (/[RC]/.test(record.slice(0, 2))) paths.push(renameSource(records[++i2]));
+    const record2 = records[i2];
+    if (!record2) continue;
+    if (!/^[ MADRCU?!]{2} /.test(record2)) throw new Error("git status paths unknown");
+    paths.push(record2.slice(3));
+    if (/[RC]/.test(record2.slice(0, 2))) paths.push(renameSource(records[++i2]));
   }
   return [...new Set(paths)].sort();
 }
@@ -955,8 +965,65 @@ var init_process = __esm({
   }
 });
 
+// src/lanes/reap/session-work.ts
+import { readFileSync as readFileSync7, statSync as statSync4 } from "node:fs";
+function record(jobs, job) {
+  if (typeof job?.id === "string" && typeof job.command === "string") jobs.set(job.id, job);
+}
+function fold(jobs, entry2) {
+  const message = entry2.type === "message" ? entry2.message : entry2;
+  if (message?.role === "toolResult" && JOB_TOOLS.has(message.toolName)) {
+    record(jobs, message.details);
+    for (const job of message.details?.jobs ?? []) record(jobs, job);
+  }
+  if (message?.customType === "pi-jobs") {
+    for (const completion of message.details?.completions ?? []) record(jobs, completion?.job);
+  }
+}
+function subagents(pending2, entry2) {
+  const message = entry2.type === "message" ? entry2.message : entry2;
+  if (message?.role === "assistant") {
+    for (const part of Array.isArray(message.content) ? message.content : []) {
+      if (part.type === "toolCall" && part.name === "subagent") pending2.add(part.id);
+    }
+  }
+  if (message?.role === "toolResult" && message.toolName === "subagent") pending2.delete(message.toolCallId);
+}
+function sessionWork(s, ctx) {
+  if (statSync4(s.sessionFile).size > 32 * 1024 * 1024) {
+    s.asks.push("session work scan exceeds size limit");
+    return;
+  }
+  const jobs = /* @__PURE__ */ new Map();
+  const pending2 = /* @__PURE__ */ new Set();
+  try {
+    for (const line of readFileSync7(s.sessionFile, "utf8").split("\n").filter(Boolean)) {
+      const entry2 = JSON.parse(line);
+      fold(jobs, entry2);
+      subagents(pending2, entry2);
+    }
+  } catch {
+    s.asks.push("session work history malformed");
+    return;
+  }
+  if (pending2.size) s.keeps.push("subagent tool call pending");
+  for (const job of jobs.values()) {
+    if (job.status !== "running") continue;
+    const deadline = job.startedAt + job.timeoutSeconds * 1e3;
+    if (job.cwd !== s.cwd || !Number.isFinite(deadline) || deadline <= ctx.now().getTime()) {
+      s.asks.push("job/watch last recorded running; current state unknown");
+    } else s.keeps.push("job/watch running (session snapshot)");
+  }
+}
+var JOB_TOOLS;
+var init_session_work = __esm({
+  "src/lanes/reap/session-work.ts"() {
+    JOB_TOOLS = /* @__PURE__ */ new Set(["job_start", "job_watch", "job_list", "job_output", "job_kill"]);
+  }
+});
+
 // src/lanes/reap/session.ts
-import { readFileSync as readFileSync7, readdirSync as readdirSync3 } from "node:fs";
+import { readFileSync as readFileSync8, readdirSync as readdirSync3 } from "node:fs";
 import { isAbsolute as isAbsolute4, join as join8 } from "node:path";
 function sameProcess(value, s, ctx) {
   if (value.pid !== s.pid) return false;
@@ -1001,6 +1068,7 @@ function resolveSession(s, ctx) {
   s.sessionFile = fileFor(identity, dir);
   checkFile(s, dir, ctx);
   checkHeartbeat(beat, s, ctx);
+  sessionWork(s, ctx);
 }
 function sessionIdentity(s, ctx, dir) {
   try {
@@ -1026,7 +1094,7 @@ function resolveAdoptSession(s, ctx) {
   checkFile(s, dir, ctx);
 }
 function sessionHeader(file, cwd, ctx) {
-  const header = JSON.parse(readFileSync7(file, "utf8").split("\n")[0]);
+  const header = JSON.parse(readFileSync8(file, "utf8").split("\n")[0]);
   if (!validHeader(header)) throw new Error("session identity unknown");
   if (header.cwd && absolute(ctx, header.cwd) !== cwd) throw new Error("signals disagree: session cwd");
   return header.id;
@@ -1050,6 +1118,7 @@ var init_session = __esm({
     init_names();
     init_files();
     init_process();
+    init_session_work();
   }
 });
 
@@ -1075,33 +1144,42 @@ var init_status_line = __esm({
 });
 
 // src/lanes/reap/inbox.ts
-import { readdirSync as readdirSync4 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, statSync as statSync5 } from "node:fs";
 import { join as join9 } from "node:path";
-function isAddressed(to, ids) {
-  return ids.filter(Boolean).some((id) => to.some((recipient2) => recipient2 === id || `-${recipient2}-`.includes(`-${id}-`)));
+function markerTime(s, root, dir, now) {
+  const times = [];
+  const canonical2 = join9(dir, `${s.id}-inbox.marker`);
+  if (existsSync5(canonical2)) times.push(statSync5(canonical2).mtimeMs);
+  const watcher = join9(root, ".state", `inbox-${s.id}.marker`);
+  if (existsSync5(watcher)) {
+    const value = readFileSync9(watcher, "utf8").trim();
+    times.push(/^\d+$/.test(value) ? Number(value) * 1e3 : NaN);
+  }
+  if (!times.length) {
+    s.asks.push("inbox watch never ran (marker missing/unreadable)");
+    return void 0;
+  }
+  if (times.some((time) => !Number.isFinite(time) || time <= 0 || time > now)) {
+    s.asks.push("inbox marker invalid");
+    return void 0;
+  }
+  return Math.min(...times);
 }
 function checkMessage(name, s, options) {
   if (!name.endsWith(".md")) return;
   const message = parseMessageName(name);
-  if (!message) {
-    s.asks.push(`unparseable message ${name}`);
-    return;
-  }
-  if (message.from === s.id || !isAddressed(message.to, options.ids)) return;
-  if (mtime(join9(options.dir, name)) > options.since) s.unread.push(name);
+  if (message?.from === s.id) return;
+  const addressed2 = message ? options.ids.some((id) => message.to.some((to) => messageTokenMatch(`${to}.md`, id))) : options.ids.some((id) => messageTokenMatch(name, id));
+  if (!addressed2) return;
+  if (!message) s.asks.push("message name ambiguous (token match)");
+  if (options.since !== void 0 && statSync5(join9(options.dir, name)).mtimeMs > options.since) s.unread.push(name);
 }
 function inboxAndStatus(s, env) {
   const { c: c2, root, ctx, lane } = env;
   const dir = expand(c2.messages.dir, c2, root, ctx.home);
-  let since;
-  try {
-    since = mtime(join9(dir, `${s.id}-inbox.marker`));
-  } catch {
-    s.asks.push("inbox watch never ran (marker missing/unreadable)");
-    return;
-  }
-  const ids = [s.id, c2.messages.broadcast, "ALL", lane.group];
-  for (const name of readdirSync4(dir)) checkMessage(name, s, { dir, ids, since });
+  const since = markerTime(s, root, dir, ctx.now().getTime());
+  const ids = [s.id, c2.messages.broadcast, "ALL", lane.group].filter((id) => Boolean(id));
+  for (const name of existsSync5(dir) ? readdirSync4(dir) : []) checkMessage(name, s, { dir, ids, since });
   if (s.unread.length) s.keeps.push("unread inbox");
   s.status = optionalText(join9(dir, "status", `${s.id}.status`));
   if (suppressed(s.status?.trim(), ctx.now())) s.keeps.push("declared wait until future");
@@ -1115,8 +1193,64 @@ var init_inbox = __esm({
   }
 });
 
+// src/lanes/reap/local-claims.ts
+import { readdirSync as readdirSync5 } from "node:fs";
+import { join as join10, relative as relative3 } from "node:path";
+function statusFiles(base) {
+  const dirs = [base];
+  const files2 = [];
+  let scanned = 0;
+  while (dirs.length) {
+    const dir = dirs.pop();
+    let entries;
+    try {
+      entries = readdirSync5(dir, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    scanned += entries.length;
+    if (scanned > 1e4) throw new Error(`local claim scan exceeds limit: ${base}`);
+    for (const entry2 of entries) {
+      if (entry2.isDirectory()) dirs.push(join10(dir, entry2.name));
+      else if (entry2.isFile() && entry2.name === "status.md") files2.push(join10(dir, entry2.name));
+    }
+  }
+  return files2;
+}
+function field(text3, name) {
+  return new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.+)$`, "mi").exec(text3)?.[1].trim().replace(/^`|`$/g, "");
+}
+function exactOwner(text3, s) {
+  return field(text3, "Session") === s.sessionId || field(text3, "SessionId") === s.sessionId || [field(text3, "Cwd"), field(text3, "Worktree")].includes(s.cwd);
+}
+function issueOwner(text3, path2, lane, base) {
+  if (!lane.repo || !lane.issue) return false;
+  const issue = field(text3, "Issue");
+  const ref = `${lane.repo}#${lane.issue}`.toLowerCase();
+  if (issue?.toLowerCase() === ref) return true;
+  if (field(text3, "Repo")?.toLowerCase() === lane.repo.toLowerCase() && issue === `#${lane.issue}`) return true;
+  return relative3(base, path2).toLowerCase() === `${lane.repo}/${lane.issue}/status.md`.toLowerCase();
+}
+function localClaims(s, env) {
+  const bases = [.../* @__PURE__ */ new Set([env.root, s.cwd])].map((root) => join10(root, ".ai-work/issue-work"));
+  for (const base of bases) for (const path2 of statusFiles(base)) {
+    const text3 = optionalText(path2);
+    if (field(text3, "State")?.toLowerCase() !== "in-progress") continue;
+    if (exactOwner(text3, s) || issueOwner(text3, path2, env.lane, base)) s.keeps.push("in-progress local claim");
+    else if (!field(text3, "Repo") || field(text3, "Repo")?.toLowerCase() === env.lane.repo?.toLowerCase()) {
+      s.asks.push("local claim ownership unknown");
+    }
+  }
+}
+var init_local_claims = __esm({
+  "src/lanes/reap/local-claims.ts"() {
+    init_files();
+  }
+});
+
 // src/lanes/reap/ownership.ts
-import { join as join10 } from "node:path";
+import { dirname as dirname4, join as join11 } from "node:path";
 function registry(text3) {
   const folded = /* @__PURE__ */ new Map();
   for (const line of text3.split("\n").filter((l2) => l2.trim())) {
@@ -1150,7 +1284,7 @@ function classifyClaim(claim, s) {
 }
 function namedNotes(s, env) {
   const pattern = new RegExp(`(^|[^A-Z0-9-])${s.id}([^A-Z0-9-]|$)`);
-  for (const name of ["NOW.md", "WATCHES.md"]) if (pattern.test(optionalText(join10(env.root, "coordinator", name)) || "")) s.asks.push(`named in ${name}`);
+  for (const name of ["NOW.md", "WATCHES.md"]) if (pattern.test(optionalText(join11(env.root, "coordinator", name)) || "")) s.asks.push(`named in ${name}`);
 }
 function assigned(task, s) {
   return [s.sessionId, s.id].includes(task.assignee) || task.assignee?.sessionId === s.sessionId;
@@ -1162,21 +1296,23 @@ function subagentRunning(status2) {
   return status2.role === "subagent" && !["done", "failed", "cancelled", "stopped"].includes(status2.phase || status2.state);
 }
 function subagentOwned(status2, s) {
-  return [status2.pid, status2.parentPid].includes(s.pid) || [status2.sessionId, status2.parentSessionId].includes(s.sessionId);
+  return status2.parentPid !== void 0 && status2.parentPid === s.pid || status2.parentSessionId !== void 0 && status2.parentSessionId === s.sessionId;
 }
 function orchestration(s, env) {
   const { ctx } = env;
-  for (const task of jsonFiles(join10(ctx.home, ".pi/orch/tasks"))) if (assigned(task, s) && openTask(task)) s.asks.push("assigned pi-orch task requires handoff");
-  const statuses = jsonFiles(join10(ctx.piAgentDir, "context-budget/status")).filter(subagentRunning);
-  for (const status2 of statuses) {
-    if (subagentOwned(status2, s)) s.keeps.push("subagent running");
-    else s.asks.push("subagent ownership unknown");
+  for (const task of jsonFiles(join11(ctx.home, ".pi/orch/tasks"))) if (assigned(task, s) && openTask(task)) s.asks.push("assigned pi-orch task requires handoff");
+  const statuses = jsonFiles(join11(dirname4(s.sessionFile), "subagents")).filter(subagentRunning);
+  for (const status2 of statuses.filter((status3) => subagentOwned(status3, s))) {
+    const age = ctx.now().getTime() - Date.parse(status2.at);
+    if (!Number.isFinite(age) || age < 0 || age > 6e5) s.asks.push("owned subagent status stale or unknown");
+    else s.keeps.push("subagent running");
   }
 }
 function claimsAndOwnership(s, env) {
-  const text3 = optionalText(join10(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
-  const claims = registry(text3 || "").filter((claim) => env.lane.repo ? claim.repo.toLowerCase() === env.lane.repo.toLowerCase() : claim.sessionId === s.sessionId);
+  const text3 = optionalText(join11(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
+  const claims = registry(text3 || "").filter((claim) => env.lane.repo ? claim.repo.toLowerCase() === env.lane.repo.toLowerCase() && claim.sessionId === s.sessionId : claim.sessionId === s.sessionId);
   for (const claim of claims) classifyClaim(claim, s);
+  localClaims(s, env);
   namedNotes(s, env);
   orchestration(s, env);
 }
@@ -1189,14 +1325,15 @@ function activeUnnoted(claim) {
 }
 var init_ownership = __esm({
   "src/lanes/reap/ownership.ts"() {
+    init_local_claims();
     init_files();
   }
 });
 
 // src/lanes/reap/signals.ts
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 function snooze(s, env) {
-  const text3 = optionalText(join11(env.root, ".state/snooze", s.id));
+  const text3 = optionalText(join12(env.root, ".state/snooze", s.id));
   if (text3 === void 0) return;
   const until2 = Date.parse(text3.trim());
   if (!Number.isFinite(until2)) throw new Error("cannot read snooze");
@@ -1271,9 +1408,9 @@ var init_signals = __esm({
 });
 
 // src/lanes/backend.ts
-import { mkdirSync as mkdirSync2, readdirSync as readdirSync5, readFileSync as readFileSync8, renameSync as renameSync3, statSync as statSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync2, readdirSync as readdirSync6, readFileSync as readFileSync10, renameSync as renameSync3, statSync as statSync6, writeFileSync as writeFileSync3 } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 function addressed(m2, id) {
   return m2.to.some((to) => to === id || `-${to}-`.includes(`-${id}-`));
 }
@@ -1301,7 +1438,7 @@ var init_backend = __esm({
         const at = this.now();
         for (let i2 = 1; ; i2++) {
           const name = messageName(m2.from, m2.to, m2.topic, at, i2);
-          const path2 = join12(this.dir, name);
+          const path2 = join13(this.dir, name);
           try {
             writeFileSync3(path2, m2.body, { flag: "wx" });
             return { name, from: m2.from, to: [m2.to], topic: m2.topic, at, path: path2 };
@@ -1313,7 +1450,7 @@ var init_backend = __esm({
       async list(filter = {}) {
         let names;
         try {
-          names = readdirSync5(this.dir);
+          names = readdirSync6(this.dir);
         } catch (e) {
           if (e.code === "ENOENT") return [];
           throw e;
@@ -1322,7 +1459,7 @@ var init_backend = __esm({
         for (const name of names) {
           const parsed = parseMessageName(name);
           if (!parsed) continue;
-          const stat2 = statSync4(join12(this.dir, name));
+          const stat2 = statSync6(join13(this.dir, name));
           if (!stat2.isFile()) continue;
           const ref = { name, ...parsed, at: stat2.mtime };
           if (filter.from !== void 0 && ref.from !== filter.from) continue;
@@ -1337,18 +1474,18 @@ var init_backend = __esm({
       }
       async setStatus(lane, line) {
         if (!validId(lane)) throw new Error("invalid lane id");
-        const dir = join12(this.dir, "status");
+        const dir = join13(this.dir, "status");
         mkdirSync2(dir, { recursive: true });
-        const tmp = join12(dir, `.${lane}-${randomUUID3()}.tmp`);
+        const tmp = join13(dir, `.${lane}-${randomUUID3()}.tmp`);
         writeFileSync3(tmp, `${line}
 `, { flag: "wx" });
-        renameSync3(tmp, join12(dir, `${lane}.status`));
+        renameSync3(tmp, join13(dir, `${lane}.status`));
       }
       async unread(lane, opts = {}) {
         if (!validId(lane)) throw new Error("invalid lane id");
         let since;
         try {
-          since = statSync4(join12(this.dir, `${lane}-inbox.marker`)).mtimeMs;
+          since = statSync6(join13(this.dir, `${lane}-inbox.marker`)).mtimeMs;
         } catch (e) {
           if (e.code === "ENOENT") return void 0;
           throw e;
@@ -1358,7 +1495,7 @@ var init_backend = __esm({
       async status(lane) {
         if (!validId(lane)) throw new Error("invalid lane id");
         try {
-          return readFileSync8(join12(this.dir, "status", `${lane}.status`), "utf8").split(/\r?\n/)[0];
+          return readFileSync10(join13(this.dir, "status", `${lane}.status`), "utf8").split(/\r?\n/)[0];
         } catch (e) {
           if (e.code === "ENOENT") return void 0;
           throw e;
@@ -1371,15 +1508,15 @@ var init_backend = __esm({
 // src/lanes/reap/handoff.ts
 import { createHash as createHash2 } from "node:crypto";
 import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync4 } from "node:fs";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 function fingerprint(s) {
   return createHash2("sha256").update(JSON.stringify(s)).digest("hex");
 }
 function packPath(env) {
-  return join13(env.root, ".state/handoffs", env.lane.id);
+  return join14(env.root, ".state/handoffs", env.lane.id);
 }
 function readPack(env) {
-  const text3 = optionalText(join13(packPath(env), "handoff.json"));
+  const text3 = optionalText(join14(packPath(env), "handoff.json"));
   if (text3 === void 0) return void 0;
   const value = JSON.parse(text3);
   if (!validPack(value, env.lane.id)) throw new Error("invalid handoff pack");
@@ -1413,8 +1550,8 @@ async function prepare(env, to, s) {
     signals: s
   };
   const notes = ["NOW.md", "WATCHES.md", "STATE.md"].map((n3) => `## ${n3}
-${optionalText(join13(root, "coordinator", n3)) || "unknown/not present"}`).join("\n\n");
-  writeFileSync4(join13(dir, "HANDOFF.md"), [
+${optionalText(join14(root, "coordinator", n3)) || "unknown/not present"}`).join("\n\n");
+  writeFileSync4(join14(dir, "HANDOFF.md"), [
     `# Handoff ${pack.id}`,
     `Recipient: ${to}`,
     `Branch: ${lane.branch ?? "unknown"}`,
@@ -1438,15 +1575,15 @@ ${optionalText(join13(root, "coordinator", n3)) || "unknown/not present"}`).join
     `${notes}`,
     ``
   ].join("\n"));
-  atomicJson(join13(dir, "handoff.json"), pack);
+  atomicJson(join14(dir, "handoff.json"), pack);
   const message = await backendFor(c2, ctx, root).send({
     from: c2.coordinator.id,
     to,
     topic: "handoff-request",
-    body: `Review ${join13(dir, "HANDOFF.md")} and ${join13(dir, "handoff.json")}. Explicitly accept with: lanes handoff ${lane.id} --accept --from ${to}. This transfers next-action and pending acknowledgement ownership; it does not complete claims.`
+    body: `Review ${join14(dir, "HANDOFF.md")} and ${join14(dir, "handoff.json")}. Explicitly accept with: lanes handoff ${lane.id} --accept --from ${to}. This transfers next-action and pending acknowledgement ownership; it does not complete claims.`
   });
   pack.requestMessage = message.name;
-  atomicJson(join13(dir, "handoff.json"), pack);
+  atomicJson(join14(dir, "handoff.json"), pack);
   return pack;
 }
 async function accept(env, from) {
@@ -1460,7 +1597,7 @@ async function accept(env, from) {
     throw new Error("handoff evidence changed; prepare a new pack before accepting");
   }
   pack.acceptance = { from, at: ctx.now().toISOString(), fingerprint: pack.fingerprint };
-  atomicJson(join13(packPath(env), "handoff.json"), pack);
+  atomicJson(join14(packPath(env), "handoff.json"), pack);
   return pack;
 }
 function handoffRecipient(lane, c2, override) {
@@ -1497,7 +1634,7 @@ var init_handoff = __esm({
 });
 
 // src/lanes/commands/handoff.ts
-import { join as join14, relative as relative3 } from "node:path";
+import { join as join15, relative as relative4 } from "node:path";
 async function handoff(args, opts, env) {
   const { c: c2, root, ctx } = env;
   const lane = activeLane(args, c2);
@@ -1511,10 +1648,10 @@ async function handoff(args, opts, env) {
   if (opts.from) throw new UsageError("--from requires --accept");
   const s = await collect({ c: c2, lane, root, ctx, minutes });
   const pack = await prepare({ c: c2, lane, root, ctx, minutes }, handoffRecipient(lane, c2, opts.to), s);
-  atomicJson(join14(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), rows: [{
+  atomicJson(join15(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), rows: [{
     id: lane.id,
     verdict: "handoff",
-    pack: relative3(root, packPath({ root, lane })),
+    pack: relative4(root, packPath({ root, lane })),
     signals: s
   }] });
   ctx.out(`handoff ${pack.id}: ${packPath({ root, lane })}`);
@@ -1537,8 +1674,35 @@ var init_handoff2 = __esm({
   }
 });
 
+// src/lanes/reap/summary.ts
+import { existsSync as existsSync6, readdirSync as readdirSync7 } from "node:fs";
+import { join as join16 } from "node:path";
+function summary(signals, env) {
+  const result2 = [];
+  const dir = expand(env.c.messages.dir, env.c, env.root, env.ctx.home);
+  const names = existsSync6(dir) ? readdirSync7(dir).filter((name) => name.endsWith(".md") && !parseMessageName(name)) : [];
+  if (names.length) result2.push(`Unparseable messages (${names.length}): ${names.join(", ")}`);
+  const text3 = optionalText(join16(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
+  try {
+    const sessions = new Set(signals.map((signal) => signal.sessionId));
+    const foreign = registry(text3 ?? "").filter((claim) => !sessions.has(claim.sessionId));
+    if (foreign.length) result2.push(`Foreign claims (${foreign.length}): ${foreign.map((claim) => `${claim.repo}#${claim.issue}`).join(", ")}`);
+  } catch {
+    result2.push("Claim summary unavailable: cannot read issue-work registry");
+  }
+  return result2;
+}
+var init_summary = __esm({
+  "src/lanes/reap/summary.ts"() {
+    init_config();
+    init_names();
+    init_files();
+    init_ownership();
+  }
+});
+
 // src/lanes/terminal.ts
-import { join as join15 } from "node:path";
+import { join as join17 } from "node:path";
 function detectBackend(configured, ctx) {
   if (!BACKENDS.includes(configured)) throw new UsageError("invalid terminal.backend");
   if (configured !== "auto") return configured;
@@ -1550,7 +1714,7 @@ function detectBackend(configured, ctx) {
 function launchCommand(c2, root, cwd, id, prompt, wrapper, messages2) {
   const unset = c2.launch.unsetEnv.map((name) => `-u ${name}`).join(" ");
   const exe = /^[A-Za-z0-9_/-]+$/.test(wrapper) ? wrapper : shellQuote(wrapper);
-  return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages2)} LANE_STATUS_DIR=${shellQuote(join15(messages2, "status"))} ${exe} ${shellQuote(`@${prompt}`)}`;
+  return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages2)} LANE_STATUS_DIR=${shellQuote(join17(messages2, "status"))} ${exe} ${shellQuote(`@${prompt}`)}`;
 }
 function terminalBackend(name) {
   if (!BACKENDS.includes(name) || name === "auto") throw new UsageError("invalid terminal.backend");
@@ -1647,7 +1811,7 @@ var init_terminal = __esm({
 
 // src/lanes/reap/context-format.ts
 import { createHash as createHash3 } from "node:crypto";
-import { lstatSync as lstatSync2, readFileSync as readFileSync9 } from "node:fs";
+import { lstatSync as lstatSync2, readFileSync as readFileSync11 } from "node:fs";
 function sections(text3) {
   const matches = [...text3.matchAll(/^##\s+([^\r\n]+)\r?$/gm)];
   const result2 = /* @__PURE__ */ new Map();
@@ -1679,7 +1843,7 @@ function validSnapshot(s) {
 function readContext(path2) {
   const stat2 = lstatSync2(path2);
   if (!stat2.isFile()) throw new Error("lane handoff must be a regular file");
-  const text3 = readFileSync9(path2, "utf8");
+  const text3 = readFileSync11(path2, "utf8");
   const parts = sections(text3);
   for (const heading of HEADINGS) {
     if (!parts.get(heading.toLowerCase())) throw new Error(`lane handoff missing ${heading}`);
@@ -1743,13 +1907,13 @@ var init_context_format = __esm({
 });
 
 // src/lanes/reap/own-context.ts
-import { join as join16 } from "node:path";
+import { join as join18 } from "node:path";
 import { createHash as createHash4 } from "node:crypto";
 function contextPath(env) {
-  return join16(env.root, ".state/handoffs", `${env.lane.id}.md`);
+  return join18(env.root, ".state/handoffs", `${env.lane.id}.md`);
 }
 function receiptPath(env) {
-  return join16(env.root, ".state/handoffs", `${env.lane.id}.request.json`);
+  return join18(env.root, ".state/handoffs", `${env.lane.id}.request.json`);
 }
 function version(s) {
   const state2 = { pid: s.pid, procStart: s.procStart, sessionId: s.sessionId, git: s.git, claims: s.claims };
@@ -1866,36 +2030,36 @@ var init_safe_quit = __esm({
 
 // src/lanes/reap/closure.ts
 import { appendFileSync, mkdirSync as mkdirSync4 } from "node:fs";
-import { join as join17 } from "node:path";
-function pauseClaims(env, s, record) {
-  const path2 = join17(env.ctx.piAgentDir, "issue-work/registry.jsonl");
+import { join as join19 } from "node:path";
+function pauseClaims(env, s, record2) {
+  const path2 = join19(env.ctx.piAgentDir, "issue-work/registry.jsonl");
   const latest = registry(optionalText(path2) || "");
   for (const claim of s.claims.filter((claim2) => claim2.state !== "done")) {
     const current = latest.find((value) => value.repo.toLowerCase() === claim.repo.toLowerCase() && value.issue === claim.issue);
     if (JSON.stringify(current) !== JSON.stringify(claim)) throw new Error("claim changed before pause; inspect closure");
     const event = {
       ...claim,
-      ts: record.ts,
+      ts: record2.ts,
       state: "paused",
       sessionFile: s.sessionFile,
-      note: `Paused by lanes reap; takeover by ${record.to}; handoff: ${record.handoff}`
+      note: `Paused by lanes reap; takeover by ${record2.to}; handoff: ${record2.handoff}`
     };
     appendFileSync(path2, `
 ${JSON.stringify(event)}
 `);
   }
 }
-function tryPauseClaims(env, s, record) {
+function tryPauseClaims(env, s, record2) {
   try {
-    pauseClaims(env, s, record);
+    pauseClaims(env, s, record2);
   } catch (e) {
-    record.claimPauseError = e.message;
-    env.ctx.err(`Warning: ${env.lane.id}: could not pause claims after exit: ${record.claimPauseError}`);
+    record2.claimPauseError = e.message;
+    env.ctx.err(`Warning: ${env.lane.id}: could not pause claims after exit: ${record2.claimPauseError}`);
   }
 }
 async function recordClosure(env, s, target) {
   const { root, lane, c: c2, ctx } = env;
-  const record = {
+  const record2 = {
     id: lane.id,
     ground: "takeover",
     verdict: "retire",
@@ -1907,21 +2071,21 @@ async function recordClosure(env, s, target) {
     to: target.to,
     evidence: `Accepted takeover; clean foreground /quit and exit confirmed; tree=${s.git.digest}`
   };
-  tryPauseClaims(env, s, record);
-  mkdirSync4(join17(root, "coordinator"), { recursive: true });
+  tryPauseClaims(env, s, record2);
+  mkdirSync4(join19(root, "coordinator"), { recursive: true });
   appendFileSync(
-    join17(root, "coordinator/STATE.md"),
+    join19(root, "coordinator/STATE.md"),
     `
-- ${record.ts} ${lane.id}: takeover by ${target.to}; handoff ${record.handoff}; SHA ${record.sha}.
+- ${record2.ts} ${lane.id}: takeover by ${target.to}; handoff ${record2.handoff}; SHA ${record2.sha}.
 `
   );
-  appendFileSync(join17(root, ".state/reaped.log"), `${JSON.stringify(record)}
+  appendFileSync(join19(root, ".state/reaped.log"), `${JSON.stringify(record2)}
 `);
   await backendFor(c2, ctx, root).send({
     from: lane.id,
     to: effectiveParent(lane, c2),
     topic: "lane-closed",
-    body: `${lane.id} closed (takeover by ${target.to}). Handoff: ${record.handoff}. Archive: ${target.archive}.`
+    body: `${lane.id} closed (takeover by ${target.to}). Handoff: ${record2.handoff}. Archive: ${target.archive}.`
   });
 }
 var init_closure = __esm({
@@ -1935,54 +2099,54 @@ var init_closure = __esm({
 });
 
 // src/lanes/reap/archive.ts
-import { copyFileSync, existsSync as existsSync5, lstatSync as lstatSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync10, readdirSync as readdirSync6, unlinkSync } from "node:fs";
-import { dirname as dirname4, isAbsolute as isAbsolute5, join as join18, relative as relative4, resolve as resolve5 } from "node:path";
+import { copyFileSync, existsSync as existsSync7, lstatSync as lstatSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync12, readdirSync as readdirSync8, unlinkSync } from "node:fs";
+import { dirname as dirname5, isAbsolute as isAbsolute5, join as join20, relative as relative5, resolve as resolve5 } from "node:path";
 function checkRetirement(lane, c2, root) {
   if (c2.lanes.some((l2) => !l2.retired && effectiveParent(l2, c2) === lane.id)) throw new Error("retirement would orphan active children; reparent first");
-  const prompt = relative4(root, resolve5(root, lane.prompt));
+  const prompt = relative5(root, resolve5(root, lane.prompt));
   if (prompt.startsWith("..") || isAbsolute5(prompt)) throw new Error("prompt outside coordination root cannot be archived");
 }
 async function archive(env, s, to) {
   const { c: c2, lane, root, ctx } = env;
   checkRetirement(lane, c2, root);
   const stamp = ctx.now().toISOString().replace(/[:.]/g, "-");
-  const dest = join18(root, ".state/retired", stamp, lane.id);
-  if (existsSync5(join18(dest, "closure.json"))) throw new Error("retirement archive already exists; inspect before retrying");
+  const dest = join20(root, ".state/retired", stamp, lane.id);
+  if (existsSync7(join20(dest, "closure.json"))) throw new Error("retirement archive already exists; inspect before retrying");
   const dir = expand(c2.messages.dir, c2, root, ctx.home);
   const sources = [];
   const add2 = (path2, target) => {
-    if (existsSync5(path2)) sources.push({ path: path2, dest: join18(dest, target) });
+    if (existsSync7(path2)) sources.push({ path: path2, dest: join20(dest, target) });
   };
   add2(resolve5(root, lane.prompt), `prompts/${lane.id}.md`);
-  add2(join18(dir, "status", `${lane.id}.status`), `messages/status/${lane.id}.status`);
-  add2(join18(dir, `${lane.id}-inbox.marker`), `messages/${lane.id}-inbox.marker`);
-  for (const name of readdirSync6(dir)) {
+  add2(join20(dir, "status", `${lane.id}.status`), `messages/status/${lane.id}.status`);
+  add2(join20(dir, `${lane.id}-inbox.marker`), `messages/${lane.id}-inbox.marker`);
+  for (const name of readdirSync8(dir)) {
     const parsed = parseMessageName(name);
-    if (laneAddressed(parsed, lane)) add2(join18(dir, name), `messages/${name}`);
+    if (laneAddressed(parsed, lane)) add2(join20(dir, name), `messages/${name}`);
   }
   const handoff2 = packPath({ root, lane });
-  if (existsSync5(handoff2)) for (const name of readdirSync6(handoff2)) add2(join18(handoff2, name), `handoff/${name}`);
+  if (existsSync7(handoff2)) for (const name of readdirSync8(handoff2)) add2(join20(handoff2, name), `handoff/${name}`);
   mkdirSync5(dest, { recursive: true });
-  atomicJson(join18(dest, "lane.json"), lane);
+  atomicJson(join20(dest, "lane.json"), lane);
   sources.forEach(copySource);
-  copySource({ path: contextPath(env), dest: join18(dest, "handoff", `${lane.id}.md`) });
+  copySource({ path: contextPath(env), dest: join20(dest, "handoff", `${lane.id}.md`) });
   const closure = { id: lane.id, at: ctx.now().toISOString(), ground: "takeover", to, signals: s, worktreePreserved: s.cwd, branchPreserved: lane.branch };
-  atomicJson(join18(dest, "closure.json"), closure);
+  atomicJson(join20(dest, "closure.json"), closure);
   await recordClosure(env, s, { to, archive: dest });
   lane.retired = true;
-  lane.stateFile = relative4(root, join18(dest, "closure.json"));
+  lane.stateFile = relative5(root, join20(dest, "closure.json"));
   saveConfig(root, c2);
   sources.forEach(removeUnchanged);
   return dest;
 }
 function copySource(source) {
   if (!lstatSync3(source.path).isFile()) throw new Error(`archive source is not a regular file: ${source.path}`);
-  source.body = readFileSync10(source.path);
-  mkdirSync5(dirname4(source.dest), { recursive: true });
+  source.body = readFileSync12(source.path);
+  mkdirSync5(dirname5(source.dest), { recursive: true });
   copyFileSync(source.path, source.dest);
 }
 function removeUnchanged(source) {
-  if (source.body && readFileSync10(source.path).equals(source.body)) unlinkSync(source.path);
+  if (source.body && readFileSync12(source.path).equals(source.body)) unlinkSync(source.path);
 }
 function laneAddressed(parsed, lane) {
   if (!parsed) return false;
@@ -2000,9 +2164,14 @@ var init_archive = __esm({
 });
 
 // src/lanes/reap/verdict.ts
+function topReasons(reasons) {
+  const counts2 = /* @__PURE__ */ new Map();
+  for (const reason of reasons) counts2.set(reason, (counts2.get(reason) ?? 0) + 1);
+  return [...counts2].slice(0, 3).map(([reason, count]) => count > 1 ? `${count}\xD7 ${reason}` : reason).join("; ");
+}
 function verdict(s) {
-  if (s.asks.length) return { verdict: "ask", reason: s.asks.join("; ") };
-  if (s.keeps.length) return { verdict: "keep", reason: s.keeps.join("; ") };
+  if (s.asks.length) return { verdict: "ask", reason: topReasons(s.asks) };
+  if (s.keeps.length) return { verdict: "keep", reason: topReasons(s.keeps) };
   if (s.finished) return { verdict: "retire", ground: "finished", reason: "finished: all machine evidence proves completion" };
   if (s.takeover) return { verdict: "retire", ground: "takeover", reason: "takeover validated" };
   return { verdict: "handoff", reason: "idle; delivery acknowledgements and candidate ownership unknown; takeover required" };
@@ -2013,7 +2182,7 @@ var init_verdict = __esm({
 });
 
 // src/lanes/commands/reap.ts
-import { join as join19, relative as relative5 } from "node:path";
+import { join as join21, relative as relative6 } from "node:path";
 function validateArgs(args, opts, c2) {
   if (args.length > 1) throw new UsageError("reap accepts one active lane ID");
   validateId(args[0], c2);
@@ -2027,14 +2196,14 @@ async function applyRow(row, env, opts) {
   await recipient(env, to);
   await ownContext(env, row.signals);
   const pack = await prepare(env, to, row.signals);
-  row.pack = relative5(root, packPath({ root, lane }));
+  row.pack = relative6(root, packPath({ root, lane }));
   if (pack.acceptance?.from !== to || pack.acceptance?.fingerprint !== fingerprint(row.signals)) {
     row.reason = `takeover request sent to ${to}; explicit acceptance required`;
     return;
   }
   await recipient(env, to);
   await safeQuit(env, row.signals, to);
-  row.pack = relative5(root, await archive(env, row.signals, to));
+  row.pack = relative6(root, await archive(env, row.signals, to));
   row.verdict = "retire";
   row.ground = "takeover";
   row.reason = `takeover accepted by ${to}; /quit exit confirmed; archived`;
@@ -2068,8 +2237,10 @@ async function reap(args, opts, env) {
   const rows = [];
   const active = laneTree(c2).reverse().map((row) => row.lane).filter((l2) => !args[0] || l2.id === args[0]);
   for (const lane of active) rows.push(await planRow({ c: c2, lane, root, ctx, minutes }, opts));
-  atomicJson(join19(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), minutes, rows });
+  const summaries = summary(rows.map((row) => row.signals), env);
+  atomicJson(join21(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), minutes, rows, summaries });
   display(rows, Boolean(opts.json), ctx);
+  if (!opts.json) for (const line of summaries) ctx.out(line);
   return rows.some((row) => row.failed) ? 2 : 0;
 }
 function validateId(id, c2) {
@@ -2083,6 +2254,7 @@ function idleMinutes(opts, c2) {
 }
 var init_reap = __esm({
   "src/lanes/commands/reap.ts"() {
+    init_summary();
     init_config();
     init_handoff();
     init_own_context();
@@ -2096,13 +2268,13 @@ var init_reap = __esm({
 
 // src/lanes/commands/snooze.ts
 import { mkdirSync as mkdirSync6, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
-import { join as join20 } from "node:path";
+import { join as join22 } from "node:path";
 async function snooze2(args, opts, env) {
   const { c: c2, root, ctx } = env;
   const lane = c2.lanes.find((l2) => l2.id === args[0] && !l2.retired);
   if (invalidRequest(args, lane, opts)) throw new UsageError("snooze requires ID and --until ISO|+90m or --clear");
-  const dir = join20(root, ".state/snooze");
-  const path2 = join20(dir, lane.id);
+  const dir = join22(root, ".state/snooze");
+  const path2 = join22(dir, lane.id);
   if (opts.clear) {
     clear(path2);
     ctx.out(`snooze cleared ${lane.id}`);
@@ -2122,8 +2294,8 @@ function invalidRequest(args, lane, opts) {
   return Boolean(opts.clear) === Boolean(opts.until);
 }
 function until(value, ctx) {
-  const relative9 = /^\+(\d+)m$/.exec(value);
-  return relative9 ? ctx.now().getTime() + Number(relative9[1]) * 6e4 : Date.parse(value);
+  const relative10 = /^\+(\d+)m$/.exec(value);
+  return relative10 ? ctx.now().getTime() + Number(relative10[1]) * 6e4 : Date.parse(value);
 }
 function clear(path2) {
   try {
@@ -2139,13 +2311,13 @@ var init_snooze = __esm({
 });
 
 // src/lanes/templates.ts
-import { readFileSync as readFileSync11 } from "node:fs";
-import { join as join21 } from "node:path";
+import { readFileSync as readFileSync13 } from "node:fs";
+import { join as join23 } from "node:path";
 function renderTemplate(text3, vars) {
   return text3.replace(/\{\{(\w+)\}\}/g, (token, name) => Object.hasOwn(vars, name) ? String(vars[name]) : token);
 }
 function readTemplate(ctx, name) {
-  return readFileSync11(join21(ctx.templatesDir, name), "utf8");
+  return readFileSync13(join23(ctx.templatesDir, name), "utf8");
 }
 function templateVars(c2, ctx, root) {
   const messages2 = expand(c2.messages.dir, c2, root, ctx.home);
@@ -2156,10 +2328,10 @@ function templateVars(c2, ctx, root) {
     coordinator_sh: shellQuote(c2.coordinator.id),
     coordinator: c2.coordinator.id,
     maxRunning: c2.coordinator.maxRunning,
-    rules: join21(root, "rules.md"),
+    rules: join23(root, "rules.md"),
     messages: messages2,
-    watches: join21(root, "coordinator/WATCHES.md"),
-    handoff: join21(root, "coordinator/handoff-protocol.md")
+    watches: join23(root, "coordinator/WATCHES.md"),
+    handoff: join23(root, "coordinator/handoff-protocol.md")
   };
 }
 var init_templates = __esm({
@@ -2170,13 +2342,13 @@ var init_templates = __esm({
 });
 
 // src/lanes/commands/init.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync7, readFileSync as readFileSync12, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname5, join as join22, resolve as resolve6 } from "node:path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync14, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname6, join as join24, resolve as resolve6 } from "node:path";
 async function init(args, opts, ctx) {
   const root = resolve6(ctx.cwd, args[0] || ".");
-  const configPath = join22(root, "lanes.json");
-  const c2 = existsSync6(configPath) ? loadConfig(root) : defaults(root, ctx.home, opts["repos-root"]);
-  if (!existsSync6(configPath)) {
+  const configPath = join24(root, "lanes.json");
+  const c2 = existsSync8(configPath) ? loadConfig(root) : defaults(root, ctx.home, opts["repos-root"]);
+  if (!existsSync8(configPath)) {
     c2.coordinator.id = opts.coordinator || c2.coordinator.id;
     c2.terminal.backend = opts.terminal || c2.terminal.backend;
     c2.launch.preapproveMcp = opts["preapprove-mcp"] === "true" || preapprovalDefault(ctx.templatesDir);
@@ -2184,9 +2356,9 @@ async function init(args, opts, ctx) {
   validate(c2);
   const vars = templateVars(c2, ctx, root);
   const put2 = (rel, content) => {
-    const path2 = join22(root, rel);
-    mkdirSync7(dirname5(path2), { recursive: true });
-    if (existsSync6(path2)) ctx.out(`kept ${path2}`);
+    const path2 = join24(root, rel);
+    mkdirSync7(dirname6(path2), { recursive: true });
+    if (existsSync8(path2)) ctx.out(`kept ${path2}`);
     else {
       writeFileSync6(path2, content, { flag: "wx" });
       ctx.out(`created ${path2}`);
@@ -2197,12 +2369,12 @@ async function init(args, opts, ctx) {
   for (const [source, dest] of [["rules.md", "rules.md"], ["coordinator.md", "prompts/coordinator.md"], ...["WATCHES.md", "handoff-protocol.md", "NOW.md", "STATE.md"].map((n3) => [n3, `coordinator/${n3}`])]) {
     put2(dest, renderTemplate(readTemplate(ctx, source), vars));
   }
-  const status2 = join22(root, "messages/status");
-  const hadStatus = existsSync6(status2);
+  const status2 = join24(root, "messages/status");
+  const hadStatus = existsSync8(status2);
   mkdirSync7(status2, { recursive: true });
   ctx.out(`${hadStatus ? "kept" : "created"} ${status2}`);
-  const ignore = join22(root, ".gitignore");
-  const text3 = existsSync6(ignore) ? readFileSync12(ignore, "utf8") : "";
+  const ignore = join24(root, ".gitignore");
+  const text3 = existsSync8(ignore) ? readFileSync14(ignore, "utf8") : "";
   const missing = [".state/", "messages/"].filter((s) => !text3.split(/\r?\n/).includes(s));
   if (missing.length) {
     writeFileSync6(ignore, `${text3}${text3 && !text3.endsWith("\n") ? "\n" : ""}${missing.join("\n")}
@@ -2288,7 +2460,7 @@ var init_processes = __esm({
 });
 
 // src/lanes/adopt/discover.ts
-import { basename as basename2, join as join23 } from "node:path";
+import { basename as basename2, join as join25 } from "node:path";
 async function discover(ctx, entries, excluded, coordinatorId) {
   const rows = [];
   for (const p of await runningPi(ctx)) {
@@ -2351,7 +2523,7 @@ async function identify(row, entries, ctx) {
   applyInventory(row, map, candidates);
 }
 function identityMap(sessionId, ctx) {
-  const text3 = optionalText(join23(ctx.piAgentDir, "user-questions/lanes", `${sessionId}.json`));
+  const text3 = optionalText(join25(ctx.piAgentDir, "user-questions/lanes", `${sessionId}.json`));
   if (text3 === void 0) return void 0;
   const map = JSON.parse(text3);
   if (!validIdentity(map, sessionId)) throw new Error("conflict: invalid lane identity map");
@@ -2374,9 +2546,9 @@ function applyInventory(row, map, candidates) {
     row.source = "inventory";
   }
 }
-function markDuplicates(rows, field, warning) {
-  const active = rows.filter((r2) => !r2.excluded && r2[field]);
-  for (const row of active) if (active.filter((other) => other[field] === row[field]).length > 1) row.warnings.push(warning);
+function markDuplicates(rows, field2, warning) {
+  const active = rows.filter((r2) => !r2.excluded && r2[field2]);
+  for (const row of active) if (active.filter((other) => other[field2] === row[field2]).length > 1) row.warnings.push(warning);
 }
 function repoName(remote) {
   const match = /(?:[:/])([^/:\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(remote);
@@ -2393,10 +2565,10 @@ var init_discover = __esm({
 });
 
 // src/lanes/adopt/inventory.ts
-import { readFileSync as readFileSync13 } from "node:fs";
+import { readFileSync as readFileSync15 } from "node:fs";
 function inventory(path2) {
   if (!path2) return [];
-  const rows = readFileSync13(path2, "utf8").split("\n").filter((l2) => l2.trim().startsWith("|"));
+  const rows = readFileSync15(path2, "utf8").split("\n").filter((l2) => l2.trim().startsWith("|"));
   const cells = (line) => line.split("|").slice(1, -1).map((s) => s.trim().replace(/^`|`$/g, ""));
   const header = rows.findIndex((l2) => {
     const c2 = cells(l2);
@@ -2428,6 +2600,17 @@ function requestedRoles(value, coordinatorId) {
   }
   return roles;
 }
+function requestedOrchestrates(value, coordinatorId) {
+  const result2 = /* @__PURE__ */ new Map();
+  for (const assignment of value?.split(";") ?? []) {
+    const [id, repos, extra] = assignment.split("=");
+    if (!validId(id) || id === coordinatorId || !repos || extra !== void 0 || !repos.split(",").every(validRepo)) {
+      throw new UsageError("invalid --orchestrates; expected ID=owner/repo,owner/repo for a repo-orch");
+    }
+    result2.set(id, [.../* @__PURE__ */ new Set([...result2.get(id) ?? [], ...repos.split(",")])]);
+  }
+  return result2;
+}
 function roleAssignment(value) {
   const [id, role, extra] = value.split("=");
   if (!validId(id) || extra !== void 0) throw new UsageError("invalid --role; expected ID=role");
@@ -2442,8 +2625,8 @@ var init_roles = __esm({
 });
 
 // src/lanes/adopt/proposal.ts
-import { existsSync as existsSync7 } from "node:fs";
-import { basename as basename3, dirname as dirname6, relative as relative6 } from "node:path";
+import { existsSync as existsSync9 } from "node:fs";
+import { basename as basename3, dirname as dirname7, relative as relative7 } from "node:path";
 function mergeDiscovered(c2, rows, options) {
   for (const row of rows) {
     if (row.id && !row.excluded) mergeLane(row, { c: c2, ...options });
@@ -2480,12 +2663,13 @@ function compareStored(row, lane, env) {
   compareValue(row, "repo", lane.repo, row.repo);
   compareValue(row, "branch", lane.branch, row.branch);
   compareValue(row, "role", lane.role ?? "lane", env.roles.get(lane.id));
+  if (!blockingWarnings(row).length && env.orchestrates?.has(lane.id)) lane.orchestrates = env.orchestrates.get(lane.id);
 }
 function blockingWarnings(row) {
   return row.warnings.filter((w) => !["not a git repo", "detached HEAD", "origin repo unknown"].includes(w));
 }
-function compareValue(row, field, stored, found) {
-  if (found !== void 0 && stored !== found) row.warnings.push(`conflict: stored ${field} ${stored}, found ${found}`);
+function compareValue(row, field2, stored, found) {
+  if (found !== void 0 && stored !== found) row.warnings.push(`conflict: stored ${field2} ${stored}, found ${found}`);
 }
 function insertLane(row, env) {
   if (directoryConflict(row, env)) {
@@ -2505,15 +2689,16 @@ function discoveredRole(row, env) {
   return env.roles.get(row.id) ?? (row.id.startsWith("R-") ? "repo-orch" : "lane");
 }
 function orchestratorConflict(row, env) {
-  if (discoveredRole(row, env) !== "repo-orch" || !row.repo) return false;
+  const repos = orchestratedRepos(adoptedLane(row, env)).map((repo) => repo.toLowerCase());
   const others = env.c.lanes.filter((l2) => !l2.retired && l2.id !== row.id);
-  return others.some((l2) => l2.role === "repo-orch" && l2.repo === row.repo);
+  return others.some((l2) => orchestratedRepos(l2).some((repo) => repos.includes(repo.toLowerCase())));
 }
 function adoptedLane(row, env) {
   const { c: c2, root, ctx } = env;
   const lane = {
     id: row.id,
     role: discoveredRole(row, env),
+    ...env.orchestrates?.has(row.id) ? { orchestrates: env.orchestrates.get(row.id) } : {},
     ...row.repo ? { repo: row.repo } : {},
     ...row.branch ? { branch: row.branch } : {},
     worktree: basename3(row.cwd),
@@ -2522,14 +2707,14 @@ function adoptedLane(row, env) {
   };
   const managed = configuredDirectory(expand(c2.worktreesDir, c2, root, ctx.home), ctx);
   if (!row.repo || !row.branch) return { ...lane, cwd: row.cwd };
-  if (dirname6(row.cwd) === managed) {
-    lane.worktree = relative6(managed, row.cwd);
+  if (dirname7(row.cwd) === managed) {
+    lane.worktree = relative7(managed, row.cwd);
     delete lane.cwd;
   } else lane.cwd = row.cwd;
   return lane;
 }
 function configuredDirectory(path2, ctx) {
-  return existsSync7(path2) ? absolute(ctx, path2) : path2;
+  return existsSync9(path2) ? absolute(ctx, path2) : path2;
 }
 function missingLanes(c2, rows) {
   const found = new Set(rows.filter((r2) => !r2.excluded).map((r2) => r2.id));
@@ -2562,21 +2747,28 @@ var init_proposal = __esm({
 });
 
 // src/lanes/commands/adopt.ts
-import { existsSync as existsSync8, readFileSync as readFileSync14 } from "node:fs";
-import { join as join24, resolve as resolve7 } from "node:path";
+import { existsSync as existsSync10, readFileSync as readFileSync16 } from "node:fs";
+import { join as join26, resolve as resolve7 } from "node:path";
 async function adopt(opts, ctx) {
   const root = adoptionRoot(opts.dir, ctx);
-  const path2 = join24(root, "lanes.json");
-  const exists = existsSync8(path2);
+  const path2 = join26(root, "lanes.json");
+  const exists = existsSync10(path2);
   const c2 = exists ? loadConfig(root) : defaults(root, ctx.home);
   configure(c2, opts, root, ctx);
   const excluded = excludedTtys(opts);
   const entries = inventory(opts.inventory ? resolve7(ctx.cwd, opts.inventory) : void 0);
   const roles = requestedRoles(opts.role, c2.coordinator.id);
   const rows = await discover(ctx, entries, excluded, c2.coordinator.id);
-  mergeDiscovered(c2, rows, { root, ctx, existingConfig: exists, roles });
+  const orchestrates = requestedOrchestrates(opts.orchestrates, c2.coordinator.id);
+  mergeDiscovered(c2, rows, { root, ctx, existingConfig: exists, roles, orchestrates });
+  for (const [id, repos] of orchestrates) {
+    const lane = c2.lanes.find((l2) => l2.id === id);
+    if (lane?.role !== "repo-orch" || JSON.stringify(lane.orchestrates) !== JSON.stringify(repos)) {
+      throw new UsageError(`--orchestrates requires a mapped repo-orch: ${id}`);
+    }
+  }
   validate(c2, root, ctx.home);
-  const before = exists ? readFileSync14(path2, "utf8") : "";
+  const before = exists ? readFileSync16(path2, "utf8") : "";
   const after = JSON.stringify(c2, null, 2) + "\n";
   printProposal({ rows, missing: missingLanes(c2, rows), before, after }, ctx);
   if (opts.write && before !== after) {
@@ -2624,33 +2816,33 @@ var init_adopt = __esm({
 });
 
 // src/lanes/preapprove.ts
-import { existsSync as existsSync9, readFileSync as readFileSync15 } from "node:fs";
-import { join as join25 } from "node:path";
+import { existsSync as existsSync11, readFileSync as readFileSync17 } from "node:fs";
+import { join as join27 } from "node:path";
 async function preapprove(ctx, cwd, enabled) {
   if (!enabled) {
     ctx.out("MCP preapproval is off; enable with lanes init --preapprove-mcp for a new folder, or set launch.preapproveMcp to true in lanes.json.");
     return;
   }
-  const files2 = [".mcp.json", ".pi/mcp.json"].filter((f) => existsSync9(join25(cwd, f)));
+  const files2 = [".mcp.json", ".pi/mcp.json"].filter((f) => existsSync11(join27(cwd, f)));
   if (!files2.length) return;
   const skip = (reason2) => ctx.err(`MCP preapproval skipped: ${reason2}; pi will ask once per server when the lane starts.`);
   let reason = "adapter not found";
   try {
-    const adapter = join25(ctx.piAgentDir, "npm/node_modules/pi-mcp-adapter");
-    const pkg = JSON.parse(readFileSync15(join25(adapter, "package.json"), "utf8"));
+    const adapter = join27(ctx.piAgentDir, "npm/node_modules/pi-mcp-adapter");
+    const pkg = JSON.parse(readFileSync17(join27(adapter, "package.json"), "utf8"));
     if (!SUPPORTED_MAJORS.includes(Number(String(pkg.version).split(".")[0]))) {
       reason = `adapter ${pkg.version} not supported (supports ${SUPPORTED_MAJORS.join(", ")}.x)`;
       throw new Error(reason);
     }
     reason = "adapter API changed";
-    const mod = await ctx.loadModule(join25(adapter, "dist/project-server-trust.js"));
+    const mod = await ctx.loadModule(join27(adapter, "dist/project-server-trust.js"));
     if (typeof mod.approveProjectServer !== "function" || typeof mod.hashProjectServerDefinition !== "function") throw new Error(reason);
     for (const file of files2) {
       let servers;
       try {
-        servers = JSON.parse(readFileSync15(join25(cwd, file), "utf8")).mcpServers ?? {};
+        servers = JSON.parse(readFileSync17(join27(cwd, file), "utf8")).mcpServers ?? {};
       } catch {
-        skip(`invalid ${file} (${join25(cwd, file)})`);
+        skip(`invalid ${file} (${join27(cwd, file)})`);
         continue;
       }
       for (const [name, def] of Object.entries(servers)) {
@@ -2671,8 +2863,8 @@ var init_preapprove = __esm({
 });
 
 // src/lanes/commands/add.ts
-import { existsSync as existsSync10, mkdirSync as mkdirSync8, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname7, join as join26, resolve as resolve8 } from "node:path";
+import { existsSync as existsSync12, mkdirSync as mkdirSync8, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname8, join as join28, resolve as resolve8 } from "node:path";
 async function add(id, opts, c2, root, ctx) {
   validateInput(id, opts, c2);
   const lane = newLane(id, opts);
@@ -2735,11 +2927,14 @@ function defaultBranch(lower, worktree, opts) {
 }
 function planOrchestration(lane, opts, c2) {
   const siblings = c2.lanes.filter((l2) => !l2.retired && l2.repo === lane.repo);
-  const current = siblings.find((l2) => l2.role === "repo-orch");
+  const current = repoOrchestrator(c2, lane.repo);
   if (opts.orchestrator && opts["no-orchestrator"]) {
     throw new UsageError("choose --orchestrator or --no-orchestrator");
   }
-  if (opts.orchestrator) return { siblings, orchestrator: promotedOrchestrator(siblings, opts.orchestrator) };
+  if (opts.orchestrator) {
+    if (current && current.id !== opts.orchestrator) throw new UsageError("repository already has a repo-orch");
+    return { siblings, orchestrator: promotedOrchestrator(siblings, opts.orchestrator) };
+  }
   if (!needsOrchestrator({ current, siblings }, opts)) return { siblings, orchestrator: current };
   const candidate = newOrchestrator(lane, opts, c2);
   return { siblings, orchestrator: candidate, candidate };
@@ -2775,7 +2970,7 @@ async function assignOrchestrator(plan, { c: c2, root, ctx }) {
   const orchestrator = plan.orchestrator;
   orchestrator.role = "repo-orch";
   orchestrator.parent = c2.coordinator.id;
-  const active = c2.lanes.filter((l2) => !l2.retired && l2.repo === orchestrator.repo);
+  const active = c2.lanes.filter((l2) => !l2.retired && l2.repo && orchestratedRepos(orchestrator).includes(l2.repo));
   for (const sibling of active.filter((l2) => l2.id !== orchestrator.id)) sibling.parent = orchestrator.id;
   saveConfig(root, c2);
   for (const sibling of plan.siblings.filter((l2) => l2.id !== orchestrator.id)) {
@@ -2814,11 +3009,11 @@ async function findClone(lane, opts, { c: c2, root, ctx }, git2) {
   const candidates = [
     opts.path ? resolve8(ctx.cwd, opts.path) : void 0,
     c2.repos[lane.repo] ? expand(c2.repos[lane.repo], c2, root, ctx.home) : void 0,
-    join26(repos, name),
-    join26(repos, owner, name)
+    join28(repos, name),
+    join28(repos, owner, name)
   ].filter((p) => Boolean(p));
   for (const path2 of candidates) if ((await git2(path2, ["rev-parse", "--git-dir"])).code === 0) return path2;
-  throw new Error(`clone it first: gh repo clone ${lane.repo} ${join26(repos, name)}`);
+  throw new Error(`clone it first: gh repo clone ${lane.repo} ${join28(repos, name)}`);
 }
 async function prepareBase(input, git2) {
   const { clone, lane, opts, env: { c: c2, ctx } } = input;
@@ -2835,7 +3030,7 @@ async function prepareBase(input, git2) {
 }
 async function addWorktree(input, git2) {
   const { clone, lane, wt, base } = input;
-  if (existsSync10(wt)) throw new Error(`worktree already exists: ${wt}`);
+  if (existsSync12(wt)) throw new Error(`worktree already exists: ${wt}`);
   if ((await git2(clone, ["show-ref", "--verify", "--quiet", `refs/heads/${lane.branch}`])).code === 0) {
     throw new Error(`branch already exists: ${lane.branch}`);
   }
@@ -2846,7 +3041,7 @@ function writePrompt(input, { c: c2, root, ctx }) {
   const { lane, wt, base } = input;
   const { id, repo, branch } = lane;
   const prompt = expand(lane.prompt, c2, root, ctx.home);
-  mkdirSync8(dirname7(prompt), { recursive: true });
+  mkdirSync8(dirname8(prompt), { recursive: true });
   const template = readTemplate(ctx, lane.role === "repo-orch" ? "repo-orchestrator.md" : "lane.md");
   const vars = {
     ...templateVars(c2, ctx, root),
@@ -2884,8 +3079,8 @@ var init_add = __esm({
 });
 
 // src/lanes/sessions.ts
-import { readdirSync as readdirSync7, statSync as statSync5 } from "node:fs";
-import { join as join27 } from "node:path";
+import { readdirSync as readdirSync9, statSync as statSync7 } from "node:fs";
+import { join as join29 } from "node:path";
 function laneTarget(id, c2, root, ctx) {
   const coordinator = id === "coordinator" || id === c2.coordinator.id;
   const lane = c2.lanes.find((l2) => l2.id === id);
@@ -2896,7 +3091,7 @@ function laneTarget(id, c2, root, ctx) {
 function idleMinutes2(cwd, ctx) {
   try {
     const dir = sessionDirFor(cwd, ctx.piAgentDir);
-    const times = readdirSync7(dir).map((n3) => statSync5(join27(dir, n3))).filter((s) => s.isFile()).map((s) => s.mtimeMs);
+    const times = readdirSync9(dir).map((n3) => statSync7(join29(dir, n3))).filter((s) => s.isFile()).map((s) => s.mtimeMs);
     return times.length ? Math.max(0, Math.floor((ctx.now().getTime() - Math.max(...times)) / 6e4)) : void 0;
   } catch {
     return void 0;
@@ -2919,8 +3114,8 @@ var init_sessions = __esm({
 });
 
 // src/lanes/retention.ts
-import { closeSync, copyFileSync as copyFileSync2, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync, readdirSync as readdirSync8, renameSync as renameSync4, unlinkSync as unlinkSync3, utimesSync } from "node:fs";
-import { join as join28 } from "node:path";
+import { closeSync, copyFileSync as copyFileSync2, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync, readdirSync as readdirSync10, renameSync as renameSync4, unlinkSync as unlinkSync3, utimesSync } from "node:fs";
+import { join as join30 } from "node:path";
 function stat(path2) {
   try {
     return lstatSync4(path2);
@@ -2933,10 +3128,10 @@ function messages(dir) {
   const info = stat(dir);
   if (!info) return [];
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`not a regular directory: ${dir}`);
-  return readdirSync8(dir).flatMap((name) => {
+  return readdirSync10(dir).flatMap((name) => {
     const parsed = parseMessageName(name);
     if (!parsed || name.startsWith(".")) return [];
-    const path2 = join28(dir, name);
+    const path2 = join30(dir, name);
     const info2 = stat(path2);
     return info2?.isFile() ? [{ name, path: path2, info: info2, ...parsed, at: info2.mtime }] : [];
   });
@@ -2945,13 +3140,13 @@ function unread(m2, c2, dir) {
   const broadcast = addressed(m2, "ALL") || addressed(m2, c2.messages.broadcast);
   return [{ id: c2.coordinator.id, group: null }, ...c2.lanes].some(({ id, group }) => {
     if (!broadcast && ![id, ...group ? [group] : []].some((recipient2) => addressed(m2, recipient2))) return false;
-    const marker = stat(join28(dir, `${id}-inbox.marker`));
+    const marker = stat(join30(dir, `${id}-inbox.marker`));
     return marker?.isFile() === true && marker.mtimeMs < m2.info.mtimeMs;
   });
 }
 function archive2(m2, dir) {
   mkdirSync9(dir, { recursive: true });
-  const target = join28(dir, m2.name);
+  const target = join30(dir, m2.name);
   try {
     closeSync(openSync(target, "wx"));
   } catch (e) {
@@ -3006,7 +3201,7 @@ function prune(c2, root, ctx, dryRun = false) {
       counts2.deleted++;
       continue;
     }
-    const target = stat(join28(destination, m2.name));
+    const target = stat(join30(destination, m2.name));
     const expired = target?.isFile() && r2.archiveMaxAgeDays !== null && target.mtimeMs < now - r2.archiveMaxAgeDays * DAY;
     if (target && !(dryRun && expired) || !dryRun && !archive2(m2, destination)) {
       counts2.skippedCollision++;
@@ -3032,13 +3227,13 @@ var init_retention = __esm({
 });
 
 // src/lanes/commands/start.ts
-import { existsSync as existsSync11, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync13, statSync as statSync8 } from "node:fs";
 async function start(id, opts, c2, root, ctx) {
   rejectRetired(id, c2);
   const { coordinator, lane, cwd } = laneTarget(id, c2, root, ctx);
   const prompt = expand(coordinator ? c2.coordinator.prompt : lane.prompt, c2, root, ctx.home);
-  if (!existsSync11(cwd) || !statSync6(cwd).isDirectory()) throw new Error(`cwd not found: ${cwd}`);
-  if (!existsSync11(prompt) || !statSync6(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
+  if (!existsSync13(cwd) || !statSync8(cwd).isDirectory()) throw new Error(`cwd not found: ${cwd}`);
+  if (!existsSync13(prompt) || !statSync8(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
   const duplicate = (await runningPi(ctx)).find((p) => p.cwd === ctx.realpath(cwd));
   if (duplicate) throw new Error(`already running in ${cwd} (pid ${duplicate.pid}); not starting a second session`);
   if (!coordinator || !c2.launch.preapproveMcp) await preapprove(ctx, cwd, c2.launch.preapproveMcp);
@@ -3077,8 +3272,8 @@ var init_start = __esm({
 });
 
 // src/lanes/commands/resume.ts
-import { join as join29, resolve as resolve9 } from "node:path";
-import { existsSync as existsSync12, statSync as statSync7 } from "node:fs";
+import { join as join31, resolve as resolve9 } from "node:path";
+import { existsSync as existsSync14, statSync as statSync9 } from "node:fs";
 async function startCommand(id, opts, env) {
   if (opts["from-handoff"]) return fromHandoff({ id, opts }, env);
   return start(id, opts, env.c, env.root, env.ctx);
@@ -3087,7 +3282,7 @@ async function resume(args, opts, env) {
   return fromHandoff({ id: args[0], opts: { ...opts, "from-handoff": args[0] } }, env);
 }
 function filePath(value, env) {
-  return env.c.lanes.some((lane) => lane.id === value) ? join29(env.root, ".state/handoffs", `${value}.md`) : resolve9(env.ctx.cwd, value);
+  return env.c.lanes.some((lane) => lane.id === value) ? join31(env.root, ".state/handoffs", `${value}.md`) : resolve9(env.ctx.cwd, value);
 }
 function sourceLane(snapshot, env) {
   const { c: c2, ctx, root } = env;
@@ -3167,7 +3362,7 @@ async function fromHandoff(input, env) {
   return code;
 }
 function requireWorktree(path2) {
-  if (!existsSync12(path2) || !statSync7(path2).isDirectory()) throw new Error("handoff worktree missing");
+  if (!existsSync14(path2) || !statSync9(path2).isDirectory()) throw new Error("handoff worktree missing");
 }
 var init_resume = __esm({
   "src/lanes/commands/resume.ts"() {
@@ -3181,7 +3376,7 @@ var init_resume = __esm({
 });
 
 // src/lanes/commands/send.ts
-import { readFileSync as readFileSync16 } from "node:fs";
+import { readFileSync as readFileSync18 } from "node:fs";
 import { resolve as resolve10 } from "node:path";
 async function send(args, opts, c2, root, ctx) {
   let [to, topic, file] = args;
@@ -3193,7 +3388,7 @@ async function send(args, opts, c2, root, ctx) {
   if (opts.m !== void 0 && file !== void 0) throw new UsageError("choose a file or -m, not both");
   const known = [c2.coordinator.id, "ALL", c2.messages.broadcast, ...c2.lanes.flatMap((l2) => [l2.id, l2.group])];
   if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
-  const body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync16(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+  const body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync18(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
   if (!body.trim()) throw new UsageError("empty message body");
   to = route({ to, from, direct: opts.direct }, c2, ctx);
   ctx.out((await backendFor(c2, ctx, root).send({ from, to, topic, body })).path);
@@ -3284,8 +3479,8 @@ var init_nudge = __esm({
 });
 
 // src/lanes/joblogs.ts
-import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync9, statSync as statSync8 } from "node:fs";
-import { join as join30 } from "node:path";
+import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync11, statSync as statSync10 } from "node:fs";
+import { join as join32 } from "node:path";
 function parseWatches(text3) {
   return text3.split(/\r?\n/).flatMap((line) => {
     const [tag, label, until2, interval, ...check3] = line.split("|");
@@ -3310,17 +3505,17 @@ function liveWatch(jobs, watch, now) {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   for (const date of [now, yesterday]) {
-    const dir = join30(jobs, day(date));
+    const dir = join32(jobs, day(date));
     let names;
     try {
-      names = readdirSync9(dir);
+      names = readdirSync11(dir);
     } catch (e) {
       if (e.code === "ENOENT") continue;
       throw e;
     }
     for (const name of names.filter((n3) => n3.endsWith(".log"))) {
-      const path2 = join30(dir, name);
-      const stat2 = statSync8(path2);
+      const path2 = join32(dir, name);
+      const stat2 = statSync10(path2);
       if (!stat2.isFile() || !chunk(path2, Math.min(4096, stat2.size), 0).split("\n")[0].includes(watch.check)) continue;
       const tail = chunk(path2, Math.min(65536, stat2.size), Math.max(0, stat2.size - 65536));
       const last = tail.split("\n").filter((s) => /^--- check .* exit \d+ ---$/.test(s)).at(-1);
@@ -3336,8 +3531,8 @@ var init_joblogs = __esm({
 });
 
 // src/lanes/commands/resume-check.ts
-import { existsSync as existsSync13, readFileSync as readFileSync17, statSync as statSync9 } from "node:fs";
-import { join as join31 } from "node:path";
+import { existsSync as existsSync15, readFileSync as readFileSync19, statSync as statSync11 } from "node:fs";
+import { join as join33 } from "node:path";
 async function livePrs(text3, ctx) {
   if (!ctx.which("gh")) return;
   const refs = new Set(text3.match(/\bPR [A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+/g));
@@ -3359,12 +3554,12 @@ async function resumeCheck(c2, root, ctx) {
   const now = ctx.now();
   let bad = false;
   ctx.out(`date: ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`);
-  const watches = join31(root, "coordinator/WATCHES.md");
-  if (!existsSync13(watches)) {
+  const watches = join33(root, "coordinator/WATCHES.md");
+  if (!existsSync15(watches)) {
     ctx.out("MISSING coordinator/WATCHES.md");
     bad = true;
-  } else for (const w of parseWatches(readFileSync17(watches, "utf8"))) {
-    if (liveWatch(join31(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
+  } else for (const w of parseWatches(readFileSync19(watches, "utf8"))) {
+    if (liveWatch(join33(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
     else {
       ctx.out(`MISSING watch: ${w.label} -> job_watch until=${w.until} interval=${w.interval} check from coordinator/WATCHES.md`);
       bad = true;
@@ -3380,20 +3575,20 @@ async function resumeCheck(c2, root, ctx) {
     if (old.length) bad = true;
     else ctx.out("OK      inbox: no unread backlog");
   }
-  const path2 = join31(root, "coordinator/NOW.md");
-  if (!existsSync13(path2)) {
+  const path2 = join33(root, "coordinator/NOW.md");
+  if (!existsSync15(path2)) {
     ctx.out("MISSING coordinator/NOW.md");
     bad = true;
   } else {
-    await livePrs(readFileSync17(path2, "utf8"), ctx);
-    const age = Math.floor((now.getTime() - statSync9(path2).mtimeMs) / 6e4);
+    await livePrs(readFileSync19(path2, "utf8"), ctx);
+    const age = Math.floor((now.getTime() - statSync11(path2).mtimeMs) / 6e4);
     if (age > 90) {
       ctx.out(`STALE   NOW.md not updated for ${age} min`);
       bad = true;
     }
   }
-  const questions = join31(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
-  if (existsSync13(questions)) {
+  const questions = join33(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
+  if (existsSync15(questions)) {
     const r2 = await ctx.run(process.execPath, [questions, "list", "--all"], { timeoutMs: 15e3 });
     for (const line of r2.stdout.split("\n").filter((s) => /^Q-\d+/.test(s))) ctx.out(`OPEN    ${line}`);
   }
@@ -3407,8 +3602,8 @@ var init_resume_check = __esm({
 });
 
 // src/lanes/commands/green-prs.ts
-import { existsSync as existsSync14, mkdirSync as mkdirSync10, readFileSync as readFileSync18, writeFileSync as writeFileSync8 } from "node:fs";
-import { join as join32 } from "node:path";
+import { existsSync as existsSync16, mkdirSync as mkdirSync10, readFileSync as readFileSync20, writeFileSync as writeFileSync8 } from "node:fs";
+import { join as join34 } from "node:path";
 function green(pr, excluded) {
   return !pr.isDraft && !pr.labels.some((l2) => excluded.includes(l2.name)) && pr.statusCheckRollup.length > 0 && pr.statusCheckRollup.every((s) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(s.conclusion ?? s.state ?? ""));
 }
@@ -3439,15 +3634,15 @@ async function greenPrs(opts, c2, root, ctx) {
     }
   }
   refs.sort();
-  const ack = join32(root, ".state/green-ack");
+  const ack = join34(root, ".state/green-ack");
   if (opts.ack) {
-    mkdirSync10(join32(root, ".state"), { recursive: true });
+    mkdirSync10(join34(root, ".state"), { recursive: true });
     writeFileSync8(ack, refs.length ? `${refs.join("\n")}
 ` : "");
     ctx.out(`acked ${refs.length}`);
     return 0;
   }
-  const previous = opts.new && existsSync14(ack) ? readFileSync18(ack, "utf8").split(/\r?\n/) : [];
+  const previous = opts.new && existsSync16(ack) ? readFileSync20(ack, "utf8").split(/\r?\n/) : [];
   const output = opts.new ? refs.filter((r2) => !previous.includes(r2)) : refs;
   if (output.length) ctx.out(output.join("\n"));
   return opts.new && !output.length ? 1 : 0;
@@ -3459,7 +3654,7 @@ var init_green_prs = __esm({
 });
 
 // src/lanes/commands/close.ts
-import { basename as basename4, dirname as dirname8 } from "node:path";
+import { basename as basename4, dirname as dirname9 } from "node:path";
 function closeBody(id, to, reason, unread2) {
   const body = [
     `Lane ${id} is closed.${to ? ` Reassigned to ${to}.` : ""}${reason ? ` Reason: ${clean(reason)}` : ""}`,
@@ -3502,7 +3697,7 @@ async function close(id, opts, c2, root, ctx) {
   const target = laneTarget(id, c2, root, ctx);
   const common = await ctx.run("git", ["-C", target.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 });
   if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
-  const clone = shellQuote(dirname8(common.stdout.trim()));
+  const clone = shellQuote(dirname9(common.stdout.trim()));
   const wt = shellQuote(target.cwd);
   const backend = backendFor(c2, ctx, root);
   const unread2 = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
@@ -3531,7 +3726,7 @@ var init_close = __esm({
 });
 
 // src/lanes/commands/status.ts
-import { existsSync as existsSync15 } from "node:fs";
+import { existsSync as existsSync17 } from "node:fs";
 async function status(c2, root, ctx, all = false) {
   const backend = backendFor(c2, ctx, root);
   const processes = await runningPi(ctx);
@@ -3583,7 +3778,7 @@ function statusLanes(env, all) {
 }
 function findPid(cwd, processes, ctx) {
   let pid = "missing";
-  if (existsSync15(cwd)) {
+  if (existsSync17(cwd)) {
     try {
       pid = String(processes.find((p) => p.cwd === ctx.realpath(cwd))?.pid || "-");
     } catch {
@@ -3597,7 +3792,7 @@ function lastMessage(last, ctx) {
 function warnMissingOrchestrators(c2, ctx) {
   for (const repo of new Set(c2.lanes.filter((l2) => !l2.retired && l2.repo).map((l2) => l2.repo))) {
     const lanes = c2.lanes.filter((l2) => !l2.retired && l2.repo === repo);
-    if (lanes.length > 1 && !lanes.some((l2) => l2.role === "repo-orch")) {
+    if (lanes.length > 1 && !repoOrchestrator(c2, repo)) {
       ctx.err(`warning: ${repo}: ${lanes.length} lanes, no repo-orch`);
     }
   }
@@ -3621,7 +3816,7 @@ function parseOption(argv, i2, opts) {
     return i2;
   }
   if (equals < 0) requireValue({ argv, index: i2 });
-  if (["exclude-tty", "role"].includes(key)) return parseRepeated(argv, i2, opts, equals);
+  if (["exclude-tty", "role", "orchestrates"].includes(key)) return parseRepeated(argv, i2, opts, equals);
   return parseSingleOption({ argv, index: i2 }, opts, { key, equals });
 }
 function parseSingleOption({ argv, index: i2 }, opts, { key, equals }) {
@@ -3634,7 +3829,7 @@ function parseRepeated(argv, i2, opts, equals) {
   const { key } = optionName({ argv, index: i2 });
   const values = [equals < 0 ? argv[++i2] : argv[i2].slice(equals + 1)];
   if (key === "exclude-tty") i2 = consumeTtys({ argv, index: i2, values });
-  opts[key] = [opts[key], ...values].filter(Boolean).join(",");
+  opts[key] = [opts[key], ...values].filter(Boolean).join(key === "orchestrates" ? ";" : ",");
   return i2;
 }
 function consumeTtys({ argv, index: i2, values }) {
@@ -3791,7 +3986,7 @@ var init_main = __esm({
     init_retention();
     init_status();
     HELP = `Usage: lanes [--dir root] <command> [options]
-  adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--write]
+  adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
     [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
@@ -3813,7 +4008,7 @@ Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
     OPTIONS = {
-      adopt: ["messages", "coordinator", "exclude-tty", "inventory", "role", "write"],
+      adopt: ["messages", "coordinator", "exclude-tty", "inventory", "role", "orchestrates", "write"],
       init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"],
       add: [
         "repo",
@@ -3861,8 +4056,8 @@ Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to pr
 });
 
 // src/lanes-flow.ts
-import { existsSync as existsSync16, realpathSync as realpathSync2 } from "node:fs";
-import { join as join33 } from "node:path";
+import { existsSync as existsSync18, realpathSync as realpathSync2 } from "node:fs";
+import { join as join35 } from "node:path";
 import { pathToFileURL } from "node:url";
 function lanesCtxFrom(ctx) {
   return {
@@ -3877,8 +4072,8 @@ function lanesCtxFrom(ctx) {
     err: ctx.err,
     stdinTTY: ctx.stdinTTY,
     readStdin: async () => "",
-    templatesDir: join33(ctx.home, ".local/share/pi-setup/lanes/templates"),
-    piAgentDir: ctx.env.PI_CODING_AGENT_DIR || join33(ctx.home, ".pi/agent"),
+    templatesDir: join35(ctx.home, ".local/share/pi-setup/lanes/templates"),
+    piAgentDir: ctx.env.PI_CODING_AGENT_DIR || join35(ctx.home, ".pi/agent"),
     loadModule: (path2) => import(pathToFileURL(path2).href),
     realpath: realpathSync2
   };
@@ -3909,20 +4104,20 @@ async function runLanesFlow(ctx, options, p, nested = false) {
     ctx.out("pi-setup lanes is interactive; in scripts use lanes init <dir>, lanes --dir <dir> add <ID> --repo owner/name and lanes --dir <dir> start coordinator");
     return 1;
   }
-  if (!existsSync16(join33(ctx.home, ".local/share/pi-setup/lanes/lanes.mjs"))) throw new SetupError("lanes is not installed; run ./install.sh --with lanes");
+  if (!existsSync18(join35(ctx.home, ".local/share/pi-setup/lanes/lanes.mjs"))) throw new SetupError("lanes is not installed; run ./install.sh --with lanes");
   if (!nested) p.intro("pi-setup lanes");
-  const settings2 = readSettings(join33(ctx.home, ".pi/agent/user.json"));
-  const reposRoot = typeof settings2.reposRoot === "string" ? settings2.reposRoot : join33(ctx.home, "repos");
+  const settings2 = readSettings(join35(ctx.home, ".pi/agent/user.json"));
+  const reposRoot = typeof settings2.reposRoot === "string" ? settings2.reposRoot : join35(ctx.home, "repos");
   const requestedDir = options.dir ? expandHome(options.dir, ctx.home) : "";
-  const dir = requestedDir || join33(reposRoot, ".lanes");
-  const c2 = existsSync16(join33(dir, "lanes.json")) ? loadConfig(dir) : void 0;
+  const dir = requestedDir || join35(reposRoot, ".lanes");
+  const c2 = existsSync18(join35(dir, "lanes.json")) ? loadConfig(dir) : void 0;
   const choice = await collectLanes(p, {
     dir: requestedDir || void 0,
     reposRoot,
     home: ctx.home,
     existingIds: c2 ? [c2.coordinator.id, ...c2.lanes.map((l2) => l2.id)] : ["L0"],
     existingIdsFor: (selected) => {
-      if (!existsSync16(join33(selected, "lanes.json"))) return ["L0"];
+      if (!existsSync18(join35(selected, "lanes.json"))) return ["L0"];
       const existing = loadConfig(selected);
       return ["L0", existing.coordinator.id, ...existing.lanes.map((l2) => l2.id)];
     },
@@ -3935,7 +4130,7 @@ async function runLanesFlow(ctx, options, p, nested = false) {
   }
   const laneCtx = lanesCtxFrom(ctx);
   const created = [];
-  if (!existsSync16(join33(choice.dir, "lanes.json")) && await main(["init", choice.dir, "--repos-root", reposRoot], laneCtx) !== 0) return 1;
+  if (!existsSync18(join35(choice.dir, "lanes.json")) && await main(["init", choice.dir, "--repos-root", reposRoot], laneCtx) !== 0) return 1;
   for (const lane of choice.lanes) {
     const argv = ["--dir", choice.dir, "add", lane.id, "--repo", lane.repo, "--path", lane.path, ...lane.issue ? ["--issue", String(lane.issue)] : [`--goal=${lane.goal}`]];
     if (await main(argv, laneCtx) !== 0) {
@@ -3968,25 +4163,25 @@ import {
   chmodSync,
   closeSync as closeSync3,
   copyFileSync as copyFileSync3,
-  existsSync as existsSync17,
+  existsSync as existsSync19,
   fsyncSync,
   mkdirSync as mkdirSync11,
   openSync as openSync3,
-  readdirSync as readdirSync10,
+  readdirSync as readdirSync12,
   realpathSync as realpathSync3,
   renameSync as renameSync5,
-  statSync as statSync10,
+  statSync as statSync12,
   utimesSync as utimesSync2,
   writeSync
 } from "node:fs";
-import { dirname as dirname9, join as join34 } from "node:path";
+import { dirname as dirname10, join as join36 } from "node:path";
 function timestamp(d) {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 function listFiles(dir, base = "") {
-  if (!existsSync17(dir)) return [];
+  if (!existsSync19(dir)) return [];
   const out = [];
-  for (const entry2 of readdirSync10(join34(dir, base), { withFileTypes: true })) {
+  for (const entry2 of readdirSync12(join36(dir, base), { withFileTypes: true })) {
     const rel = base ? `${base}/${entry2.name}` : entry2.name;
     if (entry2.isFile()) {
       if (!isClutterFile(entry2.name)) out.push(rel);
@@ -3996,13 +4191,13 @@ function listFiles(dir, base = "") {
 }
 function backupCopy(from, to) {
   copyFileSync3(from, to);
-  const st = statSync10(from);
+  const st = statSync12(from);
   chmodSync(to, st.mode & 4095);
   utimesSync2(to, st.atime, st.mtime);
 }
 function atomicWrite(link, data, mode, pid = process.pid) {
-  const path2 = existsSync17(link) ? realpathSync3(link) : link;
-  mkdirSync11(dirname9(path2), { recursive: true });
+  const path2 = existsSync19(link) ? realpathSync3(link) : link;
+  mkdirSync11(dirname10(path2), { recursive: true });
   const tmp = `${path2}.tmp-${pid}`;
   const fd = openSync3(tmp, "w", mode);
   try {
@@ -4025,14 +4220,14 @@ var init_fsx = __esm({
 
 // src/manifest.ts
 import { createHash as createHash5 } from "node:crypto";
-import { existsSync as existsSync18, lstatSync as lstatSync5, readFileSync as readFileSync19 } from "node:fs";
-import { isAbsolute as isAbsolute6, join as join35, relative as relative7 } from "node:path";
+import { existsSync as existsSync20, lstatSync as lstatSync5, readFileSync as readFileSync21 } from "node:fs";
+import { isAbsolute as isAbsolute6, join as join37, relative as relative8 } from "node:path";
 function sha256(buf) {
   return createHash5("sha256").update(buf).digest("hex");
 }
 function fileSha(path2) {
   try {
-    return lstatSync5(path2).isFile() ? sha256(readFileSync19(path2)) : void 0;
+    return lstatSync5(path2).isFile() ? sha256(readFileSync21(path2)) : void 0;
   } catch {
     return void 0;
   }
@@ -4056,15 +4251,15 @@ function problemWith(rel, allowProtected = false) {
 function fromHomeRel(home, rel) {
   const problem = problemWith(rel);
   if (problem) throw new SetupError(`manifest path rejected (${problem}): ${String(rel)}`);
-  return join35(home, rel);
+  return join37(home, rel);
 }
 function symlinkTarget(home, rel) {
   const problem = problemWith(rel, true);
   if (problem) throw new SetupError(`manifest target rejected (${problem}): ${String(rel)}`);
-  return join35(home, rel);
+  return join37(home, rel);
 }
 function homeRel(home, abs) {
-  const rel = relative7(home, abs);
+  const rel = relative8(home, abs);
   if (rel === "" || rel.startsWith("..") || isAbsolute6(rel)) throw new SetupError(`${abs} is outside ${home}`);
   return rel.split("\\").join("/");
 }
@@ -4100,11 +4295,11 @@ function validateManifest(home, m2) {
 }
 function readManifest(piDir) {
   const path2 = manifestPath(piDir);
-  if (!existsSync18(path2)) return void 0;
+  if (!existsSync20(path2)) return void 0;
   const bad = (why) => new SetupError(`${path2}: ${why}; move it aside to re-adopt your files with ./install.sh`);
   let data;
   try {
-    data = JSON.parse(readFileSync19(path2, "utf8"));
+    data = JSON.parse(readFileSync21(path2, "utf8"));
   } catch (error) {
     throw bad(error.message);
   }
@@ -4146,20 +4341,20 @@ var init_manifest = __esm({
     init_settings();
     init_types();
     noSource = () => ({ release: null, commit: null });
-    dataDir = (piDir) => join35(piDir, ".pi-setup");
-    manifestPath = (piDir) => join35(dataDir(piDir), "manifest.json");
-    backupsDir = (piDir) => join35(dataDir(piDir), "backups");
+    dataDir = (piDir) => join37(piDir, ".pi-setup");
+    manifestPath = (piDir) => join37(dataDir(piDir), "manifest.json");
+    backupsDir = (piDir) => join37(dataDir(piDir), "backups");
     DENY_FILES = ["auth.json", "auth.json.lock", "models-store.json", "guards.json", "lane-policy/policy.json"];
     DENY_DIRS = ["accounts", "sessions", "jobs", "relaunch", "context-budget", "pi-phase/state", "npm/node_modules", ".pi-setup"];
   }
 });
 
 // src/backups.ts
-import { existsSync as existsSync19, mkdirSync as mkdirSync12, readdirSync as readdirSync11, rmdirSync, rmSync, statSync as statSync11, unlinkSync as unlinkSync4 } from "node:fs";
-import { dirname as dirname10, join as join36, relative as relative8 } from "node:path";
+import { existsSync as existsSync21, mkdirSync as mkdirSync12, readdirSync as readdirSync13, rmdirSync, rmSync, statSync as statSync13, unlinkSync as unlinkSync4 } from "node:fs";
+import { dirname as dirname11, join as join38, relative as relative9 } from "node:path";
 function filesBelow(dir, base = "") {
   const out = [];
-  for (const e of readdirSync11(join36(dir, base), { withFileTypes: true })) {
+  for (const e of readdirSync13(join38(dir, base), { withFileTypes: true })) {
     const rel = base ? `${base}/${e.name}` : e.name;
     if (e.isDirectory()) out.push(...filesBelow(dir, rel));
     else out.push(rel);
@@ -4172,18 +4367,18 @@ function order(name) {
 }
 function listBackups(piDir, pinned) {
   const base = backupsDir(piDir);
-  if (!existsSync19(base)) return [];
-  return readdirSync11(base, { withFileTypes: true }).filter((e) => e.isDirectory() && RUN_DIR.test(e.name)).map((e) => e.name).sort((a2, b) => {
+  if (!existsSync21(base)) return [];
+  return readdirSync13(base, { withFileTypes: true }).filter((e) => e.isDirectory() && RUN_DIR.test(e.name)).map((e) => e.name).sort((a2, b) => {
     const [x, y2] = [order(a2), order(b)];
     return x[0] === y2[0] ? y2[1] - x[1] : x[0] < y2[0] ? 1 : -1;
   }).map((name) => {
-    const files2 = filesBelow(join36(base, name));
-    return { name, path: join36(base, name), files: files2, pinned: files2.some((f) => pinned.has(`${name}/${f}`)) };
+    const files2 = filesBelow(join38(base, name));
+    return { name, path: join38(base, name), files: files2, pinned: files2.some((f) => pinned.has(`${name}/${f}`)) };
   });
 }
 function pruneEmptyDirs(dir) {
-  for (const e of readdirSync11(dir, { withFileTypes: true })) if (e.isDirectory()) pruneEmptyDirs(join36(dir, e.name));
-  if (readdirSync11(dir).length === 0) rmdirSync(dir);
+  for (const e of readdirSync13(dir, { withFileTypes: true })) if (e.isDirectory()) pruneEmptyDirs(join38(dir, e.name));
+  if (readdirSync13(dir).length === 0) rmdirSync(dir);
 }
 function prune2(piDir, keep, pinned, dryRun) {
   const removed = [];
@@ -4195,23 +4390,23 @@ function prune2(piDir, keep, pinned, dryRun) {
     }
     for (const file of info.files) {
       if (pinned.has(`${info.name}/${file}`)) continue;
-      removed.push(join36(info.path, file));
-      if (!dryRun) unlinkSync4(join36(info.path, file));
+      removed.push(join38(info.path, file));
+      if (!dryRun) unlinkSync4(join38(info.path, file));
     }
     if (!dryRun) {
-      for (const e of readdirSync11(info.path, { withFileTypes: true })) if (e.isDirectory()) pruneEmptyDirs(join36(info.path, e.name));
+      for (const e of readdirSync13(info.path, { withFileTypes: true })) if (e.isDirectory()) pruneEmptyDirs(join38(info.path, e.name));
     }
   }
   return removed;
 }
 function tidy(piDir) {
   const base = backupsDir(piDir);
-  if (existsSync19(base) && statSync11(base).isDirectory()) pruneEmptyDirs(base);
-  const data = dirname10(base);
-  if (existsSync19(data) && readdirSync11(data).length === 0) rmdirSync(data);
+  if (existsSync21(base) && statSync13(base).isDirectory()) pruneEmptyDirs(base);
+  const data = dirname11(base);
+  if (existsSync21(data) && readdirSync13(data).length === 0) rmdirSync(data);
 }
 function backupsCommand(ctx, sub, keep, dryRun) {
-  const piDir = join36(ctx.home, ".pi", "agent");
+  const piDir = join38(ctx.home, ".pi", "agent");
   const pinned = pinnedBackups(readManifest(piDir));
   if (sub === "list") {
     const all = listBackups(piDir, pinned);
@@ -4244,13 +4439,13 @@ var init_backups = __esm({
       backup(abs) {
         const run = this.runDir();
         const inside = abs.startsWith(`${this.piDir}/`);
-        const rel = inside ? relative8(this.piDir, abs) : `_home/${relative8(this.home, abs)}`;
-        const target = join36(run, rel);
-        if (!existsSync19(target)) {
-          mkdirSync12(dirname10(target), { recursive: true });
+        const rel = inside ? relative9(this.piDir, abs) : `_home/${relative9(this.home, abs)}`;
+        const target = join38(run, rel);
+        if (!existsSync21(target)) {
+          mkdirSync12(dirname11(target), { recursive: true });
           backupCopy(abs, target);
         }
-        return `${relative8(backupsDir(this.piDir), run)}/${rel}`;
+        return `${relative9(backupsDir(this.piDir), run)}/${rel}`;
       }
       runDir() {
         if (this.dir) return this.dir;
@@ -4258,7 +4453,7 @@ var init_backups = __esm({
         mkdirSync12(base, { recursive: true });
         const stamp = timestamp(this.now);
         for (let n3 = 1; ; n3++) {
-          const candidate = join36(base, n3 === 1 ? stamp : `${stamp}-${n3}`);
+          const candidate = join38(base, n3 === 1 ? stamp : `${stamp}-${n3}`);
           try {
             mkdirSync12(candidate);
             this.dir = candidate;
@@ -4275,16 +4470,16 @@ var init_backups = __esm({
 // src/apply.ts
 import {
   chmodSync as chmodSync2,
-  existsSync as existsSync20,
+  existsSync as existsSync22,
   lstatSync as lstatSync6,
   mkdirSync as mkdirSync13,
-  readFileSync as readFileSync20,
-  statSync as statSync12,
+  readFileSync as readFileSync22,
+  statSync as statSync14,
   symlinkSync,
   utimesSync as utimesSync3,
   writeFileSync as writeFileSync9
 } from "node:fs";
-import { dirname as dirname11, join as join37 } from "node:path";
+import { dirname as dirname12, join as join39 } from "node:path";
 function describe(action) {
   if (action.op === "install") return `install ${action.path}`;
   if (action.op === "keep") return `keep ${action.path} (changed since install; new version in ${action.newPath})`;
@@ -4302,28 +4497,28 @@ async function sourceOf(ctx) {
   return { release: await git2(["describe", "--tags", "--exact-match", "HEAD"]), commit: await git2(["rev-parse", "HEAD"]) };
 }
 function npmInputs(piDir) {
-  const pkg = join37(piDir, "npm", "package.json");
-  if (!existsSync20(pkg)) return void 0;
-  const lock = join37(piDir, "npm", "package-lock.json");
+  const pkg = join39(piDir, "npm", "package.json");
+  if (!existsSync22(pkg)) return void 0;
+  const lock = join39(piDir, "npm", "package-lock.json");
   return { packageJson: fileSha(pkg) ?? "", ...fileSha(lock) ? { lock: fileSha(lock) } : {} };
 }
 function needsNpm(actions, piDir, manifest, force = false) {
-  const npmDir = join37(piDir, "npm");
-  const pkg = join37(npmDir, "package.json");
-  const lock = join37(npmDir, "node_modules", ".package-lock.json");
+  const npmDir = join39(piDir, "npm");
+  const pkg = join39(npmDir, "package.json");
+  const lock = join39(npmDir, "node_modules", ".package-lock.json");
   if (actions.some((a2) => a2.op === "install" && a2.path === pkg)) return true;
-  if (!existsSync20(pkg)) return false;
-  if (force || !existsSync20(join37(npmDir, "node_modules"))) return true;
+  if (!existsSync22(pkg)) return false;
+  if (force || !existsSync22(join39(npmDir, "node_modules"))) return true;
   const known = manifest?.npm;
   if (known) {
     const now = npmInputs(piDir);
     return now?.packageJson !== known.packageJson || now?.lock !== known.lock;
   }
-  if (!existsSync20(lock)) return true;
-  return statSync12(pkg).mtimeMs > statSync12(lock).mtimeMs;
+  if (!existsSync22(lock)) return true;
+  return statSync14(pkg).mtimeMs > statSync14(lock).mtimeMs;
 }
 async function apply(ctx, actions, options, manifest) {
-  const piDir = join37(ctx.home, ".pi", "agent");
+  const piDir = join39(ctx.home, ".pi", "agent");
   for (const action of actions) {
     const line = describe(action);
     if (line) ctx.out(line);
@@ -4349,7 +4544,7 @@ async function apply(ctx, actions, options, manifest) {
 }
 function applyProfile(options, piDir, run) {
   if (options.activeBefore === options.profile) return;
-  const path2 = join37(piDir, "profiles", "ACTIVE");
+  const path2 = join39(piDir, "profiles", "ACTIVE");
   run.execute({ op: "install", path: path2, content: Buffer.from(`${options.profile}
 `), mode: 420, existed: options.activeBefore !== void 0 });
 }
@@ -4360,7 +4555,7 @@ async function runNpm(ctx, actions, options, piDir, manifest) {
     return { code: 0, ran: false };
   }
   const args = ["install", "--legacy-peer-deps"];
-  const cwd = join37(piDir, "npm");
+  const cwd = join39(piDir, "npm");
   options.spinner?.start("Installing npm packages");
   const result2 = await ctx.run("npm", args, { cwd, inherit: options.inheritNpm });
   options.spinner?.stop(result2.code === 0 ? "npm packages installed" : "npm install failed");
@@ -4370,8 +4565,8 @@ async function runNpm(ctx, actions, options, piDir, manifest) {
   return { code: 1, ran: true };
 }
 function readActive(piDir) {
-  const file = join37(piDir, "profiles", "ACTIVE");
-  return existsSync20(file) ? readFileSync20(file, "utf8").trim() : void 0;
+  const file = join39(piDir, "profiles", "ACTIVE");
+  return existsSync22(file) ? readFileSync22(file, "utf8").trim() : void 0;
 }
 var KEEP_RUNS, modeOf, Run;
 var init_apply = __esm({
@@ -4380,7 +4575,7 @@ var init_apply = __esm({
     init_backups();
     init_manifest();
     KEEP_RUNS = 10;
-    modeOf = (path2) => statSync12(path2).mode & 4095;
+    modeOf = (path2) => statSync14(path2).mode & 4095;
     Run = class {
       backups;
       next;
@@ -4402,12 +4597,12 @@ var init_apply = __esm({
       }
       ensureDir(dir) {
         const missing = [];
-        for (let d = dir; d.startsWith(`${this.ctx.home}/`) && !existsSync20(d); d = dirname11(d)) missing.push(d);
+        for (let d = dir; d.startsWith(`${this.ctx.home}/`) && !existsSync22(d); d = dirname12(d)) missing.push(d);
         mkdirSync13(dir, { recursive: true });
         for (const m2 of missing) this.dirs.add(homeRel(this.ctx.home, m2));
       }
       backupIfThere(path2) {
-        return existsSync20(path2) && statSync12(path2).isFile() ? this.backups.backup(path2) : void 0;
+        return existsSync22(path2) && statSync14(path2).isFile() ? this.backups.backup(path2) : void 0;
       }
       rel(path2) {
         return homeRel(this.ctx.home, path2);
@@ -4424,7 +4619,7 @@ var init_apply = __esm({
       install(a2) {
         const backup = a2.existed ? this.backupIfThere(a2.path) : void 0;
         const priorSha = fileSha(a2.path);
-        this.ensureDir(dirname11(a2.path));
+        this.ensureDir(dirname12(a2.path));
         if (/\/(user\.json|settings\.json|ACTIVE)$/.test(a2.path)) {
           atomicWrite(a2.path, a2.content, a2.mode);
         } else {
@@ -4465,7 +4660,7 @@ var init_apply = __esm({
         const priorSha = fileSha(a2.path);
         const unmodified = Boolean(file) && priorSha === file.sha256;
         const backup = a2.existed ? this.backupIfThere(a2.path) : void 0;
-        this.ensureDir(dirname11(a2.path));
+        this.ensureDir(dirname12(a2.path));
         atomicWrite(a2.path, a2.content, a2.mode);
         this.wrote = true;
         if (file && (unmodified || !a2.existed)) {
@@ -4477,14 +4672,14 @@ var init_apply = __esm({
       }
       keep(a2) {
         if (a2.write) {
-          this.ensureDir(dirname11(a2.newPath));
+          this.ensureDir(dirname12(a2.newPath));
           atomicWrite(a2.newPath, a2.content, a2.mode);
           this.wrote = true;
         }
         const entry2 = this.next.files[this.rel(a2.path)];
         const pending2 = { path: this.rel(a2.newPath), sha256: sha256(a2.content) };
         if (entry2) entry2.pending = pending2;
-        else if (existsSync20(a2.newPath)) this.next.pendingNew = { ...this.next.pendingNew, [pending2.path]: pending2.sha256 };
+        else if (existsSync22(a2.newPath)) this.next.pendingNew = { ...this.next.pendingNew, [pending2.path]: pending2.sha256 };
       }
       adopt(path2) {
         const rel = this.rel(path2);
@@ -4508,15 +4703,15 @@ var init_apply = __esm({
           return;
         } catch {
         }
-        this.ensureDir(dirname11(a2.path));
+        this.ensureDir(dirname12(a2.path));
         symlinkSync(a2.target, a2.path);
         this.wrote = true;
         this.next.symlinks[this.rel(a2.path)] = { target: this.rel(a2.target) };
       }
       /** Only for a file this run wrote or adopted; a kept (user-modified) file is never touched. */
       chmodX(path2) {
-        if (!this.written.has(path2) || !existsSync20(path2)) return;
-        const mode = statSync12(path2).mode;
+        if (!this.written.has(path2) || !existsSync22(path2)) return;
+        const mode = statSync14(path2).mode;
         if ((mode & 73) === 0) {
           chmodSync2(path2, mode | 73);
           this.wrote = true;
@@ -4541,8 +4736,8 @@ var init_apply = __esm({
 });
 
 // src/components.ts
-import { existsSync as existsSync21, readdirSync as readdirSync12, readFileSync as readFileSync21, statSync as statSync13 } from "node:fs";
-import { join as join38 } from "node:path";
+import { existsSync as existsSync23, readdirSync as readdirSync14, readFileSync as readFileSync23, statSync as statSync15 } from "node:fs";
+import { join as join40 } from "node:path";
 function available(id, ctx) {
   if (id === "docker-guardian") return ctx.platform === "darwin" ? true : "needs Docker Desktop on macOS";
   if (id === "secret-sweep") return ctx.platform === "darwin" ? true : "its schedule is a macOS launchd job";
@@ -4564,19 +4759,19 @@ function resolveComponents(input) {
   return out;
 }
 function currentState(ctx) {
-  const piDir = join38(ctx.home, ".pi", "agent");
-  const mcp = readJson(join38(piDir, "mcp-adapter.json"));
+  const piDir = join40(ctx.home, ".pi", "agent");
+  const mcp = readJson(join40(piDir, "mcp-adapter.json"));
   const servers = mcp?.mcpServers;
-  const packages2 = readJson(join38(piDir, "settings.json"))?.packages;
+  const packages2 = readJson(join40(piDir, "settings.json"))?.packages;
   return {
-    cratis: existsSync21(join38(piDir, "extensions", "cratis-cli-guard.ts")),
+    cratis: existsSync23(join40(piDir, "extensions", "cratis-cli-guard.ts")),
     codescene: typeof servers === "object" && servers !== null && "codescene" in servers,
     web: Array.isArray(packages2) && packages2.some((p) => WEB_PACKAGES.includes(p))
   };
 }
 function isDir(path2) {
   try {
-    return statSync13(path2).isDirectory();
+    return statSync15(path2).isDirectory();
   } catch {
     return false;
   }
@@ -4584,21 +4779,21 @@ function isDir(path2) {
 function hasCratisDir(root) {
   const entries = (dir) => {
     try {
-      return readdirSync12(dir).slice(0, LIMIT);
+      return readdirSync14(dir).slice(0, LIMIT);
     } catch {
       return [];
     }
   };
   for (const a2 of entries(root)) {
     if (a2 === ".cratis") return true;
-    const one = join38(root, a2);
+    const one = join40(root, a2);
     if (!isDir(one)) continue;
-    if (entries(one).some((b) => b === ".cratis" && isDir(join38(one, b)))) return true;
+    if (entries(one).some((b) => b === ".cratis" && isDir(join40(one, b)))) return true;
   }
   return false;
 }
 function detectDefaults(ctx, detection, reposRoot) {
-  const cratis = detection.github.orgs.some((o) => o.toLowerCase() === "cratis") || isDir(join38(reposRoot, "cratis")) || isDir(join38(reposRoot, "Cratis")) || hasCratisDir(reposRoot);
+  const cratis = detection.github.orgs.some((o) => o.toLowerCase() === "cratis") || isDir(join40(reposRoot, "cratis")) || isDir(join40(reposRoot, "Cratis")) || hasCratisDir(reposRoot);
   return {
     "docker-guardian": ctx.platform === "darwin" && Boolean(ctx.which("docker")),
     cleanup: ctx.platform === "darwin" || Boolean(ctx.which("systemctl")),
@@ -4672,7 +4867,7 @@ var init_components = __esm({
     isComponentId = (id) => COMPONENT_IDS.includes(id);
     readJson = (path2) => {
       try {
-        const data = JSON.parse(readFileSync21(path2, "utf8"));
+        const data = JSON.parse(readFileSync23(path2, "utf8"));
         return typeof data === "object" && data !== null && !Array.isArray(data) ? data : void 0;
       } catch {
         return void 0;
@@ -4823,8 +5018,8 @@ var init_args = __esm({
 });
 
 // src/detect.ts
-import { existsSync as existsSync22 } from "node:fs";
-import { join as join39 } from "node:path";
+import { existsSync as existsSync24 } from "node:fs";
+import { join as join41 } from "node:path";
 function parseAuthStatus(text3) {
   const match = /Logged in to (\S+) account (\S+)/.exec(text3);
   return match ? { host: match[1], login: match[2] } : {};
@@ -4917,8 +5112,8 @@ async function detect(ctx, request2) {
     github,
     providers: providers2,
     hints: {
-      codexAuthFile: existsSync22(join39(ctx.home, ".codex", "auth.json")),
-      claudeDir: existsSync22(join39(ctx.home, ".claude"))
+      codexAuthFile: existsSync24(join41(ctx.home, ".codex", "auth.json")),
+      claudeDir: existsSync24(join41(ctx.home, ".claude"))
     },
     catalog,
     candidates,
@@ -4948,15 +5143,15 @@ var init_detect = __esm({
 });
 
 // src/profiles.ts
-import { existsSync as existsSync23, readdirSync as readdirSync13, readFileSync as readFileSync22 } from "node:fs";
-import { join as join40 } from "node:path";
+import { existsSync as existsSync25, readdirSync as readdirSync15, readFileSync as readFileSync24 } from "node:fs";
+import { join as join42 } from "node:path";
 function profilesDir(repoDir2) {
-  return join40(repoDir2, "agent", "profiles");
+  return join42(repoDir2, "agent", "profiles");
 }
 function profileNames(repoDir2) {
   const dir = profilesDir(repoDir2);
-  if (!existsSync23(dir)) return [];
-  return readdirSync13(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  if (!existsSync25(dir)) return [];
+  return readdirSync15(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 }
 function stringList(value) {
   return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
@@ -4964,9 +5159,9 @@ function stringList(value) {
 function loadProfiles(repoDir2) {
   const metas = [];
   for (const name of profileNames(repoDir2)) {
-    const file = join40(profilesDir(repoDir2), name, "profile.json");
-    if (!existsSync23(file)) continue;
-    const data = JSON.parse(readFileSync22(file, "utf8"));
+    const file = join42(profilesDir(repoDir2), name, "profile.json");
+    if (!existsSync25(file)) continue;
+    const data = JSON.parse(readFileSync24(file, "utf8"));
     metas.push({
       name,
       summary: typeof data.summary === "string" ? data.summary : "",
@@ -4998,8 +5193,8 @@ function kimiNote(profile2, ready3) {
 }
 function pinnedModels(profileDir) {
   const pins = /* @__PURE__ */ new Set();
-  for (const file of listFiles(join40(profileDir, "agents")).filter((f) => f.endsWith(".md"))) {
-    const text3 = readFileSync22(join40(profileDir, "agents", file), "utf8");
+  for (const file of listFiles(join42(profileDir, "agents")).filter((f) => f.endsWith(".md"))) {
+    const text3 = readFileSync24(join42(profileDir, "agents", file), "utf8");
     const match = /^model:\s*(\S+)/m.exec(text3);
     if (match) pins.add(match[1]);
   }
@@ -5010,16 +5205,16 @@ function pinWarnings(pins, ready3, catalog) {
   return pins.filter((pin) => ready3.has(pin.split("/")[0]) && !catalog.has(pin)).map((pin) => `Pinned model ${pin} is not in this pi's model catalog.`);
 }
 function overlayFor(repoDir2, name, settings2) {
-  const base = join40(profilesDir(repoDir2), name);
-  if (!existsSync23(base)) throw new SetupError(`unknown profile '${name}'. available: ${profileNames(repoDir2).join(", ")}`);
+  const base = join42(profilesDir(repoDir2), name);
+  if (!existsSync25(base)) throw new SetupError(`unknown profile '${name}'. available: ${profileNames(repoDir2).join(", ")}`);
   const sources = /* @__PURE__ */ new Map();
   for (const [sub, ext] of [["agents", ".md"], ["workflows", ".js"]]) {
-    for (const file of listFiles(join40(base, sub))) {
-      if (!file.includes("/") && file.endsWith(ext)) sources.set(`${sub}/${file}`, join40(base, sub, file));
+    for (const file of listFiles(join42(base, sub))) {
+      if (!file.includes("/") && file.endsWith(ext)) sources.set(`${sub}/${file}`, join42(base, sub, file));
     }
   }
-  const routingPath = join40(base, "routing.md");
-  return { sources, routing: existsSync23(routingPath) ? render(readFileSync22(routingPath), settings2) : void 0 };
+  const routingPath = join42(base, "routing.md");
+  return { sources, routing: existsSync25(routingPath) ? render(readFileSync24(routingPath), settings2) : void 0 };
 }
 function markerLines(text3) {
   const start2 = text3.indexOf(START);
@@ -5056,23 +5251,23 @@ var init_profiles = __esm({
 });
 
 // src/plan.ts
-import { existsSync as existsSync24, lstatSync as lstatSync7, readdirSync as readdirSync14, readFileSync as readFileSync23, readlinkSync as readlinkSync2, statSync as statSync14 } from "node:fs";
-import { join as join41 } from "node:path";
+import { existsSync as existsSync26, lstatSync as lstatSync7, readdirSync as readdirSync16, readFileSync as readFileSync25, readlinkSync as readlinkSync2, statSync as statSync16 } from "node:fs";
+import { join as join43 } from "node:path";
 function fromSource(src, settings2) {
-  const raw = readFileSync23(src);
-  const st = statSync14(src);
+  const raw = readFileSync25(src);
+  const st = statSync16(src);
   const mode = st.mode & 4095;
   return hasTokens(raw) ? { content: src.endsWith("/pi-phase/config.json") ? Buffer.from(raw.toString("utf8").split("{{REPOS_ROOT}}").join(JSON.stringify(settings2.reposRoot).slice(1, -1))) : render(raw, settings2), mode } : { content: raw, mode, mtimeMs: st.mtimeMs };
 }
 function sameBytes(dest, content) {
-  return existsSync24(dest) && statSync14(dest).isFile() && readFileSync23(dest).equals(content);
+  return existsSync26(dest) && statSync16(dest).isFile() && readFileSync25(dest).equals(content);
 }
 function put(actions, dest, desired) {
   if (sameBytes(dest, desired.content)) {
     actions.push({ op: "adopt", path: dest });
     return;
   }
-  actions.push({ op: "install", path: dest, existed: existsSync24(dest), ...desired });
+  actions.push({ op: "install", path: dest, existed: existsSync26(dest), ...desired });
 }
 function putSource(actions, src, dest, settings2) {
   put(actions, dest, fromSource(src, settings2));
@@ -5083,17 +5278,17 @@ function putTree(actions, srcDir, destDir, settings2, overlay, prefix = "", filt
   for (const rel of [...files2].sort()) {
     const full = `${treeRel}${rel}`;
     if (filter.skip(full)) continue;
-    const src = overlay?.get(`${prefix}${rel}`) ?? join41(srcDir, rel);
+    const src = overlay?.get(`${prefix}${rel}`) ?? join43(srcDir, rel);
     const desired = fromSource(src, settings2);
     const content = filter.transform(full, desired.content);
-    put(actions, join41(destDir, rel), content === desired.content ? desired : { content, mode: desired.mode });
+    put(actions, join43(destDir, rel), content === desired.content ? desired : { content, mode: desired.mode });
   }
 }
 function userJsonAction(actions, piDir, settings2) {
-  const path2 = join41(piDir, "user.json");
+  const path2 = join43(piDir, "user.json");
   const existing = readSettings(path2);
   const merged = mergeUserJson(existing, settings2);
-  if (existsSync24(path2) && deepEqual(existing, merged)) return;
+  if (existsSync26(path2) && deepEqual(existing, merged)) return;
   const jsonOps = [];
   for (const key of ["githubUser", "reposRoot"]) {
     if (key in existing && deepEqual(existing[key], merged[key])) continue;
@@ -5102,7 +5297,7 @@ function userJsonAction(actions, piDir, settings2) {
   actions.push({
     op: "install",
     path: path2,
-    existed: existsSync24(path2),
+    existed: existsSync26(path2),
     mode: 420,
     merge: "user-json",
     jsonOps,
@@ -5111,7 +5306,7 @@ function userJsonAction(actions, piDir, settings2) {
   });
 }
 function agentsMd(input, live) {
-  const base = fromSource(join41(input.repoDir, "agent", "AGENTS.md"), input.settings);
+  const base = fromSource(join43(input.repoDir, "agent", "AGENTS.md"), input.settings);
   const off = ["cratis", "codescene"].filter((id) => input.components?.[id] === false);
   if (off.length) {
     const stripped = stripSections(base.content, off);
@@ -5119,14 +5314,14 @@ function agentsMd(input, live) {
     delete base.mtimeMs;
     input.notes?.push(...stripped.warnings);
   }
-  const existing = existsSync24(live) && statSync14(live).isFile() ? readFileSync23(live) : void 0;
+  const existing = existsSync26(live) && statSync16(live).isFile() ? readFileSync25(live) : void 0;
   const noMarkers = existing !== void 0 && !hasRoutingMarkers(existing);
   if (!input.overlay.routing) return { ...base, noMarkers };
   return { content: spliceRouting(base.content, input.overlay.routing, noMarkers ? void 0 : existing), mode: base.mode, noMarkers };
 }
 function registerJson(actions, path2, edit) {
   const pending2 = actions.find((a2) => a2.op === "install" && a2.path === path2);
-  const content = pending2 && pending2.op === "install" ? pending2.content : existsSync24(path2) ? readFileSync23(path2) : void 0;
+  const content = pending2 && pending2.op === "install" ? pending2.content : existsSync26(path2) ? readFileSync25(path2) : void 0;
   if (!content) return;
   let data;
   try {
@@ -5137,7 +5332,7 @@ function registerJson(actions, path2, edit) {
   const before = structuredClone(data);
   const jsonOps = edit(data, Boolean(pending2));
   if (jsonOps.length === 0 && deepEqual(before, data)) return;
-  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync14(path2).mode & 4095;
+  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync16(path2).mode & 4095;
   const next = Buffer.from(`${JSON.stringify(data, null, 2)}
 `);
   if (pending2 && pending2.op === "install") {
@@ -5199,62 +5394,62 @@ function buildPlan(input) {
     skip: isCratisFile,
     transform: (rel, content) => /(^|\/)agents\/[^/]+\.md$/.test(rel) ? dropGuardExtension(content) : content
   };
-  const agent = join41(repoDir2, "agent");
-  const piDir = join41(home, ".pi", "agent");
+  const agent = join43(repoDir2, "agent");
+  const piDir = join43(home, ".pi", "agent");
   const actions = [];
   userJsonAction(actions, piDir, settings2);
   for (const tree of TREES) {
     const useOverlay = tree === "agents" || tree === "workflows";
-    putTree(actions, join41(agent, tree), join41(piDir, tree), settings2, useOverlay ? overlay.sources : void 0, useOverlay ? `${tree}/` : "", filter, `${tree}/`);
+    putTree(actions, join43(agent, tree), join43(piDir, tree), settings2, useOverlay ? overlay.sources : void 0, useOverlay ? `${tree}/` : "", filter, `${tree}/`);
   }
-  putTree(actions, join41(agent, "local-packages/pi-questions"), join41(piDir, "local-packages/pi-questions"), settings2);
-  actions.push({ op: "chmod-x", path: join41(piDir, "local-packages/pi-questions/dist/cli.js") });
-  const agentsPath = join41(piDir, "AGENTS.md");
+  putTree(actions, join43(agent, "local-packages/pi-questions"), join43(piDir, "local-packages/pi-questions"), settings2);
+  actions.push({ op: "chmod-x", path: join43(piDir, "local-packages/pi-questions/dist/cli.js") });
+  const agentsPath = join43(piDir, "AGENTS.md");
   const { noMarkers, ...agentsDesired } = agentsMd(input, agentsPath);
   put(actions, agentsPath, agentsDesired);
   const last = actions[actions.length - 1];
   if (noMarkers && last.op === "install") last.noMarkers = true;
-  putSource(actions, join41(agent, "AGENTS.subagent.md"), join41(piDir, "AGENTS.subagent.md"), settings2);
+  putSource(actions, join43(agent, "AGENTS.subagent.md"), join43(piDir, "AGENTS.subagent.md"), settings2);
   for (const name of ONLY_IF_ABSENT) {
-    if (!existsSync24(join41(piDir, name))) putSource(actions, join41(agent, name), join41(piDir, name), settings2);
+    if (!existsSync26(join43(piDir, name))) putSource(actions, join43(agent, name), join43(piDir, name), settings2);
   }
-  registerJson(actions, join41(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web")), input.drop ?? []));
-  registerJson(actions, join41(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => void 0)));
+  registerJson(actions, join43(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web")), input.drop ?? []));
+  registerJson(actions, join43(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => void 0)));
   const absent = [
     ["docker-guardian/pinned.example.txt", "docker-guardian/pinned.txt"],
     ["dev-doctor.example.json", "dev-doctor.json"],
     ["npm-package.json", "npm/package.json"]
   ];
   for (const [from, to] of absent) {
-    if (!existsSync24(join41(piDir, to))) putSource(actions, join41(agent, from), join41(piDir, to), settings2);
+    if (!existsSync26(join43(piDir, to))) putSource(actions, join43(agent, from), join43(piDir, to), settings2);
   }
   for (const skill of listSkills(repoDir2)) {
-    putTree(actions, join41(repoDir2, "skills", skill), join41(home, ".agents", "skills", skill), settings2);
+    putTree(actions, join43(repoDir2, "skills", skill), join43(home, ".agents", "skills", skill), settings2);
   }
-  const link = join41(piDir, "skills", "ai-work-lifecycle");
-  if (!lstatExists(link)) actions.push({ op: "symlink", path: link, target: join41(home, ".agents", "skills", "ai-work-lifecycle") });
-  putTree(actions, join41(repoDir2, "tools/ai-work-lifecycle"), join41(home, ".local/share/ai-work-lifecycle"), settings2);
-  const bin = join41(repoDir2, "tools/bin/ai-work-lifecycle");
-  putSource(actions, bin, join41(home, ".local/bin/ai-work-lifecycle"), settings2);
+  const link = join43(piDir, "skills", "ai-work-lifecycle");
+  if (!lstatExists(link)) actions.push({ op: "symlink", path: link, target: join43(home, ".agents", "skills", "ai-work-lifecycle") });
+  putTree(actions, join43(repoDir2, "tools/ai-work-lifecycle"), join43(home, ".local/share/ai-work-lifecycle"), settings2);
+  const bin = join43(repoDir2, "tools/bin/ai-work-lifecycle");
+  putSource(actions, bin, join43(home, ".local/bin/ai-work-lifecycle"), settings2);
   if (input.components?.lanes === true) {
-    const lanesDir = join41(home, ".local/share/pi-setup/lanes");
-    const preapproveMcp = preapprovalDefault(join41(lanesDir, "templates")) || input.preapproveMcp === true;
-    put(actions, join41(lanesDir, "defaults.json"), { content: Buffer.from(`${JSON.stringify({ launch: { preapproveMcp } }, null, 2)}
+    const lanesDir = join43(home, ".local/share/pi-setup/lanes");
+    const preapproveMcp = preapprovalDefault(join43(lanesDir, "templates")) || input.preapproveMcp === true;
+    put(actions, join43(lanesDir, "defaults.json"), { content: Buffer.from(`${JSON.stringify({ launch: { preapproveMcp } }, null, 2)}
 `), mode: 420 });
-    putSource(actions, join41(repoDir2, "installer/dist/lanes.mjs"), join41(lanesDir, "lanes.mjs"), settings2);
-    putTree(actions, join41(repoDir2, "installer/lanes/templates"), join41(lanesDir, "templates"), settings2);
-    linkIfFree(actions, input.notes, join41(home, ".local/bin/lanes"), join41(lanesDir, "lanes.mjs"), home);
+    putSource(actions, join43(repoDir2, "installer/dist/lanes.mjs"), join43(lanesDir, "lanes.mjs"), settings2);
+    putTree(actions, join43(repoDir2, "installer/lanes/templates"), join43(lanesDir, "templates"), settings2);
+    linkIfFree(actions, input.notes, join43(home, ".local/bin/lanes"), join43(lanesDir, "lanes.mjs"), home);
   }
   for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"]]) {
-    const target = join41(piDir, "npm/node_modules/@woksin", pkg, "bin", cmd);
-    if (existsSync24(target)) linkIfFree(actions, input.notes, join41(home, ".local/bin", cmd), target, home);
+    const target = join43(piDir, "npm/node_modules/@woksin", pkg, "bin", cmd);
+    if (existsSync26(target)) linkIfFree(actions, input.notes, join43(home, ".local/bin", cmd), target, home);
   }
   return actions;
 }
 function listSkills(repoDir2) {
-  const dir = join41(repoDir2, "skills");
-  if (!existsSync24(dir)) return [];
-  return readdirSync14(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  const dir = join43(repoDir2, "skills");
+  if (!existsSync26(dir)) return [];
+  return readdirSync16(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 }
 function lstatExists(path2) {
   try {
@@ -5281,17 +5476,17 @@ var init_plan = __esm({
 });
 
 // src/reconcile.ts
-import { existsSync as existsSync25, mkdtempSync, readFileSync as readFileSync24, rmSync as rmSync2, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync27, mkdtempSync, readFileSync as readFileSync26, rmSync as rmSync2, writeFileSync as writeFileSync10 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join42 } from "node:path";
+import { join as join44 } from "node:path";
 function newVersionNeedsWrite(newPath, content) {
-  return !(existsSync25(newPath) && readFileSync24(newPath).equals(content));
+  return !(existsSync27(newPath) && readFileSync26(newPath).equals(content));
 }
 function reconcile(actions, manifest, home) {
   const conflicts = [];
   const out = actions.map((action) => {
     if (action.op !== "install" || action.merge) return action;
-    if (!action.existed || !existsSync25(action.path)) return { ...action, decision: "new" };
+    if (!action.existed || !existsSync27(action.path)) return { ...action, decision: "new" };
     const entry2 = manifest?.files[homeRel(home, action.path)];
     if (!action.noMarkers) {
       if (!entry2) return { ...action, decision: "replace" };
@@ -5317,9 +5512,9 @@ function applyTakes(actions, takes) {
   return actions.map((a2) => a2.op === "keep" && takes.has(a2.path) ? { op: "install", path: a2.path, content: a2.content, mode: a2.mode, mtimeMs: a2.mtimeMs, existed: true, decision: "take" } : a2);
 }
 async function diffText(ctx, conflict) {
-  const dir = mkdtempSync(join42(tmpdir(), "pisetup-diff."));
+  const dir = mkdtempSync(join44(tmpdir(), "pisetup-diff."));
   try {
-    const tmp = join42(dir, "new");
+    const tmp = join44(dir, "new");
     writeFileSync10(tmp, conflict.content);
     const result2 = await ctx.run("diff", ["-u", conflict.path, tmp], { timeoutMs: 1e4 });
     if (result2.code === null || result2.code > 1) return `(diff is not available; the new version is in ${conflict.newPath})`;
@@ -5340,41 +5535,41 @@ var init_reconcile = __esm({
 });
 
 // src/services.ts
-import { existsSync as existsSync26, mkdirSync as mkdirSync14, readFileSync as readFileSync25, statSync as statSync15 } from "node:fs";
-import { join as join43 } from "node:path";
+import { existsSync as existsSync28, mkdirSync as mkdirSync14, readFileSync as readFileSync27, statSync as statSync17 } from "node:fs";
+import { join as join45 } from "node:path";
 function serviceUser(env) {
   return (env.USER ?? "").replace(/[^A-Za-z0-9-]/g, "") || "pi-setup";
 }
 function systemdUnits(home) {
-  const dir = join43(home, ".config/systemd/user");
+  const dir = join45(home, ".config/systemd/user");
   return [
     {
-      path: join43(dir, "pi-cleanup.service"),
+      path: join45(dir, "pi-cleanup.service"),
       content: Buffer.from(
         "[Unit]\nDescription=pi-setup scheduled cleanup\n\n[Service]\nType=oneshot\nEnvironment=PYTHONDONTWRITEBYTECODE=1\nExecStart=%h/.pi/agent/bin/pi-cleanup --scheduled\n"
       )
     },
     {
-      path: join43(dir, TIMER),
+      path: join45(dir, TIMER),
       content: Buffer.from("[Unit]\nDescription=pi-setup scheduled cleanup (daily)\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
     }
   ];
 }
 function launchdUnit(ctx, id) {
   const name = LAUNCHD_NAME[id];
-  const src = join43(ctx.repoDir, "agent", "launchd", `com.example.${name}.plist`);
-  if (!name || !existsSync26(src)) return void 0;
+  const src = join45(ctx.repoDir, "agent", "launchd", `com.example.${name}.plist`);
+  if (!name || !existsSync28(src)) return void 0;
   const user = serviceUser(ctx.env);
-  const text3 = readFileSync25(src, "utf8").split("__HOME__").join(xml(ctx.home)).split("com.example.").join(`com.${user}.`);
-  return { unit: { path: join43(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text3) }, label: `com.${user}.${name}` };
+  const text3 = readFileSync27(src, "utf8").split("__HOME__").join(xml(ctx.home)).split("com.example.").join(`com.${user}.`);
+  return { unit: { path: join45(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text3) }, label: `com.${user}.${name}` };
 }
 function expectedUnit(ctx, id) {
   if (ctx.platform === "darwin") {
     const name = LAUNCHD_NAME[id];
     const label = `com.${serviceUser(ctx.env)}.${name}`;
-    return name ? { kind: "launchd", label, file: join43(ctx.home, "Library/LaunchAgents", `${label}.plist`) } : void 0;
+    return name ? { kind: "launchd", label, file: join45(ctx.home, "Library/LaunchAgents", `${label}.plist`) } : void 0;
   }
-  return id === "cleanup" ? { kind: "systemd", label: TIMER, file: join43(ctx.home, ".config/systemd/user", TIMER) } : void 0;
+  return id === "cleanup" ? { kind: "systemd", label: TIMER, file: join45(ctx.home, ".config/systemd/user", TIMER) } : void 0;
 }
 function planServices(ctx, manifest, on) {
   const out = { actions: [], records: {}, notes: [] };
@@ -5405,9 +5600,9 @@ function planServices(ctx, manifest, on) {
     const actions = [];
     for (const u3 of units) {
       const rel = homeRel(ctx.home, u3.path);
-      const there = existsSync26(u3.path) && statSync15(u3.path).isFile();
+      const there = existsSync28(u3.path) && statSync17(u3.path).isFile();
       if (!there) actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: false, decision: "new" });
-      else if (readFileSync25(u3.path).equals(u3.content)) actions.push({ op: "adopt", path: u3.path });
+      else if (readFileSync27(u3.path).equals(u3.content)) actions.push({ op: "adopt", path: u3.path });
       else if (manifest?.files[rel] && fileSha(u3.path) === manifest.files[rel].sha256) {
         actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: true, decision: "update" });
       } else {
@@ -5432,16 +5627,16 @@ async function syncServices(ctx, components, changed, dryRun) {
   for (const [id, c2] of Object.entries(components)) {
     const svc = c2.service;
     if (!c2.on || !svc?.managed) continue;
-    const plist = join43(ctx.home, svc.files[0]);
+    const plist = join45(ctx.home, svc.files[0]);
     const domain = `gui/${uid()}`;
     if (svc.kind === "launchd") {
       if (dryRun) {
         ctx.out(`would load ${svc.label} (launchctl bootstrap ${domain} ${plist})`);
         continue;
       }
-      mkdirSync14(join43(ctx.home, ".pi/agent/logs"), { recursive: true });
+      mkdirSync14(join45(ctx.home, ".pi/agent/logs"), { recursive: true });
       const loaded = (await sh(ctx, "launchctl", ["print", `${domain}/${svc.label}`])).ok;
-      if (loaded && !svc.files.some((f) => changed.has(join43(ctx.home, f)))) continue;
+      if (loaded && !svc.files.some((f) => changed.has(join45(ctx.home, f)))) continue;
       if (loaded) await sh(ctx, "launchctl", ["bootout", `${domain}/${svc.label}`]);
       const r2 = await sh(ctx, "launchctl", ["bootstrap", domain, plist]);
       if (!r2.ok) ctx.err(`warning: could not load ${id}: launchctl bootstrap ${domain} ${plist}`);
@@ -5501,19 +5696,19 @@ var init_services = __esm({
 // src/uninstall.ts
 import {
   copyFileSync as copyFileSync4,
-  existsSync as existsSync27,
+  existsSync as existsSync29,
   lstatSync as lstatSync8,
   mkdirSync as mkdirSync15,
-  readFileSync as readFileSync26,
+  readFileSync as readFileSync28,
   readlinkSync as readlinkSync3,
   renameSync as renameSync6,
   rmdirSync as rmdirSync2,
-  statSync as statSync16,
+  statSync as statSync18,
   unlinkSync as unlinkSync5
 } from "node:fs";
-import { dirname as dirname12, join as join44 } from "node:path";
+import { dirname as dirname13, join as join46 } from "node:path";
 function restore(from, to) {
-  mkdirSync15(dirname12(to), { recursive: true });
+  mkdirSync15(dirname13(to), { recursive: true });
   try {
     renameSync6(from, to);
   } catch (error) {
@@ -5592,10 +5787,10 @@ function revertOps(ctx, m2, rel, match, dryRun) {
   const lines2 = [];
   let data;
   try {
-    data = JSON.parse(readFileSync26(path2, "utf8"));
+    data = JSON.parse(readFileSync28(path2, "utf8"));
     if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not an object");
   } catch {
-    if (!existsSync27(path2)) {
+    if (!existsSync29(path2)) {
       entry2.ops = entry2.ops.filter((o) => !match(o));
       if (!entry2.ops.length) delete m2.json[rel];
       return [];
@@ -5612,8 +5807,8 @@ function revertOps(ctx, m2, rel, match, dryRun) {
     const tracked = m2.files[rel];
     const wasTracked = Boolean(tracked) && fileSha(path2) === tracked.sha256;
     atomicWrite(path2, `${JSON.stringify(data, null, 2)}
-`, statSync16(path2).mode & 4095);
-    const sha = sha256(readFileSync26(path2));
+`, statSync18(path2).mode & 4095);
+    const sha = sha256(readFileSync28(path2));
     entry2.sha256After = sha;
     if (wasTracked) tracked.sha256 = sha;
   }
@@ -5622,7 +5817,7 @@ function revertOps(ctx, m2, rel, match, dryRun) {
   return lines2;
 }
 async function runUninstall(ctx, options, prompter) {
-  const piDir = join44(ctx.home, ".pi", "agent");
+  const piDir = join46(ctx.home, ".pi", "agent");
   const manifest = readManifest(piDir);
   if (!manifest) {
     ctx.out(`No pi-setup manifest at ${manifestPath(piDir)}; nothing is tracked (installs older than this version are adopted by running ./install.sh once).`);
@@ -5654,13 +5849,13 @@ async function runUninstall(ctx, options, prompter) {
 function finalize(ctx, piDir, old, left) {
   const empty = Object.keys(left.files).length + Object.keys(left.json).length + Object.keys(left.symlinks).length === 0;
   if (empty) {
-    if (existsSync27(manifestPath(piDir))) unlinkSync5(manifestPath(piDir));
+    if (existsSync29(manifestPath(piDir))) unlinkSync5(manifestPath(piDir));
   } else {
     left.dirs = left.dirs.filter((d) => lstatExists2(fromHomeRel(ctx.home, d)));
     saveIfChanged(piDir, old, left, ctx.now());
   }
-  const cache = join44(piDir, ".pi-setup/update-check.json");
-  if (existsSync27(cache)) unlinkSync5(cache);
+  const cache = join46(piDir, ".pi-setup/update-check.json");
+  if (existsSync29(cache)) unlinkSync5(cache);
   tidy(piDir);
   const rest = listBackups(piDir, pinnedBackups(empty ? void 0 : left));
   for (const rel of [...left.dirs].sort((a2, b) => b.split("/").length - a2.split("/").length || (a2 < b ? 1 : -1))) {
@@ -5704,8 +5899,8 @@ var init_uninstall = __esm({
       }
       backupFile(rel) {
         if (!rel) return void 0;
-        const path2 = join44(this.backups, rel);
-        return existsSync27(path2) ? path2 : void 0;
+        const path2 = join46(this.backups, rel);
+        return existsSync29(path2) ? path2 : void 0;
       }
       add(line, run) {
         this.steps.push({ line, run });
@@ -5800,7 +5995,7 @@ var init_uninstall = __esm({
         const left = [];
         let data;
         try {
-          data = JSON.parse(readFileSync26(path2, "utf8"));
+          data = JSON.parse(readFileSync28(path2, "utf8"));
           if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not an object");
         } catch {
           this.ctx.err(`left (cannot read as JSON): ${path2}`);
@@ -5814,13 +6009,13 @@ var init_uninstall = __esm({
           delete this.remaining.json[rel];
           return;
         }
-        const mode = statSync16(path2).mode & 4095;
+        const mode = statSync18(path2).mode & 4095;
         atomicWrite(path2, `${JSON.stringify(data, null, 2)}
 `, mode);
         if (left.length === 0) {
           delete this.remaining.json[rel];
         } else {
-          this.remaining.json[rel] = { ...entry2, ops: left.reverse(), sha256After: sha256(readFileSync26(path2)) };
+          this.remaining.json[rel] = { ...entry2, ops: left.reverse(), sha256After: sha256(readFileSync28(path2)) };
           for (const op of left) this.ctx.err(`left (changed by you): ${op.key} in ${path2}`);
         }
       }
@@ -5829,18 +6024,18 @@ var init_uninstall = __esm({
 });
 
 // src/retire.ts
-import { existsSync as existsSync28, readFileSync as readFileSync27 } from "node:fs";
-import { join as join45 } from "node:path";
+import { existsSync as existsSync30, readFileSync as readFileSync29 } from "node:fs";
+import { join as join47 } from "node:path";
 function wasOn(manifest, current, id) {
   const saved = manifest?.components?.[id];
   return saved ? saved.on : current[id] === true;
 }
 function leftWebPackages(ctx, manifest) {
-  const path2 = join45(ctx.home, PI, "settings.json");
-  if (!existsSync28(path2)) return [];
+  const path2 = join47(ctx.home, PI, "settings.json");
+  if (!existsSync30(path2)) return [];
   let packages2;
   try {
-    packages2 = JSON.parse(readFileSync27(path2, "utf8")).packages;
+    packages2 = JSON.parse(readFileSync29(path2, "utf8")).packages;
   } catch {
     return [];
   }
@@ -5898,16 +6093,16 @@ var init_retire = __esm({
 });
 
 // src/doctor-checks.ts
-import { existsSync as existsSync29, lstatSync as lstatSync9, readdirSync as readdirSync15, readFileSync as readFileSync28, readlinkSync as readlinkSync4 } from "node:fs";
-import { basename as basename5, delimiter as delimiter2, dirname as dirname13, join as join46, resolve as resolve11 } from "node:path";
+import { existsSync as existsSync31, lstatSync as lstatSync9, readdirSync as readdirSync17, readFileSync as readFileSync30, readlinkSync as readlinkSync4 } from "node:fs";
+import { basename as basename5, delimiter as delimiter2, dirname as dirname14, join as join48, resolve as resolve11 } from "node:path";
 function setupCmd(ctx) {
   if (ctx.which("pi-setup")) return "pi-setup";
-  const path2 = join46(ctx.repoDir, "install.sh");
+  const path2 = join48(ctx.repoDir, "install.sh");
   return path2.startsWith(`${ctx.home}/`) ? `~/${path2.slice(ctx.home.length + 1)}` : path2;
 }
 function readJson2(path2) {
   try {
-    const value = JSON.parse(readFileSync28(path2, "utf8"));
+    const value = JSON.parse(readFileSync30(path2, "utf8"));
     return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
   } catch {
     return void 0;
@@ -5915,9 +6110,9 @@ function readJson2(path2) {
 }
 function livePins(piDir, settings2) {
   const pins = /* @__PURE__ */ new Map();
-  const dir = join46(piDir, "agents");
-  if (existsSync29(dir)) for (const file of readdirSync15(dir).filter((f) => f.endsWith(".md"))) {
-    const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text(join46(dir, file)))?.[1] ?? "";
+  const dir = join48(piDir, "agents");
+  if (existsSync31(dir)) for (const file of readdirSync17(dir).filter((f) => f.endsWith(".md"))) {
+    const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text(join48(dir, file)))?.[1] ?? "";
     const model = /^model:\s*(\S+)/m.exec(front)?.[1];
     if (!model) continue;
     const extensions = /^extensions:\s*([^\n]*(?:\n[ \t]+[^\n]*)*)/m.exec(front)?.[1] ?? "";
@@ -5932,8 +6127,8 @@ function livePins(piDir, settings2) {
   return [...pins].map(([model, agents]) => ({ model, agents }));
 }
 function state(ctx, facts) {
-  const piDir = join46(ctx.home, ".pi", "agent");
-  const s = { ctx, facts, piDir, setup: setupCmd(ctx), profile: text(join46(piDir, "profiles/ACTIVE")), settings: readJson2(join46(piDir, "settings.json")) ?? {}, pins: [], missing: [], changed: [], modes: [] };
+  const piDir = join48(ctx.home, ".pi", "agent");
+  const s = { ctx, facts, piDir, setup: setupCmd(ctx), profile: text(join48(piDir, "profiles/ACTIVE")), settings: readJson2(join48(piDir, "settings.json")) ?? {}, pins: [], missing: [], changed: [], modes: [] };
   try {
     s.manifest = readManifest(piDir);
     if (s.manifest) validateManifest(ctx.home, s.manifest);
@@ -5951,7 +6146,7 @@ function state(ctx, facts) {
   for (const [rel, link] of Object.entries(s.manifest?.symlinks ?? {})) {
     const path2 = fromHomeRel(ctx.home, rel);
     try {
-      if (!lstatSync9(path2).isSymbolicLink() || resolve11(dirname13(path2), readlinkSync4(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
+      if (!lstatSync9(path2).isSymbolicLink() || resolve11(dirname14(path2), readlinkSync4(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
     } catch {
       s.missing.push(rel);
     }
@@ -5959,7 +6154,7 @@ function state(ctx, facts) {
   return s;
 }
 function files(s) {
-  if (!existsSync29(s.piDir)) return check("files", "fail", "not installed", s.setup);
+  if (!existsSync31(s.piDir)) return check("files", "fail", "not installed", s.setup);
   if (s.manifestError) return check("files", "fail", s.manifestError, s.setup);
   if (!s.manifest) return check("files", "warn", "no install manifest", s.setup);
   const moved = s.manifest.source.commit && s.facts.head && s.manifest.source.commit !== s.facts.head;
@@ -5969,7 +6164,7 @@ function files(s) {
   return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...restorable ? { fixable: "restore" } : {} };
 }
 function pending(s) {
-  const paths = [.../* @__PURE__ */ new Set([...Object.values(s.manifest?.files ?? {}).flatMap((e) => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter((p) => existsSync29(fromHomeRel(s.ctx.home, p)));
+  const paths = [.../* @__PURE__ */ new Set([...Object.values(s.manifest?.files ?? {}).flatMap((e) => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter((p) => existsSync31(fromHomeRel(s.ctx.home, p)));
   const first = paths[0] && fromHomeRel(s.ctx.home, paths[0]);
   return check("pending", paths.length ? "warn" : "ok", `${paths.length} pending .pi-setup-new files`, first ? `diff ${first.replace(/\.pi-setup-new$/, "")} ${first}` : void 0, paths);
 }
@@ -5977,9 +6172,9 @@ function modes(s) {
   return { ...check("modes", s.modes.length ? "warn" : "skip", `${s.modes.length} unchanged files have mode drift`, `${s.setup} doctor --fix`, s.modes), ...s.modes.length ? { fixable: "chmod" } : {} };
 }
 function npm(s) {
-  const pkg = readJson2(join46(s.piDir, "npm/package.json"));
+  const pkg = readJson2(join48(s.piDir, "npm/package.json"));
   const deps = pkg?.dependencies && typeof pkg.dependencies === "object" ? Object.keys(pkg.dependencies) : [];
-  const installed = (name) => existsSync29(join46(s.piDir, "npm/node_modules", name, "package.json"));
+  const installed = (name) => existsSync31(join48(s.piDir, "npm/node_modules", name, "package.json"));
   const missing = deps.filter((n3) => !installed(n3));
   const result2 = [{ ...check("npm", missing.length ? "fail" : "ok", missing.length ? `${missing.length} missing dependencies` : "dependencies present", "(cd ~/.pi/agent/npm && npm install --legacy-peer-deps)", missing), ...missing.length ? { fixable: "npm" } : {} }];
   for (const spec of packages(s)) {
@@ -5988,7 +6183,7 @@ function npm(s) {
       const at = full.indexOf("@", 1);
       const name = at < 0 ? full : full.slice(0, at);
       if (!installed(name)) result2.push(check(`package:${name}`, "warn", `${spec} is missing`, `pi install npm:${name}`));
-    } else if (spec.startsWith(".") && !existsSync29(resolve11(s.piDir, spec))) result2.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
+    } else if (spec.startsWith(".") && !existsSync31(resolve11(s.piDir, spec))) result2.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
   }
   return result2;
 }
@@ -6014,7 +6209,7 @@ function models(s) {
   return check("models", missing.length ? "fail" : "ok", missing.length ? "pins missing from catalog" : "available pins are in the catalog", "pi update", missing);
 }
 function fallback(s) {
-  const config = readJson2(join46(s.piDir, "provider-fallback.json")) ?? {};
+  const config = readJson2(join48(s.piDir, "provider-fallback.json")) ?? {};
   const pairs = Array.isArray(config.pairs) ? config.pairs.filter((p) => Array.isArray(p) && p.length === 2 && p.every((v) => typeof v === "string")) : [];
   const chains = config.chains && typeof config.chains === "object" ? config.chains : {};
   const targets = (pin) => Array.isArray(chains[pin]) ? chains[pin].filter((v) => typeof v === "string") : pairs.filter((p) => p.includes(pin)).map((p) => p[0] === pin ? p[1] : p[0]);
@@ -6034,10 +6229,10 @@ function fallback(s) {
   return result2;
 }
 function guards(s) {
-  const path2 = join46(s.piDir, "guards.json");
+  const path2 = join48(s.piDir, "guards.json");
   const config = readJson2(path2);
   let detail = "all on";
-  if (existsSync29(path2)) {
+  if (existsSync31(path2)) {
     const off = config?.off;
     if (!off || typeof off !== "object" || Array.isArray(off) || Object.values(off).some((v) => typeof v !== "boolean")) return check("guards", "warn", "invalid guards.json shape", "/guards in pi (guards default to on)");
     const names = Object.entries(off).filter(([, v]) => v).map(([n3]) => n3);
@@ -6047,7 +6242,7 @@ function guards(s) {
   return check("guards", "ok", detail);
 }
 function path(s) {
-  const bin = join46(s.ctx.home, ".local/bin");
+  const bin = join48(s.ctx.home, ".local/bin");
   const onPath = (s.ctx.env.PATH ?? "").split(delimiter2).some((p) => resolve11(s.ctx.cwd, p) === bin);
   const shell = basename5(s.ctx.env.SHELL ?? "");
   const rc = shell === "zsh" ? "zshrc" : shell === "bash" ? "bashrc" : "profile";
@@ -6055,7 +6250,7 @@ function path(s) {
   for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"]]) {
     if (!packages(s).some((p) => p.includes(pkg))) continue;
     const target = `~/.pi/agent/npm/node_modules/@woksin/${pkg}/bin/${cmd}`;
-    const fix = existsSync29(join46(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
+    const fix = existsSync31(join48(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
     result2.push(check(`path:${cmd}`, s.ctx.which(cmd) ? "ok" : "warn", s.ctx.which(cmd) ? `${cmd} found` : `${cmd} is missing`, fix));
   }
   return result2;
@@ -6072,7 +6267,7 @@ var init_doctor_checks = __esm({
     init_types();
     text = (path2) => {
       try {
-        return readFileSync28(path2, "utf8").trim();
+        return readFileSync30(path2, "utf8").trim();
       } catch {
         return "";
       }
@@ -6093,8 +6288,8 @@ var init_doctor_checks = __esm({
 });
 
 // src/update.ts
-import { existsSync as existsSync30 } from "node:fs";
-import { join as join47 } from "node:path";
+import { existsSync as existsSync32 } from "node:fs";
+import { join as join49 } from "node:path";
 function compareTags(a2, b) {
   const x = a2.slice(1).split(".").map(Number);
   const y2 = b.slice(1).split(".").map(Number);
@@ -6142,7 +6337,7 @@ async function releaseNotes(ctx, tag) {
   if (r2.code === 0 && r2.stdout.trim()) ctx.out(r2.stdout.trim());
 }
 async function runUpdate(ctx, options, prompter) {
-  if (!existsSync30(join47(ctx.repoDir, ".git"))) throw new SetupError("update needs a git checkout of pi-setup");
+  if (!existsSync32(join49(ctx.repoDir, ".git"))) throw new SetupError("update needs a git checkout of pi-setup");
   const status2 = await git(ctx, ["status", "--porcelain"]);
   if (!status2.ok) throw new SetupError(`git status failed: ${status2.err}`);
   if (status2.out) throw new SetupError("checkout has local changes; commit or stash them first");
@@ -6164,7 +6359,7 @@ async function runUpdate(ctx, options, prompter) {
   const checkout = await git(ctx, ["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", target], 6e4);
   if (!checkout.ok) throw new SetupError(`git checkout ${target} failed: ${checkout.err}`);
   ctx.out(`checkout is detached at ${target}; \`git switch main\` to go back`);
-  const args = [join47(ctx.repoDir, "installer", "dist", "pi-setup.mjs"), "install"];
+  const args = [join49(ctx.repoDir, "installer", "dist", "pi-setup.mjs"), "install"];
   if (options.yes || !prompter) args.push("--yes");
   if (options.skipNpm) args.push("--skip-npm");
   const result2 = await ctx.run(ctx.nodePath ?? process.execPath, args, { inherit: true });
@@ -6179,20 +6374,20 @@ var init_update = __esm({
 });
 
 // src/doctor-probes.ts
-import { existsSync as existsSync31, readdirSync as readdirSync16, readFileSync as readFileSync29, writeFileSync as writeFileSync11 } from "node:fs";
-import { join as join48 } from "node:path";
+import { existsSync as existsSync33, readdirSync as readdirSync18, readFileSync as readFileSync31, writeFileSync as writeFileSync11 } from "node:fs";
+import { join as join50 } from "node:path";
 function plists(ctx) {
-  const dir = join48(ctx.home, "Library/LaunchAgents");
-  if (ctx.platform !== "darwin" || !existsSync31(dir)) return [];
-  return readdirSync16(dir).filter((f) => f.endsWith(".plist")).flatMap((file) => {
-    const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(readFileSync29(join48(dir, file), "utf8"))?.[1];
+  const dir = join50(ctx.home, "Library/LaunchAgents");
+  if (ctx.platform !== "darwin" || !existsSync33(dir)) return [];
+  return readdirSync18(dir).filter((f) => f.endsWith(".plist")).flatMap((file) => {
+    const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(readFileSync31(join50(dir, file), "utf8"))?.[1];
     return label && /\.(docker-guardian|pi-cleanup)$/.test(label) ? [{ file, label }] : [];
   });
 }
 async function disk(ctx) {
   const unknown = () => [result("disk", "warn", "disk not checked", "df -h ~")];
-  const script = join48(ctx.home, ".pi/agent/bin/dev-doctor");
-  if (!existsSync31(script)) return unknown();
+  const script = join50(ctx.home, ".pi/agent/bin/dev-doctor");
+  if (!existsSync33(script)) return unknown();
   const r2 = await ctx.run("python3", [script, "--only", "disk", "--json"], { timeoutMs: 6e3, env: { PYTHONDONTWRITEBYTECODE: "1" } });
   if (r2.timedOut || r2.code !== 0) return unknown();
   try {
@@ -6209,8 +6404,8 @@ async function disk(ctx) {
 }
 async function update(ctx, manifest) {
   const skip = (reason) => result("update", "ok", `update check skipped (${reason})`);
-  if (!existsSync31(join48(ctx.repoDir, ".git"))) return skip("not a git checkout");
-  const path2 = join48(ctx.home, ".pi/agent/.pi-setup/update-check.json");
+  if (!existsSync33(join50(ctx.repoDir, ".git"))) return skip("not a git checkout");
+  const path2 = join50(ctx.home, ".pi/agent/.pi-setup/update-check.json");
   const cache = readJson2(path2);
   const age = ctx.now().getTime() - Date.parse(String(cache?.checkedAt));
   let latest;
@@ -6220,7 +6415,7 @@ async function update(ctx, manifest) {
     try {
       latest = latestTag(await remoteTags(ctx, 5e3));
       if (!latest) return skip("no release tags");
-      if (existsSync31(join48(ctx.home, ".pi/agent/.pi-setup"))) writeFileSync11(path2, `${JSON.stringify({ checkedAt: ctx.now().toISOString(), latest })}
+      if (existsSync33(join50(ctx.home, ".pi/agent/.pi-setup"))) writeFileSync11(path2, `${JSON.stringify({ checkedAt: ctx.now().toISOString(), latest })}
 `);
     } catch {
       return skip("remote unavailable");
@@ -6283,8 +6478,8 @@ var init_doctor_probes = __esm({
 });
 
 // src/doctor-components.ts
-import { existsSync as existsSync32, lstatSync as lstatSync10, readlinkSync as readlinkSync5, statSync as statSync17 } from "node:fs";
-import { join as join49 } from "node:path";
+import { existsSync as existsSync34, lstatSync as lstatSync10, readlinkSync as readlinkSync5, statSync as statSync19 } from "node:fs";
+import { join as join51 } from "node:path";
 async function isLoaded(ctx, kind, label) {
   try {
     const r2 = kind === "launchd" ? await ctx.run("launchctl", ["print", `gui/${uid()}/${label}`], { timeoutMs: 5e3 }) : await ctx.run("systemctl", ["--user", "is-active", label], { timeoutMs: 5e3 });
@@ -6294,8 +6489,8 @@ async function isLoaded(ctx, kind, label) {
   }
 }
 function lanesChecks(ctx) {
-  const bin = join49(ctx.home, ".local/bin/lanes");
-  const target = join49(ctx.home, ".local/share/pi-setup/lanes/lanes.mjs");
+  const bin = join51(ctx.home, ".local/bin/lanes");
+  const target = join51(ctx.home, ".local/share/pi-setup/lanes/lanes.mjs");
   let linked = false;
   let present2 = false;
   try {
@@ -6304,7 +6499,7 @@ function lanesChecks(ctx) {
     linked = stat2.isSymbolicLink() && readlinkSync5(bin) === target;
   } catch {
   }
-  const good = linked && existsSync32(target);
+  const good = linked && existsSync34(target);
   const fix = good ? void 0 : present2 && !linked ? "move ~/.local/bin/lanes away, then pi-setup install --with lanes" : "pi-setup install --with lanes";
   let config;
   let configError = "";
@@ -6322,7 +6517,7 @@ function lanesChecks(ctx) {
   }
   let installedPreapproval = false;
   try {
-    installedPreapproval = preapprovalDefault(join49(ctx.home, ".local/share/pi-setup/lanes/templates"));
+    installedPreapproval = preapprovalDefault(join51(ctx.home, ".local/share/pi-setup/lanes/templates"));
   } catch (e) {
     configError ||= e.message;
   }
@@ -6332,7 +6527,7 @@ function lanesChecks(ctx) {
     check2("lanes", good ? "ok" : "warn", good ? "lanes is installed" : "lanes link or bundle is missing or points elsewhere", fix),
     check2("lanes-git", ctx.which("git") ? "ok" : "warn", ctx.which("git") ? "git is on PATH" : "git is missing", ctx.which("git") ? void 0 : "install git"),
     check2("lanes-terminal", "ok", backend === "print" ? "print (no Terminal.app, iTerm or tmux detected; lanes start will print the command)" : backend),
-    check2("lanes-preapprove-mcp", configError ? "warn" : "ok", configError || `MCP preapproval is ${enabled ? "on (trusts project MCP server definitions)" : "off"}${config ? ` in ${join49(root, "lanes.json")}` : " for new folders (no lanes.json found)"}`)
+    check2("lanes-preapprove-mcp", configError ? "warn" : "ok", configError || `MCP preapproval is ${enabled ? "on (trusts project MCP server definitions)" : "off"}${config ? ` in ${join51(root, "lanes.json")}` : " for new folders (no lanes.json found)"}`)
   ];
 }
 async function componentChecks(ctx, manifest) {
@@ -6344,7 +6539,7 @@ async function componentChecks(ctx, manifest) {
     if (!unit) continue;
     const id = `service:${def.id}`;
     const rec = comps[def.id];
-    const exists = existsSync32(unit.file);
+    const exists = existsSync34(unit.file);
     if (rec?.on && rec.service?.managed) {
       const manual = unit.kind === "launchd" ? `launchctl bootstrap gui/${uid()} ${unit.file}` : `systemctl --user enable --now ${unit.label}`;
       checks.push(await isLoaded(ctx, unit.kind, unit.label) ? check2(id, "ok", `${unit.label} is loaded`) : check2(id, "warn", `${unit.label} is not loaded`, manual));
@@ -6355,10 +6550,10 @@ async function componentChecks(ctx, manifest) {
     }
   }
   if (comps.codescene?.on) {
-    const dir = join49(ctx.home, ".agents/skills");
+    const dir = join51(ctx.home, ".agents/skills");
     const missing = CS_SKILLS.filter((n3) => {
       try {
-        return !statSync17(join49(dir, n3)).isDirectory();
+        return !statSync19(join51(dir, n3)).isDirectory();
       } catch {
         return true;
       }
@@ -6385,7 +6580,7 @@ var init_doctor_components = __esm({
 
 // src/doctor.ts
 import { chmodSync as chmodSync3 } from "node:fs";
-import { join as join50 } from "node:path";
+import { join as join52 } from "node:path";
 function doctorExitCode(checks) {
   return checks.some((c2) => c2.status === "fail") ? 2 : checks.some((c2) => c2.status === "warn") ? 1 : 0;
 }
@@ -6399,7 +6594,7 @@ function render2(checks) {
 async function inspect2(ctx) {
   let manifest;
   try {
-    manifest = readManifest(join50(ctx.home, ".pi/agent"));
+    manifest = readManifest(join52(ctx.home, ".pi/agent"));
     if (manifest) validateManifest(ctx.home, manifest);
   } catch {
     manifest = void 0;
@@ -6415,11 +6610,11 @@ async function runDoctor(ctx, options, baseCtx) {
   if (options.fix) {
     const fixable = new Set(report.checks.map((c2) => c2.fixable));
     if (fixable.has("npm")) {
-      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join50(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
+      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join52(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("npm");
     }
     if (fixable.has("restore") && report.facts.checkoutClean === true && report.facts.head && report.facts.head === report.manifest?.source.commit) {
-      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join50(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
+      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join52(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("restore");
     }
     if (fixable.has("chmod") && report.manifest) {
@@ -6639,8 +6834,8 @@ async function collectChoices(p, input) {
     ...components ? { components } : {}
   };
 }
-async function confirmApply(p, summary) {
-  p.note(summary.join("\n"), "Plan");
+async function confirmApply(p, summary2) {
+  p.note(summary2.join("\n"), "Plan");
   const answer = await p.confirm({ message: "Apply?", initial: true });
   return !p.isCancel(answer) && answer === true;
 }
@@ -8146,8 +8341,8 @@ var run_exports = {};
 __export(run_exports, {
   main: () => main2
 });
-import { join as join51 } from "node:path";
-import { existsSync as existsSync33 } from "node:fs";
+import { join as join53 } from "node:path";
+import { existsSync as existsSync35 } from "node:fs";
 function pickProfile(options, activeBefore, ready3, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
     if (!names.includes(options.profile)) {
@@ -8186,10 +8381,10 @@ function extraRows(ctx, options, saved, detection, manifest) {
   };
 }
 function savedPreapproval(ctx) {
-  return preapprovalDefault(join51(ctx.home, ".local/share/pi-setup/lanes/templates"));
+  return preapprovalDefault(join53(ctx.home, ".local/share/pi-setup/lanes/templates"));
 }
 function resolveAll(ctx, options, detection, saved, answers, manifest) {
-  const piDir = join51(ctx.home, ".pi", "agent");
+  const piDir = join53(ctx.home, ".pi", "agent");
   const settings2 = resolveSettings({
     flagUser: answers.user ?? options.user,
     flagRoot: answers.root ?? options.reposRoot,
@@ -8253,7 +8448,7 @@ function resolveAll(ctx, options, detection, saved, answers, manifest) {
     ...settings2.warnings,
     ...componentNotes.filter((n3) => n3.startsWith("warning:")).map((n3) => n3.slice(9)),
     ...detection.warnings,
-    ...pinWarnings(pinnedModels(join51(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
+    ...pinWarnings(pinnedModels(join53(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
     ...kimi ? [kimi] : []
   ];
   return { settings: settings2, choice, actions, warnings, profile: profile2, ready: ready3, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
@@ -8300,8 +8495,8 @@ async function runCommand(ctx, options, prompter, baseCtx) {
   return backupsCommand(ctx, options.sub, options.keep, options.dryRun);
 }
 async function execute(ctx, options, prompter, baseCtx) {
-  const piDir = join51(ctx.home, ".pi", "agent");
-  const saved = readSettings(join51(piDir, "user.json"));
+  const piDir = join53(ctx.home, ".pi", "agent");
+  const saved = readSettings(join53(piDir, "user.json"));
   const manifest = readManifest(piDir);
   const readOnly = options.dryRun || options.plan;
   const names = profileNames(ctx.repoDir);
@@ -8354,9 +8549,9 @@ async function execute(ctx, options, prompter, baseCtx) {
   }
   r2.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r2.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
-  const summary = summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly, components: r2.components, componentNotes: r2.componentNotes });
-  if (options.plan) return finish(ctx, baseCtx, options, r2, detection, summary, 0);
-  if (prompter && !await confirmApply(prompter, summary)) return cancelled(ctx);
+  const summary2 = summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly, components: r2.components, componentNotes: r2.componentNotes });
+  if (options.plan) return finish(ctx, baseCtx, options, r2, detection, summary2, 0);
+  if (prompter && !await confirmApply(prompter, summary2)) return cancelled(ctx);
   const applyOptions = {
     dryRun: options.dryRun,
     skipNpm: options.skipNpm || options.dryRun,
@@ -8371,9 +8566,9 @@ async function execute(ctx, options, prompter, baseCtx) {
   const live = await retire(ctx, piDir, manifest, off, options.dryRun);
   const result2 = await apply(ctx, r2.actions, applyOptions, live);
   if (result2.code === 0) await syncServices(ctx, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);
-  const shown = prompter || options.json ? [] : summary.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:") || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no") || r2.componentNotes.includes(l2));
+  const shown = prompter || options.json ? [] : summary2.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:") || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no") || r2.componentNotes.includes(l2));
   if (result2.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
-  if (prompter && result2.code === 0 && !options.dryRun && !options.plan && r2.components.lanes.on && !existsSync33(join51(r2.settings.reposRoot, ".lanes/lanes.json"))) {
+  if (prompter && result2.code === 0 && !options.dryRun && !options.plan && r2.components.lanes.on && !existsSync35(join53(r2.settings.reposRoot, ".lanes/lanes.json"))) {
     const answer = await prompter.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
     if (!prompter.isCancel(answer) && answer === true) {
       try {
@@ -8438,7 +8633,7 @@ var init_run = __esm({
 });
 
 // src/cli.ts
-import { dirname as dirname14, join as join52 } from "node:path";
+import { dirname as dirname15, join as join54 } from "node:path";
 import { fileURLToPath } from "node:url";
 var MIN = [22, 19, 0];
 function nodeTooOld(version2) {
@@ -8453,7 +8648,7 @@ if (nodeTooOld(process.version)) {
 `);
   process.exit(1);
 }
-var repoDir = join52(dirname14(fileURLToPath(import.meta.url)), "..", "..");
+var repoDir = join54(dirname15(fileURLToPath(import.meta.url)), "..", "..");
 var { realContext: realContext2 } = await Promise.resolve().then(() => (init_context(), context_exports));
 var { main: main3 } = await Promise.resolve().then(() => (init_run(), run_exports));
 process.exitCode = await main3(process.argv.slice(2), realContext2(repoDir));

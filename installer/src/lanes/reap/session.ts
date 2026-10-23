@@ -4,6 +4,7 @@ import type { LanesCtx } from "../ctx.ts";
 import { sessionDirFor } from "../names.ts";
 import { jsonFiles, mtime } from "./files.ts";
 import { absolute } from "./process.ts";
+import { sessionWork } from "./session-work.ts";
 import type { Signals } from "./signals.ts";
 function sameProcess(value: Record<string, any>, s: Signals, ctx: LanesCtx): boolean {
   if (value.pid !== s.pid) return false;
@@ -44,6 +45,7 @@ export function resolveSession(s: Signals, ctx: LanesCtx): void {
   const { identity, beat } = sessionIdentity(s, ctx, dir);
   s.sessionId = identity?.sessionId; s.sessionFile = fileFor(identity, dir);
   checkFile(s, dir, ctx); checkHeartbeat(beat, s, ctx);
+  sessionWork(s, ctx);
 }
 function sessionIdentity(s: Signals, ctx: LanesCtx, dir: string) {
   try { readdirSync(dir); } catch { throw new Error("sessions directory unreadable or missing"); }

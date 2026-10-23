@@ -130,7 +130,7 @@ test("suffix grammar and message parsing preserve legacy ids and reject unsafe i
   assert.deepEqual(parseMessageName("L0-to-L3c-hello-world.md"), { from: "L0", to: ["L3c"], topic: "hello-world" });
   assert.deepEqual(parseMessageName("L0-to-R-CHR-hello-world-1200.md"), { from: "L0", to: ["R-CHR"], topic: "hello-world" });
   assert.deepEqual(parseMessageName("L1-old-topic.md"), { from: "", to: ["L1"], topic: "old-topic" });
-  assert.deepEqual(parseMessageName("L1-to-L0-x.md"), { from: "", to: ["L1"], topic: "to-L0-x" });
+  assert.deepEqual(parseMessageName("L1-to-L0-x.md"), { from: "L1", to: ["L0"], topic: "x" });
 });
 test("adopt preserves stored lane and coordinator entries and reports changed facts", async () => {
   for (const role of ["sub-orch", "repo-orch"] as const) {
@@ -143,6 +143,15 @@ test("adopt preserves stored lane and coordinator entries and reports changed fa
     for (const field of ["cwd", "repo", "branch"]) assert.ok(text.includes(`conflict: stored ${field}`), field);
     assert.ok(text.includes(`conflict: stored cwd ${f.root}, found ${coordinator.cwd}`));
   }
+});
+test("adopt validates repeatable multi-repo orchestration assignments", async () => {
+  const f = fixture(); f.add("SPEC");
+  assert.equal(await f.invoke("adopt", "--role", "SPEC=repo-orch", "--orchestrates", "SPEC=Cratis/Fundamentals,Cratis/Specifications", "--write"), 0, f.err.join("\n"));
+  const c = loadConfig(f.root); assert.equal(c.lanes[0].repo, "example/repo");
+  assert.deepEqual(c.lanes[0].orchestrates, ["Cratis/Fundamentals", "Cratis/Specifications"]);
+  assert.equal(await f.invoke("adopt", "--orchestrates", "SPEC=Cratis/Arc", "--orchestrates", "SPEC=Cratis/Scene", "--write"), 0, f.err.join("\n"));
+  assert.deepEqual(loadConfig(f.root).lanes[0].orchestrates, ["Cratis/Arc", "Cratis/Scene"]);
+  for (const value of ["SPEC=../repo", "MISSING=Cratis/AI", "SPEC=Cratis/AI,"]) assert.equal(await f.invoke("adopt", "--orchestrates", value), 2);
 });
 test("matching discoveries never downgrade stored orchestrator roles", async () => {
   for (const role of ["sub-orch", "repo-orch"] as const) {

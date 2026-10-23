@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { localClaims } from "./local-claims.ts";
 import { optionalText, jsonFiles } from "./files.ts";
 import type { Claim, EvidenceContext, Signals } from "./signals.ts";
 export function registry(text: string): Claim[] {
@@ -26,21 +27,26 @@ function assigned(task: Record<string, any>, s: Signals): boolean { return [s.se
 function openTask(task: Record<string, any>): boolean { return ["claimed", "blocked", "ready"].includes(task.state || task.status); }
 function subagentRunning(status: Record<string, any>): boolean { return status.role === "subagent" && !["done", "failed", "cancelled", "stopped"].includes(status.phase || status.state); }
 function subagentOwned(status: Record<string, any>, s: Signals): boolean {
-  return [status.pid, status.parentPid].includes(s.pid) || [status.sessionId, status.parentSessionId].includes(s.sessionId);
+  return (status.parentPid !== undefined && status.parentPid === s.pid)
+    || (status.parentSessionId !== undefined && status.parentSessionId === s.sessionId);
 }
 function orchestration(s: Signals, env: EvidenceContext): void {
   const { ctx } = env;
   for (const task of jsonFiles(join(ctx.home, ".pi/orch/tasks"))) if (assigned(task, s) && openTask(task)) s.asks.push("assigned pi-orch task requires handoff");
-  const statuses = jsonFiles(join(ctx.piAgentDir, "context-budget/status")).filter(subagentRunning);
-  for (const status of statuses) { if (subagentOwned(status, s)) s.keeps.push("subagent running"); else s.asks.push("subagent ownership unknown"); }
+  const statuses = jsonFiles(join(dirname(s.sessionFile!), "subagents")).filter(subagentRunning);
+  for (const status of statuses.filter(status => subagentOwned(status, s))) {
+    const age = ctx.now().getTime() - Date.parse(status.at);
+    if (!Number.isFinite(age) || age < 0 || age > 600000) s.asks.push("owned subagent status stale or unknown");
+    else s.keeps.push("subagent running");
+  }
 }
 export function claimsAndOwnership(s: Signals, env: EvidenceContext): void {
   const text = optionalText(join(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
   const claims = registry(text || "").filter(claim => env.lane.repo
-    ? claim.repo.toLowerCase() === env.lane.repo.toLowerCase()
+    ? claim.repo.toLowerCase() === env.lane.repo.toLowerCase() && claim.sessionId === s.sessionId
     : claim.sessionId === s.sessionId);
   for (const claim of claims) classifyClaim(claim, s);
-  namedNotes(s, env); orchestration(s, env);
+  localClaims(s, env); namedNotes(s, env); orchestration(s, env);
 }
 
 function readyClaim(claim: Claim): boolean {

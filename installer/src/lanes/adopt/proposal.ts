@@ -1,13 +1,13 @@
 import { existsSync } from "node:fs";
 import { basename, dirname, relative } from "node:path";
-import { expand, laneDir, type Config, type Lane } from "../config.ts";
+import { expand, laneDir, orchestratedRepos, type Config, type Lane } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { absolute } from "../reap/process.ts";
 import type { Discovery } from "./discover.ts";
 import { validNewId } from "../names.ts";
 import type { Role } from "./roles.ts";
 
-interface MergeOptions { root: string; ctx: LanesCtx; existingConfig: boolean; roles: Map<string, Role> }
+interface MergeOptions { root: string; ctx: LanesCtx; existingConfig: boolean; roles: Map<string, Role>; orchestrates?: Map<string, string[]> }
 interface MergeEnv extends MergeOptions { c: Config }
 export function mergeDiscovered(c: Config, rows: Discovery[], options: MergeOptions): void {
   for (const row of rows) {
@@ -38,6 +38,7 @@ function compareStored(row: Discovery, lane: Lane, env: MergeEnv): void {
   compareValue(row, "repo", lane.repo, row.repo);
   compareValue(row, "branch", lane.branch, row.branch);
   compareValue(row, "role", lane.role ?? "lane", env.roles.get(lane.id));
+  if (!blockingWarnings(row).length && env.orchestrates?.has(lane.id)) lane.orchestrates = env.orchestrates.get(lane.id);
 }
 function blockingWarnings(row: Discovery): string[] {
   return row.warnings.filter(w => !["not a git repo", "detached HEAD", "origin repo unknown"].includes(w));
@@ -57,13 +58,14 @@ function discoveredRole(row: Discovery, env: MergeEnv): Role {
   return env.roles.get(row.id!) ?? (row.id!.startsWith("R-") ? "repo-orch" : "lane");
 }
 function orchestratorConflict(row: Discovery, env: MergeEnv): boolean {
-  if (discoveredRole(row, env) !== "repo-orch" || !row.repo) return false;
+  const repos = orchestratedRepos(adoptedLane(row, env)).map(repo => repo.toLowerCase());
   const others = env.c.lanes.filter(l => !l.retired && l.id !== row.id);
-  return others.some(l => l.role === "repo-orch" && l.repo === row.repo);
+  return others.some(l => orchestratedRepos(l).some(repo => repos.includes(repo.toLowerCase())));
 }
 function adoptedLane(row: Discovery, env: MergeEnv): Lane {
   const { c, root, ctx } = env;
   const lane: Lane = { id: row.id!, role: discoveredRole(row, env),
+    ...(env.orchestrates?.has(row.id!) ? { orchestrates: env.orchestrates.get(row.id!) } : {}),
     ...(row.repo ? { repo: row.repo } : {}), ...(row.branch ? { branch: row.branch } : {}),
     worktree: basename(row.cwd), group: null, prompt: `prompts/${row.id}.md` };
   const managed = configuredDirectory(expand(c.worktreesDir, c, root, ctx.home), ctx);

@@ -6,7 +6,7 @@ import { defaults, saveConfig } from "../src/lanes/config.ts";
 import { main } from "../src/lanes/main.ts";
 import { treeDigest } from "../src/lanes/reap/tree.ts";
 import { processEvidence } from "../src/lanes/reap/process.ts";
-import type { Signals } from "../src/lanes/reap/signals.ts";
+import { collect, type Signals } from "../src/lanes/reap/signals.ts";
 import { expectedSnapshot, readContext, validateContext } from "../src/lanes/reap/context-format.ts";
 import { verdict } from "../src/lanes/reap/verdict.ts";
 import { sessionDirFor } from "../src/lanes/names.ts";
@@ -87,6 +87,57 @@ for (const variant of ["wrapper and MCP", "vim", "foreign", "background pi", "wr
     else await assert.rejects(processEvidence(signals, f.ctx), /foreground not the expected pi/);
   });
 }
+function evidence(f: ReturnType<typeof fixture>) {
+  return collect({ c: f.c, lane: f.c.lanes[0], root: f.root, ctx: f.ctx, minutes: 75 });
+}
+test("watcher epoch markers and filename grammar preserve unread evidence", async () => {
+  for (const name of ["L0-to-L1-x.md", "20261023-120000-L1-from-L0-x.md", "L1-L2-x.md", "ALL-x.md", "legacy-L1-odd.md"]) {
+    const f = fixture(); rmSync(f.marker);
+    f.put(join(f.root, ".state/inbox-L1.marker"), String(f.now.getTime() / 1000 - 60));
+    f.put(join(f.root, "messages", name), "hello");
+    const s = await evidence(f); assert.ok(s.keeps.includes("unread inbox"), name);
+    assert.ok(!s.asks.some(reason => reason.includes("marker")), name);
+  }
+});
+test("old mail stays read and malformed or future watcher markers fail closed", async () => {
+  const f = fixture(); f.put(join(f.root, "messages/L0-to-L1-hello.md"), "hello", 20);
+  assert.ok(!(await evidence(f)).keeps.includes("unread inbox"));
+  for (const value of ["bad", String(f.now.getTime() / 1000 + 60)]) {
+    f.put(join(f.root, ".state/inbox-L1.marker"), value);
+    assert.ok((await evidence(f)).asks.includes("inbox marker invalid"));
+  }
+});
+test("local active claims require exact identity rather than branch substrings", async () => {
+  for (const [fields, keep] of [["**Session:** s1", true], ["**Worktree:** CWD", true], ["**Repo:** example/alpha\n**Issue:** #1", true], ["**Branch:** work\n**Issue:** #170", false]] as const) {
+    const f = fixture(); f.c.lanes[0].issue = 1;
+    f.put(join(f.cwd, ".ai-work/issue-work/1/status.md"), `**State:** in-progress\n${fields.replace("CWD", f.cwd)}`);
+    const s = await evidence(f); assert.equal(s.keeps.includes("in-progress local claim"), keep, fields);
+    if (!keep) assert.ok(s.asks.includes("local claim ownership unknown"));
+  }
+});
+test("unrelated subagents do not flood a lane, owned live and stale states stay scoped", async () => {
+  const f = fixture(); const dir = join(dirname(f.sessionFile), "subagents");
+  for (let i = 0; i < 20; i++) f.put(join(dir, `${i}.json`), JSON.stringify({ role: "subagent", pid: 900 + i, sessionId: `foreign${i}`, at: "old", phase: "idle" }));
+  assert.deepEqual((await evidence(f)).asks, []);
+  f.put(join(dir, "owned.json"), JSON.stringify({ role: "subagent", parentSessionId: "s1", at: f.now.toISOString(), phase: "idle" }));
+  assert.ok((await evidence(f)).keeps.includes("subagent running"));
+  f.put(join(dir, "owned.json"), JSON.stringify({ role: "subagent", parentSessionId: "s1", at: "old", phase: "idle" }));
+  assert.ok((await evidence(f)).asks.includes("owned subagent status stale or unknown"));
+});
+test("job snapshots cover sleeping watches and terminal updates clear them", async () => {
+  const f = fixture(); const snapshot = { id: "j1", command: "inbox-watch L1", status: "running", cwd: f.cwd, startedAt: f.now.getTime() - 120000, timeoutSeconds: 3600 };
+  const lines = [{ type: "message", message: { role: "toolResult", toolName: "job_watch", details: snapshot } }];
+  f.put(f.sessionFile, lines.map(line => JSON.stringify(line)).join("\n"), 120);
+  assert.ok((await evidence(f)).keeps.includes("job/watch running (session snapshot)"));
+  lines.push({ type: "message", message: { role: "toolResult", toolName: "job_output", details: { ...snapshot, status: "matched" } } });
+  f.put(f.sessionFile, lines.map(line => JSON.stringify(line)).join("\n"), 120);
+  assert.ok(!(await evidence(f)).keeps.some(reason => reason.startsWith("job/watch")));
+});
+test("human reasons are bounded while raw asks remain complete", () => {
+  const asks = Array.from({ length: 8 }, (_, i) => `lane evidence ${i}`);
+  assert.equal(verdict({ asks, keeps: [], finished: false, takeover: false }).reason.split("; ").length, 3);
+  assert.equal(asks.length, 8);
+});
 test("dry run is read-only except plan, explains takeover and threshold fallback", async () => {
   const f = fixture(); assert.equal(await f.invoke("reap", "--json"), 0); assert.equal(f.rows()[0].verdict, "handoff");
   assert.ok(existsSync(join(f.root, ".state/reap-plan.json"))); assert.deepEqual(readdirSync(join(f.root, ".state")), ["reap-plan.json"]);
@@ -98,7 +149,7 @@ const keepCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["busy child", f => f.setBusy("102 101 dotnet build")], ["busy child", f => f.setBusy("102 101 pi-phase run --kind build")],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/job.log"), "command"); f.setFiles(`n${p}\n`); }],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/watch.log"), "# pi-jobs watch until x: gh run watch 123"); f.setFiles(`n${p}\n`); }],
-  ["subagent", f => f.put(join(f.ctx.piAgentDir, "context-budget/status/sub.json"), JSON.stringify({ role: "subagent", pid: 101, phase: "working", at: f.now.toISOString() }))],
+  ["subagent", f => f.put(join(dirname(f.sessionFile), "subagents/sub.json"), JSON.stringify({ role: "subagent", parentPid: 101, phase: "working", at: f.now.toISOString() }))],
   ["unread", f => f.put(join(f.root, "messages/L0-to-L1-work-1200.md"), "hi")],
   ["in-progress claim", f => f.claim("in-progress")],
   ["declared wait", f => f.put(join(f.root, "messages/status/L1.status"), 'waiting-on "ci" until 2026-10-23T14:00:00Z')],
@@ -111,13 +162,12 @@ const askCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["sessions directory", f => rmSync(dirname(f.sessionFile), { recursive: true })],
   ["process descendants", f => { const run = f.ctx.run; f.ctx.run = async (cmd, a, o) => cmd === "ps" && a[0] === "-A" ? f.result("", 1) : run(cmd, a, o); }],
   ["open files", f => { const run = f.ctx.run; f.ctx.run = async (cmd, a, o) => cmd === "lsof" && !a.includes("cwd") ? f.result("", 1) : run(cmd, a, o); }],
-  ["inbox watch never ran", f => rmSync(f.marker)], ["unparseable message", f => f.put(join(f.root, "messages/mystery.md"), "?")],
+  ["inbox watch never ran", f => rmSync(f.marker)], ["message name ambiguous", f => f.put(join(f.root, "messages/mystery-L1-123.md"), "?")],
   ["claim from another tool", f => f.claim("in-progress", undefined, { source: "detected" })],
-  ["claim from another tool", f => f.claim("blocked", "x", { sessionId: "foreign" })],
   ["named in NOW.md", f => f.put(join(f.root, "coordinator/NOW.md"), "L1 owns the release")],
   ["signals disagree", f => f.put(join(f.home, ".pi/orch/heartbeats/s1.json"), JSON.stringify({ pid: 101, state: "working", at: f.now.toISOString() }))],
   ["foreground not the expected pi", f => f.setForeground(false)],
-  ["cannot read", f => f.put(join(f.ctx.piAgentDir, "context-budget/status/bad.json"), "{")],
+  ["cannot read", f => f.put(join(dirname(f.sessionFile), "subagents/bad.json"), "{")],
 ];
 for (const [reason, setup] of askCases) test(`ask ${reason}`, async () => { const f = fixture(); setup(f); await f.invoke("reap", "--json"); assert.equal(f.rows()[0].verdict, "ask"); assert.match(f.rows()[0].reason, new RegExp(reason.replaceAll(".", "\\."))); });
 for (const identity of ["detached", "non-git"]) test(`reap tolerates ${identity} cwd lanes without invalid gh probes`, async () => {
@@ -317,7 +367,7 @@ test("review 2: a handoff-induced session write defers retirement and is reusabl
   f.ctx.run = async (cmd, args, options) => {
     const result = await run(cmd, args, options);
     if (!wrote && args.at(-1)?.includes("Write your own context handoff")) {
-      wrote = true; f.put(f.sessionFile, "handoff response");
+      wrote = true; f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "assistant", content: "handoff response" } }));
     }
     return result;
   };
@@ -364,9 +414,9 @@ test("round 2: receipt survives trailing session writes and rotation but still w
   const receiptPath = join(f.root, ".state/handoffs/L1.request.json");
   const receipt = readFileSync(receiptPath, "utf8");
   // The native turn keeps writing after ownContext has returned and saved its receipt.
-  f.now.setTime(f.now.getTime() + 1000); f.put(f.sessionFile, "trailing response");
+  f.now.setTime(f.now.getTime() + 1000); f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "assistant", content: "trailing response" } }));
   f.now.setTime(f.now.getTime() + 1000);
-  const continued = f.put(join(dirname(f.sessionFile), "s1-continued.jsonl"), "turn complete");
+  const continued = f.put(join(dirname(f.sessionFile), "s1-continued.jsonl"), JSON.stringify({ type: "message", message: { role: "assistant", content: "turn complete" } }));
   const lease = JSON.parse(readFileSync(f.lease, "utf8")); lease.sessionFile = continued; f.put(f.lease, JSON.stringify(lease));
   assert.equal(await f.invoke("reap", "L1", "--apply", "--json"), 0);
   assert.equal(f.rows()[0].verdict, "keep"); assert.ok(!f.calls.some(c => c.args.includes("/quit")));

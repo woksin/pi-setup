@@ -5,7 +5,7 @@ import type { LanesCtx } from "../ctx.ts";
 import { validId, validNewId } from "../names.ts";
 import { discover } from "../adopt/discover.ts";
 import { inventory } from "../adopt/inventory.ts";
-import { requestedRoles } from "../adopt/roles.ts";
+import { requestedOrchestrates, requestedRoles } from "../adopt/roles.ts";
 import { mergeDiscovered, missingLanes, printProposal } from "../adopt/proposal.ts";
 
 export async function adopt(opts: Record<string, string>, ctx: LanesCtx): Promise<number> {
@@ -17,7 +17,15 @@ export async function adopt(opts: Record<string, string>, ctx: LanesCtx): Promis
   const entries = inventory(opts.inventory ? resolve(ctx.cwd, opts.inventory) : undefined);
   const roles = requestedRoles(opts.role, c.coordinator.id);
   const rows = await discover(ctx, entries, excluded, c.coordinator.id);
-  mergeDiscovered(c, rows, { root, ctx, existingConfig: exists, roles }); validate(c, root, ctx.home);
+  const orchestrates = requestedOrchestrates(opts.orchestrates, c.coordinator.id);
+  mergeDiscovered(c, rows, { root, ctx, existingConfig: exists, roles, orchestrates });
+  for (const [id, repos] of orchestrates) {
+    const lane = c.lanes.find(l => l.id === id);
+    if (lane?.role !== "repo-orch" || JSON.stringify(lane.orchestrates) !== JSON.stringify(repos)) {
+      throw new UsageError(`--orchestrates requires a mapped repo-orch: ${id}`);
+    }
+  }
+  validate(c, root, ctx.home);
   const before = exists ? readFileSync(path, "utf8") : "";
   const after = JSON.stringify(c, null, 2) + "\n";
   printProposal({ rows, missing: missingLanes(c, rows), before, after }, ctx);

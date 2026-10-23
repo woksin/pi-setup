@@ -1,4 +1,5 @@
 import { join, relative } from "node:path";
+import { summary } from "../reap/summary.ts";
 import { laneTree, UsageError, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { prepare, readPack, handoffRecipient, packPath, fingerprint, recipient } from "../reap/handoff.ts";
@@ -47,8 +48,10 @@ export async function reap(args: string[], opts: Record<string, string>, env: Co
   const minutes = validateArgs(args, opts, c); const rows: Row[] = [];
   const active = laneTree(c).reverse().map(row => row.lane).filter(l => !args[0] || l.id === args[0]);
   for (const lane of active) rows.push(await planRow({ c, lane, root, ctx, minutes }, opts));
-  atomicJson(join(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), minutes, rows });
+  const summaries = summary(rows.map(row => row.signals), env);
+  atomicJson(join(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), minutes, rows, summaries });
   display(rows, Boolean(opts.json), ctx);
+  if (!opts.json) for (const line of summaries) ctx.out(line);
   return rows.some(row => row.failed) ? 2 : 0;
 }
 
