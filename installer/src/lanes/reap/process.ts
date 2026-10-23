@@ -43,9 +43,13 @@ async function foreground(s: Signals, ctx: LanesCtx): Promise<void> {
 }
 export async function processEvidence(s: Signals, ctx: LanesCtx): Promise<void> {
   await busyChildren(s, ctx); await openJobs(s, ctx);
-  const start = await ctx.run("ps", ["-p", String(s.pid), "-o", "lstart="], { timeoutMs: 4000 }); requireProbe(start, "process start unknown");
-  s.procStart = start.stdout.trim(); if (!s.procStart) throw new Error("process start unknown");
+  s.procStart = await processStart(s.pid!, ctx);
   await foreground(s, ctx);
 }
 
+export async function processStart(pid: number, ctx: LanesCtx): Promise<string> {
+  const start = await ctx.run("ps", ["-p", String(pid), "-o", "lstart="], { timeoutMs: 4000 }); requireProbe(start, "process start unknown");
+  const value = start.stdout.trim(); if (!value) throw new Error("process start unknown");
+  return value;
+}
 function canonicalCwd(ctx: LanesCtx, cwd: string | undefined): string { if (!cwd) throw new Error("pi cwd unknown"); return absolute(ctx, cwd); }

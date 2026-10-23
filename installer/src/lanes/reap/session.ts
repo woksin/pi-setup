@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { LanesCtx } from "../ctx.ts";
 import { sessionDirFor } from "../names.ts";
@@ -41,11 +41,43 @@ function checkFile(s: Signals, dir: string, ctx: LanesCtx): void {
 }
 export function resolveSession(s: Signals, ctx: LanesCtx): void {
   const dir = sessionDirFor(s.cwd, ctx.piAgentDir);
+  const { identity, beat } = sessionIdentity(s, ctx, dir);
+  s.sessionId = identity?.sessionId; s.sessionFile = fileFor(identity, dir);
+  checkFile(s, dir, ctx); checkHeartbeat(beat, s, ctx);
+}
+function sessionIdentity(s: Signals, ctx: LanesCtx, dir: string) {
   try { readdirSync(dir); } catch { throw new Error("sessions directory unreadable or missing"); }
   const lease = leaseFor(s, ctx); const beat = heartbeatFor(s, ctx);
   checkIdentity(lease, beat);
-  const identity = lease || beat; s.sessionId = identity?.sessionId; s.sessionFile = fileFor(identity, dir);
-  checkFile(s, dir, ctx); checkHeartbeat(beat, s, ctx);
+  return { identity: lease || beat, beat };
+}
+/** Adoption alone may fall back to the newest session; reap still requires process identity. */
+export function resolveAdoptSession(s: Signals, ctx: LanesCtx): void {
+  const dir = sessionDirFor(s.cwd, ctx.piAgentDir);
+  const { identity } = sessionIdentity(s, ctx, dir);
+  if (identity) {
+    s.sessionId = identity.sessionId; s.sessionFile = fileFor(identity, dir);
+  } else {
+    s.sessionFile = newestSession(dir);
+    s.sessionId = sessionHeader(s.sessionFile, s.cwd, ctx);
+  }
+  checkFile(s, dir, ctx);
+}
+function sessionHeader(file: string, cwd: string, ctx: LanesCtx): string {
+  const header = JSON.parse(readFileSync(file, "utf8").split("\n")[0]);
+  if (!validHeader(header)) throw new Error("session identity unknown");
+  if (header.cwd && absolute(ctx, header.cwd) !== cwd) throw new Error("signals disagree: session cwd");
+  return header.id;
+}
+function validHeader(header: Record<string, any>): boolean {
+  return header.type === "session" && typeof header.id === "string" && !!header.id;
+}
+function newestSession(dir: string): string {
+  const files = readdirSync(dir).filter(n => n.endsWith(".jsonl")).map(n => join(dir, n));
+  files.sort((a, b) => mtime(b) - mtime(a) || a.localeCompare(b));
+  if (!files.length) throw new Error("session file unknown");
+  if (files.length > 1 && mtime(files[0]) === mtime(files[1])) throw new Error("conflict: equally new sessions");
+  return files[0];
 }
 
 function checkIdentity(lease: Record<string, any> | undefined, beat: Record<string, any> | undefined): void {

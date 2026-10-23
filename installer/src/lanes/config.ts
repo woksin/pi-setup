@@ -3,12 +3,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { validId } from "./names.ts";
+import type { LanesCtx } from "./ctx.ts";
 
 export const BACKENDS = ["auto", "terminal-app", "iterm", "tmux", "print"];
 export interface Lane {
   id: string; repo: string; issue?: number; goal?: string; group: string | null;
   role?: "lane" | "repo-orch" | "sub-orch"; parent?: string; retired?: boolean; stateFile?: string;
-  worktree: string; branch: string; prompt: string; [key: string]: unknown;
+  worktree: string; cwd?: string; branch: string; prompt: string; [key: string]: unknown;
 }
 export interface Retention {
   mode: "keep" | "archive" | "delete"; maxAgeDays: number; archiveDir?: string;
@@ -96,7 +97,7 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
     require(lane.goal === undefined || text(lane.goal), `${key}.goal`);
     validateHierarchyFields(lane, c, key);
   }
-  validateHierarchy(c);
+  validateHierarchy(c, root, home);
 }
 function requireField(ok: unknown, key: string): void {
   if (!ok) throw new UsageError(`invalid ${key}`);
@@ -113,15 +114,16 @@ function validateHierarchyFields(lane: Lane, c: Config, key: string): void {
   requireField(lane.role === undefined || ["lane", "repo-orch", "sub-orch"].includes(lane.role), `${key}.role`);
   requireField(lane.retired === undefined || typeof lane.retired === "boolean", `${key}.retired`);
   requireField(validStateFile(lane.stateFile), `${key}.stateFile`);
+  requireField(lane.cwd === undefined || (typeof lane.cwd === "string" && isAbsolute(lane.cwd)), `${key}.cwd`);
   requireField(validParent(lane, c), `${key}.parent`);
   requireField(validOrchestratorParent(lane, c), `${key}.parent`);
 }
 function validStateFile(value: string | undefined): boolean {
   return value === undefined || (typeof value === "string" && value.length > 0);
 }
-function validateHierarchy(c: Config): void {
+function validateHierarchy(c: Config, root: string, home: string): void {
   const active = c.lanes.filter(l => !l.retired);
-  requireField(new Set(active.map(l => l.worktree)).size === active.length, "duplicate worktree");
+  requireField(new Set(active.map(l => laneDir(l, c, root, { home }))).size === active.length, "duplicate worktree");
   const orchs = active.filter(l => l.role === "repo-orch");
   requireField(new Set(orchs.map(l => l.repo)).size === orchs.length, "duplicate repo-orch");
   for (const lane of active) validateParentChain(lane, c);
@@ -145,6 +147,10 @@ export function expand(value: string, c: Config, root: string, home: string, bas
   if (/\$\{/.test(out)) throw new UsageError(`invalid path expansion: ${value}`);
   if (out === "~" || out.startsWith("~/")) out = join(home, out.slice(2));
   return isAbsolute(out) ? resolve(out) : resolve(base, out);
+}
+/** Adopted lanes may live outside the managed worktrees directory. */
+export function laneDir(lane: Lane, c: Config, root: string, ctx: Pick<LanesCtx, "home">): string {
+  return lane.cwd ?? join(expand(c.worktreesDir, c, root, ctx.home), lane.worktree);
 }
 function physicalPath(path: string): string {
   if (existsSync(path)) return realpathSync(path);

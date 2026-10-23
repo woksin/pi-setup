@@ -43,6 +43,7 @@ Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" ques
 ### Lanes (opt-in)
 
 Install with `./install.sh --with lanes`, then run `lanes init <dir>` to create a coordination folder.
+For hand-started sessions, `lanes adopt --dir <root> --exclude-tty ttys004 --inventory <file>` previews a config diff; add `--write` to merge atomically without controlling sessions or moving messages.
 For guided setup, run `./install.sh lanes [--dir <folder>]`; it selects local repositories and issues or goals, creates locked worktrees, and offers to open the coordinator.
 Add work with `lanes --dir <dir> add L1 --repo owner/name --issue 123` (clone the repository first).
 Run `lanes --dir <dir> start coordinator` or `start L1`; the coordinator starts in the coordination folder.

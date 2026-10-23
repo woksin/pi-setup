@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { backendFor } from "../backend.ts";
-import { effectiveParent, expand, UsageError, type Config, type Lane } from "../config.ts";
+import { effectiveParent, expand, laneDir, UsageError, type Config, type Lane } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { atomicJson, optionalText } from "./files.ts";
 import { processIds, absolute } from "./process.ts";
@@ -97,7 +97,7 @@ export function handoffRecipient(lane: Lane, c: Config, override?: string): stri
 
 function recipientCwd(env: EvidenceContext, target: Lane | undefined): string {
   const { c, root, ctx } = env;
-  return target ? join(expand(c.worktreesDir, c, root, ctx.home), target.worktree)
+  return target ? laneDir(target, c, root, ctx)
     : expand(c.coordinator.cwd, c, root, ctx.home);
 }
 function validPack(value: Handoff, id: string): boolean {

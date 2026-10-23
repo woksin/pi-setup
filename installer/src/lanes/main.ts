@@ -4,6 +4,7 @@ import { snooze } from "./commands/snooze.ts";
 import { type LanesCtx } from "./ctx.ts";
 import { findRoot, loadConfig, UsageError, type Config } from "./config.ts";
 import { init } from "./commands/init.ts";
+import { adopt } from "./commands/adopt.ts";
 import { add } from "./commands/add.ts";
 import { resume, startCommand } from "./commands/resume.ts";
 import { send } from "./commands/send.ts";
@@ -16,6 +17,7 @@ import { messagesPrune } from "./retention.ts";
 import { status } from "./commands/status.ts";
 
 export const HELP = `Usage: lanes [--dir root] <command> [options]
+  adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--write]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
     [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
@@ -37,6 +39,7 @@ Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
 const OPTIONS: Record<string, string[]> = {
+  adopt: ["messages", "coordinator", "exclude-tty", "inventory", "role", "write"],
   init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"],
   add: ["repo", "issue", "goal", "group", "branch", "base", "path",
     "orchestrator", "orchestrator-id", "no-orchestrator"],
@@ -47,7 +50,7 @@ const OPTIONS: Record<string, string[]> = {
   snooze: ["until", "clear"],
   close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"],
 };
-const FLAGS = ["preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all",
+const FLAGS = ["write", "preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all",
   "no-orchestrator", "inactive", "clear", "apply", "accept"];
 interface Invocation { command: string; positional: string[]; opts: Record<string, string> }
 interface CommandEnv { c: Config; root: string; ctx: LanesCtx }
@@ -61,8 +64,24 @@ function parseOption(argv: string[], i: number, opts: Record<string, string>): n
     opts[key] = "true"; return i;
   }
   if (equals < 0) requireValue({ argv, index: i });
+  if (["exclude-tty", "role"].includes(key)) return parseRepeated(argv, i, opts, equals);
+  return parseSingleOption({ argv, index: i }, opts, { key, equals });
+}
+function parseSingleOption({ argv, index: i }: ParsePosition, opts: Record<string, string>, { key, equals }: { key: string; equals: number }): number {
+  const token = argv[i];
   if (Object.hasOwn(opts, key)) throw new UsageError(`duplicate option ${token}`);
   opts[key] = equals < 0 ? argv[++i] : token.slice(equals + 1);
+  return i;
+}
+function parseRepeated(argv: string[], i: number, opts: Record<string, string>, equals: number): number {
+  const { key } = optionName({ argv, index: i });
+  const values = [equals < 0 ? argv[++i] : argv[i].slice(equals + 1)];
+  if (key === "exclude-tty") i = consumeTtys({ argv, index: i, values });
+  opts[key] = [opts[key], ...values].filter(Boolean).join(",");
+  return i;
+}
+function consumeTtys({ argv, index: i, values }: ParsePosition & { values: string[] }): number {
+  while (argv[i + 1] && /^ttys\d+$/.test(argv[i + 1])) values.push(argv[++i]);
   return i;
 }
 function requireValue({ argv, index }: ParsePosition): void {
@@ -83,7 +102,7 @@ function validateInvocation({ command, positional, opts }: Invocation): void {
   if (!Object.hasOwn(OPTIONS, command)) throw new UsageError(HELP);
   validateOptions({ command, opts });
   const bounds: Record<string, [number, number]> = {
-    init: [0, 1], add: [1, 1], start: [1, 1], resume: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1],
+    adopt: [0, 0], init: [0, 1], add: [1, 1], start: [1, 1], resume: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1],
     "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], handoff: [1, 1],
     reap: [0, 1], snooze: [1, 1], close: [opts.inactive ? 0 : 1, 1],
   };
@@ -126,6 +145,7 @@ export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
     const { positional, opts } = parse(argv); command = positional.shift() || "";
     const input = { command, positional, opts }; validateInvocation(input);
     if (command === "init") return await init(positional, opts, ctx);
+    if (command === "adopt") return await adopt(opts, ctx);
     const root = findRoot(opts.dir, ctx.env, ctx.cwd); const c = loadConfig(root);
     return await dispatch(input, { c, root, ctx });
   } catch (e) { ctx.err((e as Error).message); return errorCode({ e, command }); }

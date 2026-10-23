@@ -8,7 +8,7 @@ import { defaults, expand, findRoot, loadConfig, preapprovalDefault, saveConfig,
 
 test("lane and group ids, topics and message names follow the shared grammar", () => {
   for (const s of ["L0", "R-AI", "GROUP", "A123"]) assert.ok(validId(s));
-  for (const s of ["", "a", "L_1", "A--B", "A-1", "A-", "A".repeat(17)]) assert.ok(!validId(s));
+  for (const s of ["", "a", "L_1", "A--B", "A-1", "A-", "A".repeat(33)]) assert.ok(!validId(s));
   for (const s of ["x", "hello-world", "0", "a".repeat(48)]) assert.ok(validTopic(s));
   for (const s of ["", "Hello", "../x", "a_", "a".repeat(49)]) assert.ok(!validTopic(s));
   const now = new Date(2026, 0, 1, 12, 0);

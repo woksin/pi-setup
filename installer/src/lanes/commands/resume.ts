@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { expand, effectiveParent, saveConfig, validate, UsageError, type Lane } from "../config.ts";
-import { validId } from "../names.ts";
+import { laneDir, effectiveParent, saveConfig, validate, UsageError, type Lane } from "../config.ts";
+import { validNewId as validId } from "../names.ts";
 import { readContext, type Snapshot } from "../reap/context-format.ts";
 import type { CommandEnv } from "../reap/signals.ts";
 import { changedPaths, treeDigest } from "../reap/tree.ts";
@@ -23,7 +23,7 @@ function filePath(value: string, env: CommandEnv): string {
 function sourceLane(snapshot: Snapshot, env: CommandEnv): Lane {
   const { c, ctx, root } = env;
   const lanes = c.lanes.filter(lane => lane.repo === snapshot.repo && lane.branch === snapshot.branch);
-  const source = lanes.find(lane => ctx.realpath(join(expand(c.worktreesDir, c, root, ctx.home), lane.worktree)) ===
+  const source = lanes.find(lane => ctx.realpath(laneDir(lane, c, root, ctx)) ===
     ctx.realpath(snapshot.worktree));
   if (!source) throw new UsageError("handoff does not match a configured lane worktree"); return source;
 }

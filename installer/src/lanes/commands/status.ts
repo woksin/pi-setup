@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { backendFor, type MessageRef } from "../backend.ts";
-import { expand, effectiveParent, laneTree, type Config } from "../config.ts";
+import { expand, effectiveParent, laneDir, laneTree, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { idleMinutes } from "../sessions.ts";
 import { runningPi } from "../processes.ts";
@@ -35,7 +34,7 @@ function statusLanes(env: { c: Config; root: string; ctx: LanesCtx }, all: boole
       label: c.coordinator.id, cwd: expand(c.coordinator.cwd, c, root, ctx.home) },
     ...laneTree(c, all).map(({ lane, depth }) => ({
       ...lane, role: lane.role || "lane", parent: effectiveParent(lane, c), label: "  ".repeat(depth) + lane.id,
-      cwd: join(expand(c.worktreesDir, c, root, ctx.home), lane.worktree),
+      cwd: laneDir(lane, c, root, ctx),
     })),
   ];
 }
