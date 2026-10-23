@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: e99de9b8825c24c4619b9d45003aea4c859ba29cb0b0fa8971c446ad9d157245
+// pi-setup-source-sha256: bd47dede76ad5ae998e9cbc57145f7ccc5b435a2c865a3677333991a4343bf5a
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -135,9 +135,14 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join as join2, resolve } from "node:path";
 function preapprovalDefault(templatesDir) {
   const path2 = join2(dirname(templatesDir), "defaults.json");
-  if (!existsSync(path2)) return false;
+  let text3;
   try {
-    const value = JSON.parse(readFileSync(path2, "utf8"));
+    text3 = readFileSync(path2, "utf8");
+  } catch {
+    return false;
+  }
+  try {
+    const value = JSON.parse(text3);
     if (typeof value?.launch?.preapproveMcp !== "boolean") throw new Error("invalid launch.preapproveMcp");
     return value.launch.preapproveMcp;
   } catch (e) {
@@ -4631,12 +4636,7 @@ function extraRows(ctx, options, saved, detection, manifest) {
   };
 }
 function savedPreapproval(ctx) {
-  const installed = preapprovalDefault(join21(ctx.home, ".local/share/pi-setup/lanes/templates"));
-  try {
-    return installed || loadConfig(findRoot(void 0, ctx.env, ctx.cwd)).launch.preapproveMcp;
-  } catch {
-    return installed;
-  }
+  return preapprovalDefault(join21(ctx.home, ".local/share/pi-setup/lanes/templates"));
 }
 function resolveAll(ctx, options, detection, saved, answers, manifest) {
   const piDir = join21(ctx.home, ".pi", "agent");

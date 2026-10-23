@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: e99de9b8825c24c4619b9d45003aea4c859ba29cb0b0fa8971c446ad9d157245
+// pi-setup-source-sha256: bd47dede76ad5ae998e9cbc57145f7ccc5b435a2c865a3677333991a4343bf5a
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -139,9 +139,14 @@ function defaults(root, home, reposRoot) {
 }
 function preapprovalDefault(templatesDir) {
   const path = join4(dirname2(templatesDir), "defaults.json");
-  if (!existsSync2(path)) return false;
+  let text;
   try {
-    const value = JSON.parse(readFileSync(path, "utf8"));
+    text = readFileSync(path, "utf8");
+  } catch {
+    return false;
+  }
+  try {
+    const value = JSON.parse(text);
     if (typeof value?.launch?.preapproveMcp !== "boolean") throw new Error("invalid launch.preapproveMcp");
     return value.launch.preapproveMcp;
   } catch (e) {
@@ -223,111 +228,14 @@ function saveConfig(root, c) {
 
 // src/lanes/commands/init.ts
 import { existsSync as existsSync3, mkdirSync, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname3, join as join6, resolve as resolve4 } from "node:path";
+import { dirname as dirname3, join as join7, resolve as resolve4 } from "node:path";
 
 // src/lanes/templates.ts
 import { readFileSync as readFileSync2 } from "node:fs";
-import { join as join5 } from "node:path";
-function renderTemplate(text, vars) {
-  return text.replace(/\{\{(\w+)\}\}/g, (token, name) => Object.hasOwn(vars, name) ? String(vars[name]) : token);
-}
-function readTemplate(ctx, name) {
-  return readFileSync2(join5(ctx.templatesDir, name), "utf8");
-}
-function templateVars(c, ctx, root) {
-  return {
-    root,
-    coordinator: c.coordinator.id,
-    maxRunning: c.coordinator.maxRunning,
-    rules: join5(root, "rules.md"),
-    messages: expand(c.messages.dir, c, root, ctx.home),
-    watches: join5(root, "coordinator/WATCHES.md"),
-    handoff: join5(root, "coordinator/handoff-protocol.md")
-  };
-}
-
-// src/lanes/commands/init.ts
-async function init(args, opts, ctx) {
-  const root = resolve4(ctx.cwd, args[0] || ".");
-  const configPath = join6(root, "lanes.json");
-  const c = existsSync3(configPath) ? loadConfig(root) : defaults(root, ctx.home, opts["repos-root"]);
-  if (!existsSync3(configPath)) {
-    c.coordinator.id = opts.coordinator || c.coordinator.id;
-    c.terminal.backend = opts.terminal || c.terminal.backend;
-    c.launch.preapproveMcp = opts["preapprove-mcp"] === "true" || preapprovalDefault(ctx.templatesDir);
-  }
-  validate(c);
-  const vars = templateVars(c, ctx, root);
-  const put = (rel, content) => {
-    const path = join6(root, rel);
-    mkdirSync(dirname3(path), { recursive: true });
-    if (existsSync3(path)) ctx.out(`kept ${path}`);
-    else {
-      writeFileSync2(path, content, { flag: "wx" });
-      ctx.out(`created ${path}`);
-    }
-  };
-  put("lanes.json", `${JSON.stringify(c, null, 2)}
-`);
-  for (const [source, dest] of [["rules.md", "rules.md"], ["coordinator.md", "prompts/coordinator.md"], ...["WATCHES.md", "handoff-protocol.md", "NOW.md", "STATE.md"].map((n) => [n, `coordinator/${n}`])]) {
-    put(dest, renderTemplate(readTemplate(ctx, source), vars));
-  }
-  const status2 = join6(root, "messages/status");
-  const hadStatus = existsSync3(status2);
-  mkdirSync(status2, { recursive: true });
-  ctx.out(`${hadStatus ? "kept" : "created"} ${status2}`);
-  const ignore = join6(root, ".gitignore");
-  const text = existsSync3(ignore) ? readFileSync3(ignore, "utf8") : "";
-  const missing = [".state/", "messages/"].filter((s) => !text.split(/\r?\n/).includes(s));
-  if (missing.length) {
-    writeFileSync2(ignore, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${missing.join("\n")}
-`);
-    ctx.out(`created ${ignore}`);
-  } else ctx.out(`kept ${ignore}`);
-  return 0;
-}
-
-// src/lanes/commands/add.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname4, join as join9, resolve as resolve5 } from "node:path";
-
-// src/lanes/preapprove.ts
-import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
-import { join as join7 } from "node:path";
-var SUPPORTED_MAJORS = [5];
-async function preapprove(ctx, cwd, enabled) {
-  if (!enabled) {
-    ctx.out("MCP preapproval is off; enable with lanes init --preapprove-mcp for a new folder, or set launch.preapproveMcp to true in lanes.json.");
-    return;
-  }
-  const files = [".mcp.json", ".pi/mcp.json"].filter((f) => existsSync4(join7(cwd, f)));
-  if (!files.length) return;
-  let reason = "adapter not found";
-  try {
-    const adapter = join7(ctx.piAgentDir, "npm/node_modules/pi-mcp-adapter");
-    const pkg = JSON.parse(readFileSync4(join7(adapter, "package.json"), "utf8"));
-    if (!SUPPORTED_MAJORS.includes(Number(String(pkg.version).split(".")[0]))) {
-      reason = `adapter ${pkg.version} not supported (supports ${SUPPORTED_MAJORS.join(", ")}.x)`;
-      throw new Error(reason);
-    }
-    reason = "adapter API changed";
-    const mod = await ctx.loadModule(join7(adapter, "dist/project-server-trust.js"));
-    if (typeof mod.approveProjectServer !== "function" || typeof mod.hashProjectServerDefinition !== "function") throw new Error(reason);
-    for (const file of files) {
-      const servers = JSON.parse(readFileSync4(join7(cwd, file), "utf8")).mcpServers ?? {};
-      for (const [name, def] of Object.entries(servers)) {
-        const hash = await mod.hashProjectServerDefinition(def);
-        await mod.approveProjectServer(cwd, name, def);
-        ctx.out(`approved ${file} ${name} ${String(hash).slice(0, 12)}`);
-      }
-    }
-  } catch {
-    ctx.err(`MCP preapproval skipped: ${reason}; pi will ask once per server when the lane starts.`);
-  }
-}
+import { join as join6 } from "node:path";
 
 // src/lanes/terminal.ts
-import { join as join8 } from "node:path";
+import { join as join5 } from "node:path";
 var shellQuote = (s) => `'${s.replace(/'/g, "'\\''")}'`;
 var appleScriptString = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r");
 function detectBackend(configured, ctx) {
@@ -341,7 +249,7 @@ function detectBackend(configured, ctx) {
 function launchCommand(c, root, cwd, id, prompt, wrapper, messages) {
   const unset = c.launch.unsetEnv.map((name) => `-u ${name}`).join(" ");
   const exe = /^[A-Za-z0-9_/-]+$/.test(wrapper) ? wrapper : shellQuote(wrapper);
-  return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages)} LANE_STATUS_DIR=${shellQuote(join8(messages, "status"))} ${exe} ${shellQuote(`@${prompt}`)}`;
+  return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages)} LANE_STATUS_DIR=${shellQuote(join5(messages, "status"))} ${exe} ${shellQuote(`@${prompt}`)}`;
 }
 function terminalBackend(name) {
   if (!BACKENDS.includes(name) || name === "auto") throw new UsageError("invalid terminal.backend");
@@ -380,6 +288,116 @@ end tell`];
     if (name === "tmux" && !ctx.env.TMUX) ctx.out("attach with: tmux attach -t lanes");
     return 0;
   } };
+}
+
+// src/lanes/templates.ts
+function renderTemplate(text, vars) {
+  return text.replace(/\{\{(\w+)\}\}/g, (token, name) => Object.hasOwn(vars, name) ? String(vars[name]) : token);
+}
+function readTemplate(ctx, name) {
+  return readFileSync2(join6(ctx.templatesDir, name), "utf8");
+}
+function templateVars(c, ctx, root) {
+  const messages = expand(c.messages.dir, c, root, ctx.home);
+  return {
+    root,
+    root_sh: shellQuote(root),
+    messages_sh: shellQuote(messages),
+    coordinator_sh: shellQuote(c.coordinator.id),
+    coordinator: c.coordinator.id,
+    maxRunning: c.coordinator.maxRunning,
+    rules: join6(root, "rules.md"),
+    messages,
+    watches: join6(root, "coordinator/WATCHES.md"),
+    handoff: join6(root, "coordinator/handoff-protocol.md")
+  };
+}
+
+// src/lanes/commands/init.ts
+async function init(args, opts, ctx) {
+  const root = resolve4(ctx.cwd, args[0] || ".");
+  const configPath = join7(root, "lanes.json");
+  const c = existsSync3(configPath) ? loadConfig(root) : defaults(root, ctx.home, opts["repos-root"]);
+  if (!existsSync3(configPath)) {
+    c.coordinator.id = opts.coordinator || c.coordinator.id;
+    c.terminal.backend = opts.terminal || c.terminal.backend;
+    c.launch.preapproveMcp = opts["preapprove-mcp"] === "true" || preapprovalDefault(ctx.templatesDir);
+  }
+  validate(c);
+  const vars = templateVars(c, ctx, root);
+  const put = (rel, content) => {
+    const path = join7(root, rel);
+    mkdirSync(dirname3(path), { recursive: true });
+    if (existsSync3(path)) ctx.out(`kept ${path}`);
+    else {
+      writeFileSync2(path, content, { flag: "wx" });
+      ctx.out(`created ${path}`);
+    }
+  };
+  put("lanes.json", `${JSON.stringify(c, null, 2)}
+`);
+  for (const [source, dest] of [["rules.md", "rules.md"], ["coordinator.md", "prompts/coordinator.md"], ...["WATCHES.md", "handoff-protocol.md", "NOW.md", "STATE.md"].map((n) => [n, `coordinator/${n}`])]) {
+    put(dest, renderTemplate(readTemplate(ctx, source), vars));
+  }
+  const status2 = join7(root, "messages/status");
+  const hadStatus = existsSync3(status2);
+  mkdirSync(status2, { recursive: true });
+  ctx.out(`${hadStatus ? "kept" : "created"} ${status2}`);
+  const ignore = join7(root, ".gitignore");
+  const text = existsSync3(ignore) ? readFileSync3(ignore, "utf8") : "";
+  const missing = [".state/", "messages/"].filter((s) => !text.split(/\r?\n/).includes(s));
+  if (missing.length) {
+    writeFileSync2(ignore, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${missing.join("\n")}
+`);
+    ctx.out(`created ${ignore}`);
+  } else ctx.out(`kept ${ignore}`);
+  return 0;
+}
+
+// src/lanes/commands/add.ts
+import { existsSync as existsSync5, mkdirSync as mkdirSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname4, join as join9, resolve as resolve5 } from "node:path";
+
+// src/lanes/preapprove.ts
+import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
+import { join as join8 } from "node:path";
+var SUPPORTED_MAJORS = [5];
+async function preapprove(ctx, cwd, enabled) {
+  if (!enabled) {
+    ctx.out("MCP preapproval is off; enable with lanes init --preapprove-mcp for a new folder, or set launch.preapproveMcp to true in lanes.json.");
+    return;
+  }
+  const files = [".mcp.json", ".pi/mcp.json"].filter((f) => existsSync4(join8(cwd, f)));
+  if (!files.length) return;
+  const skip = (reason2) => ctx.err(`MCP preapproval skipped: ${reason2}; pi will ask once per server when the lane starts.`);
+  let reason = "adapter not found";
+  try {
+    const adapter = join8(ctx.piAgentDir, "npm/node_modules/pi-mcp-adapter");
+    const pkg = JSON.parse(readFileSync4(join8(adapter, "package.json"), "utf8"));
+    if (!SUPPORTED_MAJORS.includes(Number(String(pkg.version).split(".")[0]))) {
+      reason = `adapter ${pkg.version} not supported (supports ${SUPPORTED_MAJORS.join(", ")}.x)`;
+      throw new Error(reason);
+    }
+    reason = "adapter API changed";
+    const mod = await ctx.loadModule(join8(adapter, "dist/project-server-trust.js"));
+    if (typeof mod.approveProjectServer !== "function" || typeof mod.hashProjectServerDefinition !== "function") throw new Error(reason);
+    for (const file of files) {
+      let servers;
+      try {
+        servers = JSON.parse(readFileSync4(join8(cwd, file), "utf8")).mcpServers ?? {};
+      } catch {
+        skip(`invalid .mcp.json (${join8(cwd, file)})`);
+        continue;
+      }
+      for (const [name, def] of Object.entries(servers)) {
+        const hash = await mod.hashProjectServerDefinition(def);
+        await mod.approveProjectServer(cwd, name, def);
+        ctx.out(`approved ${file} ${name} ${String(hash).slice(0, 12)}`);
+      }
+    }
+  } catch {
+    skip(reason);
+  }
 }
 
 // src/lanes/commands/add.ts

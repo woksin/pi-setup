@@ -162,7 +162,7 @@ test("installer trust opt-in is inherited by new folders and saved true survives
   } finally { rmSync(box.root, { recursive: true, force: true }); }
 });
 
-test("installer preserves an existing coordination folder's true trust choice without rewriting it", () => {
+test("installer ignores MCP trust in an unrelated LANES_DIR without rewriting it", () => {
   const box = sandbox();
   try {
     const root = join(box.home, "existing"); mkdirSync(root);
@@ -170,7 +170,7 @@ test("installer preserves an existing coordination folder's true trust choice wi
     const config = join(root, "lanes.json"); writeFileSync(config, JSON.stringify(c)); const before = readFileSync(config);
     assertInstall(install(box, [...args, "--with", "lanes"], { env: { LANES_DIR: root } }));
     assert.ok(readFileSync(config).equals(before));
-    assert.equal(JSON.parse(readFileSync(join(box.home, ".local/share/pi-setup/lanes/defaults.json"), "utf8")).launch.preapproveMcp, true);
+    assert.equal(JSON.parse(readFileSync(join(box.home, ".local/share/pi-setup/lanes/defaults.json"), "utf8")).launch.preapproveMcp, false);
   } finally { rmSync(box.root, { recursive: true, force: true }); }
 });
 
@@ -191,4 +191,13 @@ test("wizard trust consent reaches installed defaults; declining and cancellatio
     if (consent === CANCEL) assert.ok(!existsSync(installed));
     else assert.equal(JSON.parse(readFileSync(installed, "utf8")).launch.preapproveMcp, consent);
   }
+});
+
+test("installer never inherits MCP trust from the current directory or its ancestors", async () => {
+  const home = tempDir("lanes-unrelated-trust"); const root = join(home, "unrelated"); const cwd = join(root, "nested"); mkdirSync(cwd, { recursive: true });
+  const c = defaults(root, home); c.launch.preapproveMcp = true; writeFileSync(join(root, "lanes.json"), JSON.stringify(c));
+  const ctx = testCtx(home, { cwd, which: (n) => ["python3", "git"].includes(n) ? `/stub/${n}` : undefined });
+  assert.equal(await installerMain(["--yes", "--user", "tester", "--repos-root", join(home, "repos"), "--profile", "balanced", "--with", "lanes", "--skip-npm"], ctx), 0);
+  assert.equal(JSON.parse(readFileSync(join(home, ".local/share/pi-setup/lanes/defaults.json"), "utf8")).launch.preapproveMcp, false);
+  assert.equal(JSON.parse(readFileSync(join(root, "lanes.json"), "utf8")).launch.preapproveMcp, true);
 });

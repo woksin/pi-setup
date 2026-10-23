@@ -2,8 +2,8 @@
 Format: WATCH|label|until|interval|check
 Edit this file in the same turn as any watch change. Re-arm every watch after a reset.
 
-WATCH|{{coordinator}} inbox|success|120|INBOX_DIR='{{messages}}' $HOME/.pi/agent/bin/inbox-watch {{coordinator}}
-WATCH|lanes status|change|900|lanes --dir '{{root}}' status
+WATCH|{{coordinator}} inbox|success|120|INBOX_DIR={{messages_sh}} "$HOME/.pi/agent/bin/inbox-watch" {{coordinator_sh}}
+WATCH|lanes status|change|900|lanes --dir {{root_sh}} status
 
 ## On fire: coordinator inbox
 Read only new files, act in at most 2 calls or record the pending action, and re-arm. Always relay through a new message file, never an edit.

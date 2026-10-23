@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { findRoot, loadConfig, preapprovalDefault } from "./lanes/config.ts";
+import { preapprovalDefault } from "./lanes/config.ts";
 import { apply, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
 import { isInteractive, parseArgs, USAGE } from "./args.ts";
@@ -99,9 +99,7 @@ function extraRows(
 }
 
 function savedPreapproval(ctx: Ctx): boolean {
-  const installed = preapprovalDefault(join(ctx.home, ".local/share/pi-setup/lanes/templates"));
-  try { return installed || loadConfig(findRoot(undefined, ctx.env, ctx.cwd)).launch.preapproveMcp; }
-  catch { return installed; } // No valid coordination folder here; never change its files.
+  return preapprovalDefault(join(ctx.home, ".local/share/pi-setup/lanes/templates"));
 }
 
 function resolveAll(

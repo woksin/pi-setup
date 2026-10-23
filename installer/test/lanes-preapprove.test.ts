@@ -28,3 +28,15 @@ test("MCP preapproval is optional, guarded, non-blocking and uses the adapter AP
   writeFileSync(join(cwd, ".mcp.json"), "{"); await preapprove(ctx, cwd, true);
   assert.equal(errors.length, 1); assert.match(errors[0], /^MCP preapproval skipped: .*; pi will ask once per server when the lane starts\.$/);
 });
+
+test("a malformed project file is named accurately and does not prevent other file approvals", async () => {
+  const home = tempDir("lanes-mcp-invalid"); const cwd = join(home, "wt"); mkdirSync(join(cwd, ".pi"), { recursive: true });
+  const bad = join(cwd, ".mcp.json"); writeFileSync(bad, "{");
+  writeFileSync(join(cwd, ".pi/mcp.json"), '{"mcpServers":{"valid":{"command":"test"}}}');
+  const adapter = join(home, "agent/npm/node_modules/pi-mcp-adapter"); mkdirSync(adapter, { recursive: true }); writeFileSync(join(adapter, "package.json"), '{"version":"5.1.0"}');
+  const errors: string[] = []; const calls: unknown[][] = [];
+  const ctx = { piAgentDir: join(home, "agent"), out: () => {}, err: (s: string) => errors.push(s), loadModule: async () => ({ hashProjectServerDefinition: () => "abcdef", approveProjectServer: (...args: unknown[]) => calls.push(args) }) } as LanesCtx;
+  await preapprove(ctx, cwd, true);
+  assert.deepEqual(errors, [`MCP preapproval skipped: invalid .mcp.json (${bad}); pi will ask once per server when the lane starts.`]);
+  assert.deepEqual(calls, [[cwd, "valid", { command: "test" }]]);
+});

@@ -9,6 +9,7 @@ export async function preapprove(ctx: LanesCtx, cwd: string, enabled: boolean): 
   }
   const files = [".mcp.json", ".pi/mcp.json"].filter((f) => existsSync(join(cwd, f)));
   if (!files.length) return;
+  const skip = (reason: string) => ctx.err(`MCP preapproval skipped: ${reason}; pi will ask once per server when the lane starts.`);
   let reason = "adapter not found";
   try {
     const adapter = join(ctx.piAgentDir, "npm/node_modules/pi-mcp-adapter");
@@ -21,7 +22,9 @@ export async function preapprove(ctx: LanesCtx, cwd: string, enabled: boolean): 
     const mod = await ctx.loadModule(join(adapter, "dist/project-server-trust.js"));
     if (typeof mod.approveProjectServer !== "function" || typeof mod.hashProjectServerDefinition !== "function") throw new Error(reason);
     for (const file of files) {
-      const servers = JSON.parse(readFileSync(join(cwd, file), "utf8")).mcpServers ?? {};
+      let servers: Record<string, unknown>;
+      try { servers = JSON.parse(readFileSync(join(cwd, file), "utf8")).mcpServers ?? {}; }
+      catch { skip(`invalid .mcp.json (${join(cwd, file)})`); continue; }
       for (const [name, def] of Object.entries(servers)) {
         const hash = await mod.hashProjectServerDefinition(def);
         await mod.approveProjectServer(cwd, name, def);
@@ -29,6 +32,6 @@ export async function preapprove(ctx: LanesCtx, cwd: string, enabled: boolean): 
       }
     }
   } catch {
-    ctx.err(`MCP preapproval skipped: ${reason}; pi will ask once per server when the lane starts.`);
+    skip(reason);
   }
 }

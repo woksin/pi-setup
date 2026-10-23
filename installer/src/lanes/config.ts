@@ -31,9 +31,10 @@ export function defaults(root: string, home: string, reposRoot?: string): Config
 /** Installed defaults apply only when creating a new coordination folder. */
 export function preapprovalDefault(templatesDir: string): boolean {
   const path = join(dirname(templatesDir), "defaults.json");
-  if (!existsSync(path)) return false;
+  let text: string;
+  try { text = readFileSync(path, "utf8"); } catch { return false; }
   try {
-    const value = JSON.parse(readFileSync(path, "utf8"));
+    const value = JSON.parse(text);
     if (typeof value?.launch?.preapproveMcp !== "boolean") throw new Error("invalid launch.preapproveMcp");
     return value.launch.preapproveMcp;
   } catch (e) { throw new UsageError(`invalid lanes defaults: ${(e as Error).message}`); }

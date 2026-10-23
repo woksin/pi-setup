@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -5,8 +6,8 @@ import { join } from "node:path";
 import { tempDir, REPO } from "./helpers/home.ts";
 import type { LanesCtx } from "../src/lanes/ctx.ts";
 import { main } from "../src/lanes/cli.ts";
-import { loadConfig, saveConfig } from "../src/lanes/config.ts";
-import { renderTemplate } from "../src/lanes/templates.ts";
+import { defaults, loadConfig, saveConfig } from "../src/lanes/config.ts";
+import { readTemplate, renderTemplate, templateVars } from "../src/lanes/templates.ts";
 function fixture() {
   const home = tempDir("lanes-commands"); const lines: string[] = []; const errors: string[] = []; const calls: string[] = [];
   const ctx: LanesCtx = { home, cwd: home, env: {}, platform: "linux", now: () => new Date(2026, 0, 2, 3, 4),
@@ -90,4 +91,26 @@ test("MCP trust defaults off, explicit opt-in is explained and reruns preserve s
   const other = join(home, "opt-in");
   assert.equal(await main(["init", other, "--preapprove-mcp"], ctx), 0); assert.equal(loadConfig(other).launch.preapproveMcp, true);
   assert.equal(await main(["init", other], ctx), 0); assert.equal(loadConfig(other).launch.preapproveMcp, true);
+});
+
+test("coordinator shell commands quote hostile root and message paths as single words", () => {
+  const { ctx, home } = fixture();
+  const root = join(home, "root' $(printf injected); space");
+  const c = defaults(root, home);
+  c.messages.dir = "messages' $(printf injected); space";
+  const vars = templateVars(c, ctx, root);
+  const watches = renderTemplate(readTemplate(ctx, "WATCHES.md"), vars);
+  const coordinator = renderTemplate(readTemplate(ctx, "coordinator.md"), vars);
+  const commands = watches.split("\n").filter((s) => s.startsWith("WATCH|")).map((s) => s.split("|").slice(4).join("|"));
+  commands.push(/First turn: run `([^`]+)`/.exec(coordinator)![1]);
+  const rules = renderTemplate(readTemplate(ctx, "rules.md"), vars);
+  commands.push(/`(INBOX_DIR=[^`]+)`/.exec(rules)![1]);
+  const expected = [[`INBOX_DIR=${join(root, c.messages.dir)}`, "$HOME/.pi/agent/bin/inbox-watch", "L0"], ["lanes", "--dir", root, "status"], ["lanes", "--dir", root, "status"], [`INBOX_DIR=${join(root, c.messages.dir)}`]];
+  for (const [i, command] of commands.entries()) {
+    const env = { ...process.env, HOME: home, BASH_ENV: "/dev/null", ENV: "/dev/null" };
+    const syntax = spawnSync("bash", ["--noprofile", "--norc", "-n"], { input: command, env, encoding: "utf8", timeout: 10000 });
+    assert.equal(syntax.status, 0, syntax.stderr);
+    const words = spawnSync("python3", ["-c", "import json,shlex,sys; print(json.dumps(shlex.split(sys.argv[1])))", command], { env, encoding: "utf8", timeout: 10000 });
+    assert.equal(words.status, 0, words.stderr); assert.deepEqual(JSON.parse(words.stdout), expected[i]);
+  }
 });

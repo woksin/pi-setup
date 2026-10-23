@@ -1,10 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/home.ts";
 import { validId, validTopic, messageName, parseMessageName, sessionDirFor } from "../src/lanes/names.ts";
-import { defaults, expand, findRoot, loadConfig, saveConfig, validate } from "../src/lanes/config.ts";
+import { defaults, expand, findRoot, loadConfig, preapprovalDefault, saveConfig, validate } from "../src/lanes/config.ts";
 
 test("lane and group ids, topics and message names follow the shared grammar", () => {
   for (const s of ["L0", "R-AI", "GROUP", "A123"]) assert.ok(validId(s));
@@ -41,4 +41,17 @@ test("config expansion, validation, root lookup and atomic saves preserve unknow
   for (const [key, value] of [["version", 2], ["baseBranch", 3], ["terminal", { backend: "bad" }], ["coordinator", { ...c.coordinator, id: "ALL" }]]) {
     assert.throws(() => validate({ ...c, [key]: value }), new RegExp(String(key)));
   }
+});
+
+test("missing and unreadable installed defaults are not saved MCP consent", () => {
+  const dir = tempDir("lanes-unreadable-defaults"); const templates = join(dir, "templates"); const path = join(dir, "defaults.json");
+  assert.equal(preapprovalDefault(templates), false);
+  mkdirSync(path); // Deterministic read failure, including under a privileged test runner.
+  assert.equal(preapprovalDefault(templates), false); rmSync(path, { recursive: true });
+  writeFileSync(path, '{"launch":{"preapproveMcp":true}}');
+  if (process.getuid?.() !== 0) {
+    chmodSync(path, 0);
+    try { assert.equal(preapprovalDefault(templates), false); } finally { chmodSync(path, 0o600); }
+  }
+  assert.equal(preapprovalDefault(templates), true);
 });

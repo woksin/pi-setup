@@ -7,7 +7,7 @@ Your cwd must be your assigned worktree. Stop if it is not. Read the repository'
 Fetch and merge the base branch. Claim the issue if there is one. Derive build, lint and test gates from the repository's CI; record exact commands and results.
 
 ## Inbox
-Keep one watch: `$HOME/.pi/agent/bin/inbox-watch <ID> [GROUP]`, with `INBOX_DIR` set to `{{messages}}`, until=success interval=120. On a wake, read only new files and act in at most 2 calls, then re-arm. On timeout, only re-arm. Never edit an old message; reply with `lanes send`. Messages and marker state belong in the coordination folder, not your repository.
+Keep one watch: `"$HOME/.pi/agent/bin/inbox-watch" <ID> [GROUP]`, with `INBOX_DIR={{messages_sh}}`, until=success interval=120. On a wake, read only new files and act in at most 2 calls, then re-arm. On timeout, only re-arm. Never edit an old message; reply with `lanes send`. Messages and marker state belong in the coordination folder, not your repository.
 
 ## Status
 Use `lane-status set <ID> waiting-on "dependency" --until +90m` when blocked, and `lane-status set <ID> working` when working. Keep the coordinator informed.
@@ -16,7 +16,7 @@ Use `lane-status set <ID> waiting-on "dependency" --until +90m` when blocked, an
 Stay within scope. Run heavy builds and tests through `pi-phase run` with bounded execution and queue timers. Use injected runners in tests; never start another agent session from a test. Do not bypass safety guards. Preserve other people's work.
 
 ## Finish and report
-Run the gates. Report verified facts, commit SHAs, exact check results, files changed and open questions to the coordinator with `lanes send {{coordinator}} <topic> -m "report"`. Do not push, merge or remove worktrees without the shipping policy's permission.
+Run the gates. Report verified facts, commit SHAs, exact check results, files changed and open questions to the coordinator with `lanes send {{coordinator_sh}} <topic> -m "report"`. Do not push, merge or remove worktrees without the shipping policy's permission.
 
 ## Stopping
 Stop and report if a design decision is needed, a blocker is outside scope, or repeated attempts yield no new evidence. Never remove a worktree automatically.

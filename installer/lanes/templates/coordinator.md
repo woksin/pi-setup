@@ -8,4 +8,4 @@ Read first:
 - {{root}}/coordinator/NOW.md
 - {{root}}/coordinator/STATE.md
 
-First turn: run `lanes --dir '{{root}}' status`, then arm the watches in WATCHES.md. Keep NOW.md and STATE.md accurate as work changes. Never silently drop an inbox watch across a handoff.
+First turn: run `lanes --dir {{root_sh}} status`, then arm the watches in WATCHES.md. Keep NOW.md and STATE.md accurate as work changes. Never silently drop an inbox watch across a handoff.
