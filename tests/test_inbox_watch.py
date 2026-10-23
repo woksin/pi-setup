@@ -46,6 +46,16 @@ class InboxWatchSpecs(unittest.TestCase):
         self.assertEqual(matches(["L24-to-L0-x.md"], "L24"), set())
         self.assertEqual(matches(["R-AI-to-L0-x.md"], "--alias", "R-AI", "L24"), set())
 
+    def test_timestamp_prefixed_names(self):
+        names = ["20261023-074001-L0-to-L15-x.md", "20261023T074001-L0-to-L15-y.md",
+                 "20261023-074001-ALL-from-L0-z.md", "20261023-074001-L15-to-L0-own.md",
+                 "20261023-074001-L0-to-L16-other.md", "20261023-074001-L0-to-L0-l15-topic.md"]
+        self.assertEqual(matches(names, "L15"),
+                         {"20261023-074001-L0-to-L15-x.md", "20261023T074001-L0-to-L15-y.md",
+                          "20261023-074001-ALL-from-L0-z.md"})
+        self.assertEqual(matches(["20261023-074001-RETRO-to-PISETUP-L0-rule.md"], "PISETUP"),
+                         {"20261023-074001-RETRO-to-PISETUP-L0-rule.md"})
+
     def test_lane_in_topic_is_not_a_recipient(self):
         self.assertEqual(matches(["L0-to-PISETUP-l45-machine-patch-2225.md"], "L45"), set())
         self.assertEqual(matches(["L0-to-PISETUP-l45-machine-patch-2225.md"], "PISETUP"), {"L0-to-PISETUP-l45-machine-patch-2225.md"})

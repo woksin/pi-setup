@@ -187,6 +187,7 @@ has been deleted. Shared layers mean modest savings: about 1 GB on a 13.7 GB
 | `bin/secret-sweep` | Read-only daily gitleaks scan of local sessions and `.ai-work` records; redacted reports under `~/.pi/agent/logs/secret-sweep/`. |
 | `bin/pi-cleanup` | Disk cleanup of build output and stale worktrees (dry run by default). |
 | `templates/brief.md` | Template for delegation briefs. |
+| `templates/repo-orchestrator-brief.md` | Template brief for the repo orchestrator that coordinates several lanes in one repository. |
 | `settings.json`, `npm-package.json` | My pi settings and the npm packages I use. |
 
 ### Workflow rules worth knowing
