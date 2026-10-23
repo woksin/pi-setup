@@ -6,9 +6,9 @@ import type { DoctorCheck } from "./doctor.ts";
 /** pi's global npm package store is ~/.pi/agent/npm (npm install --prefix). */
 export const PINNED_PACKAGES = [
   { name: "@woksin/pi-jobs", version: "0.3.1" },
-  { name: "@woksin/pi-context-budget", version: "0.3.0" },
+  { name: "@woksin/pi-context-budget", version: "0.4.0" },
   { name: "@woksin/pi-recover", version: "0.1.1" },
-  { name: "@woksin/pi-orch", version: "0.1.0" },
+  { name: "@woksin/pi-orch", version: "0.1.1" },
 ];
 export const PACKAGE_BINS = [
   ["pi-context-budget", "pi-session"], ["pi-orch", "orch"], ["pi-orch", "orch-poll"],

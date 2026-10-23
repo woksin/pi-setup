@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { backendFor, type MessageRef } from "../backend.ts";
-import { expand, effectiveParent, laneDir, laneTree, type Config } from "../config.ts";
+import { expand, effectiveParent, laneDir, laneTree, repoOrchestrator, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { idleMinutes } from "../sessions.ts";
 import { runningPi } from "../processes.ts";
@@ -52,7 +52,7 @@ function lastMessage(last: MessageRef | undefined, ctx: LanesCtx): string {
 function warnMissingOrchestrators(c: Config, ctx: LanesCtx): void {
   for (const repo of new Set(c.lanes.filter(l => !l.retired && l.repo).map(l => l.repo))) {
     const lanes = c.lanes.filter(l => !l.retired && l.repo === repo);
-    if (lanes.length > 1 && !lanes.some(l => l.role === "repo-orch")) {
+    if (lanes.length > 1 && !repoOrchestrator(c, repo)) {
       ctx.err(`warning: ${repo}: ${lanes.length} lanes, no repo-orch`);
     }
   }

@@ -16,6 +16,20 @@ function fixture() {
     run: async (cmd, args) => { calls.push([cmd, ...args]); if (args.includes("add")) mkdirSync(args.at(-2)!, { recursive: true }); return { code: cmd === "pgrep" || args.includes("show-ref") ? 1 : 0, stdout: args.includes("get-url") ? "https://host/example/alpha.git" : "", stderr: "", timedOut: false }; } };
   return { root, c, out, err, ctx, calls, invoke: (...a: string[]) => main(["--dir", root, ...a], ctx) };
 }
+test("multi-repo orchestrators group, route and suppress missing-orchestrator warnings", async () => {
+  const f = fixture();
+  f.c.lanes.push({ ...f.c.lanes[0], id: "R-PAIR", repo: "example/beta", role: "repo-orch", orchestrates: ["example/alpha", "example/beta"], worktree: "orch" });
+  f.c.lanes.push({ ...f.c.lanes[0], id: "L2", worktree: "l2" });
+  validate(f.c, f.root, f.root); saveConfig(f.root, f.c);
+  assert.equal(effectiveParent(f.c.lanes[0], f.c), "R-PAIR");
+  assert.equal(await f.invoke("status"), 0); assert.ok(!f.err.join("\n").includes("no repo-orch"));
+  assert.equal(await f.invoke("send", "L0", "hello", "--from", "L1", "-m", "hi"), 0);
+  assert.ok(f.out.join("\n").includes("to-R-PAIR"));
+  f.c.lanes.push({ ...f.c.lanes[1], id: "R-DUP", worktree: "duplicate", repo: "example/gamma" });
+  assert.throws(() => validate(f.c, f.root, f.root), /duplicate repo-orch/);
+  f.c.lanes.pop(); f.c.lanes[0].orchestrates = ["example/beta"];
+  assert.throws(() => validate(f.c, f.root, f.root), /orchestrates/);
+});
 test("hierarchy validates roles, parents, cycles, worktrees and unique repo orchestrators", () => {
   for (const patch of [{ role: "bad" }, { parent: "NO" }, { parent: "L1" }, { role: "repo-orch", parent: "L2" }]) {
     const f = fixture(); Object.assign(f.c.lanes[0], patch); assert.throws(() => validate(f.c));

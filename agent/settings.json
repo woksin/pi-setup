@@ -31,8 +31,8 @@
     "npm:@woksin/pi-recover@0.1.1",
     "npm:pi-browser-use",
     "npm:donsetch",
-    "npm:@woksin/pi-context-budget@0.3.0",
-    "npm:@woksin/pi-orch@0.1.0",
+    "npm:@woksin/pi-context-budget@0.4.0",
+    "npm:@woksin/pi-orch@0.1.1",
     "./local-packages/pi-questions"
   ],
   "hideThinkingBlock": true,

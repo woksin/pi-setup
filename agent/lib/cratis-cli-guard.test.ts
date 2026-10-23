@@ -468,6 +468,58 @@ describe("guards.test.ts harness cases", () => {
 		}
 	});
 
+	for (const hasUI of [true, false]) {
+		for (const orchestrated of [true, false]) {
+			test(`guard off still denies production writes (UI=${hasUI}, orchestration=${orchestrated})`, async () => {
+				setGuards("cratis", true);
+				process.env.PI_ORCH_ID = orchestrated ? "test-orch" : "";
+				const app = fake(hasUI);
+				cratisExtension(app.pi);
+				for (const command of [
+					"cratis chronicle replay observer --server chronicle://prod-db:35000",
+					"CHRONICLE_CONNECTION_STRING=chronicle://production:35000 cratis chronicle jobs stop 1",
+					"cratis chronicle replay observer --context studio",
+				]) {
+					const result = await app.fire("tool_call", bash(command));
+					assert.equal(result?.block, true, command);
+					assert.match(result.reason, /denied on production \(\/guards off cratis does not cover production\)/);
+				}
+				assert.equal(app.selections.length, 0);
+				assert.equal(app.notices.length, 0);
+			});
+		}
+	}
+
+	test("guard off checks active production contexts but leaves read-only commands alone", async () => {
+		setGuards("cratis", true);
+		const app = fake();
+		cratisExtension(app.pi);
+		context = "Context: production\nServer: chronicle://cluster:35000\n";
+		for (const command of ["cratis chronicle replay observer", "cratis prologue start"]) {
+			assert.match((await app.fire("tool_call", bash(command))).reason, /active cratis context is a production context/);
+		}
+		assert.equal(await app.fire("tool_call", bash("cratis chronicle jobs list")), undefined);
+		assert.equal(app.notices.length, 0);
+		assert.equal(app.selections.length, 0);
+	});
+
+	for (const hasUI of [true, false]) {
+		test(`guard off fails closed on unreadable context even with a dev override (UI=${hasUI})`, async () => {
+			setGuards("cratis", true);
+			context = "";
+			const app = fake(hasUI);
+			cratisExtension(app.pi);
+			for (const command of ["cratis chronicle replay observer", "cratis prologue start", "cratis chronicle replay observer --server chronicle://localhost:35000"]) {
+				const result = await app.fire("tool_call", bash(command));
+				assert.equal(result?.block, true);
+				assert.match(result.reason, /production target cannot be ruled out/);
+			}
+			assert.equal(await app.fire("tool_call", bash("cratis chronicle jobs list")), undefined);
+			assert.equal(app.selections.length, 0);
+			assert.equal(app.notices.length, 0);
+		});
+	}
+
 	test("cratis classifier ignores heredoc bodies and quoted prose but still finds real command lines", () => {
 		// Regression for the L0 stall: prose in a message file was classified as a cratis call.
 		for (const command of [

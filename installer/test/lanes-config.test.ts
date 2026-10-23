@@ -20,6 +20,15 @@ test("lane and group ids, topics and message names follow the shared grammar", (
   assert.equal(sessionDirFor("/tmp/a:b/c", "/tmp/agent"), "/tmp/agent/sessions/--tmp-a-b-c--");
 });
 
+test("legacy named recipients are delimited by HHMM with an optional topic suffix", () => {
+  assert.deepEqual(parseMessageName("L0-to-ai-skills-1406-resume.md"), { from: "L0", to: ["ai-skills"], topic: "resume" });
+  assert.deepEqual(parseMessageName("L0-to-studio-503-1406-resume.md"), { from: "L0", to: ["studio-503"], topic: "resume" });
+  assert.deepEqual(parseMessageName("L0-to-hosted-ci-2327.md"), { from: "L0", to: ["hosted-ci"], topic: "2327" });
+  assert.deepEqual(parseMessageName("L0-to-lanes-disk-0400.md"), { from: "L0", to: ["lanes-disk"], topic: "0400" });
+  assert.deepEqual(parseMessageName("20261023-074001-L0-to-wave2-0505.md"), { from: "L0", to: ["wave2"], topic: "0505" });
+  for (const name of ["L0-to-ai-skills-resume.md", "L0-to-ai-skills-2460.md", "L0-to-ai-skills-1406.exe", "bad-to-ai-skills-1406.md"]) assert.equal(parseMessageName(name), undefined);
+});
+
 test("config expansion, validation, root lookup and atomic saves preserve unknown keys", () => {
   const root = tempDir("lanes-config");
   const home = tempDir("lanes-home");
