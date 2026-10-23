@@ -1,0 +1,37 @@
+# Shared lane rules
+
+## Where you run
+Your cwd must be your assigned worktree. Stop if it is not. Read the repository's AGENTS.md and its relevant rules before planning. Touch only the assigned repository and scope.
+
+## Start of work
+Fetch and merge the base branch. Claim the issue if there is one. Derive build, lint and test gates from the repository's CI; record exact commands and results.
+
+## Inbox
+Keep one watch: `$HOME/.pi/agent/bin/inbox-watch <ID> [GROUP]`, with `INBOX_DIR` set to `{{messages}}`, until=success interval=120. On a wake, read only new files and act in at most 2 calls, then re-arm. On timeout, only re-arm. Never edit an old message; reply with `lanes send`. Messages and marker state belong in the coordination folder, not your repository.
+
+## Status
+Use `lane-status set <ID> waiting-on "dependency" --until +90m` when blocked, and `lane-status set <ID> working` when working. Keep the coordinator informed.
+
+## Doing the work
+Stay within scope. Run heavy builds and tests through `pi-phase run` with bounded execution and queue timers. Use injected runners in tests; never start another agent session from a test. Do not bypass safety guards. Preserve other people's work.
+
+## Finish and report
+Run the gates. Report verified facts, commit SHAs, exact check results, files changed and open questions to the coordinator with `lanes send {{coordinator}} <topic> -m "report"`. Do not push, merge or remove worktrees without the shipping policy's permission.
+
+## Stopping
+Stop and report if a design decision is needed, a blocker is outside scope, or repeated attempts yield no new evidence. Never remove a worktree automatically.
+
+## Context handoff
+Keep NOW.md and STATE.md current, and follow `{{handoff}}`. Preserve constraints verbatim, separate facts from hypotheses, and include the next action and watch re-arm commands. After a reset, verify facts before acting.
+
+## Shipping and merge owners
+<!-- Fill in: who may push, review, merge and release. -->
+
+## Review rules
+<!-- Fill in: required reviews and gates. -->
+
+## Models and agent choices
+<!-- Fill in: approved models and delegation choices. -->
+
+## Repository notes
+<!-- Fill in: repository-specific conventions and constraints. -->

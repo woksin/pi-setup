@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: b7e8aefced4ca8c5f9cf6a4818283c3df8fa23ca131e2ebb6f0fb2280589576e
+// pi-setup-source-sha256: 006ab623308266e484b6a26a3b05f5608b291d5786fce3f2f01abfe603fc5372
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
