@@ -30,6 +30,20 @@ export interface JsonEntry {
   ops: JsonOp[];
 }
 
+export interface ServiceRecord {
+  kind: "launchd" | "systemd";
+  label: string;
+  /** HOME-relative paths of the unit files. */
+  files: string[];
+  /** pi-setup wrote (or adopted) the files; false means a foreign file was left alone and nothing is loaded or removed. */
+  managed: boolean;
+}
+
+export interface ComponentRecord {
+  on: boolean;
+  service?: ServiceRecord;
+}
+
 export interface Manifest {
   version: 1;
   installedAt: string;
@@ -43,6 +57,8 @@ export interface Manifest {
   /** `.pi-setup-new` files written beside a user file that pi-setup does not track (rel path to sha256). */
   pendingNew?: Record<string, string>;
   npm?: { packageJson: string; lock?: string };
+  /** The optional components the user chose (`--with`/`--without` or the wizard). */
+  components?: Record<string, ComponentRecord>;
 }
 
 export const noSource = (): Source => ({ release: null, commit: null });
@@ -121,6 +137,13 @@ export function validateManifest(home: string, m: Manifest): void {
   for (const [rel, j] of Object.entries(m.json)) {
     fromHomeRel(home, rel);
     if (j.backup !== undefined) checkBackupRel(j.backup);
+  }
+  for (const c of Object.values(m.components ?? {})) {
+    if (!c.service) continue;
+    if (typeof c.service.label !== "string" || !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(c.service.label)) {
+      throw new SetupError(`manifest service label rejected: ${String(c.service.label)}`);
+    }
+    for (const rel of c.service.files) fromHomeRel(home, rel);
   }
 }
 

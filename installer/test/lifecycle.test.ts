@@ -16,7 +16,7 @@ after(() => {
   for (const box of boxes) rmSync(box.root, { recursive: true, force: true });
 });
 
-const ARGS = (box: Sandbox, user = "einari") => ["--yes", "--skip-npm", "--user", user, "--repos-root", join(box.root, "repos")];
+const ARGS = (box: Sandbox, user = "einari") => ["--yes", "--skip-npm", "--with", "cratis", "--user", user, "--repos-root", join(box.root, "repos")];
 const RERUN = ["--skip-npm"];
 const manifestOf = (box: Sandbox) => JSON.parse(readFileSync(piPath(box, ".pi-setup/manifest.json"), "utf8"));
 const rel = (box: Sandbox, abs: string) => abs.slice(box.home.length + 1);
@@ -58,7 +58,7 @@ describe("manifest and re-runs (lifecycle e2e)", () => {
   test("L2b a plain re-run does not run npm again and writes nothing; --reinstall-npm or a changed package.json does", () => {
     const box = fresh();
     const npmCalls = () => stubLog(box).filter((l) => l.startsWith("npm install")).length;
-    assert.equal(install(box, ["--yes", "--user", "einari", "--repos-root", join(box.root, "repos")]).status, 0);
+    assert.equal(install(box, ["--yes", "--with", "cratis", "--user", "einari", "--repos-root", join(box.root, "repos")]).status, 0);
     assert.equal(npmCalls(), 1);
     const before = snapshot(box.home, true);
     const again = install(box, []);
@@ -231,7 +231,7 @@ describe("uninstall (lifecycle e2e)", () => {
 });
 
 describe("data-loss regressions (review blockers)", () => {
-  const PROFILE_ARGS = (box: Sandbox, profile: string) => ["--yes", "--skip-npm", "--user", "einari", "--repos-root", join(box.root, "repos"), "--profile", profile];
+  const PROFILE_ARGS = (box: Sandbox, profile: string) => ["--yes", "--skip-npm", "--with", "cratis", "--user", "einari", "--repos-root", join(box.root, "repos"), "--profile", profile];
 
   test("B1/B4 an edited agent or workflow survives a rerun, also with a different --profile; pi-profile is never called", () => {
     const box = fresh();

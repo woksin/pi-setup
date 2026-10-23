@@ -168,7 +168,7 @@ class InstallTests(unittest.TestCase):
     def clean_install(self):
         self.install("--dry-run", "--user", "einari", "--repos-root", "/tmp/x/repos")
         self.assertEqual(list(self.home.iterdir()), [], "dry run wrote to HOME")
-        self.install("--repos-root", "/tmp/x/repos", "--user", "einari")
+        self.install("--repos-root", "/tmp/x/repos", "--user", "einari", "--with", "cratis", "--with", "codescene")
         pi = self.home / ".pi/agent"
         self.assertEqual(json.loads((pi / "user.json").read_text()),
                          {"githubUser": "einari", "reposRoot": "/tmp/x/repos"})

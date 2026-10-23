@@ -15,6 +15,7 @@ function scripted(answers: unknown[]): { p: Prompter; asked: string[] } {
   const p: Prompter = {
     intro: () => {}, outro: () => {}, note: () => {}, spinner: () => ({ start: () => {}, stop: () => {} }),
     confirm: (o) => next(o.message), select: (o) => next(o.message), text: (o) => next(o.message),
+    multiselect: (o) => Promise.resolve(o.initial) as never,
     isCancel: (v) => v === CANCEL,
   };
   return { p, asked };

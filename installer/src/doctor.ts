@@ -6,6 +6,7 @@ import { gatherFacts } from "./doctor-probes.ts";
 import { fileSha, fromHomeRel, readManifest, validateManifest } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
 import type { Ctx, Detection } from "./types.ts";
+import { componentChecks } from "./doctor-components.ts";
 
 export { setupCmd } from "./doctor-checks.ts";
 export interface DoctorCheck {
@@ -36,7 +37,8 @@ async function inspect(ctx: Ctx) {
   try { manifest = readManifest(join(ctx.home, ".pi/agent")); if (manifest) validateManifest(ctx.home, manifest); } catch { manifest = undefined; }
   const gathered = await gatherFacts(ctx, manifest);
   const local = localChecks(ctx, gathered.facts);
-  return { ...local, facts: gathered.facts, checks: [...local.checks, ...gathered.checks] };
+  const extras = await componentChecks(ctx, local.manifest);
+  return { ...local, facts: gathered.facts, checks: [...local.checks, ...gathered.checks, ...extras] };
 }
 
 export async function runDoctor(ctx: Ctx, options: Options, baseCtx: Ctx): Promise<number> {

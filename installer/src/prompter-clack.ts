@@ -22,6 +22,15 @@ export function clackPrompter(): Prompter {
         })) as T | symbol,
       ),
     text: async (o) => wrap(await clack.text({ message: o.message, initialValue: o.initial, validate: o.validate })),
+    multiselect: async <T extends string>(o: Parameters<Prompter["multiselect"]>[0] & { options: { value: T }[] }) =>
+      wrap<T[]>(
+        (await clack.multiselect<T>({
+          message: o.message,
+          options: o.options as never,
+          initialValues: o.initial as T[],
+          required: false,
+        })) as T[] | symbol,
+      ),
     isCancel: (value) => value === CANCEL || clack.isCancel(value),
   };
 }

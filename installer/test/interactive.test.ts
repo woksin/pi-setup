@@ -59,6 +59,7 @@ function scripted(answers: Record<string, unknown[]>) {
       return answer("select", o.message, o.initial) as never;
     },
     text: (o) => answer("text", o.message, o.initial ?? "") as never,
+    multiselect: (o) => Promise.resolve(o.initial) as never,
     isCancel: (v) => v === CANCEL,
   };
   return { p, events, notes, offered };

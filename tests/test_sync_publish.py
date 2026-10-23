@@ -33,7 +33,7 @@ class SyncPublishTests(unittest.TestCase):
         self.home = Path(self.directory.name) / "home"
         self.home.mkdir()
         self.env = dict(os.environ, HOME=str(self.home), TMPDIR=self.directory.name, PYTHONDONTWRITEBYTECODE="1")
-        self.run_command("./install.sh", "--repos-root", "/tmp/x/repos", "--user", "tester", cwd=REPO)
+        self.run_command("./install.sh", "--repos-root", "/tmp/x/repos", "--user", "tester", "--with", "cratis", "--with", "codescene", cwd=REPO)
         self.pi = self.home / ".pi/agent"
         self.scratch = Path(self.directory.name) / "repo"
         shutil.copytree(REPO, self.scratch, ignore=shutil.ignore_patterns(".git", ".ai-work", "__pycache__", "node_modules"))

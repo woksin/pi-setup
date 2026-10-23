@@ -1,5 +1,7 @@
 import { PROVIDER_IDS, PROVIDER_LABELS } from "./types.ts";
 import type { Action, Detection, ProfileMeta } from "./types.ts";
+import { COMPONENTS } from "./components.ts";
+import type { ComponentChoice } from "./components.ts";
 import type { Choice } from "./profiles.ts";
 import type { ResolvedSettings } from "./settings.ts";
 
@@ -48,6 +50,8 @@ export function summaryLines(args: {
   skipNpm: boolean;
   kimi: string | undefined;
   warnings: string[];
+  components?: ComponentChoice;
+  componentNotes?: string[];
 }): string[] {
   const { settings, choice, actions } = args;
   const counts = countActions(actions);
@@ -63,6 +67,10 @@ export function summaryLines(args: {
     `Files: ${counts.added} new, ${counts.changed} changed${counts.kept ? `, ${counts.kept} kept (changed by you)` : ""}${counts.register ? ", register pi-questions" : ""}`,
     `npm install: ${args.skipNpm ? "skipped (--skip-npm)" : args.npm ? "yes" : "up to date"}`,
   );
+  if (args.components) {
+    const word = (id: string): string => `${COMPONENTS.find((c) => c.id === id)?.label} ${args.components?.[id]?.on ? "on" : "off"}`;
+    lines.push(`Extras: ${COMPONENTS.map((c) => word(c.id)).join(", ")}`);
+  }
   const kept = actions.filter((a) => a.op === "keep");
   if (kept.some((a) => /\/\.pi\/agent\/(agents\/[^/]+\.md|workflows\/[^/]+\.js)$/.test(a.path))) {
     lines.push(KEPT_EDITS);
@@ -70,6 +78,7 @@ export function summaryLines(args: {
   if (kept.some((a) => a.op === "keep" && a.noMarkers)) {
     lines.push("AGENTS.md has no pi-profile routing markers, so it is reconciled as a whole file; the new version is in AGENTS.md.pi-setup-new");
   }
+  lines.push(...(args.componentNotes ?? []));
   for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines.push(`warning: ${warning}`);
   return lines;
 }

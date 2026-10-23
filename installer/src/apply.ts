@@ -7,7 +7,7 @@ import { BackupRun, prune } from "./backups.ts";
 import {
   emptyManifest, fileSha, homeRel, noSource, pinnedBackups, recordArrayAdd, recordSet, saveIfChanged, sha256,
 } from "./manifest.ts";
-import type { FileEntry, JsonEntry, Manifest, Source } from "./manifest.ts";
+import type { ComponentRecord, FileEntry, JsonEntry, Manifest, Source } from "./manifest.ts";
 import type { Action, Ctx, JsonOp } from "./types.ts";
 
 const KEEP_RUNS = 10;
@@ -23,18 +23,25 @@ export interface ApplyOptions {
   profile: string;
   activeBefore: string | undefined;
   spinner?: { start(message: string): void; stop(message: string): void };
+  /** The choices to record in the manifest. */
+  components?: Record<string, ComponentRecord>;
 }
 
 export interface ApplyResult {
   code: number;
   /** Whether this run changed anything on disk besides the manifest and backups. */
   wrote: boolean;
+  /** Absolute paths this run wrote. */
+  written: Set<string>;
 }
 
 export function describe(action: Action): string | undefined {
   if (action.op === "install") return `install ${action.path}`;
   if (action.op === "keep") return `keep ${action.path} (changed since install; new version in ${action.newPath})`;
-  if (action.op === "register") return `register ./local-packages/pi-questions in ${action.path}`;
+  if (action.op === "register") {
+    const what = (action.jsonOps ?? []).map((o) => (o.op === "array-add" ? String(o.value) : o.key)).join(", ");
+    return `register ${what || "changes"} in ${action.path}`;
+  }
   return undefined;
 }
 
@@ -252,13 +259,14 @@ export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, 
     const line = describe(action);
     if (line) ctx.out(line);
   }
-  if (options.dryRun) return { code: 0, wrote: false };
+  if (options.dryRun) return { code: 0, wrote: false, written: new Set() };
   const run = new Run(ctx, piDir, manifest, noSource());
   let code = 0;
   try {
     run.source = await sourceOf(ctx);
     for (const action of actions) run.execute(action);
     applyProfile(options, piDir, run);
+    if (options.components) run.next.components = options.components;
     if (code === 0) {
       const npm = await runNpm(ctx, actions, options, piDir, manifest);
       code = npm.code;
@@ -268,7 +276,7 @@ export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, 
   } finally {
     run.finish();
   }
-  return { code, wrote: run.wrote };
+  return { code, wrote: run.wrote, written: run.written };
 }
 
 /** pi-profile is never run: the plan already wrote agents/, workflows/ and the routing block through reconciliation. Only ACTIVE is left. */
