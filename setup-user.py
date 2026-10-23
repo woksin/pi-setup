@@ -12,6 +12,7 @@ import sys
 # Only these synced files contain operator identity or repository-root settings.
 TEMPLATES = [
     "agent/AGENTS.md", "agent/bin/docker-guardian", "agent/bin/pi-cleanup",
+    "agent/pi-phase/config.json", "agent/pi-phase/README.md",
     "skills/github-issue-hygiene/SKILL.md",
     "tools/ai-work-lifecycle/README.md",
     "tools/ai-work-lifecycle/sweep-known-roots.py",

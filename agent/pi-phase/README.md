@@ -51,7 +51,7 @@ The shipped config contains ordered policy rules (Specifications, Fundamentals a
 
 The installer renders `{{REPOS_ROOT}}` from the configured repositories root, preserving valid JSON. Paths are case-sensitive globs (`*` also matches `/`; a leading `~` is expanded) matched against the real cwd (including nested worktrees); kinds must match too. A config-direct rule requires at least one completed run of the same exact cwd/command fingerprint in the last seven days with p90 at or below its `max_expected_s` (default 90). No history or a slower p90 downgrades the rule to fast, subject to the normal fast safeguards; slow history can therefore fall back to queued. Explicit direct overrides do not require history. Nonmatching paths retain existing automatic fast/heavy behaviour.
 
-A parent's brief may bind the execution policy or authorize a direct light check; subagents follow it instead of re-deciding policy or priority. High priority is used only when the brief grants it. Python/Node/TS unit checks, lint and small bundle builds finishing in about two minutes without Docker or .NET are light gates; the parent can authorize these to run directly under `nice -n 10` without waiting in the heavy queue. These are execution permissions, not permission to skip gates.
+A parent's brief may bind the execution policy or authorize a direct light check; subagents follow it instead of re-deciding policy or priority. High priority is used only when the brief grants it. Python/Node/TS unit checks, lint and small bundle builds finishing in about two minutes without Docker or .NET are light gates; the parent can authorize `--policy direct` for these so they skip the heavy queue. These are execution permissions, not permission to skip gates.
 
 ### Fast lane
 
