@@ -51,6 +51,8 @@ test("pi-phase budget: Σ(timeout+queue)+60 slack raises the allowed outer timeo
 	assert.equal(piPhaseBudget("pi-phase run --timeout 100 --queue-timeout 50 -- a && pi-phase run --timeout 200 --queue-timeout 0 -- b"), 410);
 	assert.equal(piPhaseBudget("pi-phase run --timeout 700 --queue-timeout 10 -- x"), undefined);
 	assert.equal(piPhaseBudget("pi-phase run --timeout 300 --queue-timeout 700 -- x"), undefined);
+	assert.equal(piPhaseBudget("pi-phase run --timeout 300 --queue-timeout 7200 -- x"), undefined);
+	assert.ok(assess("pi-phase run --timeout 300 --queue-timeout 7200 -- x", 7560, false).needsApproval);
 	assert.equal(piPhaseBudget("pi-phase run --timeout 700 --approved-long-timeout -- x"), undefined);
 	const cmd = "pi-phase run --kind build --timeout 500 --queue-timeout 200 -- make"; // budget 760
 	assert.deepEqual(assess(cmd, 760, false), {});
