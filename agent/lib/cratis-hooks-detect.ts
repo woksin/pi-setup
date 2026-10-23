@@ -107,7 +107,9 @@ export interface RunnerResult { status: number | null; error?: unknown }
 export type CratisRunner = (script: string, cwd: string, stdin: string, timeoutMs: number) => RunnerResult;
 export const spawnRunner: CratisRunner = (script, cwd, stdin, timeoutMs) => {
 	const run = spawnSync("bash", [script], { cwd, input: stdin, timeout: timeoutMs, stdio: ["pipe", "ignore", "ignore"] });
-	return { status: run.status, error: run.error };
+	// A script that exits before reading its stdin can make the payload write fail with EPIPE; its exit status still stands (#19).
+	const epipe = (run.error as NodeJS.ErrnoException | undefined)?.code === "EPIPE" && run.status !== null;
+	return { status: run.status, error: epipe ? undefined : run.error };
 };
 export const CRATIS_SCRIPT_TIMEOUT_MS = 3000;
 

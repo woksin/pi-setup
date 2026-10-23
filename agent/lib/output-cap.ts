@@ -9,7 +9,7 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { scan, summary } from "./secret-mask.ts";
+import { loadConfig as loadSecretConfig, scan, summary } from "./secret-mask.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Config and gating
@@ -242,13 +242,14 @@ export function capResult(
 	event: { toolName: string; toolCallId: string; input: Record<string, unknown>; content: Part[] },
 	maxChars: number,
 	dirs: string[],
+	secretConfig = loadSecretConfig(),
 ): TextPart[] | undefined {
 	const full = capText(event.toolName, event.content, maxChars);
 	if (full === undefined) return undefined;
 	// Never persist or truncate raw credentials first: a downstream handler cannot undo
 	// an offload or recover a secret cut across the head/tail boundary. Oversized scans
 	// fail closed here, rather than writing an unscanned >2 MiB payload to disk.
-	const masked = scan(full);
+	const masked = secretConfig.enabled ? scan(full, secretConfig.allowlist) : { text: full, skipped: false, count: 0, kinds: [] };
 	const text = masked.skipped ? "[secret-mask] Output omitted: exceeds 2 MiB scan limit; raw text was not offloaded." : masked.text;
 	const path = offload(text, dirs, event.toolCallId);
 	const keepFailures = looksLikeTestOrBuild(event.toolName, event.input ?? {}, text);

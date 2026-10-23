@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ToolLister } from "./cratis-hooks-detect.ts";
-import { cratisExtensionLoaded, cratisHookActive, cratisReadOnlyCommands, cratisSwitchOn, cratisVerdict } from "./cratis-hooks-detect.ts";
+import { cratisExtensionLoaded, cratisHookActive, cratisReadOnlyCommands, cratisSwitchOn, cratisVerdict, spawnRunner } from "./cratis-hooks-detect.ts";
 
 /** What `pi.getAllTools()` lists when Pi loaded the Cratis extension of `repo` (via the .pi/extensions symlink), or from `path`. */
 export const loaded = (repo: { root: string }, path = join(repo.root, ".pi", "extensions", "cratis-hooks", "index.ts")): ToolLister =>
@@ -98,16 +98,25 @@ test("cratisVerdict runs the real script only after positive registration: exit 
 	const repo = cratisRepo();
 	const other = cratisRepo(); // a different root than the one holding the scripts
 	const script = join(repo.root, ".cratis", "ai", "hooks", "scripts", "cratis-guard-store-mutations.sh");
-	const v = (cwd: string, options: object) => cratisVerdict("store-mutations", cwd, "cratis chronicle observers replay x", { env: {}, base: repo.root, tools: loaded(repo), ...options });
+	// Record the real runner's result so a failing assertion names its cause (#19).
+	let last: unknown;
+	const recording: typeof spawnRunner = (...args) => {
+		const result = spawnRunner(...args);
+		last = { status: result.status, error: (result.error as NodeJS.ErrnoException | undefined)?.code ?? result.error?.message };
+		return result;
+	};
+	const v = (cwd: string, options: object) => { last = undefined; return cratisVerdict("store-mutations", cwd, "cratis chronicle observers replay x", { env: {}, base: repo.root, tools: loaded(repo), run: recording, ...options }); };
+	const why = () => `runner result: ${JSON.stringify(last)}`;
 	try {
 		writeFileSync(script, '#!/usr/bin/env bash\ncat >/dev/null\n[ "$(pwd -P)" = "$(cd "$EXPECT_CWD" && pwd -P)" ] || exit 0\nexit 2\n');
 		process.env.EXPECT_CWD = other.sub;
 		// Run from repo.root (process.cwd()'s scripts) with the tool cwd = other.sub, exactly as the Cratis extension does.
-		assert.equal(v(other.sub, {}), "blocked");
-		writeFileSync(script, "#!/usr/bin/env bash\nexit 0\n"); // `hook_have jq || exit 0`
-		assert.equal(v(repo.sub, {}), "none");
-		writeFileSync(script, "#!/usr/bin/env bash\nexit 2\n");
-		assert.equal(v(repo.sub, {}), "blocked");
+		assert.equal(v(other.sub, {}), "blocked", why());
+		writeFileSync(script, "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n"); // `hook_have jq || exit 0`
+		assert.equal(v(repo.sub, {}), "none", why());
+		// Real Cratis scripts read the payload first; the stub does too.
+		writeFileSync(script, "#!/usr/bin/env bash\ncat >/dev/null\nexit 2\n");
+		assert.equal(v(repo.sub, {}), "blocked", why());
 		assert.equal(v(repo.sub, { env: { CRATIS_HOOKS_ALLOW_STORE_MUTATIONS: "1" }, run: () => { throw new Error("not run"); } }), "switch");
 		assert.equal(v(repo.sub, { run: () => ({ status: 2, error: new Error("timeout") }) }), "none");
 		assert.equal(v(repo.sub, { run: () => { throw new Error("spawn"); } }), "none");
