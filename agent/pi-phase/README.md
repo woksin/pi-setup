@@ -67,6 +67,32 @@ In orchestrated sessions only, the `dotnet` guard rejects definite unwrapped `do
 
 The executable `bin/pi-phase` is only a Python launcher; cleanup lives in `pi-phase/pi_phase.py`. It already handles missing groups and ignores EPERM only when no live group members remain. A reported EPERM alone does not establish that cleanup was safe, so do not swallow all permission errors. Changes to that implementation require separate scope and descendant-cleanup tests.
 
+## Phase history and throughput
+
+Each `run` appends one version-1 JSON line to `~/.pi/agent/state/pi-phase/ledger/YYYY-MM-DD.jsonl` (UTC), including phases that fail, time out, are cancelled, or are rejected after their kind is known. Ledger files older than 60 days are pruned opportunistically on append. A ledger error prints one stderr note and does not change the phase's output or exit status. There is no service or configuration toggle.
+
+Records contain `v`, `ts`, `session` (`PI_SESSION_ID`, otherwise null), `lane` (`PI_ORCH_ID` then `PI_LANE_ID`, otherwise null), absolute `cwd` (null if the cwd was deleted), `kind`, `stack`, `label`, `priority`, UTC `queuedAt`/`startedAt`/`endedAt`, monotonic `waitS`/`runS`, `exit`, `outcome`, `head`, `dirty`, and `argvHash`. `startedAt` is null and `runS` is zero if execution never started; otherwise runtime covers the execution gate through final phase cleanup. `ts` equals `endedAt`. Outcomes are `passed`, `failed`, `queue-timeout`, `timeout`, `cancelled`, `rejected`, and `error`; they reflect the cause, not just the numeric exit (a producer exiting 124 is `failed`, not `timeout`). A duplicate CI watcher is `rejected`. Internal errors after enqueue but before execution (for example, a failed claim or process launch) are `error`, not `rejected`.
+
+`head` is `git rev-parse HEAD` (2-second probe). `dirty` is `clean` for empty porcelain status, otherwise SHA-256 of `git status --porcelain=v1 -z --untracked-files=normal` bytes followed by `git diff HEAD --binary` bytes (5-second combined budget). Every Git call uses `--no-optional-locks` and `GIT_OPTIONAL_LOCKS=0` to prevent optional index locking. Failed probes, including non-Git cwd, yield null. Exactly one snapshot is started in a daemon thread immediately after waiter registration: queueing and admission never wait for Git, and no admission-time snapshot is taken. After phase cleanup and permit release, the ledger waits at most 1 second for the result; if it is still running, both `head` and `dirty` are null. These fields describe the code state when the phase was queued, not its state at completion. **Lanes must not edit files while a phase is queued or running.**
+
+Privacy: the ledger stores no command arguments, filenames from Git status, or diffs in clear text. `argvHash` is SHA-256 of the command argv joined with NUL. Labels and cwd are still descriptive metadata: do not put secrets in labels. Each line is a single `O_APPEND` write under 4 KiB; exceptionally large session/lane/cwd/label/priority strings are shortened to meet that bound. Reading history never creates state or prunes files.
+
+### Stacks, including frontend commands
+
+Stack is inferred from the command's executable basename: `dotnet` → `dotnet`; `node`, `npm`, `npx`, `yarn`, `pnpm`, `corepack`, `tsc`, `tsgo`, `vite`, `vitest`, `jest`, `playwright`, `eslint`, `prettier`, `turbo`, `nx` → `node`; `python`, `python3`, `pytest` → `python`; `docker`, `docker-compose` → `docker`; `cargo` → `rust`; `go` → `go`; everything else → `other`. Simple `env`, `nice`, `bash -c` and `sh -c` wrappers are unwrapped without executing shell text. Complex shell chains are `other`. Use `run --stack NAME` to override inference, including for scripts; names must match `^[a-z0-9-]{1,20}$`. Older records without a stack are grouped as `other`.
+
+```sh
+~/.pi/agent/bin/pi-phase run --kind test --stack node --label 'frontend tests' \
+  --timeout 120 --queue-timeout 120 -- npm test
+~/.pi/agent/bin/pi-phase stats
+~/.pi/agent/bin/pi-phase stats --days 14 --kind test --stack node --json
+~/.pi/agent/bin/pi-phase wait --eta --kind build
+```
+
+`stats [--days N] [--kind KIND] [--stack NAME] [--json]` defaults to the last 7 UTC calendar days, including today. It groups by day × kind × stack and adds a `total` row per kind × stack across the selected days. Columns are count, started count, wait/run p50 and p90 seconds, queue timeouts, and failures (`failed`, `timeout` or `error`, not cancellations or rejections). Wait percentiles include every record; run percentiles include only started records. Percentiles use nearest rank: sorted value at `ceil(p/100 × n)` (one-based); an empty sample is null in JSON, `-` in text. Malformed lines are skipped and counted. JSON is `{ "days": N, "skipped": N, "rows": [...] }`, with each row containing `day`, `kind`, `stack`, `count`, `started`, `waitS`/`runS` objects (`p50`, `p90`), `queueTimeouts`, and `failures`. It reads history only, never live locks.
+
+`wait --eta [--kind KIND]` defaults to build and estimates a new normal-priority arrival using the last 7 days' p50 runtime for that kind, running phases' elapsed time, live high/normal waiters, and heavy/integration capacity. Each queued kind uses its own median when available, otherwise the requested kind's median. It models priority/FIFO and integration backfill; low-priority waiters are behind the hypothetical arrival. It does not reserve a place, create a waiter, remove stale files, or mutate locks/permits. With no history it prints `eta unknown (no ledger data)`; otherwise, for example, `eta ~3m (ahead=2 running=4 p50run=160s, basis=18 runs)`. This is an estimate, rounded up to minutes, not an admission promise: memory gates, configuration changes and runtime variation can delay work.
+
 ## Memory ceilings (pi-setup#3)
 
 Config keys (defaults in code; `config.json` overrides, `0` turns a key off):
