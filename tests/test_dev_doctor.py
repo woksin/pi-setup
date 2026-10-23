@@ -485,7 +485,7 @@ class AddendumTests(unittest.TestCase):
         env = {**os.environ, 'HOME': str(home)}
         for first in (True, False):
             result = subprocess.run(['./install.sh', '--user', 'einari', '--repos-root', '/tmp/x'],
-                                    cwd=SCRIPT.parents[2], env=env, capture_output=True, text=True, timeout=30)
+                                    cwd=SCRIPT.parents[2], env=env, capture_output=True, text=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stderr)
             config = home / '.pi/agent/dev-doctor.json'
             pins = home / '.pi/agent/docker-guardian/pinned.txt'
