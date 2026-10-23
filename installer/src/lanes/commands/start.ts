@@ -4,6 +4,7 @@ import { expand, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { laneTarget } from "../sessions.ts";
 import { runningPi } from "../processes.ts";
+import { prune } from "../retention.ts";
 import { preapprove } from "../preapprove.ts";
 import { detectBackend, launchCommand, terminalBackend } from "../terminal.ts";
 export async function start(id: string, opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx): Promise<number> {
@@ -21,6 +22,10 @@ export async function start(id: string, opts: Record<string, string>, c: Config,
     if (wrapper) ctx.err("pi-session not found; starting pi directly (no relaunch after a context handoff)");
     else if (backend === "print") { wrapper = c.launch.wrapper; ctx.err(`${c.launch.wrapper} and pi not found; printing the command only`); }
     else throw new Error("pi not found");
+  }
+  if (c.messages.retention?.auto) {
+    try { prune(c, root, ctx); }
+    catch (e) { ctx.err(`warning: message prune failed: ${(e as Error).message.replace(/\s+/g, " ")}`); }
   }
   const command = launchCommand(c, root, cwd, coordinator ? c.coordinator.id : id, prompt, wrapper, expand(c.messages.dir, c, root, ctx.home));
   return terminalBackend(backend).start(ctx, { id: coordinator ? c.coordinator.id : id, cwd, command });

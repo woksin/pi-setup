@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { validId } from "./names.ts";
 
@@ -8,10 +9,14 @@ export interface Lane {
   id: string; repo: string; issue?: number; goal?: string; group: string | null;
   worktree: string; branch: string; prompt: string; [key: string]: unknown;
 }
+export interface Retention {
+  mode: "keep" | "archive" | "delete"; maxAgeDays: number; archiveDir?: string;
+  archiveMaxAgeDays: number | null; keepUnread: boolean; auto: boolean;
+}
 export interface Config {
   version: number; reposRoot: string; worktreesDir: string; baseBranch: string; repos: Record<string, string>;
   coordinator: { id: string; cwd: string; prompt: string; maxRunning: number; [key: string]: unknown };
-  messages: { dir: string; broadcast: string; [key: string]: unknown };
+  messages: { dir: string; broadcast: string; retention?: Retention; [key: string]: unknown };
   terminal: { backend: string; [key: string]: unknown };
   launch: { wrapper: string; preapproveMcp: boolean; unsetEnv: string[]; [key: string]: unknown };
   idle?: { minutes: number };
@@ -27,7 +32,7 @@ export function defaults(root: string, home: string, reposRoot?: string): Config
     idle: { minutes: 75 }, github: { repos: [], author: "@me", excludeLabels: [] },
     version: 1, reposRoot: reposRoot || dirname(root), worktreesDir: "${reposRoot}/.worktrees", baseBranch: "origin/main", repos: {},
     coordinator: { id: "L0", cwd: "${root}", prompt: "prompts/coordinator.md", maxRunning: 8 },
-    messages: { dir: "messages", broadcast: "ALL" }, terminal: { backend: "auto" },
+    messages: { dir: "messages", broadcast: "ALL", retention: { mode: "archive", maxAgeDays: 14, archiveDir: "archive", archiveMaxAgeDays: null, keepUnread: true, auto: true } }, terminal: { backend: "auto" },
     launch: { wrapper: "pi-session", preapproveMcp: false, unsetEnv: ["PI_MCP_CONFIG_MODE"] }, lanes: [],
   };
 }
@@ -43,7 +48,7 @@ export function preapprovalDefault(templatesDir: string): boolean {
   } catch (e) { throw new UsageError(`invalid lanes defaults: ${(e as Error).message}`); }
 }
 
-export function validate(value: unknown): asserts value is Config {
+export function validate(value: unknown, root = process.cwd(), home = homedir()): asserts value is Config {
   const c = value as Config;
   const require = (ok: unknown, key: string) => { if (!ok) throw new UsageError(`invalid ${key}`); };
   const text = (v: unknown) => typeof v === "string" && v.length > 0;
@@ -53,6 +58,19 @@ export function validate(value: unknown): asserts value is Config {
   require(c.repos && typeof c.repos === "object" && !Array.isArray(c.repos) && Object.values(c.repos).every(text), "repos");
   require(c.messages && text(c.messages.dir), "messages.dir");
   require(c.messages && typeof c.messages.broadcast === "string" && validId(c.messages.broadcast), "messages.broadcast");
+  if (c.messages.retention !== undefined) {
+    const r = c.messages.retention;
+    require(r && typeof r === "object" && !Array.isArray(r), "messages.retention");
+    require(["keep", "archive", "delete"].includes(r.mode), "messages.retention.mode");
+    require(Number.isInteger(r.maxAgeDays) && r.maxAgeDays >= 1, "messages.retention.maxAgeDays");
+    require(r.archiveDir === undefined || text(r.archiveDir), "messages.retention.archiveDir");
+    require(r.archiveMaxAgeDays === null || (Number.isInteger(r.archiveMaxAgeDays) && r.archiveMaxAgeDays >= 1), "messages.retention.archiveMaxAgeDays");
+    require(typeof r.keepUnread === "boolean", "messages.retention.keepUnread");
+    require(typeof r.auto === "boolean", "messages.retention.auto");
+    try {
+      require(archiveDir(c, root, home) !== expand(c.messages.dir, c, root, home), "messages.retention.archiveDir (must not be messages.dir)");
+    } catch (e) { throw new UsageError(`invalid messages.retention.archiveDir: ${(e as Error).message}`); }
+  }
   require(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !["ALL", c.messages.broadcast].includes(c.coordinator.id), "coordinator.id");
   require(text(c.coordinator.cwd), "coordinator.cwd"); require(text(c.coordinator.prompt), "coordinator.prompt");
   require(Number.isInteger(c.coordinator.maxRunning) && c.coordinator.maxRunning > 0, "coordinator.maxRunning");
@@ -79,7 +97,7 @@ export function validate(value: unknown): asserts value is Config {
     require(lane.goal === undefined || text(lane.goal), `${key}.goal`);
   }
 }
-export function expand(value: string, c: Config, root: string, home: string): string {
+export function expand(value: string, c: Config, root: string, home: string, base = root): string {
   let out = value;
   for (let n = 0; n < 8; n++) {
     const next = out.replace(/\$\{(root|reposRoot|worktreesDir)\}/g, (_, key) => key === "root" ? root : c[key]);
@@ -88,7 +106,10 @@ export function expand(value: string, c: Config, root: string, home: string): st
   }
   if (/\$\{/.test(out)) throw new UsageError(`invalid path expansion: ${value}`);
   if (out === "~" || out.startsWith("~/")) out = join(home, out.slice(2));
-  return isAbsolute(out) ? resolve(out) : resolve(root, out);
+  return isAbsolute(out) ? resolve(out) : resolve(base, out);
+}
+export function archiveDir(c: Config, root: string, home: string): string {
+  return expand(c.messages.retention?.archiveDir ?? "archive", c, root, home, expand(c.messages.dir, c, root, home));
 }
 export function findRoot(dir: string | undefined, env: Record<string, string | undefined>, cwd: string): string {
   if (dir || env.LANES_DIR) return resolve(cwd, dir || env.LANES_DIR!);
@@ -104,10 +125,10 @@ export function loadConfig(root: string): Config {
   let c: unknown;
   try { c = JSON.parse(readFileSync(join(root, "lanes.json"), "utf8")); }
   catch (e) { throw new UsageError(`invalid lanes.json: ${(e as Error).message}`); }
-  validate(c); return c;
+  validate(c, root); return c;
 }
 export function saveConfig(root: string, c: Config): void {
-  validate(c);
+  validate(c, root);
   const tmp = join(root, `.lanes-${randomUUID()}.tmp`);
   writeFileSync(tmp, `${JSON.stringify(c, null, 2)}\n`, { flag: "wx" });
   renameSync(tmp, join(root, "lanes.json"));

@@ -48,6 +48,8 @@ Add work with `lanes --dir <dir> add L1 --repo owner/name --issue 123` (clone th
 Run `lanes --dir <dir> start coordinator` or `start L1`; the coordinator starts in the coordination folder.
 `lanes send <TO> <topic> -m "text" --from L0` sends a message; `lanes status` shows the lanes (use `--dir` outside the folder).
 Terminal.app, iTerm and tmux are supported; `--terminal print` prints a shell command without starting a session.
+Message retention is configured with `messages.retention`: `mode` is `keep`, `archive` or `delete`; `maxAgeDays` sets the age threshold; `archiveDir` is relative to the messages folder (or absolute); `archiveMaxAgeDays: null` keeps archives forever. New folders default to archive after 14 days in `archive`, with `keepUnread: true` protecting messages newer than an addressed configured lane’s inbox marker (missing markers do not protect), and `auto: true` pruning before start; prune errors only warn. Existing configs without retention keep messages. Run `lanes messages prune [--dry-run] [--json]` manually; archive expiry also runs in keep mode.
+
 MCP preapproval is off by default. The wizard asks before trusting project MCP server definitions; `./install.sh --with lanes --preapprove-mcp` saves this opt-in for new coordination folders. `lanes init <new-dir> --preapprove-mcp` opts in for one folder. Existing folders keep their saved setting; doctor reports the current folder’s setting or the installed default.
 
 Lanes operations (use `--dir <folder>` outside the coordination folder):

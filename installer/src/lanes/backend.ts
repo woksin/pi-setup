@@ -15,7 +15,7 @@ export interface LaneBackend {
   unread(lane: string, opts?: { groups?: string[]; aliases?: string[] }): Promise<MessageRef[] | undefined>;
   status(lane: string): Promise<string | undefined>;
 }
-function addressed(m: MessageRef, id: string): boolean {
+export function addressed(m: MessageRef, id: string): boolean {
   return m.to.some((to) => to === id || (`-${to}-`).includes(`-${id}-`));
 }
 export class FileBackend implements LaneBackend {

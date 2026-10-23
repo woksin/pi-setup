@@ -9,6 +9,8 @@ Fetch and merge the base branch. Claim the issue if there is one. Derive build, 
 ## Inbox
 Keep one watch: `"$HOME/.pi/agent/bin/inbox-watch" <ID> [GROUP]`, with `INBOX_DIR={{messages_sh}}`, until=success interval=120. On a wake, read only new files and act in at most 2 calls, then re-arm. On timeout, only re-arm. Never edit an old message; reply with `lanes send`. Messages and marker state belong in the coordination folder, not your repository.
 
+Message retention is configured with `messages.retention`: `mode` is `keep`, `archive` or `delete`; `maxAgeDays` sets the age threshold; `archiveDir` is relative to the messages folder (or absolute); `archiveMaxAgeDays: null` keeps archives forever. New folders default to archive after 14 days in `archive`, with `keepUnread: true` protecting messages newer than an addressed configured lane’s inbox marker (missing markers do not protect), and `auto: true` pruning before start; prune errors only warn. Existing configs without retention keep messages. Run `lanes messages prune [--dry-run] [--json]` manually; archive expiry also runs in keep mode.
+
 ## Status
 Use `lane-status set <ID> waiting-on "dependency" --until +90m` when blocked, and `lane-status set <ID> working` when working. Keep the coordinator informed.
 
