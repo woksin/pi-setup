@@ -19,13 +19,24 @@ export function parseMessageName(name: string): { from: string; to: string[]; to
   let end = start;
   while (end < tokens.length && messageIdToken(tokens[end])) end++;
   const topic = tokens.slice(end).join("-").replace(/-[0-9]{4}(?:-[0-9]+)?$/, "");
-  if (end === start || !topic) return undefined;
+  if (end === start) return legacyNamedRecipient(tokens, k);
+  if (!topic) return undefined;
   if (k < 0) return { from: "", to: [tokens.slice(0, end).join("-")], topic };
   const left = tokens.slice(0, k);
   if (!left.length || !left.every(messageIdToken)) return undefined;
   const right = tokens.slice(start, end).join("-");
   return tokens[k] === "to" ? { from: left.join("-"), to: [right], topic }
     : { from: right, to: [left.join("-")], topic };
+}
+
+// Legacy named lanes use the clock token to delimit a lowercase recipient.
+function legacyNamedRecipient(tokens: string[], k: number): { from: string; to: string[]; topic: string } | undefined {
+  if (k < 1 || tokens[k] !== "to") return undefined;
+  const left = tokens.slice(0, k);
+  if (!left.every(messageIdToken)) return undefined;
+  const match = /^([a-z][a-z0-9]*(?:-[a-z0-9]+)*?)-((?:[01]\d|2[0-3])[0-5]\d)(?:-([a-z0-9][a-z0-9-]*))?$/.exec(tokens.slice(k + 1).join("-"));
+  if (!match) return undefined;
+  return { from: left.join("-"), to: [match[1]], topic: match[3] || match[2] };
 }
 
 // inbox-watch's ids are a run of capital-start tokens (or legacy ttys ids).

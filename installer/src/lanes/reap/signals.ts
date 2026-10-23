@@ -44,7 +44,7 @@ export async function collect(env: EvidenceContext): Promise<Signals> {
     if (!s.pids.length) { s.keeps.push("not running"); return s; }
     if (s.pids.length !== 1) { s.asks.push("shared cwd"); return s; }
     s.pid = s.pids[0]; await processEvidence(s, ctx); await resolveSession(s, ctx);
-    idle(s, env); snooze(s, env); inboxAndStatus(s, env); claimsAndOwnership(s, env);
+    idle(s, env); snooze(s, env); inboxAndStatus(s, env); await claimsAndOwnership(s, env);
     s.git = await gitEvidence(ctx, lane, s.cwd); if (s.git.error) s.asks.push(s.git.error);
     // File messages cannot prove delivery acknowledgement or candidate ownership.
   } catch (e) { s.asks.push((e as Error).message); }

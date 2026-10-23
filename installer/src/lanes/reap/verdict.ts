@@ -2,9 +2,7 @@
 export interface DecisionSignals { asks: string[]; keeps: string[]; finished: boolean; takeover: boolean }
 export interface Decision { verdict: "keep" | "ask" | "handoff" | "retire"; ground?: "finished" | "takeover"; reason: string }
 export function topReasons(reasons: string[]): string {
-  const counts = new Map<string, number>();
-  for (const reason of reasons) counts.set(reason, (counts.get(reason) ?? 0) + 1);
-  return [...counts].slice(0, 3).map(([reason, count]) => count > 1 ? `${count}× ${reason}` : reason).join("; ");
+  return [...new Set(reasons)].slice(0, 3).join("; ");
 }
 export function verdict(s: DecisionSignals): Decision {
   if (s.asks.length) return { verdict: "ask", reason: topReasons(s.asks) };

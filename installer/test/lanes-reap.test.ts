@@ -50,6 +50,15 @@ export function fixture() {
     invoke: (...args: string[]) => main(["--dir", root, ...args], ctx),
     rows: () => JSON.parse(out.at(-1)!) as { id: string; verdict: string; reason: string }[] };
 }
+function mockSubagentPids(f: ReturnType<typeof fixture>): void {
+  const run = f.ctx.run;
+  f.ctx.run = async (cmd, args, opts) => {
+    if (cmd === "ps" && args.includes("pid=")) {
+      f.calls.push({ cmd, args }); return args[1] === "101" ? f.result("101\n") : f.result("", 1);
+    }
+    return run(cmd, args, opts);
+  };
+}
 function foregroundProbe({ args, foreground, busy }: { args: string[]; foreground: boolean; busy: string }): string | undefined {
   if (args.includes("pgid=,tpgid=")) return "101 101\n";
   if (args.includes("pid=,ppid=,pgid=,command=")) return `101 1 101 ${foreground ? "pi" : "bash"}\n${busy.replace(/^(\d+) (\d+) /gm, "$1 $2 102 ")}`;
@@ -216,16 +225,52 @@ test("local active claims require exact identity rather than branch substrings",
     if (!keep) assert.ok(s.asks.includes("local claim ownership unknown"));
   }
 });
-test("unrelated subagents do not flood a lane, owned live and stale states stay scoped", async () => {
-  const f = fixture(); const dir = join(f.ctx.piAgentDir, "context-budget/status");
-  for (let i = 0; i < 20; i++) f.put(join(dir, `${i}.json`), JSON.stringify({ role: "subagent", pid: 900 + i, cwd: `${f.cwd}-other`, at: "old" }));
-  f.put(join(dir, "main.json"), JSON.stringify({ role: "main", pid: 101, cwd: f.cwd, at: "old" }));
-  assert.deepEqual((await evidence(f)).asks, []);
-  for (const identity of [{ pid: 101, cwd: "/other" }, { pid: 909, cwd: f.cwd }, { pid: 909, cwd: join(f.cwd, "child") }]) {
-    f.put(join(dir, "owned.json"), JSON.stringify({ role: "subagent", ...identity, at: f.now.toISOString() }));
+test("subagent ownership requires exact session, file or parent pid; cwd and own pid alone do not count", async () => {
+  const f = fixture(); mockSubagentPids(f); const path = join(f.ctx.piAgentDir, "context-budget/status/sub.json");
+  for (const identity of [{ cwd: f.cwd }, { cwd: join(f.cwd, "child") }, { pid: 101 }, { sessionId: "s10" }, { sessionFile: `${f.sessionFile}.other` }, { parentPid: 1010 }]) {
+    f.put(path, JSON.stringify({ role: "subagent", pid: 909, at: "unknown", ...identity }));
+    const s = await evidence(f); assert.deepEqual(s.asks, []); assert.ok(!s.keeps.includes("subagent running"));
+  }
+  for (const identity of [{ sessionId: "s1" }, { sessionFile: f.sessionFile }, { parentPid: 101 }]) {
+    f.put(path, JSON.stringify({ role: "subagent", pid: 101, at: "unknown", ...identity }));
     assert.ok((await evidence(f)).keeps.includes("subagent running"));
-    f.put(join(dir, "owned.json"), JSON.stringify({ role: "subagent", ...identity, at: "old" }));
-    assert.ok((await evidence(f)).asks.includes("owned subagent status stale or unknown"));
+  }
+  f.put(path, JSON.stringify({ role: "main", pid: 101, sessionId: "s1", at: "unknown" }));
+  assert.ok(!(await evidence(f)).keeps.includes("subagent running"));
+});
+test("owned live subagents keep regardless of status age; dead old records are finished history", async () => {
+  const f = fixture(); mockSubagentPids(f); const path = join(f.ctx.piAgentDir, "context-budget/status/sub.json");
+  const at = new Date(f.now.getTime() - 600001).toISOString();
+  f.put(path, JSON.stringify({ role: "subagent", parentPid: 101, pid: 101, at }));
+  const alive = await evidence(f); assert.deepEqual(alive.asks, []); assert.ok(alive.keeps.includes("subagent running"));
+  f.put(path, JSON.stringify({ role: "subagent", parentPid: 101, pid: 909, at }));
+  const dead = await evidence(f); assert.deepEqual(dead.asks, []); assert.ok(!dead.keeps.includes("subagent running"));
+});
+test("owned dead fresh, future and unknown timestamps ask once per lane, not once per record", async () => {
+  const f = fixture(); mockSubagentPids(f); const dir = join(f.ctx.piAgentDir, "context-budget/status");
+  const timestamps = [f.now.toISOString(), new Date(f.now.getTime() - 600000).toISOString(), "unknown", undefined, new Date(f.now.getTime() + 1000).toISOString()];
+  for (const at of timestamps) {
+    f.put(join(dir, "sub.json"), JSON.stringify({ role: "subagent", sessionId: "s1", pid: 909, at }));
+    assert.deepEqual((await evidence(f)).asks, ["owned subagent liveness uncertain"]);
+  }
+  for (let i = 0; i < 20; i++) f.put(join(dir, `${i}.json`), JSON.stringify({ role: "subagent", sessionId: "s1", pid: 909, at: f.now.toISOString() }));
+  f.put(join(dir, "alive.json"), JSON.stringify({ role: "subagent", sessionId: "s1", pid: 101 }));
+  const start = f.calls.length; const mixed = await evidence(f);
+  assert.deepEqual(mixed.asks, ["owned subagent liveness uncertain"]);
+  assert.deepEqual(mixed.keeps, ["subagent running"]);
+  assert.equal(f.calls.slice(start).filter(c => c.cmd === "ps" && c.args[1] === "909").length, 1);
+});
+test("unknown owned subagent pid or failed liveness probe asks even for old records", async () => {
+  const f = fixture(); mockSubagentPids(f); const path = join(f.ctx.piAgentDir, "context-budget/status/sub.json");
+  for (const pid of [undefined, 0, -1, "909"]) {
+    f.put(path, JSON.stringify({ role: "subagent", sessionId: "s1", pid, at: "2020-01-01T00:00:00Z" }));
+    assert.deepEqual((await evidence(f)).asks, ["owned subagent liveness uncertain"]);
+  }
+  f.put(path, JSON.stringify({ role: "subagent", sessionId: "s1", pid: 909, at: "2020-01-01T00:00:00Z" }));
+  const run = f.ctx.run;
+  for (const probe of [{ ...f.result("", 1), timedOut: true }, f.result("", 2), f.result(""), f.result("910")]) {
+    f.ctx.run = async (cmd, args, opts) => cmd === "ps" && args.includes("pid=") ? probe : run(cmd, args, opts);
+    assert.deepEqual((await evidence(f)).asks, ["owned subagent liveness uncertain"]);
   }
 });
 test("job snapshots cover sleeping watches and terminal updates clear them", async () => {
@@ -236,6 +281,10 @@ test("job snapshots cover sleeping watches and terminal updates clear them", asy
   lines.push({ type: "message", message: { role: "toolResult", toolName: "job_output", details: { ...snapshot, status: "matched" } } });
   f.put(f.sessionFile, lines.map(line => JSON.stringify(line)).join("\n"), 120);
   assert.ok(!(await evidence(f)).keeps.some(reason => reason.startsWith("job/watch")));
+});
+test("reason classes are deduplicated without history counts", () => {
+  assert.equal(verdict({ asks: ["uncertain", "uncertain", "claim", "claim"], keeps: [], finished: false, takeover: false }).reason, "uncertain; claim");
+  assert.equal(verdict({ asks: [], keeps: ["subagent running", "subagent running"], finished: false, takeover: false }).reason, "subagent running");
 });
 test("human reasons are bounded while raw asks remain complete", () => {
   const asks = Array.from({ length: 8 }, (_, i) => `lane evidence ${i}`);
@@ -253,7 +302,7 @@ const keepCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["busy child", f => f.setBusy("102 101 dotnet build")], ["busy child", f => f.setBusy("102 101 pi-phase run --kind build")],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/job.log"), "command"); f.setFiles(`n${p}\n`); }],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/watch.log"), "# pi-jobs watch until x: gh run watch 123"); f.setFiles(`n${p}\n`); }],
-  ["subagent", f => f.put(join(f.ctx.piAgentDir, "context-budget/status/sub.json"), JSON.stringify({ role: "subagent", pid: 101, cwd: f.cwd, at: f.now.toISOString() }))],
+  ["subagent", f => { mockSubagentPids(f); f.put(join(f.ctx.piAgentDir, "context-budget/status/sub.json"), JSON.stringify({ role: "subagent", sessionId: "s1", pid: 101, cwd: f.cwd, at: f.now.toISOString() })); }],
   ["unread", f => f.put(join(f.root, "messages/L0-to-L1-work-1200.md"), "hi")],
   ["in-progress claim", f => f.claim("in-progress")],
   ["declared wait", f => f.put(join(f.root, "messages/status/L1.status"), 'waiting-on "ci" until 2026-10-23T14:00:00Z')],
