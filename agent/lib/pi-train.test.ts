@@ -160,6 +160,22 @@ test('eta command updates and clears an existing delivery locally, respecting dr
   assert.ok(f.calls.every(call => call.command === 'git'));
 });
 
+test('close marks a train released or abandoned without gh calls, and only once', async t => {
+  const f = await setup(t);
+  f.calls.length = 0;
+  assert.equal(await f.invoke('close', '--dry-run'), 0);
+  assert.equal((await f.read()).state, 'open');
+  assert.equal(await f.invoke('close', '--abandoned'), 0);
+  const manifest = await f.read();
+  assert.equal(manifest.state, 'abandoned'); assert.ok(manifest.closedAt);
+  assert.equal(manifest.log.at(-1).op, 'close');
+  assert.equal(await f.invoke('close', '--train', TRAIN), 1);
+  assert.equal(await f.invoke('status', '--abandoned'), 2);
+  assert.ok(f.calls.every(call => call.command === 'git'));
+  assert.equal(await f.invoke('status', '--all', '--json'), 0);
+  assert.deepEqual(JSON.parse(f.output.at(-1)!).trains, []);
+});
+
 test('status exposes ETA recommendations and override precedence without additional gh calls', async t => {
   const f = await setup(t);
   assert.equal(await f.invoke('planned', '7', TRAIN, '--eta', '+20m'), 0);
