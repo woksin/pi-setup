@@ -136,7 +136,7 @@ test("heredocs fed to a shell/interpreter (directly, piped, or via substitution)
 		`git commit <<EOF\n%\nEOF`,
 		`git status "$(cat <<EOF\n%\nEOF\n)"`,
 		"git -c alias.x=foo commit -F - <<EOF\n$(cratis chronicle observers replay x)\nEOF",
-	].map(c => c.replace(/^(.*)%/s, "$1%").replace(/%/g, "cratis chronicle observers replay x"))) assert.ok(found(c).length > 0, c);
+	].map(c => c.replace(/%/g, "cratis chronicle observers replay x"))) assert.ok(found(c).length > 0, c);
 });
 
 test("heredoc skip is not a bypass: executed or expanded heredoc content is still classified", () => {
