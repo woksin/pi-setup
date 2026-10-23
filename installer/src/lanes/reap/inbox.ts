@@ -43,7 +43,8 @@ export function inboxAndStatus(s: Signals, env: EvidenceContext): void {
   const { c, root, ctx, lane } = env; const dir = expand(c.messages.dir, c, root, ctx.home);
   const marker = markerTime(s, root, dir, ctx.now().getTime());
   const since = marker ?? s.lastWrite;
-  const ids = [s.id, c.messages.broadcast, "ALL", lane.group].filter((id): id is string => Boolean(id));
+  const ids = [s.id, ...(s.inboxAliases ?? []), ...(ctx.env.INBOX_ALIASES?.split(",") ?? []),
+    c.messages.broadcast, "ALL", lane.group].filter((id): id is string => Boolean(id));
   for (const name of existsSync(dir) ? readdirSync(dir) : []) checkMessage(name, s, { dir, ids, since });
   s.keeps.push(...s.unread.map(() => "unread inbox"));
   if (pendingWithoutWatch(s, marker)) s.asks.push("pending inbound; inbox marker and watch evidence missing");

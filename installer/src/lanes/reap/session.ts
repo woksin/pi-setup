@@ -40,12 +40,12 @@ function checkFile(s: Signals, dir: string, ctx: LanesCtx): void {
   if (!absolute(ctx, s.sessionFile).startsWith(absolute(ctx, dir) + "/")) throw new Error("session file unknown");
   s.lastWrite = mtime(s.sessionFile);
 }
-export function resolveSession(s: Signals, ctx: LanesCtx): void {
+export async function resolveSession(s: Signals, ctx: LanesCtx): Promise<void> {
   const dir = sessionDirFor(s.cwd, ctx.piAgentDir);
   const { identity, beat } = sessionIdentity(s, ctx, dir);
   s.sessionId = identity?.sessionId; s.sessionFile = fileFor(identity, dir);
   checkFile(s, dir, ctx); checkHeartbeat(beat, s, ctx);
-  sessionWork(s, ctx);
+  await sessionWork(s, ctx);
 }
 function sessionIdentity(s: Signals, ctx: LanesCtx, dir: string) {
   try { readdirSync(dir); } catch { throw new Error("sessions directory unreadable or missing"); }

@@ -1,4 +1,4 @@
-import { dirname, join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { localClaims } from "./local-claims.ts";
 import { optionalText, jsonFiles } from "./files.ts";
 import type { Lane } from "../config.ts";
@@ -25,15 +25,20 @@ function namedNotes(s: Signals, env: EvidenceContext): void {
 }
 function assigned(task: Record<string, any>, s: Signals): boolean { return [s.sessionId, s.id].includes(task.assignee) || task.assignee?.sessionId === s.sessionId; }
 function openTask(task: Record<string, any>): boolean { return ["claimed", "blocked", "ready"].includes(task.state || task.status); }
-function subagentRunning(status: Record<string, any>): boolean { return status.role === "subagent" && !["done", "failed", "cancelled", "stopped"].includes(status.phase || status.state); }
+function insideCwd(cwd: unknown, laneCwd: string): boolean {
+  if (typeof cwd !== "string" || !isAbsolute(cwd)) return false;
+  const path = relative(laneCwd, cwd);
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
 function subagentOwned(status: Record<string, any>, s: Signals): boolean {
-  return (status.parentPid !== undefined && status.parentPid === s.pid)
-    || (status.parentSessionId !== undefined && status.parentSessionId === s.sessionId);
+  if (status.role !== "subagent") return false;
+  if (s.pid !== undefined && status.pid === s.pid) return true;
+  return insideCwd(status.cwd, s.cwd);
 }
 function orchestration(s: Signals, env: EvidenceContext): void {
   const { ctx } = env;
   for (const task of jsonFiles(join(ctx.home, ".pi/orch/tasks"))) if (assigned(task, s) && openTask(task)) s.asks.push("assigned pi-orch task requires handoff");
-  const statuses = jsonFiles(join(dirname(s.sessionFile!), "subagents")).filter(subagentRunning);
+  const statuses = jsonFiles(join(ctx.piAgentDir, "context-budget/status"));
   for (const status of statuses.filter(status => subagentOwned(status, s))) {
     const age = ctx.now().getTime() - Date.parse(status.at);
     if (!Number.isFinite(age) || age < 0 || age > 600000) s.asks.push("owned subagent status stale or unknown");

@@ -17,7 +17,7 @@ export interface Claim {
 export interface Signals extends DecisionSignals {
   id: string; cwd: string; pid?: number; pids: number[]; sessionId?: string; sessionFile?: string;
   lastWrite?: number; procStart?: string; tty?: string;
-  claims: Claim[]; git: GitEvidence; unread: string[]; status?: string; notes?: string[]; inboxWatch?: boolean;
+  claims: Claim[]; git: GitEvidence; unread: string[]; status?: string; notes?: string[]; inboxWatch?: boolean; inboxAliases?: string[];
 }
 export interface EvidenceContext { c: Config; lane: Lane; root: string; ctx: LanesCtx; minutes: number }
 export type CommandEnv = Pick<EvidenceContext, "c" | "root" | "ctx">;
@@ -43,7 +43,7 @@ export async function collect(env: EvidenceContext): Promise<Signals> {
     s.pids = await processIds(ctx, s.cwd);
     if (!s.pids.length) { s.keeps.push("not running"); return s; }
     if (s.pids.length !== 1) { s.asks.push("shared cwd"); return s; }
-    s.pid = s.pids[0]; await processEvidence(s, ctx); resolveSession(s, ctx);
+    s.pid = s.pids[0]; await processEvidence(s, ctx); await resolveSession(s, ctx);
     idle(s, env); snooze(s, env); inboxAndStatus(s, env); claimsAndOwnership(s, env);
     s.git = await gitEvidence(ctx, lane, s.cwd); if (s.git.error) s.asks.push(s.git.error);
     // File messages cannot prove delivery acknowledgement or candidate ownership.

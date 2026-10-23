@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 1c9ed80d9c9799de9a77d00d1ee30db2635364762e25db6e8d31a2437b3218c0
+// pi-setup-source-sha256: b27962593127c447959142361c3fe8b8beba6c46979d97b6968757f49b4eb3cd
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -965,30 +965,32 @@ var init_process = __esm({
   }
 });
 
-// src/lanes/reap/session-tail.ts
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
-function sessionTail(path2, limit = 8 * 1024 * 1024) {
-  const fd = openSync(path2, "r");
+// src/lanes/reap/session-scan.ts
+import { createReadStream, statSync as statSync4 } from "node:fs";
+import { createInterface } from "node:readline";
+async function scanSession(path2, consume, limits = { bytes: 256 * 1024 * 1024, milliseconds: 5e3 }) {
+  if (statSync4(path2).size > limits.bytes) throw new Error(INCOMPLETE);
+  const input = createReadStream(path2, { end: limits.bytes - 1 });
+  const lines2 = createInterface({ input, crlfDelay: Infinity });
+  const deadline = performance.now() + limits.milliseconds;
+  const timer = setTimeout(() => input.destroy(new Error(INCOMPLETE)), limits.milliseconds);
   try {
-    const size = fstatSync(fd).size;
-    const start2 = Math.max(0, size - limit);
-    const buffer = Buffer.alloc(size - start2);
-    let bytes = 0;
-    while (bytes < buffer.length) {
-      const read = readSync(fd, buffer, bytes, buffer.length - bytes, start2 + bytes);
-      if (!read) break;
-      bytes += read;
+    for await (const line of lines2) {
+      if (performance.now() >= deadline) throw new Error(INCOMPLETE);
+      if (line.trim()) consume(line);
     }
-    const data = buffer.subarray(0, bytes);
-    const offset = start2 ? data.indexOf(10) + 1 : 0;
-    if (start2 && !offset) throw new Error("session tail has no complete line boundary");
-    return { text: data.subarray(offset).toString("utf8"), truncated: start2 > 0 };
+    if (performance.now() >= deadline) throw new Error(INCOMPLETE);
+    if (statSync4(path2).size > input.bytesRead) throw new Error(INCOMPLETE);
   } finally {
-    closeSync(fd);
+    clearTimeout(timer);
+    lines2.close();
+    input.destroy();
   }
 }
-var init_session_tail = __esm({
-  "src/lanes/reap/session-tail.ts"() {
+var INCOMPLETE;
+var init_session_scan = __esm({
+  "src/lanes/reap/session-scan.ts"() {
+    INCOMPLETE = "session scan incomplete";
   }
 });
 
@@ -1011,8 +1013,16 @@ function watch(command, s) {
   const start2 = words.findIndex((word) => /(?:^|\/)inbox-watch$/.test(word));
   if (start2 < 0) return;
   const args = words.slice(start2 + 1);
-  while (args[0] === "--alias" && args.length > 1) args.splice(0, 2);
-  if (args[0] === s.id) s.inboxWatch = true;
+  const aliases = [];
+  while (args[0] === "--alias" && args.length > 1) {
+    aliases.push(args[1]);
+    args.splice(0, 2);
+  }
+  if (args[0] !== s.id) return;
+  s.inboxWatch = true;
+  const envAliases = words.slice(0, start2).find((word) => word.startsWith("INBOX_ALIASES="));
+  aliases.push(...envAliases?.slice("INBOX_ALIASES=".length).split(",") ?? []);
+  s.inboxAliases = [.../* @__PURE__ */ new Set([...s.inboxAliases ?? [], ...aliases.filter(Boolean)])];
 }
 function workTool(name) {
   return name === "subagent" || JOB_TOOLS.has(name);
@@ -1035,40 +1045,39 @@ function currentJob(job, s, ctx) {
   const deadline = job.startedAt + job.timeoutSeconds * 1e3;
   return job.cwd === s.cwd && Number.isFinite(deadline) && deadline > ctx.now().getTime();
 }
-function runningJob(job, s, ctx, truncated) {
+function runningJob(job, s, ctx) {
   if (job.status !== "running") return;
   if (!job.command || !Number.isFinite(job.startedAt)) {
-    s.asks.push(truncated ? `job ${job.id} open; start before session tail` : `job ${job.id} start evidence missing`);
+    s.asks.push(`job ${job.id} start evidence missing`);
     return;
   }
   if (!currentJob(job, s, ctx)) {
     s.asks.push("job/watch last recorded running; current state unknown");
   } else s.keeps.push("job/watch running (session snapshot)");
 }
-function sessionWork(s, ctx) {
+async function sessionWork(s, ctx) {
   const jobs = /* @__PURE__ */ new Map();
   const pending2 = /* @__PURE__ */ new Map();
-  const tail = sessionTail(s.sessionFile);
   try {
-    for (const line of tail.text.split("\n").filter(Boolean)) {
+    await scanSession(s.sessionFile, (line) => {
       const entry2 = JSON.parse(line);
       const message = entry2.type === "message" ? entry2.message : entry2;
       foldJobs(jobs, message);
       completions(jobs, message);
       toolCalls(pending2, message, s);
       toolResult(pending2, message, s);
-    }
-  } catch {
-    s.asks.push("session work history malformed");
+    });
+  } catch (error) {
+    s.asks.push(error.message === "session scan incomplete" ? "session scan incomplete" : "session work history malformed");
     return;
   }
   for (const tool of pending2.values()) s.keeps.push(`${tool} tool call pending`);
-  for (const job of jobs.values()) runningJob(job, s, ctx, tail.truncated);
+  for (const job of jobs.values()) runningJob(job, s, ctx);
 }
 var JOB_TOOLS;
 var init_session_work = __esm({
   "src/lanes/reap/session-work.ts"() {
-    init_session_tail();
+    init_session_scan();
     JOB_TOOLS = /* @__PURE__ */ new Set(["job_start", "job_watch", "job_list", "job_output", "job_kill"]);
   }
 });
@@ -1112,14 +1121,14 @@ function checkFile(s, dir, ctx) {
   if (!absolute(ctx, s.sessionFile).startsWith(absolute(ctx, dir) + "/")) throw new Error("session file unknown");
   s.lastWrite = mtime(s.sessionFile);
 }
-function resolveSession(s, ctx) {
+async function resolveSession(s, ctx) {
   const dir = sessionDirFor(s.cwd, ctx.piAgentDir);
   const { identity, beat } = sessionIdentity(s, ctx, dir);
   s.sessionId = identity?.sessionId;
   s.sessionFile = fileFor(identity, dir);
   checkFile(s, dir, ctx);
   checkHeartbeat(beat, s, ctx);
-  sessionWork(s, ctx);
+  await sessionWork(s, ctx);
 }
 function sessionIdentity(s, ctx, dir) {
   try {
@@ -1195,7 +1204,7 @@ var init_status_line = __esm({
 });
 
 // src/lanes/reap/inbox.ts
-import { existsSync as existsSync5, readFileSync as readFileSync8, readdirSync as readdirSync4, statSync as statSync4 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync8, readdirSync as readdirSync4, statSync as statSync5 } from "node:fs";
 import { join as join9 } from "node:path";
 function validMarker(time, now) {
   return Number.isFinite(time) && time > 0 && time <= now;
@@ -1203,7 +1212,7 @@ function validMarker(time, now) {
 function markerTime(s, root, dir, now) {
   const times = [];
   const canonical2 = join9(dir, `${s.id}-inbox.marker`);
-  if (existsSync5(canonical2)) times.push(statSync4(canonical2).mtimeMs);
+  if (existsSync5(canonical2)) times.push(statSync5(canonical2).mtimeMs);
   const watcher = join9(root, ".state", `inbox-${s.id}.marker`);
   if (existsSync5(watcher)) {
     const value = readFileSync8(watcher, "utf8").trim();
@@ -1231,7 +1240,7 @@ function checkMessage(name, s, options) {
   const message = parseMessageName(name);
   if (message?.from === s.id) return;
   if (!addressed(name, options.ids, message)) return;
-  if (options.since === void 0 || statSync4(join9(options.dir, name)).mtimeMs <= options.since) return;
+  if (options.since === void 0 || statSync5(join9(options.dir, name)).mtimeMs <= options.since) return;
   if (!message) s.asks.push("message name ambiguous (token match)");
   s.unread.push(name);
 }
@@ -1240,7 +1249,14 @@ function inboxAndStatus(s, env) {
   const dir = expand(c2.messages.dir, c2, root, ctx.home);
   const marker = markerTime(s, root, dir, ctx.now().getTime());
   const since = marker ?? s.lastWrite;
-  const ids = [s.id, c2.messages.broadcast, "ALL", lane.group].filter((id) => Boolean(id));
+  const ids = [
+    s.id,
+    ...s.inboxAliases ?? [],
+    ...ctx.env.INBOX_ALIASES?.split(",") ?? [],
+    c2.messages.broadcast,
+    "ALL",
+    lane.group
+  ].filter((id) => Boolean(id));
   for (const name of existsSync5(dir) ? readdirSync4(dir) : []) checkMessage(name, s, { dir, ids, since });
   s.keeps.push(...s.unread.map(() => "unread inbox"));
   if (pendingWithoutWatch(s, marker)) s.asks.push("pending inbound; inbox marker and watch evidence missing");
@@ -1317,7 +1333,7 @@ var init_local_claims = __esm({
 });
 
 // src/lanes/reap/ownership.ts
-import { dirname as dirname4, join as join11 } from "node:path";
+import { isAbsolute as isAbsolute5, join as join11, relative as relative4, sep as sep2 } from "node:path";
 function registry(text3) {
   const folded = /* @__PURE__ */ new Map();
   for (const line of text3.split("\n").filter((l2) => l2.trim())) {
@@ -1355,16 +1371,20 @@ function assigned(task, s) {
 function openTask(task) {
   return ["claimed", "blocked", "ready"].includes(task.state || task.status);
 }
-function subagentRunning(status2) {
-  return status2.role === "subagent" && !["done", "failed", "cancelled", "stopped"].includes(status2.phase || status2.state);
+function insideCwd(cwd, laneCwd) {
+  if (typeof cwd !== "string" || !isAbsolute5(cwd)) return false;
+  const path2 = relative4(laneCwd, cwd);
+  return path2 === "" || path2 !== ".." && !path2.startsWith(`..${sep2}`) && !isAbsolute5(path2);
 }
 function subagentOwned(status2, s) {
-  return status2.parentPid !== void 0 && status2.parentPid === s.pid || status2.parentSessionId !== void 0 && status2.parentSessionId === s.sessionId;
+  if (status2.role !== "subagent") return false;
+  if (s.pid !== void 0 && status2.pid === s.pid) return true;
+  return insideCwd(status2.cwd, s.cwd);
 }
 function orchestration(s, env) {
   const { ctx } = env;
   for (const task of jsonFiles(join11(ctx.home, ".pi/orch/tasks"))) if (assigned(task, s) && openTask(task)) s.asks.push("assigned pi-orch task requires handoff");
-  const statuses = jsonFiles(join11(dirname4(s.sessionFile), "subagents")).filter(subagentRunning);
+  const statuses = jsonFiles(join11(ctx.piAgentDir, "context-budget/status"));
   for (const status2 of statuses.filter((status3) => subagentOwned(status3, s))) {
     const age = ctx.now().getTime() - Date.parse(status2.at);
     if (!Number.isFinite(age) || age < 0 || age > 6e5) s.asks.push("owned subagent status stale or unknown");
@@ -1443,7 +1463,7 @@ async function collect(env) {
     }
     s.pid = s.pids[0];
     await processEvidence(s, ctx);
-    resolveSession(s, ctx);
+    await resolveSession(s, ctx);
     idle(s, env);
     snooze(s, env);
     inboxAndStatus(s, env);
@@ -1484,7 +1504,7 @@ var init_signals = __esm({
 });
 
 // src/lanes/backend.ts
-import { mkdirSync as mkdirSync2, readdirSync as readdirSync6, readFileSync as readFileSync9, renameSync as renameSync3, statSync as statSync5, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync2, readdirSync as readdirSync6, readFileSync as readFileSync9, renameSync as renameSync3, statSync as statSync6, writeFileSync as writeFileSync3 } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { join as join13 } from "node:path";
 function addressed2(m2, id) {
@@ -1535,7 +1555,7 @@ var init_backend = __esm({
         for (const name of names) {
           const parsed = parseMessageName(name);
           if (!parsed) continue;
-          const stat2 = statSync5(join13(this.dir, name));
+          const stat2 = statSync6(join13(this.dir, name));
           if (!stat2.isFile()) continue;
           const ref = { name, ...parsed, at: stat2.mtime };
           if (filter.from !== void 0 && ref.from !== filter.from) continue;
@@ -1561,7 +1581,7 @@ var init_backend = __esm({
         if (!validId(lane)) throw new Error("invalid lane id");
         let since;
         try {
-          since = statSync5(join13(this.dir, `${lane}-inbox.marker`)).mtimeMs;
+          since = statSync6(join13(this.dir, `${lane}-inbox.marker`)).mtimeMs;
         } catch (e) {
           if (e.code === "ENOENT") return void 0;
           throw e;
@@ -1710,7 +1730,7 @@ var init_handoff = __esm({
 });
 
 // src/lanes/commands/handoff.ts
-import { join as join15, relative as relative4 } from "node:path";
+import { join as join15, relative as relative5 } from "node:path";
 async function handoff(args, opts, env) {
   const { c: c2, root, ctx } = env;
   const lane = activeLane(args, c2);
@@ -1727,7 +1747,7 @@ async function handoff(args, opts, env) {
   atomicJson(join15(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), rows: [{
     id: lane.id,
     verdict: "handoff",
-    pack: relative4(root, packPath({ root, lane })),
+    pack: relative5(root, packPath({ root, lane })),
     signals: s
   }] });
   ctx.out(`handoff ${pack.id}: ${packPath({ root, lane })}`);
@@ -2185,11 +2205,11 @@ var init_closure = __esm({
 
 // src/lanes/reap/archive.ts
 import { copyFileSync, existsSync as existsSync7, lstatSync as lstatSync3, mkdirSync as mkdirSync5, readFileSync as readFileSync11, readdirSync as readdirSync8, unlinkSync } from "node:fs";
-import { dirname as dirname5, isAbsolute as isAbsolute5, join as join20, relative as relative5, resolve as resolve5 } from "node:path";
+import { dirname as dirname4, isAbsolute as isAbsolute6, join as join20, relative as relative6, resolve as resolve5 } from "node:path";
 function checkRetirement(lane, c2, root) {
   if (c2.lanes.some((l2) => !l2.retired && effectiveParent(l2, c2) === lane.id)) throw new Error("retirement would orphan active children; reparent first");
-  const prompt = relative5(root, resolve5(root, lane.prompt));
-  if (prompt.startsWith("..") || isAbsolute5(prompt)) throw new Error("prompt outside coordination root cannot be archived");
+  const prompt = relative6(root, resolve5(root, lane.prompt));
+  if (prompt.startsWith("..") || isAbsolute6(prompt)) throw new Error("prompt outside coordination root cannot be archived");
 }
 async function archive(env, s, to) {
   const { c: c2, lane, root, ctx } = env;
@@ -2219,7 +2239,7 @@ async function archive(env, s, to) {
   atomicJson(join20(dest, "closure.json"), closure);
   await recordClosure(env, s, { to, archive: dest });
   lane.retired = true;
-  lane.stateFile = relative5(root, join20(dest, "closure.json"));
+  lane.stateFile = relative6(root, join20(dest, "closure.json"));
   saveConfig(root, c2);
   sources.forEach(removeUnchanged);
   return dest;
@@ -2227,7 +2247,7 @@ async function archive(env, s, to) {
 function copySource(source) {
   if (!lstatSync3(source.path).isFile()) throw new Error(`archive source is not a regular file: ${source.path}`);
   source.body = readFileSync11(source.path);
-  mkdirSync5(dirname5(source.dest), { recursive: true });
+  mkdirSync5(dirname4(source.dest), { recursive: true });
   copyFileSync(source.path, source.dest);
 }
 function removeUnchanged(source) {
@@ -2267,7 +2287,7 @@ var init_verdict = __esm({
 });
 
 // src/lanes/commands/reap.ts
-import { join as join21, relative as relative6 } from "node:path";
+import { join as join21, relative as relative7 } from "node:path";
 function validateArgs(args, opts, c2) {
   if (args.length > 1) throw new UsageError("reap accepts one active lane ID");
   validateId(args[0], c2);
@@ -2281,14 +2301,14 @@ async function applyRow(row, env, opts) {
   await recipient(env, to);
   await ownContext(env, row.signals);
   const pack = await prepare(env, to, row.signals);
-  row.pack = relative6(root, packPath({ root, lane }));
+  row.pack = relative7(root, packPath({ root, lane }));
   if (pack.acceptance?.from !== to || pack.acceptance?.fingerprint !== fingerprint(row.signals)) {
     row.reason = `takeover request sent to ${to}; explicit acceptance required`;
     return;
   }
   await recipient(env, to);
   await safeQuit(env, row.signals, to);
-  row.pack = relative6(root, await archive(env, row.signals, to));
+  row.pack = relative7(root, await archive(env, row.signals, to));
   row.verdict = "retire";
   row.ground = "takeover";
   row.reason = `takeover accepted by ${to}; /quit exit confirmed; archived`;
@@ -2379,8 +2399,8 @@ function invalidRequest(args, lane, opts) {
   return Boolean(opts.clear) === Boolean(opts.until);
 }
 function until(value, ctx) {
-  const relative10 = /^\+(\d+)m$/.exec(value);
-  return relative10 ? ctx.now().getTime() + Number(relative10[1]) * 6e4 : Date.parse(value);
+  const relative11 = /^\+(\d+)m$/.exec(value);
+  return relative11 ? ctx.now().getTime() + Number(relative11[1]) * 6e4 : Date.parse(value);
 }
 function clear(path2) {
   try {
@@ -2428,7 +2448,7 @@ var init_templates = __esm({
 
 // src/lanes/commands/init.ts
 import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname6, join as join24, resolve as resolve6 } from "node:path";
+import { dirname as dirname5, join as join24, resolve as resolve6 } from "node:path";
 async function init(args, opts, ctx) {
   const root = resolve6(ctx.cwd, args[0] || ".");
   const configPath = join24(root, "lanes.json");
@@ -2442,7 +2462,7 @@ async function init(args, opts, ctx) {
   const vars = templateVars(c2, ctx, root);
   const put2 = (rel, content) => {
     const path2 = join24(root, rel);
-    mkdirSync7(dirname6(path2), { recursive: true });
+    mkdirSync7(dirname5(path2), { recursive: true });
     if (existsSync8(path2)) ctx.out(`kept ${path2}`);
     else {
       writeFileSync6(path2, content, { flag: "wx" });
@@ -2711,7 +2731,7 @@ var init_roles = __esm({
 
 // src/lanes/adopt/proposal.ts
 import { existsSync as existsSync9 } from "node:fs";
-import { basename as basename3, dirname as dirname7, relative as relative7 } from "node:path";
+import { basename as basename3, dirname as dirname6, relative as relative8 } from "node:path";
 function mergeDiscovered(c2, rows, options) {
   for (const row of rows) {
     if (row.id && !row.excluded) mergeLane(row, { c: c2, ...options });
@@ -2792,8 +2812,8 @@ function adoptedLane(row, env) {
   };
   const managed = configuredDirectory(expand(c2.worktreesDir, c2, root, ctx.home), ctx);
   if (!row.repo || !row.branch) return { ...lane, cwd: row.cwd };
-  if (dirname7(row.cwd) === managed) {
-    lane.worktree = relative7(managed, row.cwd);
+  if (dirname6(row.cwd) === managed) {
+    lane.worktree = relative8(managed, row.cwd);
     delete lane.cwd;
   } else lane.cwd = row.cwd;
   return lane;
@@ -2949,7 +2969,7 @@ var init_preapprove = __esm({
 
 // src/lanes/commands/add.ts
 import { existsSync as existsSync12, mkdirSync as mkdirSync8, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname8, join as join28, resolve as resolve8 } from "node:path";
+import { dirname as dirname7, join as join28, resolve as resolve8 } from "node:path";
 async function add(id, opts, c2, root, ctx) {
   validateInput(id, opts, c2);
   const lane = newLane(id, opts);
@@ -3126,7 +3146,7 @@ function writePrompt(input, { c: c2, root, ctx }) {
   const { lane, wt, base } = input;
   const { id, repo, branch } = lane;
   const prompt = expand(lane.prompt, c2, root, ctx.home);
-  mkdirSync8(dirname8(prompt), { recursive: true });
+  mkdirSync8(dirname7(prompt), { recursive: true });
   const template = readTemplate(ctx, lane.role === "repo-orch" ? "repo-orchestrator.md" : "lane.md");
   const vars = {
     ...templateVars(c2, ctx, root),
@@ -3164,7 +3184,7 @@ var init_add = __esm({
 });
 
 // src/lanes/sessions.ts
-import { readdirSync as readdirSync9, statSync as statSync6 } from "node:fs";
+import { readdirSync as readdirSync9, statSync as statSync7 } from "node:fs";
 import { join as join29 } from "node:path";
 function laneTarget(id, c2, root, ctx) {
   const coordinator = id === "coordinator" || id === c2.coordinator.id;
@@ -3176,7 +3196,7 @@ function laneTarget(id, c2, root, ctx) {
 function idleMinutes2(cwd, ctx) {
   try {
     const dir = sessionDirFor(cwd, ctx.piAgentDir);
-    const times = readdirSync9(dir).map((n3) => statSync6(join29(dir, n3))).filter((s) => s.isFile()).map((s) => s.mtimeMs);
+    const times = readdirSync9(dir).map((n3) => statSync7(join29(dir, n3))).filter((s) => s.isFile()).map((s) => s.mtimeMs);
     return times.length ? Math.max(0, Math.floor((ctx.now().getTime() - Math.max(...times)) / 6e4)) : void 0;
   } catch {
     return void 0;
@@ -3199,7 +3219,7 @@ var init_sessions = __esm({
 });
 
 // src/lanes/retention.ts
-import { closeSync as closeSync2, copyFileSync as copyFileSync2, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync as openSync2, readdirSync as readdirSync10, renameSync as renameSync4, unlinkSync as unlinkSync3, utimesSync } from "node:fs";
+import { closeSync, copyFileSync as copyFileSync2, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync, readdirSync as readdirSync10, renameSync as renameSync4, unlinkSync as unlinkSync3, utimesSync } from "node:fs";
 import { join as join30 } from "node:path";
 function stat(path2) {
   try {
@@ -3233,7 +3253,7 @@ function archive2(m2, dir) {
   mkdirSync9(dir, { recursive: true });
   const target = join30(dir, m2.name);
   try {
-    closeSync2(openSync2(target, "wx"));
+    closeSync(openSync(target, "wx"));
   } catch (e) {
     if (e.code === "EEXIST") return false;
     throw e;
@@ -3312,13 +3332,13 @@ var init_retention = __esm({
 });
 
 // src/lanes/commands/start.ts
-import { existsSync as existsSync13, statSync as statSync7 } from "node:fs";
+import { existsSync as existsSync13, statSync as statSync8 } from "node:fs";
 async function start(id, opts, c2, root, ctx) {
   rejectRetired(id, c2);
   const { coordinator, lane, cwd } = laneTarget(id, c2, root, ctx);
   const prompt = expand(coordinator ? c2.coordinator.prompt : lane.prompt, c2, root, ctx.home);
-  if (!existsSync13(cwd) || !statSync7(cwd).isDirectory()) throw new Error(`cwd not found: ${cwd}`);
-  if (!existsSync13(prompt) || !statSync7(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
+  if (!existsSync13(cwd) || !statSync8(cwd).isDirectory()) throw new Error(`cwd not found: ${cwd}`);
+  if (!existsSync13(prompt) || !statSync8(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
   const duplicate = (await runningPi(ctx)).find((p) => p.cwd === ctx.realpath(cwd));
   if (duplicate) throw new Error(`already running in ${cwd} (pid ${duplicate.pid}); not starting a second session`);
   if (!coordinator || !c2.launch.preapproveMcp) await preapprove(ctx, cwd, c2.launch.preapproveMcp);
@@ -3358,7 +3378,7 @@ var init_start = __esm({
 
 // src/lanes/commands/resume.ts
 import { join as join31, resolve as resolve9 } from "node:path";
-import { existsSync as existsSync14, statSync as statSync8 } from "node:fs";
+import { existsSync as existsSync14, statSync as statSync9 } from "node:fs";
 async function startCommand(id, opts, env) {
   if (opts["from-handoff"]) return fromHandoff({ id, opts }, env);
   return start(id, opts, env.c, env.root, env.ctx);
@@ -3447,7 +3467,7 @@ async function fromHandoff(input, env) {
   return code;
 }
 function requireWorktree(path2) {
-  if (!existsSync14(path2) || !statSync8(path2).isDirectory()) throw new Error("handoff worktree missing");
+  if (!existsSync14(path2) || !statSync9(path2).isDirectory()) throw new Error("handoff worktree missing");
 }
 var init_resume = __esm({
   "src/lanes/commands/resume.ts"() {
@@ -3564,7 +3584,7 @@ var init_nudge = __esm({
 });
 
 // src/lanes/joblogs.ts
-import { closeSync as closeSync3, openSync as openSync3, readSync as readSync2, readdirSync as readdirSync11, statSync as statSync9 } from "node:fs";
+import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync11, statSync as statSync10 } from "node:fs";
 import { join as join32 } from "node:path";
 function parseWatches(text3) {
   return text3.split(/\r?\n/).flatMap((line) => {
@@ -3575,12 +3595,12 @@ function parseWatches(text3) {
   });
 }
 function chunk(path2, length, position) {
-  const fd = openSync3(path2, "r");
+  const fd = openSync2(path2, "r");
   try {
     const b = Buffer.alloc(length);
-    return b.subarray(0, readSync2(fd, b, 0, length, position)).toString("utf8");
+    return b.subarray(0, readSync(fd, b, 0, length, position)).toString("utf8");
   } finally {
-    closeSync3(fd);
+    closeSync2(fd);
   }
 }
 function day(date) {
@@ -3600,7 +3620,7 @@ function liveWatch(jobs, watch2, now) {
     }
     for (const name of names.filter((n3) => n3.endsWith(".log"))) {
       const path2 = join32(dir, name);
-      const stat2 = statSync9(path2);
+      const stat2 = statSync10(path2);
       if (!stat2.isFile() || !chunk(path2, Math.min(4096, stat2.size), 0).split("\n")[0].includes(watch2.check)) continue;
       const tail = chunk(path2, Math.min(65536, stat2.size), Math.max(0, stat2.size - 65536));
       const last = tail.split("\n").filter((s) => /^--- check .* exit \d+ ---$/.test(s)).at(-1);
@@ -3616,7 +3636,7 @@ var init_joblogs = __esm({
 });
 
 // src/lanes/commands/resume-check.ts
-import { existsSync as existsSync15, readFileSync as readFileSync18, statSync as statSync10 } from "node:fs";
+import { existsSync as existsSync15, readFileSync as readFileSync18, statSync as statSync11 } from "node:fs";
 import { join as join33 } from "node:path";
 async function livePrs(text3, ctx) {
   if (!ctx.which("gh")) return;
@@ -3666,7 +3686,7 @@ async function resumeCheck(c2, root, ctx) {
     bad = true;
   } else {
     await livePrs(readFileSync18(path2, "utf8"), ctx);
-    const age = Math.floor((now.getTime() - statSync10(path2).mtimeMs) / 6e4);
+    const age = Math.floor((now.getTime() - statSync11(path2).mtimeMs) / 6e4);
     if (age > 90) {
       ctx.out(`STALE   NOW.md not updated for ${age} min`);
       bad = true;
@@ -3739,7 +3759,7 @@ var init_green_prs = __esm({
 });
 
 // src/lanes/commands/close.ts
-import { basename as basename4, dirname as dirname9 } from "node:path";
+import { basename as basename4, dirname as dirname8 } from "node:path";
 function closeBody(id, to, reason, unread2) {
   const body = [
     `Lane ${id} is closed.${to ? ` Reassigned to ${to}.` : ""}${reason ? ` Reason: ${clean(reason)}` : ""}`,
@@ -3782,7 +3802,7 @@ async function close(id, opts, c2, root, ctx) {
   const target = laneTarget(id, c2, root, ctx);
   const common = await ctx.run("git", ["-C", target.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 });
   if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
-  const clone = shellQuote(dirname9(common.stdout.trim()));
+  const clone = shellQuote(dirname8(common.stdout.trim()));
   const wt = shellQuote(target.cwd);
   const backend = backendFor(c2, ctx, root);
   const unread2 = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
@@ -4246,20 +4266,20 @@ var init_lanes_flow = __esm({
 // src/fsx.ts
 import {
   chmodSync,
-  closeSync as closeSync4,
+  closeSync as closeSync3,
   copyFileSync as copyFileSync3,
   existsSync as existsSync19,
   fsyncSync,
   mkdirSync as mkdirSync11,
-  openSync as openSync4,
+  openSync as openSync3,
   readdirSync as readdirSync12,
   realpathSync as realpathSync3,
   renameSync as renameSync5,
-  statSync as statSync11,
+  statSync as statSync12,
   utimesSync as utimesSync2,
   writeSync
 } from "node:fs";
-import { dirname as dirname10, join as join36 } from "node:path";
+import { dirname as dirname9, join as join36 } from "node:path";
 function timestamp(d) {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
@@ -4276,20 +4296,20 @@ function listFiles(dir, base = "") {
 }
 function backupCopy(from, to) {
   copyFileSync3(from, to);
-  const st = statSync11(from);
+  const st = statSync12(from);
   chmodSync(to, st.mode & 4095);
   utimesSync2(to, st.atime, st.mtime);
 }
 function atomicWrite(link, data, mode, pid = process.pid) {
   const path2 = existsSync19(link) ? realpathSync3(link) : link;
-  mkdirSync11(dirname10(path2), { recursive: true });
+  mkdirSync11(dirname9(path2), { recursive: true });
   const tmp = `${path2}.tmp-${pid}`;
-  const fd = openSync4(tmp, "w", mode);
+  const fd = openSync3(tmp, "w", mode);
   try {
     writeSync(fd, data);
     fsyncSync(fd);
   } finally {
-    closeSync4(fd);
+    closeSync3(fd);
   }
   chmodSync(tmp, mode);
   renameSync5(tmp, path2);
@@ -4306,7 +4326,7 @@ var init_fsx = __esm({
 // src/manifest.ts
 import { createHash as createHash5 } from "node:crypto";
 import { existsSync as existsSync20, lstatSync as lstatSync5, readFileSync as readFileSync20 } from "node:fs";
-import { isAbsolute as isAbsolute6, join as join37, relative as relative8 } from "node:path";
+import { isAbsolute as isAbsolute7, join as join37, relative as relative9 } from "node:path";
 function sha256(buf) {
   return createHash5("sha256").update(buf).digest("hex");
 }
@@ -4324,7 +4344,7 @@ function emptyManifest(now) {
 function problemWith(rel, allowProtected = false) {
   if (typeof rel !== "string" || rel === "") return "empty path";
   if (rel.includes("\0") || rel.includes("\\")) return "invalid character";
-  if (isAbsolute6(rel)) return "absolute path";
+  if (isAbsolute7(rel)) return "absolute path";
   if (rel.split("/").some((s) => s === "" || s === "." || s === "..")) return "path escapes its directory";
   const prefix = ".pi/agent/";
   if (!allowProtected && rel.startsWith(prefix)) {
@@ -4344,12 +4364,12 @@ function symlinkTarget(home, rel) {
   return join37(home, rel);
 }
 function homeRel(home, abs) {
-  const rel = relative8(home, abs);
-  if (rel === "" || rel.startsWith("..") || isAbsolute6(rel)) throw new SetupError(`${abs} is outside ${home}`);
+  const rel = relative9(home, abs);
+  if (rel === "" || rel.startsWith("..") || isAbsolute7(rel)) throw new SetupError(`${abs} is outside ${home}`);
   return rel.split("\\").join("/");
 }
 function checkBackupRel(rel) {
-  if (typeof rel !== "string" || rel === "" || isAbsolute6(rel) || rel.split("/").some((s) => s === "" || s === "." || s === "..")) {
+  if (typeof rel !== "string" || rel === "" || isAbsolute7(rel) || rel.split("/").some((s) => s === "" || s === "." || s === "..")) {
     throw new SetupError(`manifest backup path rejected: ${String(rel)}`);
   }
   return rel;
@@ -4435,8 +4455,8 @@ var init_manifest = __esm({
 });
 
 // src/backups.ts
-import { existsSync as existsSync21, mkdirSync as mkdirSync12, readdirSync as readdirSync13, rmdirSync, rmSync, statSync as statSync12, unlinkSync as unlinkSync4 } from "node:fs";
-import { dirname as dirname11, join as join38, relative as relative9 } from "node:path";
+import { existsSync as existsSync21, mkdirSync as mkdirSync12, readdirSync as readdirSync13, rmdirSync, rmSync, statSync as statSync13, unlinkSync as unlinkSync4 } from "node:fs";
+import { dirname as dirname10, join as join38, relative as relative10 } from "node:path";
 function filesBelow(dir, base = "") {
   const out = [];
   for (const e of readdirSync13(join38(dir, base), { withFileTypes: true })) {
@@ -4486,8 +4506,8 @@ function prune2(piDir, keep, pinned, dryRun) {
 }
 function tidy(piDir) {
   const base = backupsDir(piDir);
-  if (existsSync21(base) && statSync12(base).isDirectory()) pruneEmptyDirs(base);
-  const data = dirname11(base);
+  if (existsSync21(base) && statSync13(base).isDirectory()) pruneEmptyDirs(base);
+  const data = dirname10(base);
   if (existsSync21(data) && readdirSync13(data).length === 0) rmdirSync(data);
 }
 function backupsCommand(ctx, sub, keep, dryRun) {
@@ -4524,13 +4544,13 @@ var init_backups = __esm({
       backup(abs) {
         const run = this.runDir();
         const inside = abs.startsWith(`${this.piDir}/`);
-        const rel = inside ? relative9(this.piDir, abs) : `_home/${relative9(this.home, abs)}`;
+        const rel = inside ? relative10(this.piDir, abs) : `_home/${relative10(this.home, abs)}`;
         const target = join38(run, rel);
         if (!existsSync21(target)) {
-          mkdirSync12(dirname11(target), { recursive: true });
+          mkdirSync12(dirname10(target), { recursive: true });
           backupCopy(abs, target);
         }
-        return `${relative9(backupsDir(this.piDir), run)}/${rel}`;
+        return `${relative10(backupsDir(this.piDir), run)}/${rel}`;
       }
       runDir() {
         if (this.dir) return this.dir;
@@ -4559,12 +4579,12 @@ import {
   lstatSync as lstatSync6,
   mkdirSync as mkdirSync13,
   readFileSync as readFileSync21,
-  statSync as statSync13,
+  statSync as statSync14,
   symlinkSync,
   utimesSync as utimesSync3,
   writeFileSync as writeFileSync9
 } from "node:fs";
-import { dirname as dirname12, join as join39 } from "node:path";
+import { dirname as dirname11, join as join39 } from "node:path";
 function describe(action) {
   if (action.op === "install") return `install ${action.path}`;
   if (action.op === "keep") return `keep ${action.path} (changed since install; new version in ${action.newPath})`;
@@ -4600,7 +4620,7 @@ function needsNpm(actions, piDir, manifest, force = false) {
     return now?.packageJson !== known.packageJson || now?.lock !== known.lock;
   }
   if (!existsSync22(lock)) return true;
-  return statSync13(pkg).mtimeMs > statSync13(lock).mtimeMs;
+  return statSync14(pkg).mtimeMs > statSync14(lock).mtimeMs;
 }
 async function apply(ctx, actions, options, manifest) {
   const piDir = join39(ctx.home, ".pi", "agent");
@@ -4660,7 +4680,7 @@ var init_apply = __esm({
     init_backups();
     init_manifest();
     KEEP_RUNS = 10;
-    modeOf = (path2) => statSync13(path2).mode & 4095;
+    modeOf = (path2) => statSync14(path2).mode & 4095;
     Run = class {
       backups;
       next;
@@ -4682,12 +4702,12 @@ var init_apply = __esm({
       }
       ensureDir(dir) {
         const missing = [];
-        for (let d = dir; d.startsWith(`${this.ctx.home}/`) && !existsSync22(d); d = dirname12(d)) missing.push(d);
+        for (let d = dir; d.startsWith(`${this.ctx.home}/`) && !existsSync22(d); d = dirname11(d)) missing.push(d);
         mkdirSync13(dir, { recursive: true });
         for (const m2 of missing) this.dirs.add(homeRel(this.ctx.home, m2));
       }
       backupIfThere(path2) {
-        return existsSync22(path2) && statSync13(path2).isFile() ? this.backups.backup(path2) : void 0;
+        return existsSync22(path2) && statSync14(path2).isFile() ? this.backups.backup(path2) : void 0;
       }
       rel(path2) {
         return homeRel(this.ctx.home, path2);
@@ -4704,7 +4724,7 @@ var init_apply = __esm({
       install(a2) {
         const backup = a2.existed ? this.backupIfThere(a2.path) : void 0;
         const priorSha = fileSha(a2.path);
-        this.ensureDir(dirname12(a2.path));
+        this.ensureDir(dirname11(a2.path));
         if (/\/(user\.json|settings\.json|ACTIVE)$/.test(a2.path)) {
           atomicWrite(a2.path, a2.content, a2.mode);
         } else {
@@ -4745,7 +4765,7 @@ var init_apply = __esm({
         const priorSha = fileSha(a2.path);
         const unmodified = Boolean(file) && priorSha === file.sha256;
         const backup = a2.existed ? this.backupIfThere(a2.path) : void 0;
-        this.ensureDir(dirname12(a2.path));
+        this.ensureDir(dirname11(a2.path));
         atomicWrite(a2.path, a2.content, a2.mode);
         this.wrote = true;
         if (file && (unmodified || !a2.existed)) {
@@ -4757,7 +4777,7 @@ var init_apply = __esm({
       }
       keep(a2) {
         if (a2.write) {
-          this.ensureDir(dirname12(a2.newPath));
+          this.ensureDir(dirname11(a2.newPath));
           atomicWrite(a2.newPath, a2.content, a2.mode);
           this.wrote = true;
         }
@@ -4788,7 +4808,7 @@ var init_apply = __esm({
           return;
         } catch {
         }
-        this.ensureDir(dirname12(a2.path));
+        this.ensureDir(dirname11(a2.path));
         symlinkSync(a2.target, a2.path);
         this.wrote = true;
         this.next.symlinks[this.rel(a2.path)] = { target: this.rel(a2.target) };
@@ -4796,7 +4816,7 @@ var init_apply = __esm({
       /** Only for a file this run wrote or adopted; a kept (user-modified) file is never touched. */
       chmodX(path2) {
         if (!this.written.has(path2) || !existsSync22(path2)) return;
-        const mode = statSync13(path2).mode;
+        const mode = statSync14(path2).mode;
         if ((mode & 73) === 0) {
           chmodSync2(path2, mode | 73);
           this.wrote = true;
@@ -4821,7 +4841,7 @@ var init_apply = __esm({
 });
 
 // src/components.ts
-import { existsSync as existsSync23, readdirSync as readdirSync14, readFileSync as readFileSync22, statSync as statSync14 } from "node:fs";
+import { existsSync as existsSync23, readdirSync as readdirSync14, readFileSync as readFileSync22, statSync as statSync15 } from "node:fs";
 import { join as join40 } from "node:path";
 function available(id, ctx) {
   if (id === "docker-guardian") return ctx.platform === "darwin" ? true : "needs Docker Desktop on macOS";
@@ -4856,7 +4876,7 @@ function currentState(ctx) {
 }
 function isDir(path2) {
   try {
-    return statSync14(path2).isDirectory();
+    return statSync15(path2).isDirectory();
   } catch {
     return false;
   }
@@ -5336,16 +5356,16 @@ var init_profiles = __esm({
 });
 
 // src/plan.ts
-import { existsSync as existsSync26, lstatSync as lstatSync7, readdirSync as readdirSync16, readFileSync as readFileSync24, readlinkSync as readlinkSync2, statSync as statSync15 } from "node:fs";
+import { existsSync as existsSync26, lstatSync as lstatSync7, readdirSync as readdirSync16, readFileSync as readFileSync24, readlinkSync as readlinkSync2, statSync as statSync16 } from "node:fs";
 import { join as join43 } from "node:path";
 function fromSource(src, settings2) {
   const raw = readFileSync24(src);
-  const st = statSync15(src);
+  const st = statSync16(src);
   const mode = st.mode & 4095;
   return hasTokens(raw) ? { content: src.endsWith("/pi-phase/config.json") ? Buffer.from(raw.toString("utf8").split("{{REPOS_ROOT}}").join(JSON.stringify(settings2.reposRoot).slice(1, -1))) : render(raw, settings2), mode } : { content: raw, mode, mtimeMs: st.mtimeMs };
 }
 function sameBytes(dest, content) {
-  return existsSync26(dest) && statSync15(dest).isFile() && readFileSync24(dest).equals(content);
+  return existsSync26(dest) && statSync16(dest).isFile() && readFileSync24(dest).equals(content);
 }
 function put(actions, dest, desired) {
   if (sameBytes(dest, desired.content)) {
@@ -5399,7 +5419,7 @@ function agentsMd(input, live) {
     delete base.mtimeMs;
     input.notes?.push(...stripped.warnings);
   }
-  const existing = existsSync26(live) && statSync15(live).isFile() ? readFileSync24(live) : void 0;
+  const existing = existsSync26(live) && statSync16(live).isFile() ? readFileSync24(live) : void 0;
   const noMarkers = existing !== void 0 && !hasRoutingMarkers(existing);
   if (!input.overlay.routing) return { ...base, noMarkers };
   return { content: spliceRouting(base.content, input.overlay.routing, noMarkers ? void 0 : existing), mode: base.mode, noMarkers };
@@ -5417,7 +5437,7 @@ function registerJson(actions, path2, edit) {
   const before = structuredClone(data);
   const jsonOps = edit(data, Boolean(pending2));
   if (jsonOps.length === 0 && deepEqual(before, data)) return;
-  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync15(path2).mode & 4095;
+  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync16(path2).mode & 4095;
   const next = Buffer.from(`${JSON.stringify(data, null, 2)}
 `);
   if (pending2 && pending2.op === "install") {
@@ -5620,7 +5640,7 @@ var init_reconcile = __esm({
 });
 
 // src/services.ts
-import { existsSync as existsSync28, mkdirSync as mkdirSync14, readFileSync as readFileSync26, statSync as statSync16 } from "node:fs";
+import { existsSync as existsSync28, mkdirSync as mkdirSync14, readFileSync as readFileSync26, statSync as statSync17 } from "node:fs";
 import { join as join45 } from "node:path";
 function serviceUser(env) {
   return (env.USER ?? "").replace(/[^A-Za-z0-9-]/g, "") || "pi-setup";
@@ -5685,7 +5705,7 @@ function planServices(ctx, manifest, on) {
     const actions = [];
     for (const u3 of units) {
       const rel = homeRel(ctx.home, u3.path);
-      const there = existsSync28(u3.path) && statSync16(u3.path).isFile();
+      const there = existsSync28(u3.path) && statSync17(u3.path).isFile();
       if (!there) actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: false, decision: "new" });
       else if (readFileSync26(u3.path).equals(u3.content)) actions.push({ op: "adopt", path: u3.path });
       else if (manifest?.files[rel] && fileSha(u3.path) === manifest.files[rel].sha256) {
@@ -5788,12 +5808,12 @@ import {
   readlinkSync as readlinkSync3,
   renameSync as renameSync6,
   rmdirSync as rmdirSync2,
-  statSync as statSync17,
+  statSync as statSync18,
   unlinkSync as unlinkSync5
 } from "node:fs";
-import { dirname as dirname13, join as join46 } from "node:path";
+import { dirname as dirname12, join as join46 } from "node:path";
 function restore(from, to) {
-  mkdirSync15(dirname13(to), { recursive: true });
+  mkdirSync15(dirname12(to), { recursive: true });
   try {
     renameSync6(from, to);
   } catch (error) {
@@ -5892,7 +5912,7 @@ function revertOps(ctx, m2, rel, match, dryRun) {
     const tracked = m2.files[rel];
     const wasTracked = Boolean(tracked) && fileSha(path2) === tracked.sha256;
     atomicWrite(path2, `${JSON.stringify(data, null, 2)}
-`, statSync17(path2).mode & 4095);
+`, statSync18(path2).mode & 4095);
     const sha = sha256(readFileSync27(path2));
     entry2.sha256After = sha;
     if (wasTracked) tracked.sha256 = sha;
@@ -6094,7 +6114,7 @@ var init_uninstall = __esm({
           delete this.remaining.json[rel];
           return;
         }
-        const mode = statSync17(path2).mode & 4095;
+        const mode = statSync18(path2).mode & 4095;
         atomicWrite(path2, `${JSON.stringify(data, null, 2)}
 `, mode);
         if (left.length === 0) {
@@ -6179,7 +6199,7 @@ var init_retire = __esm({
 
 // src/doctor-checks.ts
 import { existsSync as existsSync31, lstatSync as lstatSync9, readdirSync as readdirSync17, readFileSync as readFileSync29, readlinkSync as readlinkSync4 } from "node:fs";
-import { basename as basename5, delimiter as delimiter2, dirname as dirname14, join as join48, resolve as resolve11 } from "node:path";
+import { basename as basename5, delimiter as delimiter2, dirname as dirname13, join as join48, resolve as resolve11 } from "node:path";
 function setupCmd(ctx) {
   if (ctx.which("pi-setup")) return "pi-setup";
   const path2 = join48(ctx.repoDir, "install.sh");
@@ -6231,7 +6251,7 @@ function state(ctx, facts) {
   for (const [rel, link] of Object.entries(s.manifest?.symlinks ?? {})) {
     const path2 = fromHomeRel(ctx.home, rel);
     try {
-      if (!lstatSync9(path2).isSymbolicLink() || resolve11(dirname14(path2), readlinkSync4(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
+      if (!lstatSync9(path2).isSymbolicLink() || resolve11(dirname13(path2), readlinkSync4(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
     } catch {
       s.missing.push(rel);
     }
@@ -6563,7 +6583,7 @@ var init_doctor_probes = __esm({
 });
 
 // src/doctor-components.ts
-import { existsSync as existsSync34, lstatSync as lstatSync10, readlinkSync as readlinkSync5, statSync as statSync18 } from "node:fs";
+import { existsSync as existsSync34, lstatSync as lstatSync10, readlinkSync as readlinkSync5, statSync as statSync19 } from "node:fs";
 import { join as join51 } from "node:path";
 async function isLoaded(ctx, kind, label) {
   try {
@@ -6638,7 +6658,7 @@ async function componentChecks(ctx, manifest) {
     const dir = join51(ctx.home, ".agents/skills");
     const missing = CS_SKILLS.filter((n3) => {
       try {
-        return !statSync18(join51(dir, n3)).isDirectory();
+        return !statSync19(join51(dir, n3)).isDirectory();
       } catch {
         return true;
       }
@@ -8718,7 +8738,7 @@ var init_run = __esm({
 });
 
 // src/cli.ts
-import { dirname as dirname15, join as join54 } from "node:path";
+import { dirname as dirname14, join as join54 } from "node:path";
 import { fileURLToPath } from "node:url";
 var MIN = [22, 19, 0];
 function nodeTooOld(version2) {
@@ -8733,7 +8753,7 @@ if (nodeTooOld(process.version)) {
 `);
   process.exit(1);
 }
-var repoDir = join54(dirname15(fileURLToPath(import.meta.url)), "..", "..");
+var repoDir = join54(dirname14(fileURLToPath(import.meta.url)), "..", "..");
 var { realContext: realContext2 } = await Promise.resolve().then(() => (init_context(), context_exports));
 var { main: main3 } = await Promise.resolve().then(() => (init_run(), run_exports));
 process.exitCode = await main3(process.argv.slice(2), realContext2(repoDir));

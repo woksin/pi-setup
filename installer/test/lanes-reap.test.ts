@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { defaults, saveConfig } from "../src/lanes/config.ts";
 import { main } from "../src/lanes/main.ts";
@@ -10,7 +10,7 @@ import { collect, type Signals } from "../src/lanes/reap/signals.ts";
 import { expectedSnapshot, readContext, validateContext } from "../src/lanes/reap/context-format.ts";
 import { verdict } from "../src/lanes/reap/verdict.ts";
 import { sessionDirFor } from "../src/lanes/names.ts";
-import { sessionTail } from "../src/lanes/reap/session-tail.ts";
+import { scanSession } from "../src/lanes/reap/session-scan.ts";
 import { summaryLine } from "../src/lanes/reap/summary.ts";
 import { tempDir, REPO } from "./helpers/home.ts";
 import type { LanesCtx } from "../src/lanes/ctx.ts";
@@ -143,6 +143,21 @@ test("missing marker is only a JSON note until pending inbound needs watch evide
   f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_watch", details: { command: "inbox-watch L10" } } }), 120);
   assert.equal((await evidence(f)).inboxWatch, undefined);
 });
+test("watch aliases and INBOX_ALIASES count pending inbound only for the lane", async () => {
+  for (const command of ["inbox-watch --alias R-AI --alias ttys003 L1", "INBOX_ALIASES=R-AI,ttys003 inbox-watch L1"]) {
+    const f = fixture();
+    f.put(f.sessionFile, JSON.stringify({ role: "toolResult", toolName: "job_watch", details: { command } }), 120);
+    f.put(join(f.root, "messages/L0-to-R-AI-work.md"), "fixture");
+    f.put(join(f.root, "messages/L0-to-ttys003-work.md"), "fixture");
+    const s = await evidence(f); assert.equal(s.unread.length, 2, command);
+    assert.ok(s.keeps.includes("unread inbox"));
+    f.put(f.sessionFile, JSON.stringify({ role: "toolResult", toolName: "job_watch", details: { command: command.replace(" L1", " L10") } }), 120);
+    assert.deepEqual((await evidence(f)).unread, []);
+  }
+  const f = fixture(); f.ctx.env.INBOX_ALIASES = "R-AI,ttys003";
+  f.put(join(f.root, "messages/L0-to-R-AI-work.md"), "fixture");
+  assert.deepEqual((await evidence(f)).unread, ["L0-to-R-AI-work.md"]);
+});
 test("claim mapping is independent of source and foreign claims appear only in summary", async () => {
   for (const extra of [{ sessionId: "foreign", branch: "l1", cwd: "/other" }, { sessionId: "foreign", cwd: "CWD" }, { source: "detected" }]) {
     const f = fixture(); f.claim("in-progress", undefined, { ...extra, ...(extra.cwd === "CWD" ? { cwd: f.cwd } : {}) });
@@ -153,15 +168,32 @@ test("claim mapping is independent of source and foreign claims appear only in s
   const plan = JSON.parse(readFileSync(join(f.root, ".state/reap-plan.json"), "utf8"));
   assert.deepEqual(plan.summaries.find(item => item.label === "Foreign claims").names, ["example/alpha#1"]);
 });
-test("large sessions use an aligned bounded tail and name undecidable open jobs", async () => {
-  const f = fixture(); const prefix = JSON.stringify({ padding: "x".repeat(33 * 1024 * 1024) });
-  const header = { id: "j-before", status: "running" };
-  const entry = JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_output", details: header } });
-  f.put(f.sessionFile, `${prefix}\n${entry}\n`, 120);
-  assert.ok(sessionTail(f.sessionFile).text.startsWith(entry));
-  assert.deepEqual((await evidence(f)).asks, ["job j-before open; start before session tail"]);
-  f.put(f.sessionFile, `${prefix}\n${JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_output", details: { ...header, status: "completed" } } })}\n`, 120);
-  assert.deepEqual((await evidence(f)).asks, []);
+test("whole-session folding retains early jobs, watches and pending calls beyond the old tail", async () => {
+  const f = fixture();
+  const job = { id: "j-before", status: "running", command: "inbox-watch --alias R-AI L1", cwd: f.cwd, startedAt: f.now.getTime() - 120000, timeoutSeconds: 3600 };
+  const result = (toolName: string, details: object) => JSON.stringify({ type: "message", message: { role: "toolResult", toolName, details } });
+  const call = JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "pending", name: "subagent" }] } });
+  const padding = `${JSON.stringify({ padding: "x".repeat(1024) })}\n`.repeat(34000);
+  const history = `${result("job_watch", job)}\n${call}\n${padding}`;
+  f.put(f.sessionFile, history, 120);
+  const active = await evidence(f);
+  assert.deepEqual(active.asks, []); assert.ok(active.keeps.includes("job/watch running (session snapshot)"));
+  assert.ok(active.keeps.includes("subagent tool call pending")); assert.equal(active.inboxWatch, true);
+  assert.deepEqual(active.inboxAliases, ["R-AI"]);
+  f.put(f.sessionFile, `${history}${result("job_output", { id: job.id, status: "completed" })}\n${JSON.stringify({ role: "toolResult", toolCallId: "pending" })}\n`, 120);
+  const completed = await evidence(f); assert.deepEqual(completed.asks, []);
+  assert.ok(!completed.keeps.some(reason => /job\/watch|tool call pending/.test(reason)));
+});
+test("session scans fail closed at size and time bounds and on malformed history", async () => {
+  const f = fixture();
+  await assert.rejects(scanSession(f.sessionFile, () => {}, { bytes: 1, milliseconds: 5000 }), /session scan incomplete/);
+  await assert.rejects(scanSession(f.sessionFile, () => {}, { bytes: 1024, milliseconds: 0 }), /session scan incomplete/);
+  truncateSync(f.sessionFile, 256 * 1024 * 1024 + 1);
+  assert.deepEqual((await evidence(f)).asks, ["session scan incomplete"]);
+  f.put(f.sessionFile, "{malformed\n{}\n", 120);
+  assert.deepEqual((await evidence(f)).asks, ["session work history malformed"]);
+  f.put(f.sessionFile, JSON.stringify({ role: "toolResult", toolName: "job_output", details: { id: "j1", status: "running" } }), 120);
+  assert.deepEqual((await evidence(f)).asks, ["job j1 start evidence missing"]);
 });
 test("summary samples are capped while saved lists remain complete", async () => {
   const f = fixture();
@@ -185,13 +217,16 @@ test("local active claims require exact identity rather than branch substrings",
   }
 });
 test("unrelated subagents do not flood a lane, owned live and stale states stay scoped", async () => {
-  const f = fixture(); const dir = join(dirname(f.sessionFile), "subagents");
-  for (let i = 0; i < 20; i++) f.put(join(dir, `${i}.json`), JSON.stringify({ role: "subagent", pid: 900 + i, sessionId: `foreign${i}`, at: "old", phase: "idle" }));
+  const f = fixture(); const dir = join(f.ctx.piAgentDir, "context-budget/status");
+  for (let i = 0; i < 20; i++) f.put(join(dir, `${i}.json`), JSON.stringify({ role: "subagent", pid: 900 + i, cwd: `${f.cwd}-other`, at: "old" }));
+  f.put(join(dir, "main.json"), JSON.stringify({ role: "main", pid: 101, cwd: f.cwd, at: "old" }));
   assert.deepEqual((await evidence(f)).asks, []);
-  f.put(join(dir, "owned.json"), JSON.stringify({ role: "subagent", parentSessionId: "s1", at: f.now.toISOString(), phase: "idle" }));
-  assert.ok((await evidence(f)).keeps.includes("subagent running"));
-  f.put(join(dir, "owned.json"), JSON.stringify({ role: "subagent", parentSessionId: "s1", at: "old", phase: "idle" }));
-  assert.ok((await evidence(f)).asks.includes("owned subagent status stale or unknown"));
+  for (const identity of [{ pid: 101, cwd: "/other" }, { pid: 909, cwd: f.cwd }, { pid: 909, cwd: join(f.cwd, "child") }]) {
+    f.put(join(dir, "owned.json"), JSON.stringify({ role: "subagent", ...identity, at: f.now.toISOString() }));
+    assert.ok((await evidence(f)).keeps.includes("subagent running"));
+    f.put(join(dir, "owned.json"), JSON.stringify({ role: "subagent", ...identity, at: "old" }));
+    assert.ok((await evidence(f)).asks.includes("owned subagent status stale or unknown"));
+  }
 });
 test("job snapshots cover sleeping watches and terminal updates clear them", async () => {
   const f = fixture(); const snapshot = { id: "j1", command: "inbox-watch L1", status: "running", cwd: f.cwd, startedAt: f.now.getTime() - 120000, timeoutSeconds: 3600 };
@@ -218,7 +253,7 @@ const keepCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["busy child", f => f.setBusy("102 101 dotnet build")], ["busy child", f => f.setBusy("102 101 pi-phase run --kind build")],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/job.log"), "command"); f.setFiles(`n${p}\n`); }],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/watch.log"), "# pi-jobs watch until x: gh run watch 123"); f.setFiles(`n${p}\n`); }],
-  ["subagent", f => f.put(join(dirname(f.sessionFile), "subagents/sub.json"), JSON.stringify({ role: "subagent", parentPid: 101, phase: "working", at: f.now.toISOString() }))],
+  ["subagent", f => f.put(join(f.ctx.piAgentDir, "context-budget/status/sub.json"), JSON.stringify({ role: "subagent", pid: 101, cwd: f.cwd, at: f.now.toISOString() }))],
   ["unread", f => f.put(join(f.root, "messages/L0-to-L1-work-1200.md"), "hi")],
   ["in-progress claim", f => f.claim("in-progress")],
   ["declared wait", f => f.put(join(f.root, "messages/status/L1.status"), 'waiting-on "ci" until 2026-10-23T14:00:00Z')],
@@ -236,7 +271,7 @@ const askCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["named in NOW.md", f => f.put(join(f.root, "coordinator/NOW.md"), "L1 owns the release")],
   ["signals disagree", f => f.put(join(f.home, ".pi/orch/heartbeats/s1.json"), JSON.stringify({ pid: 101, state: "working", at: f.now.toISOString() }))],
   ["foreground not the expected pi", f => f.setForeground(false)],
-  ["cannot read", f => f.put(join(dirname(f.sessionFile), "subagents/bad.json"), "{")],
+  ["cannot read", f => f.put(join(f.ctx.piAgentDir, "context-budget/status/bad.json"), "{")],
 ];
 for (const [reason, setup] of askCases) test(`ask ${reason}`, async () => { const f = fixture(); setup(f); await f.invoke("reap", "--json"); assert.equal(f.rows()[0].verdict, "ask"); assert.match(f.rows()[0].reason, new RegExp(reason.replaceAll(".", "\\."))); });
 for (const identity of ["detached", "non-git"]) test(`reap tolerates ${identity} cwd lanes without invalid gh probes`, async () => {
