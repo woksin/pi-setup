@@ -1,4 +1,4 @@
-import importlib.machinery, importlib.util, json, os, tempfile, time, unittest
+import importlib.machinery, importlib.util, json, os, subprocess, tempfile, time, unittest
 from datetime import datetime, timezone
 
 P = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-watchdog")
@@ -195,6 +195,58 @@ class Mapping(Base):
         self.write(self.stuck_rec(), hb=False, mtime=NOW - 100)
         self.run_wd(procs=self.procs(100, start=NOW - 50))
         self.assertEqual(calls, [])
+
+
+class QueueWait(Base):
+    def phase_state(self, pid, status="waiters"):
+        d = os.path.join(self.tmp.name, "phase")
+        if status == "waiters":
+            os.makedirs(os.path.join(d, "waiters"), exist_ok=True)
+            p = os.path.join(d, "waiters", "w1.json")
+        else:
+            os.makedirs(d, exist_ok=True)
+            p = os.path.join(d, "heavy-0.json")
+        with open(p, "w") as f:
+            json.dump({"pid": pid, "label": "i42 gate", "cwd": self.cwd, "enqueued": NOW - 400, "started": NOW - 400, "rank": 2}, f)
+        return d
+
+    def batch(self):
+        cmd = "~/.pi/agent/bin/pi-phase run --kind test --label 'i42 gate' -- make"
+        return self.write([msg("a", NOW - 1400, "assistant", [call("c1"), call("c2", command=cmd)], stopReason="toolUse"),
+                           msg("b", NOW - 1399, "toolResult", [], toolCallId="c1")])
+
+    def dead_pid(self):
+        p = subprocess.Popen(["true"])
+        p.wait()
+        return p.pid
+
+    def test_live_queued_phase_is_waiting_not_stuck(self):
+        self.batch()
+        me = os.getpid()
+        for kind in ("waiters", "heavy"):
+            self.assertEqual(self.run_wd(phase_state=self.phase_state(me, kind), ppids={me: 99, 99: 100}, inject_ttys={}), [])
+            self.assertEqual(self.files(), [])
+            with open(os.path.join(sw.STATE_DIR, "board.json")) as f:
+                row = json.load(f)["sessions"][0]
+            self.assertEqual(row["state"], "waiting")
+            self.assertIn("i42 gate", row["queue"])
+            self.assertIn("rank 2", row["queue"])
+            self.assertIn("6m40s", row["queue"])
+
+    def test_label_cwd_fallback_without_ancestry(self):
+        self.batch()
+        self.assertEqual(self.run_wd(phase_state=self.phase_state(os.getpid()), ppids={}, inject_ttys={}), [])
+
+    def test_dead_waiter_leaves_stuck_logic_unchanged(self):
+        self.batch()
+        self.assertEqual(len(self.run_wd(phase_state=self.phase_state(self.dead_pid()), ppids={}, inject_ttys={})), 1)
+
+    def test_unrelated_live_waiter_does_not_hide_stuck(self):
+        self.batch()
+        d = self.phase_state(os.getpid())
+        with open(os.path.join(d, "waiters", "w1.json"), "w") as f:
+            json.dump({"pid": os.getpid(), "label": "other", "cwd": "/elsewhere", "enqueued": NOW - 5}, f)
+        self.assertEqual(len(self.run_wd(phase_state=d, ppids={}, inject_ttys={})), 1)
 
 
 class Alarms(Base):

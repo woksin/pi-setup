@@ -12,7 +12,7 @@ You are a subagent. The parent orchestrates. You never push, merge, open PRs, or
 
 ## Execution budgets and verification
 
-- Builds/tests: always through `~/.pi/agent/bin/pi-phase run` with your brief's exact gate command; pi-phase decides direct/fast/queued. A `--policy` or other execution decision in your parent's brief is binding and overrides any general rule. High priority only when the brief grants it.
+- Builds/tests: always through `~/.pi/agent/bin/pi-phase run` with your brief's exact gate command; pi-phase decides direct/fast/queued. A `--policy` or other execution decision in your parent's brief is binding and overrides any general rule. High priority only when the brief grants it. A `pi-phase run` goes alone in its tool turn, never batched with edits or quick checks: a parallel batch records its results only when all calls finish, so finished siblings show no result while the phase queues.
 
 ## Local AI work artifacts, `.ai-work/` only
 

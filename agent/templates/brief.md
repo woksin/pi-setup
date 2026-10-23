@@ -39,7 +39,7 @@ Ordered, small steps, each naming the file(s) and the change, and the specs/test
 ## Verify with
 - Configuration to verify: <e.g. Release, warnings as errors; must match CI>.
 - Iterate with: `<narrow affected-project command>`.
-- Finish with the Done gate once. Use `pi-phase run ... --log <repo>/.ai-work/<task>/<phase>.log` instead of redirects, pipes or `; echo $?`.
+- Finish with the Done gate once. Use `pi-phase run ... --log <repo>/.ai-work/<task>/<phase>.log` instead of redirects, pipes or `; echo $?`. A `pi-phase run` goes alone in its tool turn, never batched with edits or quick checks (a parallel batch records results only when all calls finish).
 
 ## Stop and report (do not work around) when
 - The gate fails for a reason outside your files, or a pre-existing test fails.

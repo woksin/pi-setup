@@ -11,6 +11,9 @@ Detection (per live pi session, from the tail of ~/.pi/agent/sessions/*/*.jsonl)
      recorded a `timeout` is stuck only after max(10 min, timeout + 2 min).
   b) the last message is a user message or toolResult with no assistant reply for > 10 min (in-flight request).
   An assistant message that ended its turn is idle, not stuck.
+  Exception (#42): pi records a parallel batch of results only when the whole batch finishes, so a pending
+  `pi-phase run` with a live pi-phase process (queued waiter or running phase whose ancestry reaches the session's
+  pi pid, else label + cwd match) is "waiting on queue", not stuck: no notice, board state "waiting".
 
 Live-session mapping (positive association only): a pi-orch heartbeat (~/.pi/orch/heartbeats/*.json: pid, sessionId;
 file younger than 5 min, pid a live `pi` process) maps pid -> sessionId -> `sessions/*/*_<sessionId>.jsonl`.
@@ -18,7 +21,7 @@ Only such sessions may produce ALL- "stuck" notices. In a cwd that has live pi p
 mapping (found with `ps` + `lsof -d cwd`), a stuck-looking log modified after the youngest unmapped process
 started (ps lstart) is reported only to PISETUP-to-L0 as "possibly-stuck / unconfirmed". Dead logs are ignored.
 """
-import argparse, glob, json, os, re, subprocess, sys, time
+import argparse, glob, json, os, re, shlex, subprocess, sys, time
 from datetime import datetime, timezone
 
 HOME = os.path.expanduser("~")
@@ -26,6 +29,7 @@ SESSIONS = os.path.join(HOME, ".pi/agent/sessions")
 STATE_DIR = os.path.join(HOME, ".pi/agent/session-watchdog")
 LOG = os.path.join(HOME, ".pi/agent/logs/session-watchdog.log")
 HEARTBEATS = os.path.join(HOME, ".pi/orch/heartbeats")
+PHASE_STATE = os.path.join(HOME, ".pi/agent/pi-phase/state")
 HEARTBEAT_FRESH = 300     # heartbeat file must be younger than 5 min
 
 STUCK_AFTER = 600          # 10 min
@@ -160,14 +164,98 @@ def _pending(asst, pending):
         args_s = json.dumps(args, ensure_ascii=False)
     except (TypeError, ValueError):
         args_s = str(args)
+    cmds = [a["command"] for a in (p.get("arguments") for p in pending)
+            if isinstance(a, dict) and isinstance(a.get("command"), str) and "pi-phase run" in a["command"]]
     return {"kind": "tool", "record_id": c.get("id") or asst.get("id"), "since": ts, "tool": c.get("name"),
-            "args": args_s[:200], "timeout": timeout, "last_ts": ts}
+            "args": args_s[:200], "timeout": timeout, "last_ts": ts, "phase_cmds": cmds}
 
 
 def threshold(info):
     if info["kind"] == "tool" and info["timeout"] is not None and info["timeout"] > STUCK_AFTER:
         return info["timeout"] + BASH_TIMEOUT_GRACE
     return STUCK_AFTER
+
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError, OverflowError):
+        return False
+    return True
+
+
+def ppid_map():
+    """{pid: ppid} for all processes; empty on failure."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return {int(a): int(b) for a, b in (l.split() for l in out.splitlines() if len(l.split()) == 2) if a.isdigit() and b.isdigit()}
+
+
+def phase_entries(state_dir=PHASE_STATE, now=None):
+    """Live pi-phase processes: queued waiters (waiters/*.json) and running phases (heavy-*.json), pid alive."""
+    out = []
+    for kind, pat in (("queued", "waiters/*.json"), ("running", "heavy-*.json")):
+        for p in glob.glob(os.path.join(state_dir, pat)):
+            try:
+                with open(p) as f:
+                    d = json.load(f)
+                pid = d["pid"]
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if isinstance(d, dict) and isinstance(pid, int) and pid_alive(pid):
+                out.append(dict(d, status=kind))
+    return out
+
+
+def command_labels(cmds):
+    labels = set()
+    for c in cmds:
+        try:
+            toks = shlex.split(c)
+        except ValueError:
+            toks = c.split()
+        labels.update(toks[i + 1] for i, t in enumerate(toks[:-1]) if t == "--label")
+        labels.update(t[8:] for t in toks if t.startswith("--label="))
+    return labels
+
+
+def queue_wait(info, pid, cwd, entries, ppids, now):
+    """dict(label, waited, rank, status) when a pending `pi-phase run` has a live pi-phase process, else None.
+    Prefer ancestry (pi-phase pid descends from the session's pi pid); fall back to label + cwd."""
+    if not info or not info.get("phase_cmds") or not entries:
+        return None
+    labels = command_labels(info["phase_cmds"])
+
+    def descends(e):
+        cur, seen = e["pid"], set()
+        while cur and cur not in seen:
+            if cur == pid:
+                return True
+            seen.add(cur)
+            cur = ppids.get(cur)
+        return False
+
+    hit = next((e for e in entries if pid is not None and descends(e)), None)
+    if hit is None:
+        hit = next((e for e in entries if e.get("label") in labels and e.get("cwd") == cwd), None)
+    if hit is None:
+        return None
+    t0 = hit.get("enqueued") if hit["status"] == "queued" else hit.get("started")
+    return {"label": hit.get("label"), "status": hit["status"], "rank": hit.get("rank"),
+            "waited": max(0, now - t0) if isinstance(t0, (int, float)) else None}
+
+
+def queue_text(w):
+    parts = [w["label"] or "?", "running" if w["status"] == "running" else "queued"]
+    if w["waited"] is not None:
+        parts.append(human(w["waited"]))
+    if w["rank"] is not None:
+        parts.append(f"rank {w['rank']}")
+    return ", ".join(parts)
 
 
 def live_pi_procs():
@@ -304,13 +392,13 @@ def iso_or_dash(t):
 
 
 def board_rows(procs, mapped, infos, now, ttys, status_dir):
-    """One row per live pi process. state: working | idle | stuck | unmapped (positive heartbeat mapping only)."""
+    """One row per live pi process. state: working | idle | waiting (on pi-phase queue) | stuck | unmapped (positive heartbeat mapping only)."""
     by_pid = {pid: p for p, pid in mapped.items()}
     rows = []
     for pid in sorted(procs):
         cwd = procs[pid][0]
         row = {"pid": pid, "tty": ttys.get(pid, "?"), "cwd": cwd, "session_id": "unmapped", "session_name": "unmapped",
-               "last_record": None, "last_turn_end": None, "state": "unmapped", "lane": None, "lane_status": None}
+               "last_record": None, "last_turn_end": None, "state": "unmapped", "queue": None, "lane": None, "lane_status": None}
         path = by_pid.get(pid)
         if path:
             try:
@@ -319,7 +407,8 @@ def board_rows(procs, mapped, infos, now, ttys, status_dir):
                 info = infos.get(path)
                 row.update(session_id=sid or os.path.basename(path), session_name=name or "-", last_record=last,
                            last_turn_end=turn_end,
-                           state="idle" if not info else ("stuck" if now - info["since"] > threshold(info) else "working"))
+                           state="idle" if not info else ("waiting" if info.get("waiting") else "stuck" if now - info["since"] > threshold(info) else "working"))
+                row["queue"] = queue_text(info["waiting"]) if info and info.get("waiting") else None
                 row["lane"], row["lane_status"] = lane_for(name, status_dir)
             except OSError as e:
                 log(f"board {path}: {e}")
@@ -337,7 +426,7 @@ def write_board(rows, now, board_dir=None):
     for r in doc["sessions"]:
         lane = f"{r['lane']}: {r['lane_status']}" if r["lane"] else "-"
         md.append(f"| {r['pid']} | {r['tty']} | {r['cwd']} | {r['session_id']} | {r['session_name']} | {r['last_record']} | "
-                  f"{r['last_turn_end']} | {r['state']} | {lane.replace('|', '/')} |")
+                  f"{r['last_turn_end']} | {r['state'] + (' on queue: ' + r['queue'] if r.get('queue') else '')} | {lane.replace('|', '/')} |")
     for name, text in (("board.json", json.dumps(doc, indent=1) + "\n"), ("board.md", "\n".join(md) + "\n")):
         tmp = os.path.join(board_dir, f"{name}.tmp.{os.getpid()}")
         with open(tmp, "w") as f:
@@ -430,7 +519,7 @@ def notify(suffix, title, text, messages_dir, dry_run):
     log(f"notified {suffix}: {text.splitlines()[0] if text else ''}")
 
 
-def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS, messages_dir=None, swap=None, level=-1, fsevents_mb=None, sessions=SESSIONS, inject_ttys=None):
+def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS, messages_dir=None, swap=None, level=-1, fsevents_mb=None, sessions=SESSIONS, inject_ttys=None, phase_state=PHASE_STATE, ppids=None):
     now = time.time() if now is None else now
     if messages_dir is None:
         messages_dir = os.environ.get("SESSION_WATCHDOG_MESSAGES") or os.environ.get("DOCKER_GUARDIAN_MESSAGES", "")
@@ -447,6 +536,11 @@ def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS,
             pass
     stuck, possible = [], []
     infos = {}
+    entries = phase_entries(phase_state)
+    if entries and ppids is None:
+        ppids = ppid_map()
+    ppids = ppids or {}
+    pid_of = {p: pid for p, pid in mapped.items()}
     for confirmed, group in ((True, list(files)), (False, unmapped)):
         for path, mtime, cwd in group:
             try:
@@ -455,6 +549,10 @@ def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS,
                 log(f"{path}: {e}")
                 continue
             infos[path] = info
+            w = queue_wait(info, pid_of.get(path), cwd, entries, ppids, now)
+            if w:
+                info["waiting"] = w
+                continue
             if not info or now - info["since"] <= threshold(info):
                 continue
             sid, hcwd, name = read_head_info(path)
