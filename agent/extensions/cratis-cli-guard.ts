@@ -91,6 +91,39 @@ export interface CratisInvocation {
 	readOnly: boolean;
 }
 
+const STDIN_FILE_FLAGS = ["-F", "--file", "--body-file", "--notes-file", "--input"];
+function readsStdinFile(rest: string[]): boolean {
+	return rest.some((w, k) => (STDIN_FILE_FLAGS.includes(w) && rest[k + 1] === "-") || STDIN_FILE_FLAGS.some(f => w === `${f}=-`) || w === "-F-");
+}
+
+/**
+ * True only for git/gh forms known to treat stdin / a substituted argument as data (message, body, patch).
+ * `stdin` demands an explicit stdin-file flag; a `$( )` argument only needs the data-taking subcommand.
+ */
+function dataConsumer(head: string, args: string[], stdin: boolean): boolean {
+	if (head === "gh") {
+		const [sub, verb, ...rest] = args;
+		if (sub === "api") return !stdin || readsStdinFile(args.slice(1));
+		const verbs: Record<string, string[]> = { pr: ["create", "edit", "comment", "review"], issue: ["create", "edit", "comment"], release: ["create", "edit"] };
+		return !!verbs[sub]?.includes(verb) && (!stdin || readsStdinFile(rest));
+	}
+	let k = 0;
+	for (;;) {
+		const a = args[k];
+		if (a === "-C") k += 2;
+		else if (a === "-c") {
+			if (!args[k + 1] || /^(?:alias|core)\./i.test(args[k + 1])) return false;
+			k += 2;
+		} else if (a === "--no-pager" || a === "-P" || a === "-p") k++;
+		else break;
+	}
+	const [sub, second, ...more] = args.slice(k);
+	if (sub === "apply" || sub === "am") return true;
+	const rest = sub === "notes" ? more : [second, ...more].filter(w => w !== undefined);
+	if (sub === "notes") return second === "add" && (!stdin || readsStdinFile(rest));
+	return (sub === "commit" || sub === "tag") && (!stdin || readsStdinFile(rest));
+}
+
 /**
  * Recognize only a small literal file-writing grammar; all other headers keep the legacy scan.
  * Returns the written file names (cat's one redirect target, tee's files), or null.
@@ -114,11 +147,13 @@ function literalFileWriter(header: string): string[] | null {
 		} else tokens.push({ operator: match[1] });
 	}
 	const head = tokens.shift()?.literal;
-	// git/gh only read a heredoc as stdin data (commit message, PR body). Any non-heredoc operator,
-	// config override or alias word keeps the legacy scan.
+	// Only proven data-consuming git/gh forms (allowlist); every other subcommand keeps the legacy scan.
 	if (head === "git" || head === "gh") {
-		const data = tokens.every(t => t.operator ? t.operator.startsWith("<<") : !!t.literal && !/^(?:-c|--config-env.*|alias)$/.test(t.literal));
-		return data ? [] : null;
+		const args: string[] = [];
+		for (let k = 0; k < tokens.length; k++) {
+			if (tokens[k].operator) { if (!tokens[k].operator!.startsWith("<<")) return null; k++; } else args.push(tokens[k].literal ?? "");
+		}
+		return dataConsumer(head, args, true) ? [] : null;
 	}
 	const cat = ["cat", "/bin/cat", "/usr/bin/cat"].includes(head ?? "");
 	const tee = ["tee", "/bin/tee", "/usr/bin/tee"].includes(head ?? "");
@@ -169,7 +204,7 @@ function simpleCommands(input: string, out: string[][] = [], depth = 0, heredocs
 	};
 	// A $( ) inside git/gh arguments only supplies data to them, so its heredocs may be classified.
 	// Anywhere else (eval, sh -c, bash, ...) the output may be executed: keep the legacy scan.
-	const dataArgument = () => heredocs && (words[0] === "git" || words[0] === "gh");
+	const dataArgument = () => heredocs && (words[0] === "git" || words[0] === "gh") && dataConsumer(words[0], words.slice(1), false);
 	const endCommand = () => {
 		endWord();
 		if (words.length) out.push(words);

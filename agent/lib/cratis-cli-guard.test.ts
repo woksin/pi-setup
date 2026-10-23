@@ -110,6 +110,11 @@ test("prose in a heredoc consumed by git/gh or cat-to-stdout is not a command", 
 		"gh pr create --body-file - <<'EOF'\ncratis chronicle observers replay x\nEOF",
 		"cat <<'EOF'\ncratis chronicle observers replay x\nEOF",
 		"cat <<EOF\ncratis chronicle observers replay x\nEOF",
+		...["git -C dir commit -F -", "git -c user.name=x commit --file=- -a", "git tag -a v1 -F -", "git notes add -F -", "git apply", "git am",
+			"gh pr create --body-file -", "gh pr edit 1 -F -", "gh pr comment 1 --body-file -", "gh pr review 1 --body-file -", "gh issue create --body-file -",
+			"gh issue edit 1 --body-file -", "gh issue comment 1 -F -", "gh release create v1 --notes-file -", "gh release edit v1 --notes-file -",
+			"gh api repos/o/r/issues --input -"].map(h => `${h} <<'EOF'\ncratis chronicle observers replay x\nEOF`),
+		"git tag -a v1 -m \"$(cat <<'EOF'\ncratis chronicle observers replay x\nEOF\n)\"",
 	]) assert.deepEqual(found(c), [], c);
 });
 
@@ -120,8 +125,18 @@ test("heredocs fed to a shell/interpreter (directly, piped, or via substitution)
 		"python3 - <<EOF\ncratis chronicle observers replay x\nEOF",
 		"eval \"$(cat <<EOF\ncratis chronicle observers replay x\nEOF\n)\"",
 		"sh -c \"$(cat <<EOF\ncratis chronicle observers replay x\nEOF\n)\"",
+		`git bisect run bash <<EOF\n%\nEOF`,
+		`git rebase --exec bash -i HEAD~1 <<EOF\n%\nEOF`,
+		`git rebase -x sh HEAD~1 <<EOF\n%\nEOF`,
+		`git submodule foreach bash <<EOF\n%\nEOF`,
+		`gh extension exec shell <<EOF\n%\nEOF`,
+		`gh myalias <<EOF\n%\nEOF`,
+		`git -c alias.x=sh x <<EOF\n%\nEOF`,
+		`git -c core.pager=sh log <<EOF\n%\nEOF`,
+		`git commit <<EOF\n%\nEOF`,
+		`git status "$(cat <<EOF\n%\nEOF\n)"`,
 		"git -c alias.x=foo commit -F - <<EOF\n$(cratis chronicle observers replay x)\nEOF",
-	]) assert.ok(found(c).length > 0, c);
+	].map(c => c.replace(/^(.*)%/s, "$1%").replace(/%/g, "cratis chronicle observers replay x"))) assert.ok(found(c).length > 0, c);
 });
 
 test("heredoc skip is not a bypass: executed or expanded heredoc content is still classified", () => {
