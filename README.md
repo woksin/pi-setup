@@ -173,7 +173,7 @@ has been deleted. Shared layers mean modest savings: about 1 GB on a 13.7 GB
 | `workflows/bulk-edit.js` | One mechanical change across many files, then verified. |
 | `workflows/loose-threads-plan.js` | Turns a `loose-threads` inventory into a cleanup plan. |
 | `loose-threads/` | Weekly audit of leftover worktrees, branches, stashes and Docker volumes. |
-| `pi-phase/`, `bin/pi-phase` | Wrapper for build and test commands with time limits, logs and a shared queue ordered by priority (`low`, `normal`, `high`), then first come first served. |
+| `pi-phase/`, `bin/pi-phase` | Wrapper for build and test commands with time limits, logs and a shared queue ordered by priority (`low`, `normal`, `high`), then first come first served. Includes a 60-day run ledger, per-stack throughput `stats` and read-only `wait --eta` estimates. |
 | `bin/dev-doctor`, `dev-doctor.example.json` | Bounded diagnostics and safe, fused cleanup for old exited/label-owned containers and temporary browsers. |
 | `bin/docker-guardian` | macOS: checks that Docker Desktop answers every 2 minutes, restarts it within a budget, removes dead containers and old build cache, only removes superseded semver tags/dangling old images under the narrow rule below. Run it from the launchd template in `launchd/`. |
 | `bin/inbox-watch` | Polls a directory of files that parallel agent sessions use as messages; pair it with one `job_watch`. Set `INBOX_DIR`. |

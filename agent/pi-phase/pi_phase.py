@@ -5,7 +5,7 @@ metadata guards against a dead supervisor whose descendant closed inherited FDs.
 """
 import argparse
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import errno
 import fcntl
 import hashlib
@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,370 @@ OVER_CAP_SAMPLES = 3
 
 def note(message):
     print(f"pi-phase: {message}", flush=True)
+
+
+KINDS = ("build", "test", "integration", "ci")
+OUTCOMES = ("passed", "failed", "queue-timeout", "timeout", "cancelled", "rejected")
+
+
+def stack_name(value):
+    if not re.fullmatch(r"[a-z0-9-]{1,20}", value):
+        raise argparse.ArgumentTypeError("stack must match ^[a-z0-9-]{1,20}$")
+    return value
+
+
+def command_stack(command):
+    """Best effort only: unwrap simple invocations, never evaluate shell code."""
+    command = list(command)
+    for _ in range(20):
+        if not command:
+            return "other"
+        name = Path(command[0]).name
+        if name == "env":
+            index = 1
+            while index < len(command):
+                arg = command[index]
+                if arg == "--":
+                    index += 1
+                    break
+                if arg in ("-i", "--ignore-environment") or re.match(r"[A-Za-z_][A-Za-z0-9_]*=", arg):
+                    index += 1
+                elif arg in ("-u", "--unset") and index + 1 < len(command):
+                    index += 2
+                elif arg.startswith("--unset="):
+                    index += 1
+                elif arg.startswith("-"):
+                    return "other"
+                else:
+                    break
+            command = command[index:]
+        elif name == "nice":
+            index = 1
+            if index < len(command) and command[index] in ("-n", "--adjustment"):
+                index += 2
+            elif index < len(command) and (re.fullmatch(r"-\d+", command[index])
+                                          or command[index].startswith("--adjustment=")):
+                index += 1
+            if index < len(command) and command[index] == "--":
+                index += 1
+            command = command[index:]
+        elif name in ("bash", "sh") and len(command) >= 3 and command[1] == "-c":
+            try:
+                lexer = shlex.shlex(command[2], posix=True, punctuation_chars=";&|<>()")
+                lexer.whitespace_split = True
+                command = list(lexer)
+            except ValueError:
+                return "other"
+            if any(arg and all(c in ";&|<>()" for c in arg) for arg in command):
+                return "other"
+        else:
+            if name == "dotnet":
+                return "dotnet"
+            if name in ("node", "npm", "npx", "yarn", "pnpm", "corepack", "tsc", "tsgo", "vite",
+                        "vitest", "jest", "playwright", "eslint", "prettier", "turbo", "nx"):
+                return "node"
+            if name in ("python", "python3", "pytest"):
+                return "python"
+            if name in ("docker", "docker-compose"):
+                return "docker"
+            return {"cargo": "rust", "go": "go"}.get(name, "other")
+    return "other"
+
+
+def utc_stamp():
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def git_state(cwd):
+    """Capture the code being admitted, without recording filenames or diffs."""
+    head = dirty = None
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True,
+                              text=True, check=True, timeout=2).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    deadline = time.monotonic() + 5
+    try:
+        status = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+                                cwd=cwd, capture_output=True, check=True, timeout=5).stdout
+        if not status:
+            dirty = "clean"
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return head, None
+            diff = subprocess.run(["git", "diff", "HEAD", "--binary"], cwd=cwd,
+                                  capture_output=True, check=True, timeout=remaining).stdout
+            dirty = hashlib.sha256(status + diff).hexdigest()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return head, dirty
+
+
+def append_ledger(state, record):
+    """One bounded append; a broken ledger must never change a phase result."""
+    try:
+        directory = state / "ledger"
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        payload = (json.dumps(record, separators=(",", ":")) + "\n").encode()
+        # Environment values and even rejected labels can be arbitrarily large. Bound only
+        # descriptive strings, retaining hashes, times and measurements in their entirety.
+        while len(payload) >= 4096:
+            key = max(("session", "lane", "cwd", "label", "priority"),
+                      key=lambda k: len(json.dumps(record[k])))
+            record[key] = record[key][:len(record[key]) // 2]
+            payload = (json.dumps(record, separators=(",", ":")) + "\n").encode()
+        fd = os.open(directory / (record["ts"][:10] + ".jsonl"),
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            if os.write(fd, payload) != len(payload):
+                raise OSError("short ledger write")
+        finally:
+            os.close(fd)
+        cutoff = datetime.now(timezone.utc).date() - timedelta(days=60)
+        for path in directory.glob("????-??-??.jsonl"):
+            try:
+                day = datetime.strptime(path.stem, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if day < cutoff:
+                path.unlink(missing_ok=True)
+    except Exception as exc:
+        try:
+            print(f"pi-phase: ledger write failed: {exc}", file=sys.stderr, flush=True)
+        except OSError:
+            pass  # Even a full/broken stderr must not change the phase's exit.
+
+
+class PhaseLedger:
+    def __init__(self, args):
+        command = args.command[1:] if args.command[:1] == ["--"] else args.command
+        self.record = dict(v=1, ts=None, session=os.environ.get("PI_SESSION_ID") or None,
+                           lane=os.environ.get("PI_ORCH_ID") or os.environ.get("PI_LANE_ID") or None,
+                           cwd=os.getcwd(), kind=args.kind, label=args.label, priority=args.priority,
+                           stack=getattr(args, "stack", None) or command_stack(command),
+                           queuedAt=utc_stamp(), startedAt=None, endedAt=None, waitS=0, runS=0,
+                           exit=None, outcome="rejected", head=None, dirty=None,
+                           argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest())
+        self.queued = time.monotonic()
+        self.started = None
+
+    def enqueue(self):
+        self.record["queuedAt"] = utc_stamp()
+        self.queued = time.monotonic()
+        self.snapshot()
+
+    def snapshot(self):
+        self.record["head"], self.record["dirty"] = git_state(self.record["cwd"])
+
+    def start(self):
+        self.record["outcome"] = "failed"
+        self.record["startedAt"] = utc_stamp()
+        self.started = time.monotonic()
+        self.record["waitS"] = max(0, self.started - self.queued)
+
+    def outcome(self, value):
+        self.record["outcome"] = value
+
+    def finish(self, state, code):
+        self.record["ts"] = self.record["endedAt"] = utc_stamp()
+        self.record["exit"] = code
+        if self.started is None:
+            self.record["waitS"] = max(0, time.monotonic() - self.queued)
+        else:
+            self.record["runS"] = max(0, time.monotonic() - self.started)
+            if self.record["outcome"] == "failed" and code == 0:
+                self.record["outcome"] = "passed"
+        append_ledger(state, self.record)
+
+
+def rejected_ledger(argv):
+    """Argparse may reject before producing a Namespace; retain only known metadata."""
+    if not argv or argv[0] != "run":
+        return None
+    options, command = [], []
+    valued = {"--kind", "--label", "--priority", "--timeout", "--queue-timeout", "--repo", "--pr",
+              "--commit", "--log", "--tail", "--vstest-hang-minutes", "--stack"}
+    index = 1
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--":
+            command = argv[index + 1:]
+            break
+        if not arg.startswith("-"):
+            command = argv[index:]
+            break
+        options.append(arg)
+        index += 1
+        if arg in valued and index < len(argv):
+            options.append(argv[index])
+            index += 1
+    def value(name, default=None):
+        for i, arg in enumerate(options):
+            if arg.startswith(name + "="):
+                return arg.split("=", 1)[1]
+            if arg == name and i + 1 < len(options):
+                return options[i + 1]
+        return default
+    kind = value("--kind")
+    if kind not in KINDS:
+        return None
+    stack = value("--stack", "")
+    return PhaseLedger(argparse.Namespace(kind=kind, label=value("--label", ""),
+                                         priority=value("--priority", "normal"), command=command,
+                                         stack=stack if re.fullmatch(r"[a-z0-9-]{1,20}", stack) else None))
+
+
+def read_ledger(state, days=7, kind=None, stack=None):
+    today = datetime.now(timezone.utc).date()
+    first = today - timedelta(days=min(days - 1, (today - datetime.min.date()).days))
+    records, skipped = [], 0
+    for path in sorted((state / "ledger").glob("????-??-??.jsonl")):
+        try:
+            day = datetime.strptime(path.stem, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if not first <= day <= today:
+            continue
+        with open(path, "rb") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                    record.setdefault("stack", "other")
+                    if (type(record.get("v")) is not int or record["v"] != 1 or record.get("kind") not in KINDS
+                            or not isinstance(record["stack"], str)
+                            or not re.fullmatch(r"[a-z0-9-]{1,20}", record["stack"])
+                            or record.get("outcome") not in OUTCOMES
+                            or type(record.get("startedAt")) not in (str, type(None))
+                            or "startedAt" not in record
+                            or any(type(record.get(k)) not in (int, float)
+                                   or not math.isfinite(record[k]) or record[k] < 0
+                                   for k in ("waitS", "runS"))):
+                        raise ValueError("invalid ledger record")
+                    stamp = datetime.fromisoformat(record["ts"].replace("Z", "+00:00"))
+                    if stamp.utcoffset() != timedelta(0):
+                        raise ValueError("not UTC")
+                    if (first <= stamp.date() <= today and (kind is None or record["kind"] == kind)
+                            and (stack is None or record["stack"] == stack)):
+                        records.append(record)
+                except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+                    skipped += 1
+    return records, skipped
+
+
+def percentile(values, percent):
+    return sorted(values)[math.ceil(len(values) * percent / 100) - 1] if values else None
+
+
+def stats(state, days, kind, as_json, stack=None):
+    records, skipped = read_ledger(state, days, kind, stack)
+    groups = {}
+    for record in records:
+        for day in (record["ts"][:10], "total"):
+            groups.setdefault((day, record["kind"], record["stack"]), []).append(record)
+    rows = []
+    for (day, kind, stack), entries in sorted(groups.items()):
+        started = [r for r in entries if r["startedAt"] is not None]
+        rows.append(dict(day=day, kind=kind, stack=stack, count=len(entries), started=len(started),
+                         waitS={f"p{p}": percentile([r["waitS"] for r in entries], p) for p in (50, 90)},
+                         runS={f"p{p}": percentile([r["runS"] for r in started], p) for p in (50, 90)},
+                         queueTimeouts=sum(r["outcome"] == "queue-timeout" for r in entries),
+                         failures=sum(r["outcome"] in ("failed", "timeout") for r in entries)))
+    if as_json:
+        print(json.dumps(dict(days=days, skipped=skipped, rows=rows)))
+    else:
+        print("day kind stack count started waitS.p50 waitS.p90 runS.p50 runS.p90 queue-timeouts failures")
+        for row in rows:
+            print(row["day"], row["kind"], row["stack"], row["count"], row["started"],
+                  *("-" if v is None else f"{v:g}" for v in (*row["waitS"].values(), *row["runS"].values())),
+                  row["queueTimeouts"], row["failures"])
+        print(f"skipped {skipped} malformed ledger lines")
+    return 0
+
+
+def readonly_busy(path):
+    """Probe existing locks only: ETA never creates or removes live state."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
+    finally:
+        os.close(fd)
+
+
+def wait_eta(state, configuration, kind):
+    records, _ = read_ledger(state)
+    durations = {k: [r["runS"] for r in records if r["kind"] == k and r["startedAt"] is not None]
+                 for k in KINDS}
+    basis = len(durations[kind])
+    if not basis:
+        print("eta unknown (no ledger data)")
+        return 0
+    median = percentile(durations[kind], 50)
+    medians = {k: percentile(v, 50) if v else median for k, v in durations.items()}
+    heavy, integration = config(configuration)
+    free = dict(heavy=heavy, integration=integration)
+    events, running = [], set()
+    now = time.time()
+    # Probe once for orphan metadata as well as live locks, as admission does.
+    live = live_groups(2) if state.exists() else set()
+    for path in state.glob("*.lock"):
+        resource = path.stem.split("-", 1)[0]
+        if resource not in free:
+            continue
+        data = metadata(path.with_suffix(".json"))
+        if not (readonly_busy(path) or data.get("unreadable") or live is None or data.get("pgid") in live):
+            continue
+        free[resource] -= 1
+        running.add(data.get("token", path.stem))
+        remaining = max(0, medians.get(data.get("kind"), median) - max(0, now - data.get("started", now)))
+        events.append((remaining, resource))
+    try:
+        coordinator = os.open(state / "coordinator.lock", os.O_RDONLY)
+    except FileNotFoundError:
+        waiters = []
+    else:
+        try:
+            fcntl.flock(coordinator, fcntl.LOCK_SH)
+            waiters = live_waiters(state, readonly=True)
+        finally:
+            os.close(coordinator)
+    waiters = [w for w in waiters if PRIORITIES[w["priority"]] >= PRIORITIES["normal"]]
+    ahead = len(waiters)
+    pending = [w["kind"] for w in waiters] + [kind]
+    elapsed = 0
+    if kind == "ci":
+        pending, ahead = [kind], 0
+    while pending:
+        for entry in list(enumerate(pending)):
+            index, candidate = entry
+            needs = [] if candidate == "ci" else ["heavy"] + (["integration"] if candidate == "integration" else [])
+            if not all(free[r] > 0 for r in needs):
+                continue
+            if index == len(pending) - 1:
+                print(f"eta ~{math.ceil(elapsed / 60)}m (ahead={ahead} running={len(running)} "
+                      f"p50run={median:g}s, basis={basis} runs)")
+                return 0
+            pending[index] = None
+            for resource in needs:
+                free[resource] -= 1
+                events.append((elapsed + medians[candidate], resource))
+        pending = [k for k in pending if k is not None]
+        if not events:
+            print("eta unknown (live capacity unavailable)")
+            return 0
+        elapsed = min(t for t, _ in events)
+        for t, resource in events:
+            if t == elapsed:
+                free[resource] += 1
+        events = [(t, r) for t, r in events if t != elapsed]
+    return 0
 
 
 def safe_label(value):
@@ -686,14 +1051,14 @@ def deregister_waiter(state, token, fd):
             unlock(fd)
 
 
-def live_waiters(state, cancelled=lambda: False):
+def live_waiters(state, cancelled=lambda: False, *, readonly=False):
     """Kernel locks, not PIDs, define liveness. Caller holds the coordinator."""
     waiters = []
     for path in (state / "waiters").glob("*.json"):
         if cancelled():
             return []
         try:
-            fd = os.open(path, os.O_RDWR)
+            fd = os.open(path, os.O_RDONLY if readonly else os.O_RDWR)
         except FileNotFoundError:
             continue
         try:
@@ -711,7 +1076,8 @@ def live_waiters(state, cancelled=lambda: False):
                     raise ValueError("unreadable live waiter")
                 waiters.append(data)
             else:
-                path.unlink(missing_ok=True)
+                if not readonly:
+                    path.unlink(missing_ok=True)
         finally:
             os.close(fd)
     return sorted(waiters, key=lambda w: (-PRIORITIES[w["priority"]], w["enqueued"], w["seq"]))
@@ -970,6 +1336,7 @@ def run(args, state, configuration, output=None):
     elif args.vstest_confirmed:
         raise ValueError("--vstest-confirmed requires --vstest-hang-minutes")
 
+    ledger = getattr(args, "ledger", None)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     ci_key = (args.repo, args.pr, args.commit)
     queued = time.monotonic()
@@ -996,6 +1363,8 @@ def run(args, state, configuration, output=None):
     fingerprint = test_fingerprint(os.getcwd(), command)
     admission_args = argparse.Namespace(**vars(args))
     try:
+        if ledger:
+            ledger.enqueue()
         config_notes = set()
         settings = config(configuration, notes=config_notes)
         options = settings.options
@@ -1009,12 +1378,16 @@ def run(args, state, configuration, output=None):
         while True:
             if cancelled[0]:
                 note("cancelled while queued")
+                if ledger:
+                    ledger.outcome("cancelled")
                 return 128 + cancelled[0]
             if not long_queue_hint and time.monotonic() - queued > 600:
                 note(f"long queue ({int(time.monotonic() - queued)}s): run dev-doctor to look for contention")
                 long_queue_hint = True
             if time.monotonic() >= deadline:
                 note(f"queue timeout ({args.queue_timeout:g}s); command not started")
+                if ledger:
+                    ledger.outcome("queue-timeout")
                 return 75
             if not registered:
                 registered, waiter_fd = register_waiter(state, admission_args, token)
@@ -1030,20 +1403,28 @@ def run(args, state, configuration, output=None):
                          integration if burst and admission_args.kind == "integration" else None)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
+                if ledger:
+                    ledger.outcome("cancelled")
                 return 128 + cancelled[0]
             if held:
                 if time.monotonic() >= deadline:
                     release(state, held, token, True)
                     held = None
                     note(f"queue timeout ({args.queue_timeout:g}s); command not started")
+                    if ledger:
+                        ledger.outcome("queue-timeout")
                     return 75
                 break
             if args.kind == "ci":
+                if ledger:
+                    ledger.outcome("rejected")
                 note("already watching this repo/PR/commit; no second watcher started")
                 return 75
             now = time.monotonic()
             if now >= deadline:
                 note(f"queue timeout ({args.queue_timeout:g}s); command not started")
+                if ledger:
+                    ledger.outcome("queue-timeout")
                 return 75
             if now >= next_heartbeat:
                 note(f"queued kind={args.kind} label={args.label} remaining={max(0, int(deadline-now))}s")
@@ -1052,7 +1433,11 @@ def run(args, state, configuration, output=None):
             settings = config(configuration, notes=config_notes)
         if cancelled[0]:
             note("cancelled after admission; command not started")
+            if ledger:
+                ledger.outcome("cancelled")
             return 128 + cancelled[0]
+        if ledger:
+            ledger.snapshot()
         child_env = None
         cap = msbuild_cap(options["msbuild_max_cpu"], heavy)
         if cap and args.kind in ("build", "test", "integration"):
@@ -1080,11 +1465,15 @@ def run(args, state, configuration, output=None):
                                label=args.label, kind=args.kind, started=time.time()))
             if cancelled[0]:
                 note("cancelled before execution; command not started")
+                if ledger:
+                    ledger.outcome("cancelled")
                 return 128 + cancelled[0]
             attribution = begin_test_attribution(state, token) if args.kind in ("test", "integration") else None
             detection_started = time.time()
             os.write(write_gate, b"1")
             started = time.monotonic()  # No execution budget consumed waiting for a permit.
+            if ledger:
+                ledger.start()
         finally:
             if read_gate != -1:
                 os.close(read_gate)
@@ -1103,6 +1492,8 @@ def run(args, state, configuration, output=None):
             if cancelled[0]:
                 note("cancelled; stopping owned process group")
                 return_code = 128 + cancelled[0]
+                if ledger:
+                    ledger.outcome("cancelled")
                 break
             if exited_unreaped(proc.pid):
                 break
@@ -1110,6 +1501,8 @@ def run(args, state, configuration, output=None):
             if now - started >= args.timeout:
                 note(f"phase timed out ({args.timeout:g}s); stopping owned process group")
                 return_code = 124
+                if ledger:
+                    ledger.outcome("timeout")
                 break
             if now >= next_memory:
                 next_memory = now + MEMORY_SAMPLE_INTERVAL
@@ -1130,6 +1523,8 @@ def run(args, state, configuration, output=None):
             proc.wait(timeout=2)
             if return_code == 125:
                 return_code = proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
+                if ledger and proc.returncode < 0:
+                    ledger.outcome("cancelled")
         except subprocess.TimeoutExpired:
             note("cleanup incomplete; lease retained while group exists")
             return_code = 125
@@ -1164,6 +1559,14 @@ def main(argv=None, *, state=None, configuration=None):
     parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner")
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("status", help="show leases, queue and priority grant (never command arguments)")
+    summary = commands.add_parser("stats", help="summarize phase history by UTC day and kind")
+    summary.add_argument("--days", type=int, default=7)
+    summary.add_argument("--kind", choices=KINDS)
+    summary.add_argument("--json", action="store_true")
+    summary.add_argument("--stack", type=stack_name)
+    waiting = commands.add_parser("wait", help="estimate the wait for a new normal-priority phase")
+    waiting.add_argument("--eta", action="store_true", required=True)
+    waiting.add_argument("--kind", choices=KINDS, default="build")
     grant = commands.add_parser("grant-priority", help="grant user-approved high priority")
     duration = grant.add_mutually_exclusive_group()
     duration.add_argument("--uses", type=int, help="1-20 uses, expires after 60 minutes (default 1)")
@@ -1172,6 +1575,7 @@ def main(argv=None, *, state=None, configuration=None):
     runner = commands.add_parser("run", help="run a single explicit command in one phase")
     runner.add_argument("--kind", choices=("build", "test", "integration", "ci"), required=True)
     runner.add_argument("--label", required=True)
+    runner.add_argument("--stack", type=stack_name, help="override inferred ledger stack")
     runner.add_argument("--priority", choices=tuple(PRIORITIES), default="normal")
     runner.add_argument("--timeout", type=float, default=None, help="execution seconds (default 300 build/test/integration, 120 ci)")
     runner.add_argument("--queue-timeout", type=float, default=120, help="separate permit wait in seconds")
@@ -1187,21 +1591,38 @@ def main(argv=None, *, state=None, configuration=None):
     internal = commands.add_parser("_launch", help=argparse.SUPPRESS)
     internal.add_argument("gate", type=int)
     internal.add_argument("command", nargs=argparse.REMAINDER)
-    args = parser.parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    state = Path(state) if state is not None else STATE
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        if exc.code:
+            ledger = rejected_ledger(argv)
+            if ledger:
+                ledger.finish(state, exc.code)
+        raise
     if args.action == "_launch":
         command = args.command[1:] if args.command and args.command[0] == "--" else args.command
         return launch(args.gate, command)
-    if args.action == "run" and args.tail is not None:
-        if args.log is None:
-            parser.error("--tail requires --log")
-        if args.tail < 0:
-            parser.error("--tail must be nonnegative")
     os.umask(0o077)
-    state = Path(state) if state is not None else STATE
     configuration = Path(configuration) if configuration is not None else CONFIG
     output = None
     return_code = 125
+    ledger = PhaseLedger(args) if args.action == "run" else None
+    if ledger:
+        args.ledger = ledger
     try:
+        if args.action == "run" and args.tail is not None:
+            if args.log is None:
+                parser.error("--tail requires --log")
+            if args.tail < 0:
+                parser.error("--tail must be nonnegative")
+        if args.action == "stats":
+            if args.days < 1:
+                parser.error("--days must be positive")
+            return stats(state, args.days, args.kind, args.json, args.stack)
+        if args.action == "wait":
+            return wait_eta(state, configuration, args.kind)
         if args.action == "status":
             return status(state)
         if args.action == "grant-priority":
@@ -1215,6 +1636,9 @@ def main(argv=None, *, state=None, configuration=None):
             log_path.parent.mkdir(parents=True, exist_ok=True)
             output = open(log_path, "wb")
         return_code = run(args, state, configuration, output=output)
+    except SystemExit as exc:
+        return_code = exc.code
+        raise
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         print(f"pi-phase: {exc}", file=sys.stderr, flush=True)
     finally:
@@ -1225,6 +1649,8 @@ def main(argv=None, *, state=None, configuration=None):
             except OSError as exc:
                 print(f"pi-phase: {exc}", file=sys.stderr, flush=True)
                 return_code = 125
+        if ledger:
+            ledger.finish(state, return_code)
     return return_code
 
 
