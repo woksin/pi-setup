@@ -71,8 +71,9 @@ export async function gatherFacts(baseCtx: Ctx, manifest?: Manifest): Promise<{ 
   const hasPi = Boolean(ctx.which("pi"));
   // units recorded in the manifest are reported by componentChecks
   const recorded = new Set(Object.values(manifest?.components ?? {}).flatMap((c) => (c.service?.kind === "launchd" ? [c.service.label] : [])));
-  const agents = plists(ctx).filter((p) => !recorded.has(p.label));
-  const guardian = agents.some(p => p.label.endsWith(".docker-guardian"));
+  const all = plists(ctx);
+  const agents = all.filter((p) => !recorded.has(p.label));
+  const guardian = all.some(p => p.label.endsWith(".docker-guardian")) || manifest?.components?.["docker-guardian"]?.on === true;
   const [providers, models, version, gh, head, checkout, disks, launchd, docker, updates] = await Promise.all([
     Promise.all(PROVIDER_IDS.map(id => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" as const })) : Promise.resolve({ status: "unknown" as const }))),
     hasPi ? listModels(ctx) : Promise.resolve({ catalog: null, code: null, stderr: "", timedOut: false }),

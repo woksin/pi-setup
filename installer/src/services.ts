@@ -153,11 +153,25 @@ export function unloadLine(svc: ServiceRecord): string {
   return svc.kind === "launchd" ? `boot out ${svc.label} (launchctl bootout gui/${uid()}/${svc.label})` : `disable ${svc.label} (systemctl --user disable --now ${svc.label})`;
 }
 
-/** Stop a managed service before its files are removed. "Not loaded" is fine. */
+const NOT_LOADED = /no such process|could not find service|not loaded|not found|does not exist|no such file|unit .* not loaded/i;
+
+/** Stop a managed service before its files are removed. "Not loaded" is success; any other failure is a warning and the removal goes on. */
 export async function unloadService(ctx: Ctx, svc: ServiceRecord): Promise<void> {
   if (!svc.managed) return;
-  if (svc.kind === "launchd") await sh(ctx, "launchctl", ["bootout", `gui/${uid()}/${svc.label}`]);
-  else if (ctx.which("systemctl")) await sh(ctx, "systemctl", ["--user", "disable", "--now", svc.label]);
+  const [cmd, args] = svc.kind === "launchd"
+    ? ["launchctl", ["bootout", `gui/${uid()}/${svc.label}`]]
+    : ["systemctl", ["--user", "disable", "--now", svc.label]];
+  if (svc.kind === "systemd" && !ctx.which("systemctl")) return;
+  let text: string;
+  try {
+    const r = await ctx.run(cmd, args, { timeoutMs: TIMEOUT });
+    if (r.code === 0 && !r.timedOut) return;
+    text = r.timedOut ? "timed out" : `${r.stdout}${r.stderr}`.trim();
+    if (!r.timedOut && (NOT_LOADED.test(text) || (svc.kind === "launchd" && [3, 113].includes(r.code)))) return;
+  } catch (error) {
+    text = (error as Error).message;
+  }
+  ctx.err(`warning: could not stop ${svc.label} (${text.split("\n")[0] || "failed"}); remove it by hand: ${cmd} ${args.join(" ")}`);
 }
 
 /** After the unit files are gone. */

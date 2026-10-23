@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: a3a9275252b1b2c3d816125df30deaee7f60e02d2b85f26c9f6f1bc8fd566b71
+// pi-setup-source-sha256: b7e8aefced4ca8c5f9cf6a4818283c3df8fa23ca131e2ebb6f0fb2280589576e
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -1775,13 +1775,23 @@ function unloadLine(svc) {
 }
 async function unloadService(ctx, svc) {
   if (!svc.managed) return;
-  if (svc.kind === "launchd") await sh(ctx, "launchctl", ["bootout", `gui/${uid()}/${svc.label}`]);
-  else if (ctx.which("systemctl")) await sh(ctx, "systemctl", ["--user", "disable", "--now", svc.label]);
+  const [cmd, args] = svc.kind === "launchd" ? ["launchctl", ["bootout", `gui/${uid()}/${svc.label}`]] : ["systemctl", ["--user", "disable", "--now", svc.label]];
+  if (svc.kind === "systemd" && !ctx.which("systemctl")) return;
+  let text3;
+  try {
+    const r2 = await ctx.run(cmd, args, { timeoutMs: TIMEOUT });
+    if (r2.code === 0 && !r2.timedOut) return;
+    text3 = r2.timedOut ? "timed out" : `${r2.stdout}${r2.stderr}`.trim();
+    if (!r2.timedOut && (NOT_LOADED.test(text3) || svc.kind === "launchd" && [3, 113].includes(r2.code))) return;
+  } catch (error) {
+    text3 = error.message;
+  }
+  ctx.err(`warning: could not stop ${svc.label} (${text3.split("\n")[0] || "failed"}); remove it by hand: ${cmd} ${args.join(" ")}`);
 }
 async function reloadSystemd(ctx, svc) {
   if (svc.managed && svc.kind === "systemd" && ctx.which("systemctl")) await sh(ctx, "systemctl", ["--user", "daemon-reload"]);
 }
-var LAUNCHD_NAME, TIMER, TIMEOUT, xml, isService, uid;
+var LAUNCHD_NAME, TIMER, TIMEOUT, xml, isService, uid, NOT_LOADED;
 var init_services = __esm({
   "src/services.ts"() {
     init_components();
@@ -1792,6 +1802,7 @@ var init_services = __esm({
     xml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     isService = (id) => COMPONENTS.some((c2) => c2.id === id && c2.service);
     uid = () => typeof process.getuid === "function" ? process.getuid() : 0;
+    NOT_LOADED = /no such process|could not find service|not loaded|not found|does not exist|no such file|unit .* not loaded/i;
   }
 });
 
@@ -2518,8 +2529,9 @@ async function gatherFacts(baseCtx, manifest) {
   const ctx = { ...baseCtx, run: (cmd, args, options) => baseCtx.run(cmd, cmd === "git" ? ["--no-optional-locks", ...args] : args, options) };
   const hasPi = Boolean(ctx.which("pi"));
   const recorded = new Set(Object.values(manifest?.components ?? {}).flatMap((c2) => c2.service?.kind === "launchd" ? [c2.service.label] : []));
-  const agents = plists(ctx).filter((p) => !recorded.has(p.label));
-  const guardian = agents.some((p) => p.label.endsWith(".docker-guardian"));
+  const all = plists(ctx);
+  const agents = all.filter((p) => !recorded.has(p.label));
+  const guardian = all.some((p) => p.label.endsWith(".docker-guardian")) || manifest?.components?.["docker-guardian"]?.on === true;
   const [providers2, models2, version, gh, head, checkout, disks, launchd, docker, updates] = await Promise.all([
     Promise.all(PROVIDER_IDS.map((id) => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" })) : Promise.resolve({ status: "unknown" }))),
     hasPi ? listModels(ctx) : Promise.resolve({ catalog: null, code: null, stderr: "", timedOut: false }),

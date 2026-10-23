@@ -221,6 +221,20 @@ describe("doctor", () => {
     assert.deepEqual(b.calls, []);
   });
 
+  test("a recorded, enabled docker-guardian still gets the docker reachability check", async () => {
+    const b = box();
+    assert.equal(await run(b, "--with", "docker-guardian"), 0, b.err.join("\n"));
+    const run0 = b.ctx.run;
+    const docker: string[] = [];
+    b.ctx.run = async (cmd, args, o) => {
+      if (cmd === "docker") { docker.push(args.join(" ")); return { code: 0, stdout: "27.0", stderr: "", timedOut: false }; }
+      return run0(cmd, args, o);
+    };
+    const { text } = await doctor(b);
+    assert.deepEqual(docker, ["info --format {{.ServerVersion}}"]);
+    assert.ok(!text.includes("no docker guardian"), text);
+  });
+
   test("systemd uses is-active", async () => {
     const b = box("linux");
     assert.equal(await run(b, "--with", "cleanup"), 0, b.err.join("\n"));
@@ -244,5 +258,33 @@ describe("doctor", () => {
     text = (await doctor(b)).text;
     assert.ok(text.includes("✔ codescene-mcp") && text.includes("✔ codescene-token") && text.includes("✔ codescene-skills"), text);
     assert.ok(!text.includes("SECRET-VALUE"));
+  });
+});
+
+describe("stopping a service", () => {
+  const failing = (b: Box, code: number, stderr: string) => {
+    const run0 = b.ctx.run;
+    b.ctx.run = async (cmd, args, o) => (cmd === "launchctl" && args[0] === "bootout" ? { code, stdout: "", stderr, timedOut: false } : run0(cmd, args, o));
+  };
+
+  test("not loaded is success; the unit is removed without a warning", async () => {
+    const b = box();
+    await run(b, "--with", "docker-guardian");
+    failing(b, 3, "Boot-out failed: 3: No such process");
+    assert.equal(await run(b, "--without", "docker-guardian"), 0, b.err.join("\n"));
+    assert.ok(!b.err.some((l) => l.includes("could not stop")));
+    assert.ok(!existsSync(unit(b, "com.tester.docker-guardian.plist")));
+  });
+
+  test("any other failure is a warning with the manual command, and the file is still removed (turn-off and uninstall)", async () => {
+    for (const via of ["off", "uninstall"]) {
+      const b = box();
+      await run(b, "--with", "docker-guardian");
+      failing(b, 1, "Operation not permitted");
+      const code = via === "off" ? await run(b, "--without", "docker-guardian") : await main(["uninstall", "--yes"], b.ctx);
+      assert.equal(code, 0, b.err.join("\n"));
+      assert.ok(b.err.some((l) => l.startsWith("warning: could not stop com.tester.docker-guardian (Operation not permitted); remove it by hand: launchctl bootout gui/")), `${via}: ${b.err.join("|")}`);
+      assert.ok(!existsSync(unit(b, "com.tester.docker-guardian.plist")), via);
+    }
   });
 });
