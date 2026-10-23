@@ -45,6 +45,8 @@ function gitProbe(args: string[]) {
 }
 function psProbe(args: string[], rows: Process[]) {
   if (args.includes("lstart=")) return result("start");
+  if (args.includes("pgid=,tpgid=")) return result(`${args.at(-1)} ${args.at(-1)}`);
+  if (args.includes("pid=,ppid=,pgid=,command=")) return result(rows.map(r => `${r.pid} 1 ${r.pid} pi`).join("\n"));
   if (args[0] === "-t") return result(`${rows.find(r => r.tty === args[1])?.pid} S+ pi`);
   if (args.includes("tty=")) return result(rows.find(r => String(r.pid) === args.at(-1))?.tty ?? "?");
   return result(rows.map(r => `${r.pid} 1 pi`).join("\n"));
@@ -177,6 +179,68 @@ test("discovery distinguishes a non-git directory from detached HEAD and retains
   const rows = await discover(f.ctx, [], []);
   assert.deepEqual(rows[0].warnings, ["not a git repo"]);
   assert.deepEqual(rows[1].warnings, ["detached HEAD"]); assert.equal(rows[1].repo, "example/repo"); assert.equal(rows[1].branch, undefined);
+});
+test("write preserves detached and non-git lanes, roles, status and routing", async (t) => {
+  const { assert } = t;
+  const f = fixture(); const orch = f.add("R-CHR"); const detached = f.add("L29"); const plain = f.add("L49"); const solo = f.add("SOLO");
+  const run = f.ctx.run;
+  f.ctx.run = async (cmd, args, opts) => {
+    if (cmd !== "git") return run(cmd, args, opts);
+    if ([plain.cwd, solo.cwd].some(cwd => args.includes(cwd))) return result("", 128);
+    return result(args.includes("remote") ? "git@github.com:Cratis/Chronicle.git\n" : "HEAD\n");
+  };
+  assert.equal(await f.invoke("adopt", "--write"), 0, f.err.join("\n"));
+  const c = loadConfig(f.root); assert.equal(c.lanes.length, 4);
+  for (const p of [orch, detached, plain, solo]) {
+    const lane = c.lanes.find(l => l.cwd === p.cwd)!; assert.ok(lane); assert.ok(!("branch" in lane));
+    assert.equal(lane.repo, [orch, detached].includes(p) ? "Cratis/Chronicle" : undefined);
+  }
+  assert.equal(c.lanes[0].role, "repo-orch");
+  assert.match(f.out.join("\n"), /found=4 mapped=4 unmapped=0 conflicts=0/);
+  assert.equal(await f.invoke("status"), 0, f.err.join("\n"));
+  assert.ok(!f.err.join("\n").includes("no repo-orch")); assert.ok(!f.out.at(-1)!.includes("undefined"));
+  assert.equal(await f.invoke("send", "L0", "report", "--from", "L29", "-m", "done"), 0);
+  assert.equal(await f.invoke("send", "L0", "report", "--from", "L49", "-m", "done"), 0);
+  const backend = new FileBackend(join(f.root, "messages"), f.ctx.now);
+  assert.equal((await backend.inbox("R-CHR")).length, 1); assert.equal((await backend.inbox("L0")).length, 1);
+  const before = readFileSync(join(f.root, "lanes.json"), "utf8");
+  assert.equal(await f.invoke("adopt", "--write"), 0); assert.equal(readFileSync(join(f.root, "lanes.json"), "utf8"), before);
+});
+test("every omitted discovery has an explicit skipped reason", async (t) => {
+  const { assert } = t;
+  const f = fixture(); f.add("WORK-TWO"); f.add("L1"); f.add("L1"); f.add(undefined);
+  assert.equal(await f.invoke("adopt", "--write"), 0, f.err.join("\n"));
+  assert.deepEqual(loadConfig(f.root).lanes, []);
+  const summary = f.out.join("\n");
+  assert.match(summary, /WORK-TWO.*skipped: unsupported id/);
+  assert.match(summary, /L1.*skipped: duplicate id/); assert.match(summary, /\?.*skipped: unmapped/);
+});
+test("cwd lanes may omit git identity but managed worktrees still require it", (t) => {
+  const { assert } = t;
+  const f = fixture(); const c = defaults(f.root, f.home);
+  c.lanes = [{ id: "L1", cwd: join(f.home, "plain"), worktree: "plain", group: null, prompt: "prompts/L1.md" }];
+  validate(c); delete c.lanes[0].cwd; assert.throws(() => validate(c), /repo/);
+  c.lanes[0].repo = "example/repo"; assert.throws(() => validate(c), /branch/);
+});
+test("green-prs ignores repo-less cwd lanes", async (t) => {
+  const { assert } = t;
+  const f = fixture(); const c = defaults(f.root, f.home);
+  c.lanes = [{ id: "L1", cwd: join(f.home, "plain"), worktree: "plain", group: null, prompt: "prompts/L1.md" }];
+  saveConfig(f.root, c); f.ctx.which = cmd => cmd === "gh" ? "/bin/gh" : undefined;
+  const run = f.ctx.run; f.ctx.run = async (cmd, args, opts) => cmd === "gh" ? (f.calls.push({ cmd, args }), result("[]")) : run(cmd, args, opts);
+  assert.equal(await f.invoke("green-prs"), 1); assert.ok(!f.calls.some(call => call.cmd === "gh"));
+  c.lanes.push({ id: "L2", repo: "example/repo", branch: "work", worktree: "l2", group: null, prompt: "prompts/L2.md" });
+  saveConfig(f.root, c); assert.equal(await f.invoke("green-prs"), 0);
+  assert.deepEqual(f.calls.filter(call => call.cmd === "gh").map(call => call.args[3]), ["example/repo"]);
+});
+test("repo-less orchestrators do not group unrelated cwd lanes", async (t) => {
+  const { assert } = t;
+  const f = fixture(); f.add("R-ONE"); f.add("R-TWO"); f.add("L3"); const run = f.ctx.run;
+  f.ctx.run = async (cmd, args, opts) => cmd === "git" ? result("", 128) : run(cmd, args, opts);
+  assert.equal(await f.invoke("adopt", "--write"), 0, f.err.join("\n")); assert.equal(loadConfig(f.root).lanes.length, 3);
+  assert.equal(await f.invoke("status"), 0, f.err.join("\n")); assert.ok(!f.err.join("\n").includes("no repo-orch"));
+  assert.equal(await f.invoke("send", "L0", "report", "--from", "L3", "-m", "done"), 0);
+  const backend = new FileBackend(join(f.root, "messages"), f.ctx.now); assert.equal((await backend.inbox("L0")).length, 1);
 });
 test("absolute inventory worktree matching tty fills a new coordinator, not a lane", async () => {
   const f = fixture(); const p = f.add(undefined); const inv = f.inventory([`| 000 | ${p.cwd} | L0 |`]);
