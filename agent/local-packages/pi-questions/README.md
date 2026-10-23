@@ -48,6 +48,7 @@ User commands are verbatim by construction. `record_answer` is for an answer the
 - `/questions [all|decided|repo|search <terms>]`: open items grouped as Blocking, High, Normal, Low. `all` shows every repo with asker lanes.
 - `/q <id> [reopen|comment <text>|answer|decide|defer|close ...]`: show or act on one item.
 - `/answer <id> <text>`, `/decide <id> <option key or number> [rationale]`, `/defer <id> [YYYY-MM-DD] [reason]`, `/close <id> [reason]`.
+- Tab completion: every command completes the id. For `/decide` and `/q`, the id list also shows each item's options, with the recommended key starred (`[no/yes*/later]`). After `/decide <id> ` (or `/q <id> decide `) it completes that item's option keys, labelled `<n> <key> - <text>`, with the recommended option first and marked. `/q <id> ` completes the operation.
 
 Ids may be written `42`, `Q-42` or `q42`; commands complete open ids. Output is plain text: no blockquotes, and list lines are at most 100 columns wide. A status line shows "Q 5 open, 2 blocking" plus ", 1 answered for you" when an answer is waiting to be delivered; it is hidden at zero.
 

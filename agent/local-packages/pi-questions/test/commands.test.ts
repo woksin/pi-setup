@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { completeIds, parseAnswer, parseClose, parseDate, parseDecide, parseDefer, parseQ, parseQuestions } from "../src/commands.ts";
+import { completeDecide, completeIds, completeQ, optionsHint, parseAnswer, parseClose, parseDate, parseDecide, parseDefer, parseQ, parseQuestions } from "../src/commands.ts";
 import { seed, tempDir } from "./helpers.ts";
 
 const ok = (r: any) => {
@@ -63,4 +63,50 @@ test("completion offers open ids only", t => {
 	assert.deepEqual(completeIds(items, "q1")!.map(x => x.value), ["Q-1"]);
 	assert.equal(completeIds(items, "9"), null);
 	assert.equal(completeIds(items, "1 more"), null);
+});
+
+function decisionItem(t: any, title = "Chronicle: make hot-core-gate the default") {
+	return seed(tempDir(t), {
+		kind: "decision", title,
+		options: [{ key: "no", text: "keep the current gate" }, { key: "yes", text: "switch to hot-core-gate" }, { key: "later", text: "revisit next week" }],
+		recommended: "yes",
+	});
+}
+
+test("/decide completes the item's options after the id, recommended first", t => {
+	const items = [decisionItem(t)];
+	assert.deepEqual(completeDecide(items, "1 "), [
+		{ value: "Q-1 yes", label: "2 yes - switch to hot-core-gate (recommended)" },
+		{ value: "Q-1 no", label: "1 no - keep the current gate" },
+		{ value: "Q-1 later", label: "3 later - revisit next week" },
+	]);
+	assert.deepEqual(completeDecide(items, "q-1 l")!.map(x => x.value), ["Q-1 later"]);
+	assert.deepEqual(completeDecide(items, "Q-1 3")!.map(x => x.value), ["Q-1 later"]);
+	assert.equal(completeDecide(items, "1 maybe"), null);
+	assert.equal(completeDecide(items, "1 yes because"), null, "no completion once the rationale starts");
+	assert.equal(completeDecide(items, "7 "), null, "unknown id");
+	assert.equal(completeDecide([{ ...items[0], status: "closed" as const }], "1 "), null, "closed item");
+});
+
+test("/decide and /q id labels show the options with the recommendation starred", t => {
+	const item = decisionItem(t);
+	assert.equal(optionsHint(item), "[no/yes*/later]");
+	assert.deepEqual(completeDecide([item], "")!.map(x => x.label), ["Q-1 Chronicle: make hot-core-gate the default [no/yes*/later]"]);
+	assert.deepEqual(completeQ([item], "q")!.map(x => x.label), ["Q-1 Chronicle: make hot-core-gate the default [no/yes*/later]"]);
+	assert.deepEqual(completeIds([item], "")!.map(x => x.label), ["Q-1 Chronicle: make hot-core-gate the default"], "/answer etc. unchanged");
+	const long = decisionItem(t, "x".repeat(120));
+	const label = completeDecide([long], "")![0].label;
+	assert.ok(label.length <= 80, label);
+	assert.ok(label.endsWith("... [no/yes*/later]"), label);
+	const plain = seed(tempDir(t), { title: "no options here" });
+	assert.deepEqual(completeDecide([plain], "")!.map(x => x.label), ["Q-1 no options here"]);
+	assert.equal(completeDecide([plain], "1 "), null);
+});
+
+test("/q completes operations, then options after decide", t => {
+	const items = [decisionItem(t)];
+	assert.deepEqual(completeQ(items, "1 d")!.map(x => x.value), ["Q-1 decide", "Q-1 defer"]);
+	assert.deepEqual(completeQ(items, "1 decide ")!.map(x => x.value), ["Q-1 decide yes", "Q-1 decide no", "Q-1 decide later"]);
+	assert.equal(completeQ(items, "1 comment hello"), null);
+	assert.equal(completeQ(items, "9 d"), null);
 });

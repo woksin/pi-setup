@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, watch as fsWatch } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import * as actions from "./actions.ts";
-import { completeIds, parseAnswer, parseClose, parseDecide, parseDefer, parseQ, parseQuestions } from "./commands.ts";
+import { completeDecide, completeIds, completeQ, parseAnswer, parseClose, parseDecide, parseDefer, parseQ, parseQuestions } from "./commands.ts";
 import { Deliverer, pending, type Entry, type LiveSession } from "./delivery.ts";
 import { possibleDuplicates } from "./dedup.ts";
 import { renderCandidates, renderItem, renderList, renderRecord, statusText } from "./format.ts";
@@ -416,10 +416,12 @@ export function createQuestionsExtension(opts: Options = {}) {
 				notify(ctx, e.message, "error");
 			}
 		};
-		const idCompletions = (prefix: string) => {
-			const found = completeIds(listItems(home).items, prefix);
-			return found ? found.map(f => ({ value: f.value, label: f.label })) : null;
-		};
+		const completions = (complete: (items: ReturnType<typeof listItems>["items"], prefix: string) => { value: string; label: string }[] | null) =>
+			(prefix: string) => {
+				const found = complete(listItems(home).items, prefix);
+				return found ? found.map(f => ({ value: f.value, label: f.label })) : null;
+			};
+		const idCompletions = completions((items, prefix) => completeIds(items, prefix));
 		const listFor = (ctx: any, f: Parameters<typeof selectItems>[1], heading: string, showAsker = false) => {
 			const me = whoOf(identity(ctx));
 			const { items, warnings } = listItems(home);
@@ -467,7 +469,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 
 		pi.registerCommand("q", {
 			description: "Show or act on one item: /q <id> [reopen|comment <text>|answer|decide|defer|close]",
-			getArgumentCompletions: idCompletions,
+			getArgumentCompletions: completions(completeQ),
 			handler: guarded((args, ctx) => userOp(args, ctx, parseQ(args))),
 		});
 		pi.registerCommand("answer", {
@@ -477,7 +479,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 		});
 		pi.registerCommand("decide", {
 			description: "Decide: /decide <id> <option key or number> [rationale]",
-			getArgumentCompletions: idCompletions,
+			getArgumentCompletions: completions(completeDecide),
 			handler: guarded((args, ctx) => userOp(args, ctx, parseDecide(args))),
 		});
 		pi.registerCommand("defer", {
