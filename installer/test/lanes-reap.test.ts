@@ -50,14 +50,11 @@ export function fixture() {
     invoke: (...args: string[]) => main(["--dir", root, ...args], ctx),
     rows: () => JSON.parse(out.at(-1)!) as { id: string; verdict: string; reason: string }[] };
 }
-function mockSubagentPids(f: ReturnType<typeof fixture>): void {
-  const run = f.ctx.run;
-  f.ctx.run = async (cmd, args, opts) => {
-    if (cmd === "ps" && args.includes("pid=")) {
-      f.calls.push({ cmd, args }); return args[1] === "101" ? f.result("101\n") : f.result("", 1);
-    }
-    return run(cmd, args, opts);
-  };
+function subagentStatus(f: ReturnType<typeof fixture>, overrides: Record<string, unknown> = {}, name = "sub"): void {
+  f.put(join(f.ctx.piAgentDir, `context-budget/status/${name}.json`), JSON.stringify({
+    role: "subagent", sessionId: "child-session", sessionFile: "/sessions/child.jsonl", pid: 101,
+    at: f.now.toISOString(), ...overrides,
+  }));
 }
 function foregroundProbe({ args, foreground, busy }: { args: string[]; foreground: boolean; busy: string }): string | undefined {
   if (args.includes("pgid=,tpgid=")) return "101 101\n";
@@ -225,53 +222,72 @@ test("local active claims require exact identity rather than branch substrings",
     if (!keep) assert.ok(s.asks.includes("local claim ownership unknown"));
   }
 });
-test("subagent ownership requires exact session, file or parent pid; cwd and own pid alone do not count", async () => {
-  const f = fixture(); mockSubagentPids(f); const path = join(f.ctx.piAgentDir, "context-budget/status/sub.json");
-  for (const identity of [{ cwd: f.cwd }, { cwd: join(f.cwd, "child") }, { pid: 101 }, { sessionId: "s10" }, { sessionFile: `${f.sessionFile}.other` }, { parentPid: 1010 }]) {
-    f.put(path, JSON.stringify({ role: "subagent", pid: 909, at: "unknown", ...identity }));
-    const s = await evidence(f); assert.deepEqual(s.asks, []); assert.ok(!s.keeps.includes("subagent running"));
+test("real-shaped child records belong by primary session or legacy shared host pid", async () => {
+  const f = fixture();
+  for (const identity of [{}, { primarySessionId: "s1", state: "active" }, { primarySessionId: "s1", pid: 909 }]) {
+    subagentStatus(f, identity); const s = await evidence(f);
+    assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, ["subagent running"]);
   }
-  for (const identity of [{ sessionId: "s1" }, { sessionFile: f.sessionFile }, { parentPid: 101 }]) {
-    f.put(path, JSON.stringify({ role: "subagent", pid: 101, at: "unknown", ...identity }));
-    assert.ok((await evidence(f)).keeps.includes("subagent running"));
-  }
-  f.put(path, JSON.stringify({ role: "main", pid: 101, sessionId: "s1", at: "unknown" }));
-  assert.ok(!(await evidence(f)).keeps.includes("subagent running"));
+  assert.ok(!f.calls.some(c => c.args.includes("pid=")));
 });
-test("owned live subagents keep regardless of status age; dead old records are finished history", async () => {
-  const f = fixture(); mockSubagentPids(f); const path = join(f.ctx.piAgentDir, "context-budget/status/sub.json");
-  const at = new Date(f.now.getTime() - 600001).toISOString();
-  f.put(path, JSON.stringify({ role: "subagent", parentPid: 101, pid: 101, at }));
-  const alive = await evidence(f); assert.deepEqual(alive.asks, []); assert.ok(alive.keeps.includes("subagent running"));
-  f.put(path, JSON.stringify({ role: "subagent", parentPid: 101, pid: 909, at }));
-  const dead = await evidence(f); assert.deepEqual(dead.asks, []); assert.ok(!dead.keeps.includes("subagent running"));
+test("explicit primary mismatch never falls back to host pid; cwd and child ancestry do not establish ownership", async () => {
+  const f = fixture();
+  for (const identity of [{ primarySessionId: "s10" }, { primarySessionId: null }, { pid: 909, cwd: f.cwd }, { pid: 909, cwd: join(f.cwd, "child") }, { pid: 909, sessionId: "s1", sessionFile: f.sessionFile, parentPid: 101 }, { role: "main", primarySessionId: "s1" }]) {
+    subagentStatus(f, { at: "unknown", ...identity }); const s = await evidence(f);
+    assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, []);
+  }
 });
-test("owned dead fresh, future and unknown timestamps ask once per lane, not once per record", async () => {
-  const f = fixture(); mockSubagentPids(f); const dir = join(f.ctx.piAgentDir, "context-budget/status");
-  const timestamps = [f.now.toISOString(), new Date(f.now.getTime() - 600000).toISOString(), "unknown", undefined, new Date(f.now.getTime() + 1000).toISOString()];
-  for (const at of timestamps) {
-    f.put(join(dir, "sub.json"), JSON.stringify({ role: "subagent", sessionId: "s1", pid: 909, at }));
-    assert.deepEqual((await evidence(f)).asks, ["owned subagent liveness uncertain"]);
+test("ended children are history even with unknown timestamps; active fresh and boundary timestamps keep", async () => {
+  const f = fixture();
+  for (const identity of [{}, { primarySessionId: "s1" }]) {
+    subagentStatus(f, { ...identity, state: "ended", at: "unknown" });
+    assert.deepEqual((await evidence(f)).asks, []); assert.deepEqual((await evidence(f)).keeps, []);
+    subagentStatus(f, { ...identity, state: "active", at: new Date(f.now.getTime() - 600000).toISOString() });
+    assert.deepEqual((await evidence(f)).keeps, ["subagent running"]);
   }
-  for (let i = 0; i < 20; i++) f.put(join(dir, `${i}.json`), JSON.stringify({ role: "subagent", sessionId: "s1", pid: 909, at: f.now.toISOString() }));
-  f.put(join(dir, "alive.json"), JSON.stringify({ role: "subagent", sessionId: "s1", pid: 101 }));
-  const start = f.calls.length; const mixed = await evidence(f);
-  assert.deepEqual(mixed.asks, ["owned subagent liveness uncertain"]);
-  assert.deepEqual(mixed.keeps, ["subagent running"]);
-  assert.equal(f.calls.slice(start).filter(c => c.cmd === "ps" && c.args[1] === "909").length, 1);
 });
-test("unknown owned subagent pid or failed liveness probe asks even for old records", async () => {
-  const f = fixture(); mockSubagentPids(f); const path = join(f.ctx.piAgentDir, "context-budget/status/sub.json");
-  for (const pid of [undefined, 0, -1, "909"]) {
-    f.put(path, JSON.stringify({ role: "subagent", sessionId: "s1", pid, at: "2020-01-01T00:00:00Z" }));
-    assert.deepEqual((await evidence(f)).asks, ["owned subagent liveness uncertain"]);
+test("stale, future and unparseable active child states ask once per lane", async () => {
+  const f = fixture();
+  for (const at of ["2020-01-01T00:00:00Z", "unknown", undefined, new Date(f.now.getTime() + 1000).toISOString()]) {
+    subagentStatus(f, { at }); assert.deepEqual((await evidence(f)).asks, ["subagent state unknown"]);
   }
-  f.put(path, JSON.stringify({ role: "subagent", sessionId: "s1", pid: 909, at: "2020-01-01T00:00:00Z" }));
-  const run = f.ctx.run;
-  for (const probe of [{ ...f.result("", 1), timedOut: true }, f.result("", 2), f.result(""), f.result("910")]) {
-    f.ctx.run = async (cmd, args, opts) => cmd === "ps" && args.includes("pid=") ? probe : run(cmd, args, opts);
-    assert.deepEqual((await evidence(f)).asks, ["owned subagent liveness uncertain"]);
+  for (let i = 0; i < 20; i++) subagentStatus(f, { at: "unknown" }, `unknown${i}`);
+  for (let i = 0; i < 20; i++) subagentStatus(f, { state: "active" }, `fresh${i}`);
+  const s = await evidence(f); assert.deepEqual(s.asks, ["subagent state unknown"]); assert.deepEqual(s.keeps, ["subagent running"]);
+});
+test("matching session, file and agent completion evidence settles stale children", async () => {
+  const f = fixture();
+  const completions = [
+    { type: "custom_message", customType: "subagent-notification", details: { status: "completed", sessionId: "child-session" } },
+    { role: "custom", customType: "subagent-notification", details: { status: "completed", sessionFile: "/sessions/child.jsonl" } },
+    { role: "toolResult", toolName: "subagent", details: { status: "completed", sessionId: "child-session" } },
+    { type: "custom_message", customType: "subagent-notification", content: "<task-notification><task-id>agent&amp;1</task-id><status>Done</status></task-notification>" },
+  ];
+  for (const completion of completions) {
+    subagentStatus(f, { at: "2020-01-01T00:00:00Z", agentId: "agent&1" });
+    f.put(f.sessionFile, JSON.stringify(completion), 120);
+    const s = await evidence(f); assert.deepEqual(s.asks, []); assert.deepEqual(s.keeps, []);
   }
+});
+test("unrelated, failed and quoted notifications do not settle a stale child", async () => {
+  const f = fixture(); subagentStatus(f, { at: "2020-01-01T00:00:00Z", agentId: "agent1" });
+  const completions = [
+    { type: "custom_message", customType: "subagent-notification", details: { status: "completed", sessionId: "child-session-other" } },
+    { type: "custom_message", customType: "subagent-notification", content: "<task-notification><task-id>agent1</task-id><status>Running</status></task-notification>" },
+    { type: "custom_message", customType: "subagent-notification", details: { status: "failed", sessionId: "child-session" } },
+    { role: "user", content: "<task-notification><task-id>agent1</task-id><status>Done</status></task-notification>" },
+  ];
+  for (const completion of completions) {
+    f.put(f.sessionFile, JSON.stringify(completion), 120);
+    assert.deepEqual((await evidence(f)).asks, ["subagent state unknown"]);
+  }
+});
+test("completion does not excuse an invalid timestamp or a partial history scan", async () => {
+  const f = fixture(); const completion = JSON.stringify({ type: "custom_message", customType: "subagent-notification", details: { status: "completed", sessionId: "child-session" } });
+  subagentStatus(f, { at: "unknown" }); f.put(f.sessionFile, completion, 120);
+  assert.deepEqual((await evidence(f)).asks, ["subagent state unknown"]);
+  subagentStatus(f, { at: "2020-01-01T00:00:00Z" }); f.put(f.sessionFile, `${completion}\n{broken`, 120);
+  assert.deepEqual((await evidence(f)).asks, ["session work history malformed", "subagent state unknown"]);
 });
 test("job snapshots cover sleeping watches and terminal updates clear them", async () => {
   const f = fixture(); const snapshot = { id: "j1", command: "inbox-watch L1", status: "running", cwd: f.cwd, startedAt: f.now.getTime() - 120000, timeoutSeconds: 3600 };
@@ -302,7 +318,7 @@ const keepCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["busy child", f => f.setBusy("102 101 dotnet build")], ["busy child", f => f.setBusy("102 101 pi-phase run --kind build")],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/job.log"), "command"); f.setFiles(`n${p}\n`); }],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/watch.log"), "# pi-jobs watch until x: gh run watch 123"); f.setFiles(`n${p}\n`); }],
-  ["subagent", f => { mockSubagentPids(f); f.put(join(f.ctx.piAgentDir, "context-budget/status/sub.json"), JSON.stringify({ role: "subagent", sessionId: "s1", pid: 101, cwd: f.cwd, at: f.now.toISOString() })); }],
+  ["subagent", f => subagentStatus(f, { primarySessionId: "s1", state: "active" })],
   ["unread", f => f.put(join(f.root, "messages/L0-to-L1-work-1200.md"), "hi")],
   ["in-progress claim", f => f.claim("in-progress")],
   ["declared wait", f => f.put(join(f.root, "messages/status/L1.status"), 'waiting-on "ci" until 2026-10-23T14:00:00Z')],

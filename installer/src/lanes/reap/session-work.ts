@@ -1,6 +1,7 @@
 import type { LanesCtx } from "../ctx.ts";
 import type { Signals } from "./signals.ts";
 import { scanSession } from "./session-scan.ts";
+import { foldSubagentCompletions } from "./subagent-completions.ts";
 
 type Snapshot = Record<string, any>;
 const JOB_TOOLS = new Set(["job_start", "job_watch", "job_list", "job_output", "job_kill"]);
@@ -59,14 +60,17 @@ function runningJob(job: Snapshot, s: Signals, ctx: LanesCtx): void {
 }
 export async function sessionWork(s: Signals, ctx: LanesCtx): Promise<void> {
   const jobs = new Map<string, Snapshot>(); const pending = new Map<string, string>();
+  const completedSubagents = new Set<string>();
   try {
     await scanSession(s.sessionFile!, line => {
       const entry = JSON.parse(line); const message = entry.type === "message" ? entry.message : entry;
       foldJobs(jobs, message); completions(jobs, message); toolCalls(pending, message, s); toolResult(pending, message, s);
+      foldSubagentCompletions(completedSubagents, message);
     });
   } catch (error) {
     s.asks.push((error as Error).message === "session scan incomplete" ? "session scan incomplete" : "session work history malformed"); return;
   }
+  s.completedSubagents = [...completedSubagents];
   for (const tool of pending.values()) s.keeps.push(`${tool} tool call pending`);
   for (const job of jobs.values()) runningJob(job, s, ctx);
 }

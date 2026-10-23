@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 8d59c1455ccc011d638871be8a76934a089207281dc9e87d22e4bcf2d9a4a723
+// pi-setup-source-sha256: de19de5beea4720009b1f4ef976bad1c5f4b3196cc5439538fad5fae1a3d1965
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -659,6 +659,40 @@ async function scanSession(path, consume, limits = { bytes: 256 * 1024 * 1024, m
   }
 }
 
+// src/lanes/reap/subagent-completions.ts
+function subagentKeys(record2) {
+  const fields = { sessionId: "session", sessionFile: "file", agentId: "agent", id: "agent" };
+  return Object.entries(fields).flatMap(([field2, kind]) => typeof record2[field2] === "string" && record2[field2] ? [`${kind}:${record2[field2]}`] : []);
+}
+function completed(status2) {
+  return typeof status2 === "string" && /^(done|completed)$/i.test(status2.trim());
+}
+function structured(out, record2) {
+  if (record2 && completed(record2.status)) for (const key of subagentKeys(record2)) out.add(key);
+}
+var decode = (value) => value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+function notificationRecord(block) {
+  const record2 = { status: /<status>([^<]+)<\/status>/.exec(block)?.[1] };
+  for (const [tag, field2] of Object.entries({ "task-id": "id", "agent-id": "agentId", "session-id": "sessionId", "session-file": "sessionFile" })) {
+    const value = new RegExp(`<${tag}>([^<]+)</${tag}>`).exec(block)?.[1];
+    if (value) record2[field2] = decode(value);
+  }
+  return record2;
+}
+function notifications(out, content) {
+  const text = typeof content === "string" ? content : "";
+  for (const block of text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) structured(out, notificationRecord(block[1]));
+}
+function foldSubagentCompletions(out, message) {
+  if (message.customType === "subagent-notification") {
+    structured(out, message.details);
+    notifications(out, message.content);
+  }
+  if (message.role === "toolResult" && /^(subagent|get_subagent_result|wait_subagent)$/.test(message.toolName ?? "")) {
+    structured(out, message.details);
+  }
+}
+
 // src/lanes/reap/session-work.ts
 var JOB_TOOLS = /* @__PURE__ */ new Set(["job_start", "job_watch", "job_list", "job_output", "job_kill"]);
 function record(jobs, job) {
@@ -724,6 +758,7 @@ function runningJob(job, s, ctx) {
 async function sessionWork(s, ctx) {
   const jobs = /* @__PURE__ */ new Map();
   const pending = /* @__PURE__ */ new Map();
+  const completedSubagents = /* @__PURE__ */ new Set();
   try {
     await scanSession(s.sessionFile, (line) => {
       const entry2 = JSON.parse(line);
@@ -732,11 +767,13 @@ async function sessionWork(s, ctx) {
       completions(jobs, message);
       toolCalls(pending, message, s);
       toolResult(pending, message, s);
+      foldSubagentCompletions(completedSubagents, message);
     });
   } catch (error) {
     s.asks.push(error.message === "session scan incomplete" ? "session scan incomplete" : "session work history malformed");
     return;
   }
+  s.completedSubagents = [...completedSubagents];
   for (const tool of pending.values()) s.keeps.push(`${tool} tool call pending`);
   for (const job of jobs.values()) runningJob(job, s, ctx);
 }
@@ -915,41 +952,24 @@ import { join as join11 } from "node:path";
 
 // src/lanes/reap/subagents.ts
 import { join as join9 } from "node:path";
-function exact(value, expected) {
-  return expected !== void 0 && value === expected;
-}
 function owned(status2, s) {
   if (status2.role !== "subagent") return false;
-  return exact(status2.sessionId, s.sessionId) || exact(status2.sessionFile, s.sessionFile) || exact(status2.parentPid, s.pid);
+  if (status2.primarySessionId !== void 0) return status2.primarySessionId === s.sessionId;
+  return s.pid !== void 0 && status2.pid === s.pid;
 }
-async function pidState(pid, ctx) {
-  if (!Number.isInteger(pid) || Number(pid) <= 0) return "unknown";
-  try {
-    const probe = await ctx.run("ps", ["-p", String(pid), "-o", "pid="], { timeoutMs: 4e3 });
-    if (probe.timedOut) return "unknown";
-    if (probe.code === 1) return "dead";
-    if (probe.code === 0 && probe.stdout.trim() === String(pid)) return "alive";
-  } catch {
-  }
-  return "unknown";
+function evidence(status2, completed2, now) {
+  if (status2.state === "ended") return "history";
+  const age = typeof status2.at === "string" ? now - Date.parse(status2.at) : NaN;
+  if (!Number.isFinite(age) || age < 0) return "unknown";
+  if (age <= 6e5) return "running";
+  return subagentKeys(status2).some((key) => completed2.has(key)) ? "history" : "unknown";
 }
-function finishedHistory(at, now) {
-  if (typeof at !== "string") return false;
-  const age = now - Date.parse(at);
-  return Number.isFinite(age) && age > 6e5;
-}
-async function subagents(s, ctx) {
+function subagents(s, ctx) {
   const statuses = jsonFiles(join9(ctx.piAgentDir, "context-budget/status")).filter((status2) => owned(status2, s));
-  const pids = /* @__PURE__ */ new Map();
-  const evidence = /* @__PURE__ */ new Set();
-  for (const status2 of statuses) {
-    if (!pids.has(status2.pid)) pids.set(status2.pid, await pidState(status2.pid, ctx));
-    const state = pids.get(status2.pid);
-    if (state === "alive") evidence.add("running");
-    else if (state === "unknown" || !finishedHistory(status2.at, ctx.now().getTime())) evidence.add("uncertain");
-  }
-  if (evidence.has("running")) s.keeps.push("subagent running");
-  if (evidence.has("uncertain")) s.asks.push("owned subagent liveness uncertain");
+  const completed2 = new Set(s.completedSubagents);
+  const states = new Set(statuses.map((status2) => evidence(status2, completed2, ctx.now().getTime())));
+  if (states.has("running")) s.keeps.push("subagent running");
+  if (states.has("unknown")) s.asks.push("subagent state unknown");
 }
 
 // src/lanes/reap/local-claims.ts
