@@ -650,9 +650,10 @@ for (const input of [
 	"DB_PASSWORD=hunter npm start",
 	"docker run -e DB_PASSWORD=hunter img",
 	"API_KEY: abcd", "API_KEY: alphabetic", "DB_PASSWORD='two words'",
+	'["DB_PASSWORD=abc def"]', '["DB_PASSWORD=hunter bunny"]', "'DB_PASSWORD=two words'",
 ]) test(`env-style short secret is redacted: ${JSON.stringify(input)}`, () => {
 	const out = scan(input).text;
-	assert.ok(!/hunter|abc def|abcd|alphabetic|two words/.test(out), out);
+	assert.ok(!/hunter|bunny|abc|def|abcd|alphabetic|two words/.test(out), out);
 });
 for (const input of [
 	"environment:\n  NODE_ENV: production\n",

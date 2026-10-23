@@ -245,6 +245,15 @@ function envAssignments(text: string, out: Candidate[]): void {
 			out.push({ start, end, kind: "connection-string" });
 		}
 	}
+	// A whole quoted entry (docker `Env` JSON, list items): the value runs to the closing quote, spaces included.
+	const entries = /(["'])(?:export[ \t]+)?([A-Z_][A-Z0-9_]*)=((?:(?!\1)[^\r\n\\]|\\.)+)\1/gd;
+	for (const match of text.matchAll(entries)) {
+		if (!isSecretKey(match[2])) continue;
+		const value = match[3];
+		if (value.length < 4 || !secretValue(value, true, false, true)) continue;
+		const [start, end] = match.indices![3]!;
+		out.push({ start, end, kind: "connection-string" });
+	}
 }
 
 function connections(text: string, out: Candidate[]): void {
