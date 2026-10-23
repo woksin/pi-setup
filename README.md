@@ -1,8 +1,43 @@
 # pi-setup
 
-My [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) agent setup: global rules, custom agents, extensions, workflows, model-routing profiles, skills and helper scripts. Take the whole thing or copy the pieces you want.
+My pi coding agent setup, ready to install: global rules, subagents, extensions, an installer, `lanes` and `pi-train`.
 
-Auth, sessions, caches and machine identity are never included.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/woksin/pi-setup)](https://github.com/woksin/pi-setup/releases)
+
+This is the setup I run [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) with every day. Take the whole thing or copy the pieces you want. Auth, sessions, caches and machine identity are never included.
+
+## What you get
+
+- **Global rules** (`AGENTS.md`) for scope, execution budgets, delegation briefs, review loops, GitHub issue hygiene and shipping.
+- **Custom subagents** pinned to a model and thinking level, and **model-routing profiles** you switch with `pi-profile`.
+- **Extensions and guards** for long waits, usage-limit fallback, output caps, issue tracking and more.
+- **Workflows and tools**: cross-provider `review`, the `pi-phase` build/test queue, `pi-train` release trains and opt-in `lanes` for parallel sessions.
+- **An installer** that detects your setup, backs up what it overwrites and can update, uninstall and run a doctor check.
+- **Standalone packages** from the same author: [pi-jobs](https://github.com/woksin/pi-jobs), [pi-recover](https://github.com/woksin/pi-recover), [pi-context-budget](https://github.com/woksin/pi-context-budget) and the experimental [pi-orch](https://github.com/woksin/pi-orch).
+
+```sh
+git clone https://github.com/woksin/pi-setup && cd pi-setup
+./install.sh --dry-run   # show what would change
+./install.sh             # overwritten files are backed up first
+```
+
+It needs Node.js 22.19 or newer and Python 3. The full installer reference follows below.
+
+## Contents
+
+- [Install](#install), including update, uninstall, doctor and the opt-in lanes
+- [For Cratis team members](#for-cratis-team-members)
+- [Machine performance](#machine-performance)
+- [What's in it](#whats-in-it)
+- [Related repositories](#related-repositories)
+- [What is deliberately not included](#what-is-deliberately-not-included)
+- [Keeping it up to date](#keeping-it-up-to-date)
+
+## Highlights
+
+- Safe to re-run: files you changed are kept and the new version is written next to them, and every overwrite is backed up.
+- Nothing is scheduled unless you choose it. The `docker-guardian`, `cleanup` and `secret-sweep` schedules are opt-in extras.
+- Releases are cut by hand from tagged versions; `./install.sh update` moves a checkout to the latest release tag.
 
 ## Install
 
