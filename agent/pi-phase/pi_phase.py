@@ -461,7 +461,16 @@ def readonly_busy(path):
         os.close(fd)
 
 
-def wait_eta(state, configuration, kind):
+def eta_fast(state, settings, request):
+    if request is None or not request.command:
+        return False
+    command = request.command[1:] if request.command[0] == "--" else request.command
+    if not command:
+        return False
+    return fast_phase(state, request, settings, test_fingerprint(os.getcwd(), command))
+
+
+def wait_eta(state, configuration, kind, request=None):
     records, _ = read_ledger(state)
     durations = {k: [r["runS"] for r in records if r["kind"] == k and r["startedAt"] is not None]
                  for k in KINDS}
@@ -502,7 +511,7 @@ def wait_eta(state, configuration, kind):
             os.close(coordinator)
     waiters = [w for w in waiters if PRIORITIES[w["priority"]] >= PRIORITIES["normal"]]
     ahead = len(waiters)
-    pending = [(w["kind"], w.get("fast", False)) for w in waiters] + [(kind, False)]
+    pending = [(w["kind"], w.get("fast", False)) for w in waiters] + [(kind, eta_fast(state, fast, request))]
     elapsed = 0
     if kind == "ci":
         pending, ahead = [(kind, False)], 0
@@ -650,6 +659,14 @@ def slow_fast_history(history, threshold):
     return any(r.get("fastBudgetExceeded") is True for r in history) or (p90 is not None and p90 > threshold)
 
 
+def fast_refusal(state, fingerprint, history, threshold):
+    if metadata(state / "container-tests.json").get(fingerprint) is True:
+        return "recorded container test"
+    if slow_fast_history(history, threshold):
+        return "history says this phase is slow"
+    return None
+
+
 def fast_phase(state, args, settings, fingerprint):
     if not settings or args.kind not in settings["kinds"]:
         return False
@@ -657,9 +674,10 @@ def fast_phase(state, args, settings, fingerprint):
         history = fast_history(state, fingerprint)
     except (OSError, ValueError):
         history = []
-    if slow_fast_history(history, settings["max_expected_s"]):
+    refusal = fast_refusal(state, fingerprint, history, settings["max_expected_s"])
+    if refusal:
         if getattr(args, "expect_fast", False):
-            note("--expect-fast ignored: history says this phase is slow")
+            note(f"--expect-fast ignored: {refusal}")
         return False
     return getattr(args, "expect_fast", False) or len(history) >= 3
 
@@ -1580,14 +1598,18 @@ def report_log(path, tail, return_code):
 
 def prepare_fast(state, args, settings, fingerprint):
     fast = fast_phase(state, args, settings, fingerprint)
-    budget = fast_budget(settings) if fast else None
-    timeout = args.timeout
-    if fast:
-        timeout = min(timeout, budget)
-        note(f"fast lane (budget {budget:g}s)")
     if getattr(args, "ledger", None):
         args.ledger.record.update(fingerprint=fingerprint, fast=fast)
-    return fast, budget, timeout
+    return fast
+
+
+def apply_fast_budget(args, settings, held):
+    if not any(path.name.startswith("fast-") for path, _ in held):
+        return None
+    budget = fast_budget(settings)
+    args.timeout = min(args.timeout, budget)
+    note(f"fast lane (budget {budget:g}s)")
+    return budget
 
 
 def fast_timeout(args, budget):
@@ -1680,7 +1702,7 @@ def run(args, state, configuration, output=None):
                 and metadata(state / "container-tests.json").get(fingerprint) is True):
             admission_args.kind = "integration"
             note("recorded container test: also claiming an integration permit (container_test_detection)")
-        admission_args.fast, budget, args.timeout = prepare_fast(state, admission_args, options["fast_lane"], fingerprint)
+        admission_args.fast = prepare_fast(state, admission_args, options["fast_lane"], fingerprint)
         while True:
             if cancelled[0]:
                 note("cancelled while queued")
@@ -1745,6 +1767,7 @@ def run(args, state, configuration, output=None):
             if ledger:
                 ledger.outcome("cancelled")
             return 128 + cancelled[0]
+        budget = apply_fast_budget(args, options["fast_lane"], held)
         child_env = None
         cap = msbuild_cap(options["msbuild_max_cpu"], heavy)
         if cap and args.kind in ("build", "test", "integration"):
@@ -1876,6 +1899,8 @@ def main(argv=None, *, state=None, configuration=None):
     waiting = commands.add_parser("wait", help="estimate the wait for a new normal-priority phase")
     waiting.add_argument("--eta", action="store_true", required=True)
     waiting.add_argument("--kind", choices=KINDS, default="build")
+    waiting.add_argument("--expect-fast", action="store_true", help="request fast estimate for a short build/test")
+    waiting.add_argument("command", nargs=argparse.REMAINDER)
     grant = commands.add_parser("grant-priority", help="grant user-approved high priority")
     duration = grant.add_mutually_exclusive_group()
     duration.add_argument("--uses", type=int, help="1-20 uses, expires after 60 minutes (default 1)")
@@ -1933,7 +1958,7 @@ def main(argv=None, *, state=None, configuration=None):
                 parser.error("--days must be positive")
             return stats(state, args.days, args.kind, args.json, args.stack)
         if args.action == "wait":
-            return wait_eta(state, configuration, args.kind)
+            return wait_eta(state, configuration, args.kind, args)
         if args.action == "status":
             return status(state, configuration)
         if args.action == "grant-priority":

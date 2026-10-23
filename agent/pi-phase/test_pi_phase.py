@@ -1911,6 +1911,51 @@ class PhaseTests(unittest.TestCase):
             pi_phase.wait_eta(self.state, self.config, "build")
         self.assertIn("ahead=1 running=1", output.call_args.args[0])
 
+    def test_fast_fallback_keeps_normal_timeout_without_budget_demotion(self):
+        self.configure(fast_lane=dict(slots=1))
+        self.hold_fast_slot()
+        with patch.object(pi_phase, "fast_budget", return_value=.05), patch.object(pi_phase, "note") as note:
+            code = pi_phase.main(["run", "--kind", "build", "--label", "fallback", "--expect-fast",
+                                  "--timeout", "1", "--", sys.executable, "-c", "import time;time.sleep(.2)"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, 0)
+        record = self.ledger_records()[0]
+        self.assertEqual(record["outcome"], "passed")
+        self.assertNotIn("fastBudgetExceeded", record)
+        self.assertFalse(any("fast lane (budget" in call.args[0] for call in note.call_args_list))
+
+    def test_fast_container_history_excludes_hint_mode_even_with_hint(self):
+        command = [sys.executable, "-c", "pass"]
+        fingerprint = pi_phase.test_fingerprint(os.getcwd(), command)
+        self.fast_records([1, 2, 3], fingerprint=fingerprint)
+        pi_phase.save(self.state / "container-tests.json", {fingerprint: True})
+        self.assertEqual(pi_phase.config(self.config).options["container_test_detection"], "hint")
+        self.assertFalse(pi_phase.fast_phase(self.state, self.fast_args(kind="test"), self.fast_settings(), fingerprint))
+        with patch.object(pi_phase, "note") as note:
+            code = pi_phase.main(["run", "--kind", "test", "--label", "container", "--expect-fast",
+                                  "--", *command], state=self.state, configuration=self.config)
+        self.assertEqual(code, 0)
+        self.assertFalse(self.ledger_records()[-1]["fast"])
+        self.assertTrue(any("--expect-fast ignored: recorded container test" in call.args[0]
+                            for call in note.call_args_list))
+
+    def test_wait_eta_classifies_callers_exact_command_against_fast_queue(self):
+        self.seed_ledger()
+        command = [sys.executable, "-c", "pass"]
+        self.fast_records([1, 2, 3], fingerprint=pi_phase.test_fingerprint(os.getcwd(), command))
+        self.config.write_text('{"heavy_slots":1}')
+        self.hold_fast_slot("heavy-0")
+        pi_phase.save(self.state / "heavy-0.json", dict(token="heavy", kind="build", started=time.time()))
+        self.waiter("ahead")
+        with patch("builtins.print") as output:
+            self.assertEqual(pi_phase.main(["wait", "--eta", "--kind", "build", "--", *command],
+                                           state=self.state, configuration=self.config), 0)
+        self.assertIn("eta ~0m", output.call_args.args[0])
+        with patch("builtins.print") as output:
+            self.assertEqual(pi_phase.main(["wait", "--eta", "--kind", "build", "--", *command, "different"],
+                                           state=self.state, configuration=self.config), 0)
+        self.assertIn("eta ~2m", output.call_args.args[0])
+
     def test_fast_budget_limit_and_timeout_demotes_fingerprint(self):
         self.assertEqual(pi_phase.fast_budget(self.fast_settings()), 270)
         self.assertEqual(pi_phase.fast_budget(dict(max_expected_s=1)), 120)
