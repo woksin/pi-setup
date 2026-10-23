@@ -73,8 +73,11 @@ async function setup(t: any, init = true) {
   const gitRoutes = {
     remote: () => ok('git@github.com:acme/widget.git\n'),
     'check-ref-format': () => ok(),
-    'show-ref': () => state.branchExists ? ok() : bad(),
-    'for-each-ref': (args: string[]) => ok(state.localBranches[args.at(-1)!.replace('refs/heads/', '')] ?? ''),
+    'show-ref': (args: string[]) => {
+      if (!args.includes('--hash')) return state.branchExists ? ok() : bad();
+      const sha = state.localBranches[args.at(-1)!.replace('refs/heads/', '')];
+      return sha ? ok(sha) : bad();
+    },
     fetch: () => ok(),
     worktree: (args: string[]) => ok(args[1] === 'list' && state.checkedOut ? `worktree ${manifest.worktree}\nHEAD ${state.head}\nbranch refs/heads/${TRAIN}\n\n` : ''),
     log: () => ok('abcd Fold widgets\n'),
@@ -658,6 +661,14 @@ test('real local worktree: never-pushed delivery, forward redelivery, rewrite re
     assert.equal(await readFile(join(train, 'file'), 'utf8'), text);
   }
   assert.equal(fetches, 1); // init only
+  // Only feature/task exists locally: folding feature must fetch the exact origin ref.
+  git(repo, 'branch', 'feature/task', 'fix/local');
+  const base = git(repo, 'rev-parse', 'main');
+  git(origin, 'update-ref', 'refs/heads/feature', base);
+  assert.notEqual(nativeGit(repo, ['show-ref', '--verify', '--hash', 'refs/heads/feature']).status, 0);
+  assert.equal(await f.invoke('fold', 'feature'), 0, f.errors.join('\n'));
+  assert.equal((await f.read()).items.find(item => item.branch === 'feature')!.sha, base);
+  assert.equal(fetches, 2);
   git(lane, 'reset', '--hard', 'main');
   await writeFile(join(lane, 'file'), 'rewritten'); git(lane, 'commit', '-am', 'rewritten');
   assert.equal(await f.invoke('fold'), 1); assert.equal(f.errors.at(-1), 'folded branch head moved');

@@ -12,7 +12,7 @@ async function pushDecision(command: string, ctx: ExtensionContext) {
 
 function logDecision(result: { log?: string }, orchestrated: boolean, notice?: string) {
   if (result.log) orchLog('trains', 'exception', result.log);
-  else if (orchestrated) orchLog('trains', 'warn', notice ?? 'allowed');
+  else if (orchestrated && notice) orchLog('trains', 'warn', notice);
 }
 
 function remember(warnings: Map<string, string>, id: string, notice: string, ctx: ExtensionContext) {

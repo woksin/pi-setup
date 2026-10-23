@@ -54,6 +54,21 @@ test('cd, assignment prefixes, multiple commands, explicit other repo and fail-o
   assert.match((await f.decide('gh pr create --head')).warn!, /missing/);
 });
 
+test('PR free text cannot bypass candidate refusal; dynamic decision inputs still fail open', async t => {
+  const f = await fixture(t);
+  const text = 'Question? <!-- template --> {details} <summary>\nMore details';
+  for (const flag of ['--title', '--body', '--body-file', '--label']) {
+    assert.ok((await f.decide(`gh pr create ${flag} '${text}'`)).block, flag);
+    assert.ok((await f.decide(`gh pr create ${flag}='${text}'`)).block, `${flag}=`);
+  }
+  assert.ok((await f.decide('gh pr create --title "--head=train/test"')).block);
+  assert.ok((await f.decide('gh pr create --body "--repo=$REPO"')).block);
+  for (const flag of ['-R', '--repo', '-H', '--head']) {
+    assert.match((await f.decide(`gh pr create ${flag} "$VALUE"`)).warn!, /unparsed, allowed/);
+  }
+  assert.match((await prCreateDecision('gh pr create', '/repo/$DIR', f.env, f.git)).warn!, /unparsed, allowed/);
+});
+
 test('concurrency only warns, solo stays silent and nonmatching commands make no git calls', async t => {
   const f = await fixture(t, false);
   assert.match((await f.decide()).warn!, /3 worktrees.*fix\/local.*fix\/other/);
@@ -109,6 +124,9 @@ test('extension: block, exception, orchestrated result warning chains after real
   assert.equal(await handler({ ...event, input: { command: 'PI_CANDIDATE_EXCEPTION=urgent-fix gh pr create' } }, ctx), undefined);
   assert.match(await readFile(process.env.PI_GUARD_DECISIONS_LOG!, 'utf8'), /exception urgent-fix/);
   process.env.PI_ORCH_ID = 'lane';
+  const before = await readFile(process.env.PI_GUARD_DECISIONS_LOG!, 'utf8');
+  assert.equal(await handler({ ...event, input: { command: 'pi-phase status' } }, ctx), undefined);
+  assert.equal(await readFile(process.env.PI_GUARD_DECISIONS_LOG!, 'utf8'), before);
   assert.equal(await handler(event, ctx), undefined);
   // Use pi's actual runner, with both extensions loaded, rather than emulating chaining.
   let entry: string;

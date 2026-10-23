@@ -10,6 +10,9 @@ type Segment = { tokens: string[]; cwd: string; git: Git; exception: boolean; ex
 const dynamic = (value: string) => /[$`*?{}<>\n]/.test(value);
 const unparsed = (error: unknown) => `Candidate guard: unparsed, allowed (${(error as Error).message})`;
 const prCreate = (tokens: string[]) => basename(tokens[0] ?? '') === 'gh' && tokens[1] === 'pr' && tokens[2] === 'create';
+const valueFlags = new Set(['-a', '--assignee', '-B', '--base', '-b', '--body', '-F', '--body-file',
+  '-H', '--head', '-l', '--label', '-m', '--milestone', '-p', '--project', '-R', '--repo',
+  '--recover', '-r', '--reviewer', '-T', '--template', '-t', '--title']);
 
 function segments(command: string, cwd: string, git: Git) {
   const result: Segment[] = [];
@@ -24,7 +27,7 @@ function segments(command: string, cwd: string, git: Git) {
 }
 
 function validate(segment: Segment) {
-  if (!segment.cwd || segment.tokens.some(dynamic)) throw new Error('dynamic shell syntax or unresolved working directory');
+  if (!segment.cwd || dynamic(segment.cwd)) throw new Error('dynamic shell syntax or unresolved working directory');
 }
 
 function followingValue(tokens: string[], index: number) {
@@ -44,15 +47,21 @@ function option(tokens: string[], short: string, long: string) {
   for (let i = 3; i < tokens.length; i++) {
     const value = optionValue(tokens, i, { short, long });
     if (value !== undefined) return value;
+    if (valueFlags.has(tokens[i])) i++;
   }
+}
+
+function decisionInput(value: string) {
+  if (dynamic(value)) throw new Error('dynamic shell syntax in repository or head');
+  return value;
 }
 
 function identity(segment: Segment) {
   validate(segment);
   const { tokens, cwd, git } = segment;
-  const remote = option(tokens, '-R', '--repo') ?? git(cwd, ['remote', 'get-url', 'origin']);
+  const remote = decisionInput(option(tokens, '-R', '--repo') ?? git(cwd, ['remote', 'get-url', 'origin']).trim());
   const repo = repoKey(/^[\w.-]+\/[\w.-]+$/.test(remote) ? `https://github.com/${remote}` : remote);
-  const head = (option(tokens, '-H', '--head') ?? git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim()).replace(/^[^:]+:/, '');
+  const head = decisionInput(option(tokens, '-H', '--head') ?? git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim()).trim().replace(/^[^:]+:/, '');
   if (!head) throw new Error('unresolved branch');
   return { repo, head };
 }

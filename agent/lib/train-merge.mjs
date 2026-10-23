@@ -3,10 +3,11 @@ import { TrainError } from './train-gh.mjs';
 export async function fetchHead(api, manifest, resolved, dryRun, report = () => {}) {
   await api.git(manifest.worktree, ['check-ref-format', '--branch', resolved.branch]);
   if (!resolved.pr) {
-    const local = (await api.git(manifest.worktree, ['for-each-ref', '--format=%(objectname)', `refs/heads/${resolved.branch}`])).stdout.trim();
-    if (local) {
-      report(`folding local head ${local.slice(0, 7)} of ${resolved.branch}`);
-      return local;
+    const local = await api.git(manifest.worktree, ['show-ref', '--verify', '--hash', `refs/heads/${resolved.branch}`], { allowFailure: true });
+    if (local.status === 0 && local.stdout.trim()) {
+      const sha = local.stdout.trim();
+      report(`folding local head ${sha.slice(0, 7)} of ${resolved.branch}`);
+      return sha;
     }
   }
   await api.git(manifest.worktree, ['fetch', 'origin', resolved.branch], { mutate: true });
