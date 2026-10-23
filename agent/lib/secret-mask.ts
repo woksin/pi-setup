@@ -21,9 +21,10 @@
  * (user_bash only exposes the command before execution). output-cap masks before offload;
  * oversized offloads are omitted. PEM/Secret sections over 64 KiB are conservatively hidden.
  * Any command mentioning a GitHub publication scans its entire text for credentials, independently
- * of shell parsing (including quoted text and heredoc bodies). Internal paths are checked only in
- * parsed payloads/files, so ordinary local paths in cd and file arguments remain usable.
- * Literal echo/printf/heredoc stdin is scanned; unscannable stdin,
+ * of shell parsing (including quoted text and heredoc bodies). Raw body/notes-file flags also scan
+ * referenced files independently of parsing; file-flag '-' inputs and execution wrappers are refused.
+ * Internal paths are checked only in payloads/files, so cd and file arguments remain usable.
+ * Direct gist stdin from literal echo/printf/heredoc is scanned; unscannable stdin,
  * unreadable/oversized files and relative files with an uncertain cwd are refused. This scan
  * precedes Cratis credential-read delegation and cannot be approved by a dumper prompt.
  * Command matching is conservative, not a full shell interpreter; computed payloads are refused.
@@ -427,6 +428,10 @@ const EXPANDING_WORD = /[$`*?{}\[\]~\\]/;
 const PRODUCER_EXPANSION = /[$`*?{}\[\]~<>]/;
 const HEREDOC_EXPANSION = /[$`\\]/;
 const INPUT_MARKER = "--pi-outbound-stdin-";
+const RAW_PAYLOAD_FILE = /(?:^|[\s"'`;|&(])["']?(--body-file|--notes-file|-F)["']?(?:\s*=\s*|\s+|(?<=-F))("[^"]*"|'[^']*'|[^\s"'`;&|()<>]+)/g;
+const RAW_CD = /^\s*cd\s+("[^"]*"|'[^']*'|[^\s"';&|()]+)\s*&&/;
+const RAW_CWD_CHANGE = /\b(?:cd|pushd|popd)\b/;
+const RAW_AFTER_CD_UNCERTAIN = /\b(?:cd|pushd|popd)\b|[;()]|\|\|/;
 interface Publication { group: string; verb: string; args: string[] }
 interface PublicationInput { cwd?: string; stdin?: string; hasStdin: boolean }
 interface Payload { value: string; file: boolean }
@@ -454,6 +459,42 @@ function outboundFile(file: string, cwd?: string): string | undefined {
 		if (info.size > MAX_BYTES) return "outbound-payload-too-large";
 		return outboundPattern(readFileSync(path, "utf8"));
 	} catch { return "outbound-file-unreadable"; }
+}
+
+function unquoteRaw(value: string): string {
+	return value.replace(/^(['"])([\s\S]*)\1$/, "$2");
+}
+
+/** Only a leading literal cd with && has a statically known new directory. */
+function rawPayloadCwd(prefix: string, cwd: string): string | undefined {
+	const cd = RAW_CD.exec(prefix);
+	if (!cd) return RAW_CWD_CHANGE.test(prefix) ? undefined : cwd;
+	const path = unquoteRaw(cd[1]);
+	if (EXPANDING_WORD.test(path)) return undefined;
+	if (path === "-") return undefined;
+	if (RAW_AFTER_CD_UNCERTAIN.test(prefix.slice(cd[0].length))) return undefined;
+	if (process.env.CDPATH && !isAbsolute(path)) return undefined;
+	return resolve(cwd, path);
+}
+
+/** File discovery must not rely on the shell parser recognizing an executable gh invocation. */
+function rawPayloadFiles(command: string, cwd: string): string | undefined {
+	for (const match of command.matchAll(RAW_PAYLOAD_FILE)) {
+		const file = unquoteRaw(match[2]);
+		if (file === "-") return "outbound-stdin-unscannable";
+		const kind = outboundFile(file, rawPayloadCwd(command.slice(0, match.index), cwd));
+		if (kind) return kind;
+	}
+	return undefined;
+}
+
+/** Conservative text checks also cover quoted/escaped wrapper names and nested invocations. */
+function publicationWrapper(command: string, mention: string): boolean {
+	if (command.includes("$(") || command.includes("`")) return true;
+	if (/\b(?:eval|xargs|exec|nohup|timeout|sudo)\b/.test(mention)) return true;
+	if (/\b(?:bash|sh|zsh)\b[^\n;&|]*\s-[^\s]*c/.test(mention)) return true;
+	if (/\benv\b[^\n;&|]*(?:--split-string\b|\s-[^\s]*S)/.test(mention)) return true;
+	return /(?:^|[;&|()\n])\s*(?:(?:command|builtin|time)\s+|[A-Za-z_]\w*=\S+\s+)*(?:source|\.)\s+\S/.test(mention);
 }
 
 function outboundPattern(text: string): string | undefined {
@@ -702,8 +743,13 @@ function parsedPublicationKind(command: string, cwd: string): string | undefined
 export function outboundReason(command: string, cwd: string): string | undefined {
 	const mention = command.replace(/\\\r?\n/g, "").replace(/['"\\]/g, "");
 	if (!PUBLICATION_TEXT.test(mention)) return undefined;
-	const kind = outboundSecrets(command) ?? parsedPublicationKind(command, cwd);
-	return kind ? `secret-mask: GitHub publication blocked (${kind}). Remove credentials and internal paths from public text; payloads must be readable literal text within 2 MiB, with a known cwd for relative files and scannable stdin.` : undefined;
+	const secret = outboundSecrets(command);
+	const files = rawPayloadFiles(command, cwd);
+	const wrapped = publicationWrapper(command, mention);
+	const payload = wrapped ? "outbound-wrapper-unscannable" : parsedPublicationKind(command, cwd);
+	const kind = secret ?? files ?? payload;
+	const advice = wrapped ? "publication must be a direct gh command so its payload can be scanned" : "Remove credentials and internal paths from public text; payloads must be readable literal text within 2 MiB, with a known cwd for relative files and scannable stdin.";
+	return kind ? `secret-mask: GitHub publication blocked (${kind}). ${advice}` : undefined;
 }
 
 export function summary(count: number, kinds: readonly string[]): string {
