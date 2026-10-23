@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { main } from "../src/cli.ts";
@@ -148,6 +148,7 @@ test("for a live mapped lane: wake lane once, give coordinator a notice, show li
 	assert.equal(worker.sent.length, 0);
 	coordinator.controller.poll();
 	assert.deepEqual(coordinator.sent.map(s => s.options), [{ deliverAs: "nextTurn" }]);
+	assert.equal(coordinator.notes.at(-1)!.text, "1 answer arrived. See the next turn.");
 	await worker.emit("session_compact");
 	assert.deepEqual(worker.sent.map(s => s.options), [{ triggerTurn: true, deliverAs: "followUp" }]);
 	assert.ok(receiptNames(home).has(receiptName("Q-1", 2, "for:L47")));
@@ -180,8 +181,9 @@ test("for a lane with two sessions: one receipt wins, including when the asker i
 	await b.start();
 	await a.call({ action: "ask", kind: "question", title: "Ask inside recipient lane", for: ["L47"] });
 	await a.command("answer", "1 yes");
-	a.controller.poll();
 	b.controller.poll();
+	assert.equal(b.sent.length, 0, "a peer must not claim the live asker's for-lane receipt");
+	a.controller.poll();
 	assert.deepEqual(a.sent.map(s => s.options), [{ triggerTurn: true, deliverAs: "followUp" }]);
 	assert.equal(b.sent.length, 0);
 });
@@ -244,11 +246,88 @@ test("/lane cannot override PI_ORCH_ID or mutate identity from a subagent", asyn
 	const s = mk("s1", "ENV");
 	await s.start();
 	await s.command("lane", "L47");
-	assert.match(s.notes.at(-1)!.text, /ENV/);
+	assert.match(s.notes.at(-1)!.text, /PI_ORCH_ID=ENV takes precedence/);
+	assert.ok(!existsSync(join(home, "lanes", "s1.json")));
 	assert.equal(readSessions(home)[0].lane, "ENV");
 	const sub = session(t, { root, home, sessionId: "sub", hasUI: false });
 	await sub.start();
 	await sub.command("lane", "L47");
 	assert.match(sub.notes.at(-1)!.text, /only available in the main session/);
-	assert.ok(!readdirSync(join(home, "lanes")).includes("sub.json"));
+	assert.ok(!existsSync(join(home, "lanes", "sub.json")));
+});
+
+
+test("session-name fallback is strict while explicit map and environment ids may have lowercase letters", t => {
+	const { env, map, run } = world(t);
+	for (const name of ["Review", "L18bc", "Lane47", "not a lane"]) {
+		assert.equal(identity.laneOf(env, "named", name), undefined, name);
+	}
+	for (const name of ["L18b", "L47", "R-CHR", "PISETUP"]) {
+		assert.equal(identity.laneOf(env, "named", name), name);
+	}
+	map("named", "Review");
+	assert.equal(identity.laneOf(env, "named", "anything"), "Review");
+	run("lane", "clear", "--session", "named");
+	assert.equal(identity.laneOf({ ...env, PI_ORCH_ID: "Review" }, "named", "anything"), "Review");
+});
+
+test("for the asker's lane: a peer can take over immediately after the asker exits", async t => {
+	const { mk, map } = world(t);
+	map("asker");
+	map("peer");
+	const a = mk("asker"), b = mk("peer");
+	await a.start();
+	await b.start();
+	await a.call({ action: "ask", kind: "question", title: "On behalf lane takeover", for: ["L47"] });
+	await a.command("answer", "1 continue after restart");
+	await a.shutdown();
+	b.controller.poll();
+	assert.deepEqual(b.sent.map(s => s.options), [{ triggerTurn: true, deliverAs: "followUp" }]);
+});
+
+test("lane set CLI warns about other live lane sessions but still applies the mapping", async t => {
+	const { mk, run, home } = world(t);
+	const other = mk("occupied", "L47");
+	await other.start();
+	const result = run("lane", "set", "L47", "--session", "target");
+	assert.equal(result.code, 0, result.err);
+	assert.equal(result.err, "warning: L47 is also the lane of live session occupied; answers for L47 go to whichever session polls first");
+	assert.equal(JSON.parse(readFileSync(join(home, "lanes", "target.json"), "utf8")).lane, "L47");
+});
+
+test("/lane warns about another live lane session and still applies the mapping", async t => {
+	const { mk, home } = world(t);
+	const other = mk("occupied", "L47"), target = mk("target");
+	await other.start();
+	await target.start();
+	await target.command("lane", "L47");
+	assert.ok(target.notes.some(n => n.level === "warning" && n.text === "warning: L47 is also the lane of live session occupied; answers for L47 go to whichever session polls first"));
+	assert.equal(JSON.parse(readFileSync(join(home, "lanes", "target.json"), "utf8")).lane, "L47");
+	assert.equal(readSessions(home).find(s => s.sessionId === "target")!.lane, "L47");
+});
+
+test("lane warnings exclude self, stale and dead heartbeats", async t => {
+	const { mk, run, home } = world(t);
+	const self = mk("self", "L47");
+	await self.start();
+	for (const [sessionId, pid] of [["dead", -1], ["stale", process.pid]] as const) {
+		writeHeartbeat(home, { sessionId, pid, lane: "L47", repo: null, cwd: "/tmp", at: new Date().toISOString() });
+	}
+	const stale = new Date(Date.now() - identity.LIVE_MS - 1000);
+	utimesSync(join(home, "sessions", "stale.json"), stale, stale);
+	const result = run("lane", "set", "L47", "--session", "self");
+	assert.equal(result.code, 0, result.err);
+	assert.equal(result.err, "");
+});
+
+test("/lane with PI_ORCH_ID leaves an existing mapping byte-for-byte unchanged", async t => {
+	const { mk, map, home } = world(t);
+	map("s1", "EXISTING");
+	const file = join(home, "lanes", "s1.json");
+	const before = readFileSync(file, "utf8");
+	const s = mk("s1", "ENV");
+	await s.start();
+	await s.command("lane", "L47");
+	assert.match(s.notes.at(-1)!.text, /PI_ORCH_ID=ENV takes precedence/);
+	assert.equal(readFileSync(file, "utf8"), before);
 });

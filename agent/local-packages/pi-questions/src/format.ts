@@ -182,3 +182,10 @@ export function deliveryMessage(lines: string[]): string {
 	const body = lines.length === 1 ? lines[0] : `${lines.length} updates on questions for the user:\n\n${lines.join("\n\n")}`;
 	return plain(body.split("\n"));
 }
+
+/** On-behalf notices are not answers left behind by an earlier session. */
+export function noticeText(entries: { for?: string[] }[]): string {
+	const n = entries.length;
+	const origin = entries.some(e => e.for?.length) ? "" : " for questions from an earlier session";
+	return `${n} answer${n === 1 ? "" : "s"}${origin} arrived. See the next turn.`;
+}

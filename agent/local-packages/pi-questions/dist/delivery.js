@@ -51,6 +51,18 @@ function askerMode(item      , h              , ctx         )                   
 	return undefined;
 }
 
+function forRecipient(id        , item      , ctx         )          {
+	if (!matchesRecipient(id, ctx.me)) return false;
+	if (id !== item.asker.lane) return true;
+	if (ctx.me.sessionId === item.asker.sessionId) return true;
+	return !ctx.live.some(s => s.sessionId === item.asker.sessionId);
+}
+
+function entryDetails({ item, h }       ) {
+	const details = { id: item.id, seq: h.seq };
+	return item.for?.length ? { ...details, for: item.for } : details;
+}
+
 /**
  * What session `me` may deliver now, split by mode.
  *  1. The recipient is me (my session id): wake.
@@ -73,7 +85,7 @@ export function pending(
 			};
 			const mode = askerMode(item, h, routing);
 			if (mode) push("asker", "asker", mode);
-			for (const id of (item.for ?? []).filter(matches)) push(`for:${id}`, "for", "wake");
+			for (const id of (item.for ?? []).filter(id => forRecipient(id, item, routing))) push(`for:${id}`, "for", "wake");
 			for (const id of item.cc.filter(matches)) push(`cc:${id}`, "cc", "wake");
 		}
 	}
@@ -149,7 +161,7 @@ export class Deliverer {
 			if (!claimed.length) continue;
 			const content = deliveryMessage(claimed.map(e => deliveryLine(e.item, e.h, e.role)));
 			try {
-				this.host.send({ content, details: { entries: claimed.map(e => ({ id: e.item.id, seq: e.h.seq })) } }, mode);
+				this.host.send({ content, details: { entries: claimed.map(entryDetails) } }, mode);
 				sent += claimed.length;
 			} catch {
 				for (const e of claimed) this.unclaim(e);

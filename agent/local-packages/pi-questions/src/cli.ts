@@ -10,6 +10,7 @@ import * as actions from "./actions.ts";
 import { possibleDuplicates } from "./dedup.ts";
 import { renderCandidates, renderItem, renderList, renderRecord } from "./format.ts";
 import { cliSession, laneOf, repoOf, resolveLaneSession } from "./identity.ts";
+import { laneWarnings } from "./lane-warnings.ts";
 import { clearLane, listLanes, setLane } from "./lanes.ts";
 import { validateDraft, type Asker } from "./model.ts";
 import { selectItems } from "./query.ts";
@@ -148,6 +149,7 @@ function laneCommand(args: string[], home: string, setBy: string, io: Io): numbe
 			laneArgs(positionals, values, 1, 1);
 			const sessionId = laneSession(home, values);
 			setLane(home, sessionId, positionals[0], setBy);
+			laneWarnings(home, { sessionId, lane: positionals[0] }).forEach(warning => io.err(warning));
 			io.out(`${sessionId} is mapped to ${positionals[0]}.`);
 			break;
 		}

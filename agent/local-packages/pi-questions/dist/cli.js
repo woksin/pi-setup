@@ -10,6 +10,7 @@ import * as actions from "./actions.js";
 import { possibleDuplicates } from "./dedup.js";
 import { renderCandidates, renderItem, renderList, renderRecord } from "./format.js";
 import { cliSession, laneOf, repoOf, resolveLaneSession } from "./identity.js";
+import { laneWarnings } from "./lane-warnings.js";
 import { clearLane, listLanes, setLane } from "./lanes.js";
 import { validateDraft,            } from "./model.js";
 import { selectItems } from "./query.js";
@@ -148,6 +149,7 @@ function laneCommand(args          , home        , setBy        , io    )       
 			laneArgs(positionals, values, 1, 1);
 			const sessionId = laneSession(home, values);
 			setLane(home, sessionId, positionals[0], setBy);
+			laneWarnings(home, { sessionId, lane: positionals[0] }).forEach(warning => io.err(warning));
 			io.out(`${sessionId} is mapped to ${positionals[0]}.`);
 			break;
 		}

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { userInfo, homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { LANE_NAME_RE, mappedLane } from "./lanes.js";
+import { mappedLane } from "./lanes.js";
 export { LANE_NAME_RE } from "./lanes.js";
 import { pidAlive, agentDir, readSessions, resolveHome } from "./store.js";
 
@@ -105,7 +105,7 @@ export function laneOf(
 	} catch {
 		// No pi-orch here.
 	}
-	return sessionName && LANE_NAME_RE.test(sessionName) ? sessionName : undefined;
+	return sessionName && /^[A-Z][A-Z0-9-]*[a-z]?$/.test(sessionName) ? sessionName : undefined;
 }
 
 export const LIVE_MS = 120_000;
