@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
 # Copyright (c) Cratis. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
+# Usage: cratis-local-run [--priority low|normal|high] <kind> <label> -- <cmd...>
+# Priority defaults to $CRATIS_LOCAL_RUN_PRIORITY, else normal. High priority still needs pi-phase's grant.
 set -euo pipefail
+usage() { printf 'Usage: cratis-local-run [--priority low|normal|high] <kind> <label> -- <cmd...>\n' >&2; exit 2; }
+priority=${CRATIS_LOCAL_RUN_PRIORITY:-normal}
+if [ "${1:-}" = --priority ]; then
+    [ "$#" -ge 2 ] || usage
+    priority=$2
+    shift 2
+elif [ "${1#--priority=}" != "${1:-}" ]; then
+    priority=${1#--priority=}
+    shift
+fi
+case "$priority" in low|normal|high) ;; *) printf 'cratis-local-run: invalid priority %s (low|normal|high)\n' "$priority" >&2; exit 2 ;; esac
 if [ "$#" -lt 4 ] || [ "$3" != -- ]; then
-    printf 'Usage: cratis-local-run <kind> <label> -- <cmd...>\n' >&2
-    exit 2
+    usage
 fi
 kind=$1 label=$2
 shift 3
-exec "$HOME/.pi/agent/bin/pi-phase" run --kind "$kind" --label "$label" \
+exec "$HOME/.pi/agent/bin/pi-phase" run --kind "$kind" --label "$label" --priority "$priority" \
     --timeout "${CRATIS_LOCAL_RUN_TIMEOUT:-900}" --approved-long-timeout \
     --queue-timeout "${CRATIS_LOCAL_RUN_QUEUE_TIMEOUT:-3600}" -- "$@"
