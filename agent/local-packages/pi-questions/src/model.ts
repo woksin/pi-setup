@@ -54,6 +54,7 @@ export interface Item {
 	project?: string;
 	asker: Asker;
 	cc: string[];
+	for?: string[];
 	status: Status;
 	deferredUntil?: string;
 	supersededBy?: string;
@@ -76,6 +77,7 @@ export interface Draft {
 	links: string[];
 	tags: string[];
 	cc: string[];
+	for?: string[];
 	global: boolean;
 	project?: string;
 	distinctFrom: string[];
@@ -133,6 +135,12 @@ export function validateOptions(v: unknown): Option[] {
 	});
 }
 
+function forRecipients(input: unknown): string[] | undefined {
+	const recipients = strList(input, "for");
+	if (recipients.length > 5) throw new Error("for accepts at most 5 recipients");
+	return recipients.length ? recipients : undefined;
+}
+
 export function validateDraft(input: Record<string, unknown>): Draft {
 	const options = validateOptions(input.options);
 	const recommended = input.recommended === undefined ? undefined : str(input.recommended, "recommended", 20);
@@ -148,6 +156,7 @@ export function validateDraft(input: Record<string, unknown>): Draft {
 		links: strList(input.links, "links"),
 		tags: strList(input.tags, "tags"),
 		cc: strList(input.cc, "cc"),
+		for: forRecipients(input.for),
 		global: input.global === true,
 		project: str(input.project, "project", 60) || undefined,
 		distinctFrom: strList(input.distinctFrom, "distinctFrom").map(x => parseId(x) ?? x),

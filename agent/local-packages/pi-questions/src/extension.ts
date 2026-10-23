@@ -9,8 +9,10 @@ import * as actions from "./actions.ts";
 import { completeDecide, completeIds, completeQ, parseAnswer, parseClose, parseDecide, parseDefer, parseQ, parseQuestions } from "./commands.ts";
 import { Deliverer, pending, type Entry, type LiveSession } from "./delivery.ts";
 import { possibleDuplicates } from "./dedup.ts";
-import { renderCandidates, renderItem, renderList, renderRecord, statusText } from "./format.ts";
+import { renderCandidates, renderItem, renderList, renderRecord, statusText, noticeText } from "./format.ts";
 import { laneOf, liveness, orchHome, repoOf, userName } from "./identity.ts";
+import { laneWarnings } from "./lane-warnings.ts";
+import { clearLane, setLane } from "./lanes.ts";
 import { isOwn, validateDraft, validateOptions, URGENCIES, type Actor, type Asker, type Item } from "./model.ts";
 import { counts, searchItems, selectItems, type Who } from "./query.ts";
 import {
@@ -72,6 +74,7 @@ const PARAMETERS = {
 		links: strList,
 		tags: strList,
 		cc: { ...strList, description: "Lane ids or session ids that should also get the answer" },
+		for: { ...strList, maxItems: 5, description: "ask: lane ids or session ids to wake; the asker gets a notice instead" },
 		global: { type: "boolean", description: "Not tied to the current repo" },
 		project: { type: "string", description: "Free-text tag grouping work across repos" },
 		distinctFrom: { ...strList, description: "ask: ids of every duplicate candidate, to create anyway" },
@@ -136,7 +139,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 			} catch {
 				name = undefined;
 			}
-			return { sessionId: sid, lane: laneOf(env, sid, name, orch), repo: repoOf(ctx.cwd), cwd: ctx.cwd as string };
+			return { sessionId: sid, lane: laneOf(env, sid, name, orch, home), repo: repoOf(ctx.cwd), cwd: ctx.cwd as string };
 		};
 		const whoOf = (me: { sessionId: string; lane?: string; repo: string | null }): Who => me;
 
@@ -150,7 +153,17 @@ export function createQuestionsExtension(opts: Options = {}) {
 			}
 		}
 
+		function beat(): void {
+			try {
+				const m = identity(latest);
+				writeHeartbeat(home, { sessionId: m.sessionId, pid: process.pid, lane: m.lane, repo: m.repo, cwd: m.cwd, at: new Date(clock()).toISOString() });
+			} catch {
+				// Best effort.
+			}
+		}
+
 		function entriesFor(orphanOk: boolean): { entries: Entry[]; items: Item[]; me: Who } {
+			beat(); // External lane mappings take effect on every delivery pass.
 			const me = whoOf(identity(latest));
 			const { items } = listItems(home);
 			const now = clock();
@@ -164,9 +177,12 @@ export function createQuestionsExtension(opts: Options = {}) {
 		function updateStatus(items: Item[], entries: Entry[], me: Who, held = false): void {
 			if (!latest?.hasUI) return; // subagents get no status line
 			const active = selectItems(items, {}, me, clock());
-			const answered = new Set(entries.filter(e => e.mode === "wake" && (e.h.type === "answered" || e.h.type === "decided")).map(e => e.item.id)).size;
+			const answers = entries.filter(e => e.mode === "wake" && (e.h.type === "answered" || e.h.type === "decided"));
+			const forLane = (e: Entry) => !!me.lane && e.recipient === `for:${me.lane}`;
+			const answered = new Set(answers.filter(e => !forLane(e)).map(e => e.item.id)).size;
+			const answeredForLane = new Set(answers.filter(forLane).map(e => e.item.id)).size;
 			try {
-				latest.ui.setStatus("questions", statusText({ ...counts(active), answered, held }));
+				latest.ui.setStatus("questions", statusText({ ...counts(active), answered, answeredForLane, lane: me.lane, held }));
 			} catch {
 				// Stale context: the next session_start sets it again.
 			}
@@ -214,14 +230,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 			if (!ctx.hasUI) return; // subagents neither deliver nor appear as live sessions
 			const me = identity(ctx);
 			sessionId = me.sessionId;
-			const beat = () => {
-				try {
-					const m = identity(latest);
-					writeHeartbeat(home, { sessionId: m.sessionId, pid: process.pid, lane: m.lane, repo: m.repo, cwd: m.cwd, at: new Date(clock()).toISOString() });
-				} catch {
-					// Best effort.
-				}
-			};
+
 			beat();
 			heartbeatOn = true;
 			deliverer = new Deliverer(
@@ -235,8 +244,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 							mode === "wake" ? { triggerTurn: true, deliverAs: "followUp" } : { deliverAs: "nextTurn" },
 						);
 						if (mode === "notice") {
-							const n = (m.details as any).entries.length;
-							latest.ui.notify(`${n} answer${n === 1 ? "" : "s"} for questions from an earlier session arrived. See the next turn.`, "info");
+							latest.ui.notify(noticeText((m.details as any).entries), "info");
 						}
 					},
 				},
@@ -427,6 +435,35 @@ export function createQuestionsExtension(opts: Options = {}) {
 			const { items, warnings } = listItems(home);
 			notify(ctx, renderList(selectItems(items, f, me, clock()), { now: clock(), showAsker, warnings, heading, empty: "No matching items.", duplicates: possibleDuplicates(items) }));
 		};
+
+		function setSessionLane(ctx: any, lane: string): void {
+			if (env.PI_ORCH_ID) {
+				notify(ctx, `PI_ORCH_ID=${env.PI_ORCH_ID} takes precedence; no lane mapping was written.`, "warning");
+				return;
+			}
+			const me = identity(ctx);
+			setLane(home, me.sessionId, lane, me.sessionId);
+			for (const warning of laneWarnings(home, { sessionId: me.sessionId, lane })) notify(ctx, warning, "warning");
+			poll();
+			notify(ctx, `Lane: ${lane}`);
+		}
+
+		pi.registerCommand("lane", {
+			description: "Show or set lane identity: /lane [ID|clear]",
+			handler: guarded((args, ctx) => {
+				if (!ctx.hasUI) throw new Error("/lane is only available in the main session");
+				const id = args.trim();
+				const me = identity(ctx);
+				if (id === "clear") clearLane(home, me.sessionId);
+				else if (id) {
+					setSessionLane(ctx, id);
+					return;
+				}
+				poll();
+				const lane = identity(ctx).lane;
+				notify(ctx, lane ? `Lane: ${lane}` : "No lane identity set.");
+			}),
+		});
 
 		pi.registerCommand("questions", {
 			description: "List open questions for the user: /questions [all|decided|repo|search <terms>]",

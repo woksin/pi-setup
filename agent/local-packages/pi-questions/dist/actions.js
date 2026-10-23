@@ -14,6 +14,11 @@ import { createItem, listItems, mutateItem, readItem,                  } from ".
 
 const iso = (now        ) => new Date(now).toISOString();
 
+/** Keep routing metadata absent on legacy items, rather than writing an empty recipient list. */
+function routingFields(draft       )                    {
+	return draft.for?.length ? { for: draft.for } : {};
+}
+
 export function ask(
 	home        , draft       , asker       , now = Date.now(), hooks              = {},
 )                                           {
@@ -30,7 +35,7 @@ export function ask(
 				const item       = {
 					id, rev: 1, kind: draft.kind, title: draft.title, body: draft.body, options: draft.options,
 					urgency: draft.urgency, blocking: draft.blocking, links: draft.links, tags: draft.tags, repo,
-					asker, cc: draft.cc.filter(c => c !== asker.sessionId && c !== asker.lane),
+					asker, cc: draft.cc.filter(c => c !== asker.sessionId && c !== asker.lane), ...routingFields(draft),
 					status: "open", related: found.candidates.map(c => c.item.id), history: [],
 					createdAt: at, updatedAt: at,
 				};

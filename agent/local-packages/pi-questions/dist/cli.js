@@ -9,7 +9,9 @@ import { parseArgs } from "node:util";
 import * as actions from "./actions.js";
 import { possibleDuplicates } from "./dedup.js";
 import { renderCandidates, renderItem, renderList, renderRecord } from "./format.js";
-import { cliSession, laneOf, repoOf } from "./identity.js";
+import { cliSession, laneOf, repoOf, resolveLaneSession } from "./identity.js";
+import { laneWarnings } from "./lane-warnings.js";
+import { clearLane, listLanes, setLane } from "./lanes.js";
 import { validateDraft,            } from "./model.js";
 import { selectItems } from "./query.js";
 import { agentDir, listItems, resolveHome } from "./store.js";
@@ -20,8 +22,11 @@ const USAGE = `usage: pi-questions <command>
   list [--all] [--mine] [--status S] [--repo Owner/Name] [--project P]
   get <id> [--record]
   ask --kind question|decision|approval|fyi --title T [--body B] [--option key=text]... [--recommended key]
-      [--urgency high|normal|low] [--blocking X] [--cc ID]... [--link L]... [--tag T]... [--global]
+      [--urgency high|normal|low] [--blocking X] [--cc ID]... [--for ID]... [--link L]... [--tag T]... [--global]
       [--project P] [--distinct-from Q-n]...
+  lane set <ID> (--session <id> | --pid <pid> | --tty <ttysNN>)
+  lane clear --session <id>
+  lane list
   wait <id>...  exit 0 once any given item is answered, decided or closed; exit 1 while all are open.
                 Checks once and returns: run it as the job_watch check (until=success), alone, not chained.`;
 
@@ -33,6 +38,8 @@ export function main(argv          , env                                    , io
 	const lane = laneOf(env, sessionId, session.name);
 	try {
 		switch (cmd) {
+			case "lane":
+				return laneCommand(rest, home, sessionId, io);
 			case "list": {
 				const { values } = parseArgs({ args: rest, options: { all: { type: "boolean" }, mine: { type: "boolean" }, status: { type: "string" }, repo: { type: "string" }, project: { type: "string" } } });
 				const { items, warnings } = listItems(home);
@@ -65,19 +72,15 @@ export function main(argv          , env                                    , io
 					args: rest,
 					options: {
 						kind: { type: "string" }, title: { type: "string" }, body: { type: "string" }, option: { type: "string", multiple: true },
-						recommended: { type: "string" }, urgency: { type: "string" }, blocking: { type: "string" }, cc: { type: "string", multiple: true },
+						recommended: { type: "string" }, urgency: { type: "string" }, blocking: { type: "string" }, cc: { type: "string", multiple: true }, for: { type: "string", multiple: true },
 						link: { type: "string", multiple: true }, tag: { type: "string", multiple: true }, global: { type: "boolean" },
 						project: { type: "string" }, "distinct-from": { type: "string", multiple: true },
 					},
 				});
-				const options = (values.option ?? []).map(o => {
-					const i = o.indexOf("=");
-					if (i < 1) throw new Error(`--option must be key=text, got "${o}"`);
-					return { key: o.slice(0, i), text: o.slice(i + 1) };
-				});
+				const options = cliOptions(values.option ?? []);
 				const draft = validateDraft({
 					kind: values.kind, title: values.title, body: values.body, options, recommended: values.recommended, urgency: values.urgency,
-					blocking: values.blocking, cc: values.cc, links: values.link, tags: values.tag, global: values.global, project: values.project,
+					blocking: values.blocking, cc: values.cc, for: values.for, links: values.link, tags: values.tag, global: values.global, project: values.project,
 					distinctFrom: values["distinct-from"],
 				});
 				const asker        = { sessionId, lane, cwd, repo: repoOf(cwd), pid: process.pid };
@@ -98,6 +101,61 @@ export function main(argv          , env                                    , io
 		io.err(`error: ${e.message}`);
 		return 2;
 	}
+}
+
+function cliOptions(options          ) {
+	return options.map(o => {
+		const i = o.indexOf("=");
+		if (i < 1) throw new Error(`--option must be key=text, got "${o}"`);
+		return { key: o.slice(0, i), text: o.slice(i + 1) };
+	});
+}
+
+const LANE_USAGE = "lane needs: set <ID> (--session <id> | --pid <pid> | --tty <tty>), clear --session <id>, or list";
+
+function laneArgs(positionals          , values        , positionalCount        , selectorCount        )       {
+	if (positionals.length !== positionalCount) throw new Error(LANE_USAGE);
+	if (Object.keys(values).length !== selectorCount) throw new Error(LANE_USAGE);
+}
+
+function laneSession(home        , values                                                  )         {
+	if (values.session) return values.session;
+	const pid = values.pid === undefined ? undefined : Number(values.pid);
+	if (pid !== undefined) {
+		if (!Number.isInteger(pid) || pid <= 0) throw new Error("--pid must be a positive integer");
+	}
+	return resolveLaneSession(home, { pid, tty: values.tty });
+}
+
+function laneCommand(args          , home        , setBy        , io    )         {
+	const [action, ...rest] = args;
+	const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: {
+		session: { type: "string" }, pid: { type: "string" }, tty: { type: "string" },
+	} });
+	switch (action) {
+		case "list": {
+			laneArgs(positionals, values, 0, 0);
+			const records = listLanes(home);
+			io.out(records.length ? records.map(r => `${r.sessionId} ${r.lane} (set by ${r.setBy} at ${r.at})`).join("\n") : "No lane mappings.");
+			break;
+		}
+		case "clear":
+			laneArgs(positionals, values, 0, 1);
+			if (!values.session) throw new Error(LANE_USAGE);
+			clearLane(home, values.session);
+			io.out(`Cleared lane mapping for ${values.session}.`);
+			break;
+		case "set": {
+			laneArgs(positionals, values, 1, 1);
+			const sessionId = laneSession(home, values);
+			setLane(home, sessionId, positionals[0], setBy);
+			laneWarnings(home, { sessionId, lane: positionals[0] }).forEach(warning => io.err(warning));
+			io.out(`${sessionId} is mapped to ${positionals[0]}.`);
+			break;
+		}
+		default: throw new Error(LANE_USAGE);
+	}
+	return 0;
 }
 
 function isEntry()          {
