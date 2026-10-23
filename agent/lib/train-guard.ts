@@ -5,7 +5,7 @@ import { listManifests, repoKey } from './train-manifest.mjs';
 import { protectedItems, pushBlock } from './train-push.mjs';
 
 type Git = (cwd: string, args: string[]) => string;
-type Push = { cwd: string; remote: string; refs: string[]; all: boolean };
+type Push = { cwd: string; remote: string; refs: string[]; all: boolean; delete: boolean };
 type Location = { cwd: string; git: Git };
 type Segment = Location & { tokens: string[] };
 type ParsedPush = { repo: string; branches: string[] };
@@ -33,16 +33,17 @@ function skipOption(option: { token: string; rest: string[] }) {
 
 function pushTail(segment: Segment) {
   const rest = segment.tokens, positional: string[] = [];
-  const state = { all: false, end: false };
+  const state = { all: false, end: false, delete: false };
   while (rest.length) {
     const token = rest.shift()!;
     if (state.end) { positional.push(token); continue; }
     if (token === '--') { state.end = true; continue; }
     if (['--all', '--mirror'].includes(token)) { state.all = true; continue; }
+    if (['--delete', '-d'].includes(token)) { state.delete = true; continue; }
     if (token.startsWith('-')) skipOption({ token, rest });
     else positional.push(token);
   }
-  return { remote: positional.shift() ?? '', refs: positional, all: state.all };
+  return { remote: positional.shift() ?? '', refs: positional, all: state.all, delete: state.delete };
 }
 
 function pushArgs(segment: Segment): Push {
@@ -97,8 +98,9 @@ function defaultRemote(push: Push, git: Git) {
 }
 
 function pushBranches(push: Push, git: Git) {
+  if (push.delete) return [];
   if (push.all) return git(push.cwd, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']).trim().split('\n');
-  if (push.refs.length) return push.refs.map(ref => destination(ref, push, git));
+  if (push.refs.length) return push.refs.filter(ref => !/^\+?:.+/.test(ref)).map(ref => destination(ref, push, git));
   return defaultDestination(push, git);
 }
 

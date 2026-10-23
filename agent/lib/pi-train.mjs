@@ -112,17 +112,23 @@ function repoContext(context, request) {
   return { ...context, cwd: resolve(context.cwd, request.options.repoDir ?? '.') };
 }
 
-function reportError(context, error) {
-  context.err(error.message);
+function errorStatus(error, request) {
+  if (request?.command === 'guard') return 2;
   return error instanceof TrainError ? error.code : 2;
+}
+
+function reportError(context, error, request) {
+  context.err(error.message);
+  return errorStatus(error, request);
 }
 
 export async function main(argv, context = realContext()) {
   if (argv.includes('--help') || argv.includes('-h')) { context.out(HELP); return 0; }
+  let request;
   try {
-    const request = parse(argv);
+    request = parse(argv);
     return await dispatch(repoContext(context, request), request);
   } catch (error) {
-    return reportError(context, error);
+    return reportError(context, error, request);
   }
 }

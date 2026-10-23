@@ -8,6 +8,7 @@ import { main, realContext } from './pi-train.mjs';
 import { cancellable, isBot, RUN_FIELDS } from './train-gh.mjs';
 import { loadManifest, manifestPath, repoKey, saveManifest, withManifestLock } from './train-manifest.mjs';
 import { copyBullets, extractBullets, renderNotes } from './train-notes.mjs';
+import { shipLabel } from './train-ship-pr.mjs';
 
 const BASE = 'a'.repeat(40), SHA = 'b'.repeat(40), MERGE = 'c'.repeat(40);
 const REPO = 'acme/widget', TRAIN = 'train/test';
@@ -630,6 +631,16 @@ test('ship refuses behind main, reopened PRs, pending steps, dirty worktree and 
   assert.equal(f.state.pushes, 0);
   f.state.ancestor = false;
   assert.equal(await f.invoke('ship', '--label', 'no-release', '--allow-behind'), 0);
+});
+
+test('no-release fallback requires every folded PR to opt out; mixed or missing labels require --label', () => {
+  const prs = (...groups: string[][]) => groups.map(names => ({ labels: names.map(name => ({ name })) }));
+  for (const groups of [[['no-release'], []], [['no-release'], ['docs']], [[], []], [['docs']], []]) {
+    assert.throws(() => shipLabel({}, prs(...groups)), /provide --label/);
+  }
+  assert.equal(shipLabel({}, prs(['no-release'], ['docs', 'no-release'])), 'no-release');
+  assert.equal(shipLabel({}, prs(['no-release'], ['patch'])), 'patch');
+  assert.equal(shipLabel({ label: 'no-release' }, prs(['no-release'], [])), 'no-release');
 });
 
 test('ship gate requirement accepts only verified clean build/test records for the train head', async t => {

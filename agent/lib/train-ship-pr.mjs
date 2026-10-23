@@ -10,9 +10,14 @@ export function shipLabel(options, prs) {
     return options.label;
   }
   const labels = new Set(prs.flatMap(pr => (pr.labels ?? []).map(label => label.name)));
-  const label = RELEASE_LABELS.find(value => labels.has(value));
-  if (!label) throw new TrainError('no release label on folded PRs; provide --label');
-  return label;
+  const label = RELEASE_LABELS.filter(value => value !== 'no-release').find(value => labels.has(value));
+  if (label) return label;
+  if (allNoRelease(prs)) return 'no-release';
+  throw new TrainError('no release label on folded PRs; provide --label');
+}
+
+function allNoRelease(prs) {
+  return prs.length > 0 && prs.every(pr => (pr.labels ?? []).some(label => label.name === 'no-release'));
 }
 
 export function shipBody(manifest, summary) {

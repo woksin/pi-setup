@@ -8,7 +8,7 @@ export default function (pi: ExtensionAPI) {
     const command = (event.input as { command?: unknown }).command;
     if (typeof command !== 'string' || !command.includes('push')) return;
     const result = await trainPushDecision(command, ctx.cwd);
-    for (const notice of result.notices) ctx.ui.notify(notice, 'warning');
+    if (ctx.hasUI) for (const notice of result.notices) ctx.ui.notify(notice, 'warning');
     if (result.reason) return { block: true, reason: result.reason };
   });
 }
