@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { isCratisFile, WEB_PACKAGES } from "./components.ts";
 import { saveIfChanged } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
-import { retireFiles, revertOps } from "./uninstall.ts";
+import { retireFiles, retireSymlinks, revertOps } from "./uninstall.ts";
 import type { Step } from "./uninstall.ts";
 import { reloadSystemd, unloadLine, unloadService } from "./services.ts";
 import type { Ctx } from "./types.ts";
@@ -53,6 +53,10 @@ export async function retire(
       if (svc.managed) steps.push({ line: unloadLine(svc), run: () => unloadService(ctx, svc) });
       files(svc.files);
       if (svc.managed && svc.kind === "systemd") steps.push({ line: "reload systemd (systemctl --user daemon-reload)", run: () => reloadSystemd(ctx, svc) });
+    }
+    if (id === "lanes") {
+      files(Object.keys(m.files).filter((rel) => rel.startsWith(".local/share/pi-setup/lanes/")));
+      steps.push(...retireSymlinks(ctx, m, [".local/bin/lanes"]));
     }
     if (id === "cratis") files(Object.keys(m.files).filter((rel) => rel.startsWith(PI) && isCratisFile(rel.slice(PI.length))));
     if (id === "web") {

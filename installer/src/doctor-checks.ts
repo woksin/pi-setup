@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
-import { fileSha, fromHomeRel, readManifest, validateManifest } from "./manifest.ts";
+import { fileSha, fromHomeRel, symlinkTarget, readManifest, validateManifest } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
 import { chooseProfile, loadProfiles } from "./profiles.ts";
 import { PROVIDER_LABELS } from "./types.ts";
@@ -78,7 +78,7 @@ function state(ctx: Ctx, facts: DoctorFacts): State {
   for (const [rel, link] of Object.entries(s.manifest?.symlinks ?? {})) {
     const path = fromHomeRel(ctx.home, rel);
     try {
-      if (!lstatSync(path).isSymbolicLink() || resolve(dirname(path), readlinkSync(path)) !== fromHomeRel(ctx.home, link.target)) s.missing.push(rel);
+      if (!lstatSync(path).isSymbolicLink() || resolve(dirname(path), readlinkSync(path)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
     } catch { s.missing.push(rel); }
   }
   return s;

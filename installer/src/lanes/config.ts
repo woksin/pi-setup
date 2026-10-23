@@ -28,6 +28,17 @@ export function defaults(root: string, home: string, reposRoot?: string): Config
     launch: { wrapper: "pi-session", preapproveMcp: false, unsetEnv: ["PI_MCP_CONFIG_MODE"] }, lanes: [],
   };
 }
+/** Installed defaults apply only when creating a new coordination folder. */
+export function preapprovalDefault(templatesDir: string): boolean {
+  const path = join(dirname(templatesDir), "defaults.json");
+  if (!existsSync(path)) return false;
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof value?.launch?.preapproveMcp !== "boolean") throw new Error("invalid launch.preapproveMcp");
+    return value.launch.preapproveMcp;
+  } catch (e) { throw new UsageError(`invalid lanes defaults: ${(e as Error).message}`); }
+}
+
 export function validate(value: unknown): asserts value is Config {
   const c = value as Config;
   const require = (ok: unknown, key: string) => { if (!ok) throw new UsageError(`invalid ${key}`); };

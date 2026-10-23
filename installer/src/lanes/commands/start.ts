@@ -15,7 +15,7 @@ export async function start(id: string, opts: Record<string, string>, c: Config,
   if (!existsSync(prompt) || !statSync(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
   const duplicate = (await runningPi(ctx)).find((p) => p.cwd === ctx.realpath(cwd));
   if (duplicate) throw new Error(`already running in ${cwd} (pid ${duplicate.pid}); not starting a second session`);
-  if (!coordinator) await preapprove(ctx, cwd, c.launch.preapproveMcp);
+  if (!coordinator || !c.launch.preapproveMcp) await preapprove(ctx, cwd, c.launch.preapproveMcp);
   const backend = detectBackend(opts.terminal || c.terminal.backend, ctx);
   let wrapper = ctx.which(c.launch.wrapper);
   if (!wrapper) {

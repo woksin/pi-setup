@@ -18,6 +18,7 @@ export interface Options {
   yes: boolean;
   skipNpm: boolean;
   reinstallNpm: boolean;
+  preapproveMcp: boolean;
   plan: boolean;
   json: boolean;
   fix: boolean;
@@ -42,6 +43,7 @@ export const USAGE = `Usage: ./install.sh [install] [options]
   --repos-root <dir>    repositories root (default: saved, then ~/repos; interactive runs suggest a detected root)
   --profile <name|auto> profile to apply (default: the active one, else chosen from your logins)
   --with <id> / --without <id>  turn an extra on or off: ${COMPONENT_IDS.join(", ")}
+  --preapprove-mcp      trust project MCP server definitions for new lanes folders (default: off)
   --yes                 never prompt
   --skip-npm            do not run npm install in ~/.pi/agent/npm
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
@@ -61,6 +63,7 @@ const BOOLEAN_FLAGS: Record<string, keyof Options> = {
   "--yes": "yes",
   "--skip-npm": "skipNpm",
   "--reinstall-npm": "reinstallNpm",
+  "--preapprove-mcp": "preapproveMcp",
   "--plan": "plan",
   "--json": "json",
   "--fix": "fix",
@@ -74,7 +77,7 @@ function isAbsoluteOrHome(value: string): boolean {
 export function parseArgs(argv: string[], cwd: string): Parsed {
   const options: Options = {
     command: "install", sub: "list", keep: 10, ref: "", help: false, dryRun: false, user: "", reposRoot: "", profile: "",
-    yes: false, skipNpm: false, reinstallNpm: false, plan: false, json: false, fix: false, with: [], without: [],
+    yes: false, skipNpm: false, reinstallNpm: false, preapproveMcp: false, plan: false, json: false, fix: false, with: [], without: [],
   };
   let args = argv[0] === "install" ? argv.slice(1) : argv;
   if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor") {

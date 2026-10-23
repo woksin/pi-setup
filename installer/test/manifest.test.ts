@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import {
-  emptyManifest, fromHomeRel, manifestPath, pinnedBackups, readManifest, recordArrayAdd, recordSet, saveIfChanged,
+  emptyManifest, fromHomeRel, manifestPath, validateManifest, symlinkTarget, pinnedBackups, readManifest, recordArrayAdd, recordSet, saveIfChanged,
 } from "../src/manifest.ts";
 import { SetupError } from "../src/types.ts";
 import { tempDir } from "./helpers/home.ts";
@@ -71,4 +71,22 @@ test("pinned backups cover file and json entries", () => {
   m.files["a"] = { sha256: "x", mode: 1, source: { release: null, commit: null }, origin: "replaced", backup: "t/a" };
   m.json["j"] = { created: false, backup: "t/j", sha256After: "", ops: [] };
   assert.deepEqual([...pinnedBackups(m)].sort(), ["t/a", "t/j"]);
+});
+
+test("symlink targets are metadata: protected targets accepted, link paths still strict", () => {
+  const h = home(); const target = ".pi/agent/npm/node_modules/@woksin/pi-orch/bin/orch";
+  const m = emptyManifest(new Date()); m.symlinks[".local/bin/orch"] = { target };
+  assert.doesNotThrow(() => validateManifest(h, m)); assert.equal(symlinkTarget(h, target), join(h, target));
+  assert.throws(() => fromHomeRel(h, target), SetupError);
+  for (const path of [target, ".pi/agent/auth.json", "/absolute", "../escape", ""]) {
+    const bad = emptyManifest(new Date()); bad.symlinks[path] = { target: ".local/share/tool" };
+    assert.throws(() => validateManifest(h, bad), SetupError, path);
+  }
+  for (const target of ["", "/absolute", "../escape", "a/../b", "a//b"]) {
+    const bad = emptyManifest(new Date()); bad.symlinks[".local/bin/tool"] = { target };
+    assert.throws(() => validateManifest(h, bad), SetupError, target);
+  }
+  const files = emptyManifest(new Date());
+  files.files[target] = { sha256: "x", mode: 420, source: { release: null, commit: null }, origin: "new" };
+  assert.throws(() => validateManifest(h, files), SetupError);
 });

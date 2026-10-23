@@ -45,6 +45,7 @@ test("start handles print fallback, duplicate cwd, missing inputs and terminal f
   const { ctx, home, lines, errors } = fixture(); await main(["init", home, "--terminal", "print"], ctx);
   assert.equal(await main(["start", "coordinator"], ctx), 0); assert.match(lines.at(-1)!, /^cd .*PI_ORCH_ID=L0.*pi-session.*@/);
   assert.ok(errors.some((s) => /not found/.test(s)));
+  assert.equal(lines.filter((s) => s.startsWith("MCP preapproval is off;")).length, 1);
   assert.equal(await main(["start", "L9"], ctx), 1);
   ctx.run = async () => ({ code: 0, stdout: "123\n", stderr: "", timedOut: false }); ctx.readCwd = async () => home;
   assert.equal(await main(["start", "coordinator"], ctx), 1); assert.equal(errors.at(-1), `already running in ${home} (pid 123); not starting a second session`);

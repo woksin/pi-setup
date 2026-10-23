@@ -88,13 +88,13 @@ export function emptyManifest(now: Date): Manifest {
 const DENY_FILES = ["auth.json", "auth.json.lock", "models-store.json", "guards.json", "lane-policy/policy.json"];
 const DENY_DIRS = ["accounts", "sessions", "jobs", "relaunch", "context-budget", "pi-phase/state", "npm/node_modules", ".pi-setup"];
 
-function problemWith(rel: unknown): string | undefined {
+function problemWith(rel: unknown, allowProtected = false): string | undefined {
   if (typeof rel !== "string" || rel === "") return "empty path";
   if (rel.includes("\0") || rel.includes("\\")) return "invalid character";
   if (isAbsolute(rel)) return "absolute path";
   if (rel.split("/").some((s) => s === "" || s === "." || s === "..")) return "path escapes its directory";
   const prefix = ".pi/agent/";
-  if (rel.startsWith(prefix)) {
+  if (!allowProtected && rel.startsWith(prefix)) {
     const sub = rel.slice(prefix.length);
     if (DENY_FILES.includes(sub) || DENY_DIRS.some((d) => sub === d || sub.startsWith(`${d}/`))) return "protected path";
   }
@@ -105,6 +105,13 @@ function problemWith(rel: unknown): string | undefined {
 export function fromHomeRel(home: string, rel: string): string {
   const problem = problemWith(rel);
   if (problem) throw new SetupError(`manifest path rejected (${problem}): ${String(rel)}`);
+  return join(home, rel);
+}
+
+/** Resolve target metadata for readlink comparisons only; never use this for a write or deletion. */
+export function symlinkTarget(home: string, rel: string): string {
+  const problem = problemWith(rel, true);
+  if (problem) throw new SetupError(`manifest target rejected (${problem}): ${String(rel)}`);
   return join(home, rel);
 }
 
@@ -130,7 +137,7 @@ export function validateManifest(home: string, m: Manifest): void {
   }
   for (const [rel, l] of Object.entries(m.symlinks)) {
     fromHomeRel(home, rel);
-    fromHomeRel(home, l.target);
+    symlinkTarget(home, l.target);
   }
   for (const rel of m.dirs) fromHomeRel(home, rel);
   for (const rel of Object.keys(m.pendingNew ?? {})) fromHomeRel(home, rel);

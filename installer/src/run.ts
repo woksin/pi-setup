@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { findRoot, loadConfig, preapprovalDefault } from "./lanes/config.ts";
 import { apply, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
 import { isInteractive, parseArgs, USAGE } from "./args.ts";
@@ -97,9 +98,15 @@ function extraRows(
   };
 }
 
+function savedPreapproval(ctx: Ctx): boolean {
+  const installed = preapprovalDefault(join(ctx.home, ".local/share/pi-setup/lanes/templates"));
+  try { return installed || loadConfig(findRoot(undefined, ctx.env, ctx.cwd)).launch.preapproveMcp; }
+  catch { return installed; } // No valid coordination folder here; never change its files.
+}
+
 function resolveAll(
   ctx: Ctx, options: Options, detection: Detection,
-  saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean> },
+  saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean>; preapproveMcp?: boolean },
   manifest: Manifest | undefined,
 ): Resolved {
   const piDir = join(ctx.home, ".pi", "agent");
@@ -137,6 +144,7 @@ function resolveAll(
     buildPlan({
       repoDir: ctx.repoDir, home: ctx.home, settings, overlay: overlayFor(ctx.repoDir, choice.name, settings),
       components: on, which: ctx.which, notes,
+      preapproveMcp: savedPreapproval(ctx) || options.preapproveMcp || answers.preapproveMcp === true,
       drop: on.web === false ? (manifest?.json[".pi/agent/settings.json"]?.ops ?? []).flatMap((o) => (o.op === "array-add" && o.key === "packages" && WEB_PACKAGES.includes(o.value as string) ? [o.value as string] : [])) : [],
       activate: COMPONENTS.map((c) => c.id).filter((id) => on[id] && !wasOn(manifest, currentState(ctx), id)),
     }),
@@ -229,13 +237,13 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const toolErrors = requiredToolErrors(ctx, detection, options);
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
 
-  let answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean> } = {};
+  let answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean>; preapproveMcp?: boolean } = {};
   if (prompter) {
     const profiles = loadProfiles(ctx.repoDir);
     const activeBefore = readActive(piDir);
     const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, names);
     const result = await collectChoices(prompter, { options, saved, detection, profiles, initial, home: ctx.home, repoDir: ctx.repoDir,
-      extras: extraRows(ctx, options, saved, detection, manifest) });
+      extras: extraRows(ctx, options, saved, detection, manifest), preapproveMcp: savedPreapproval(ctx) });
     if (result === CANCEL) return cancelled(ctx);
     answers = result;
   }

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { defaults, loadConfig, validate } from "../config.ts";
+import { defaults, loadConfig, preapprovalDefault, validate } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { readTemplate, renderTemplate, templateVars } from "../templates.ts";
 export async function init(args: string[], opts: Record<string, string>, ctx: LanesCtx): Promise<number> {
@@ -10,7 +10,7 @@ export async function init(args: string[], opts: Record<string, string>, ctx: La
   if (!existsSync(configPath)) {
     c.coordinator.id = opts.coordinator || c.coordinator.id;
     c.terminal.backend = opts.terminal || c.terminal.backend;
-    c.launch.preapproveMcp = opts["preapprove-mcp"] === "true";
+    c.launch.preapproveMcp = opts["preapprove-mcp"] === "true" || preapprovalDefault(ctx.templatesDir);
   }
   validate(c);
   const vars = templateVars(c, ctx, root);

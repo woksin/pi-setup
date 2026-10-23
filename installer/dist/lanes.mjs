@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 006ab623308266e484b6a26a3b05f5608b291d5786fce3f2f01abfe603fc5372
+// pi-setup-source-sha256: e99de9b8825c24c4619b9d45003aea4c859ba29cb0b0fa8971c446ad9d157245
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -137,6 +137,17 @@ function defaults(root, home, reposRoot) {
     lanes: []
   };
 }
+function preapprovalDefault(templatesDir) {
+  const path = join4(dirname2(templatesDir), "defaults.json");
+  if (!existsSync2(path)) return false;
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof value?.launch?.preapproveMcp !== "boolean") throw new Error("invalid launch.preapproveMcp");
+    return value.launch.preapproveMcp;
+  } catch (e) {
+    throw new UsageError(`invalid lanes defaults: ${e.message}`);
+  }
+}
 function validate(value) {
   const c = value;
   const require2 = (ok, key) => {
@@ -243,7 +254,7 @@ async function init(args, opts, ctx) {
   if (!existsSync3(configPath)) {
     c.coordinator.id = opts.coordinator || c.coordinator.id;
     c.terminal.backend = opts.terminal || c.terminal.backend;
-    c.launch.preapproveMcp = opts["preapprove-mcp"] === "true";
+    c.launch.preapproveMcp = opts["preapprove-mcp"] === "true" || preapprovalDefault(ctx.templatesDir);
   }
   validate(c);
   const vars = templateVars(c, ctx, root);
@@ -463,7 +474,7 @@ async function start(id, opts, c, root, ctx) {
   if (!existsSync6(prompt) || !statSync2(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
   const duplicate = (await runningPi(ctx)).find((p) => p.cwd === ctx.realpath(cwd));
   if (duplicate) throw new Error(`already running in ${cwd} (pid ${duplicate.pid}); not starting a second session`);
-  if (!coordinator) await preapprove(ctx, cwd, c.launch.preapproveMcp);
+  if (!coordinator || !c.launch.preapproveMcp) await preapprove(ctx, cwd, c.launch.preapproveMcp);
   const backend = detectBackend(opts.terminal || c.terminal.backend, ctx);
   let wrapper = ctx.which(c.launch.wrapper);
   if (!wrapper) {
