@@ -89,7 +89,7 @@ test("only-if-absent files are not overwritten and settings.json gets pi-questio
   assert.ok(!actions.some((a) => a.op === "install" && a.path.endsWith("/settings.json")));
   await apply(ctxFor(h), actions, opts);
   const settingsJson = JSON.parse(readFileSync(join(h, ".pi/agent/settings.json"), "utf8"));
-  assert.deepEqual(settingsJson, { keep: true, packages: ["a", "./local-packages/pi-questions"] });
+  assert.deepEqual(settingsJson, { keep: true, packages: ["a", "npm:@woksin/pi-jobs@0.3.1", "npm:@woksin/pi-context-budget@0.3.0", "npm:@woksin/pi-recover@0.1.1", "npm:@woksin/pi-orch@0.1.0", "./local-packages/pi-questions"] });
   assert.equal(plan(h).filter((a) => a.op === "register").length, 0);
 });
 
@@ -97,5 +97,5 @@ test("a dangling skills symlink does not crash the plan", () => {
   const h = home();
   mkdirSync(join(h, ".pi/agent/skills"), { recursive: true });
   symlinkSync("/nonexistent-target", join(h, ".pi/agent/skills/ai-work-lifecycle"));
-  assert.ok(!plan(h).some((a) => a.op === "symlink"));
+  assert.ok(!plan(h).some((a) => a.op === "symlink" && a.path.endsWith("/skills/ai-work-lifecycle")));
 });

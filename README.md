@@ -41,13 +41,55 @@ It needs Node.js 22.19 or newer and Python 3. The full installer reference follo
 
 ## Install
 
+### New machine prerequisites
+
+Use Node.js **22.19 or newer** (including current Node 24/26 releases), npm, Python 3, Git, GitHub CLI (`gh`), `jq`, ripgrep (`rg`) and `fd` on PATH. Install pi with `npm install -g @earendil-works/pi-coding-agent`.
+
+- macOS (Homebrew): `brew install node python git gh jq ripgrep fd`
+- Debian/Ubuntu: `sudo apt install python3 git gh jq ripgrep fd-find`; install a current Node.js/npm from [nodejs.org](https://nodejs.org) if the distro version is too old. Debian calls fd `fdfind`: expose it as `fd` in `~/.local/bin`.
+
+| Prerequisite | Required? | Without it |
+| --- | --- | --- |
+| Node ≥22.19, npm, Python 3, Git, pi | Required | Installer, package fetching or bundled CLI tools cannot run. |
+| `gh` (run `gh auth login`) | Required for this setup | GitHub issue/PR workflows fail; use `--user` if login cannot be detected. |
+| `jq`, `rg`, `fd` | Required for this setup | JSON processing and the prescribed search workflow fail. |
+| `gitleaks` | Optional (`brew install gitleaks`) | `secret-sweep` cannot scan; required if enabling that schedule. |
+| `rtk` | Optional ([install](https://github.com/rtk-ai/rtk#installation)) | Output compression is unavailable; commands still run normally. |
+| Docker Desktop/Engine | Optional ([install](https://docs.docker.com/get-started/get-docker/)) | Container workflows and docker-guardian are unavailable. |
+| `tmux` | Optional (`brew install tmux` / `sudo apt install tmux`) | No tmux lanes backend; macOS Terminal is an alternative. |
+| `CS_ACCESS_TOKEN` + `cs-mcp` | Optional, for CodeScene | No authenticated CodeScene analysis; doctor warns when CodeScene is enabled. [Setup](https://github.com/codescene-oss/codescene-mcp-server#readme). Never store the token in this repo. |
+
+Doctor fails missing required tools/packages and warns about missing optional tools. It never installs system prerequisites.
+
+### First ten minutes: pi, login, then auto
+
+1. Install prerequisites and pi: `npm install -g @earendil-works/pi-coding-agent`.
+2. Start `pi`, then use `/login` for the providers/subscriptions you have; exit pi afterwards. Also run `gh auth login` for GitHub access.
+3. From this checkout, run `./install.sh --profile auto` (or rerun it after adding a login). Use `--user <GitHub-login> --yes` for an unattended install.
+4. Restart your shell/pi and run `./install.sh doctor`. Review the selected profile with `pi-profile list`; select another with `./install.sh --profile <name>`.
+
+| Profile | Required logins/subscriptions | Optional provider |
+| --- | --- | --- |
+| `openai-only` | ChatGPT (`openai-codex`) | — |
+| `balanced` | Claude (`anthropic`) + ChatGPT | Kimi (`kimi-coding`), otherwise ops/scout fall back to GPT |
+| `balanced-anthropic` | Claude + ChatGPT | Kimi, otherwise GPT fallback |
+| `balanced-openai` | Claude + ChatGPT | Kimi, otherwise GPT fallback |
+| `anthropic-heavy` | Claude + ChatGPT | — |
+| `openai-heavy` | Claude + ChatGPT | — |
+| `kimi-heavy` | Claude + ChatGPT + Kimi | — |
+
+`auto` chooses the highest-ranked profile whose required logins are ready: `balanced` with Claude + ChatGPT (with or without Kimi), `openai-only` with ChatGPT alone. No matching profile (including Claude-only or Kimi-only) gives provisional `balanced` and asks for the missing logins. It does **not** automatically prefer `kimi-heavy`; select that explicitly. A normal rerun keeps the active profile; `--profile auto` recomputes it.
+
+`pi-questions` is deliberately **bundled** in `agent/local-packages/pi-questions`, installed into `~/.pi/agent/local-packages/pi-questions` and registered as `./local-packages/pi-questions`. It needs no separate publication, npm install or private clone.
+
+
 ```sh
 git clone https://github.com/woksin/pi-setup && cd pi-setup
 ./install.sh --dry-run   # show what would change
 ./install.sh             # overwritten files are backed up to ~/.pi/agent/.pi-setup/backups/<timestamp>/
 ```
 
-Install needs Node.js 22.19 or newer (pi needs it too) and Python 3. `install.sh` is a thin shim around the committed bundle `installer/dist/pi-setup.mjs`; it detects your setup first and asks only what it could not find out. In a terminal it runs a short wizard; with `--yes`, `CI` set or no terminal it never prompts. It detects your GitHub login (saved, then `gh`), your repositories root (saved, then the best match among the usual places such as `~/repos` and the parent of this checkout, then `$HOME/repos`), which providers you are logged in to, and picks a profile from `agent/profiles/<name>/profile.json` (an already active profile is kept on re-runs; `--profile <name>` switches). It then runs `npm install --legacy-peer-deps` in `~/.pi/agent/npm` itself, only when the packages changed.
+Install needs Node.js 22.19 or newer (pi needs it too) and Python 3. `install.sh` is a thin shim around the committed bundle `installer/dist/pi-setup.mjs`; it detects your setup first and asks only what it could not find out. In a terminal it runs a short wizard; with `--yes`, `CI` set or no terminal it never prompts. It detects your GitHub login (saved, then `gh`), your repositories root (saved, then the best match among the usual places such as `~/repos` and the parent of this checkout, then `$HOME/repos`), which providers you are logged in to, and picks a profile from `agent/profiles/<name>/profile.json` (an already active profile is kept on re-runs; `--profile <name>` switches). It then runs npm install in pi's global package store, `~/.pi/agent/npm`, when inputs change or a pinned package is missing/wrong. New installs register and fetch `npm:@woksin/pi-jobs@0.3.1`, `npm:@woksin/pi-context-budget@0.3.0`, `npm:@woksin/pi-recover@0.1.1` and `npm:@woksin/pi-orch@0.1.0` (with `--save-exact --legacy-peer-deps`). Existing explicit package versions and local overrides are kept. `--skip-npm` skips fetching; doctor then reports missing packages. Launchers `pi-session`, `orch` and `orch-poll` are linked into `~/.local/bin` on the first install; existing files/foreign links there are left alone.
 
 Flags, in any order: `--user <login>`, `--repos-root <dir>`, `--profile <name|auto>`, `--yes` (never prompt), `--skip-npm`, `--dry-run` (writes nothing), `--plan` (print detection, profile and actions, write nothing) and `--json` (one JSON object on stdout). The operator settings are saved in `~/.pi/agent/user.json` (`githubUser` and `reposRoot`; other keys are kept) and reused on later installs unless flags override them. Without a login from any source, install fails and asks for `--user`. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. A re-run that has nothing to change prints `Everything up to date`, no `install` lines, and creates no backups.
 
@@ -72,6 +114,16 @@ For build performance and disk cleanup, use `~/.pi/agent/bin/dev-doctor`; doctor
 `--legacy-peer-deps` is needed: the packages declare conflicting peer ranges for `@earendil-works/pi-*` (for example `@vigolium/piolium` wants `^0.74`, `@tintinweb/pi-subagents` wants `>=1.1.0`), so a plain `npm install` fails with ERESOLVE.
 
 `settings.json`, `models.json` and the other JSON configs are only written when they don't exist yet. `efficiency.json` and `context-budget.json` follow the same rule. Restart pi afterwards.
+
+Both `~/.local/bin` and `~/.pi/agent/bin` must be on PATH. The installer prints a shell-specific snippet when either is missing and **does not edit shell profiles by default**. Add it yourself or opt in with `--edit-shell-profile` (append-only, idempotent; zsh `.zshrc`, bash `.bash_profile` on macOS/`.bashrc` on Linux, fish `config.fish`). Restart your shell afterwards.
+
+```sh
+export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"
+```
+
+For temporary-HOME testing use `--no-launchd`. Loading/unloading launchd is also automatically skipped whenever HOME differs from the OS account's real home, including turn-off and uninstall; selected unit files can still be staged in the temporary HOME. Linux systemd behavior is unchanged.
+
+`inbox-watch` accepts an explicit directory with `INBOX_DIR=/absolute/path/to/messages ~/.pi/agent/bin/inbox-watch`. Set it for your checkout rather than relying on the legacy default.
 
 Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" question) turn on `docker-guardian`, `cleanup`, `secret-sweep`, `codescene`, `cratis`, `web` or `lanes`. Your choice is saved in the manifest and reused on later runs; turning one off removes what pi-setup added and leaves files you changed. The schedules (`docker-guardian`, `cleanup`, `secret-sweep`) are never installed without an explicit choice: on macOS they are written to `~/Library/LaunchAgents/com.<user>.<name>.plist` and loaded with `launchctl bootstrap`; `cleanup` on Linux uses a systemd user timer. `codescene` needs `cs-mcp` on PATH and `CS_ACCESS_TOKEN` in your shell profile; pi-setup never stores the token.
 
@@ -107,7 +159,7 @@ Lanes operations (use `--dir <folder>` outside the coordination folder):
 - `lanes close <ID> [--reassign-to ID2] [--reason text] [--quit]` posts closure and a removal hint; it never removes worktrees or edits lanes.json. `--quit` is opt-in and refuses busy or recently active sessions.
 Watch exits: 0 fire/OK, 1 nothing/missing, 2 error. Nudge: 0 sent, 3 refused, 4 no tab/pane or print backend.
 
-Optional, macOS only: `agent/launchd/*.plist` are templates for the `docker-guardian`, `pi-cleanup` and `secret-sweep` schedules. They are not installed by `install.sh`. Replace `__HOME__` with your home directory, create `~/.pi/agent/logs` (they write stderr there), copy them to `~/Library/LaunchAgents/`, then `launchctl load` them.
+Optional, macOS only: use `--with docker-guardian`, `--with cleanup` or `--with secret-sweep` to manage schedules. The installer fills in your home and username and creates `~/Library/LaunchAgents/com.<user>.docker-guardian.plist`, `com.<user>.pi-cleanup.plist` or `com.<user>.secret-sweep.plist`. Files under `agent/launchd/` remain manual-install templates, not the managed filenames.
 
 `settings.json` lists the packages I load. Local checkouts are mapped to their npm packages (`npm:@woksin/pi-jobs`, `npm:@woksin/pi-recover`, `npm:@woksin/pi-context-budget`, `npm:@woksin/pi-orch`). Remove the ones you don't want.
 
@@ -122,7 +174,7 @@ Restart pi. Agents assign issues and PRs to you and request you as reviewer (ski
 
 Remove the parts you don't want:
 
-- **docker-guardian:** a macOS launchd template, not installed by default. If you installed it, run `launchctl unload ~/Library/LaunchAgents/com.example.docker-guardian.plist` (use your actual plist name if renamed), then remove that plist to prevent future loads.
+- **docker-guardian:** not installed by default. For a managed schedule, run `./install.sh --without docker-guardian` to unload and remove it. For a manually copied template, unload and remove your actual plist in `~/Library/LaunchAgents/` (managed names use `com.<user>.docker-guardian.plist`).
 - **pi-orch:** remove `npm:@woksin/pi-orch` from `packages` in `~/.pi/agent/settings.json`.
 - **loose-threads:** remove `~/.pi/agent/loose-threads` and its entry from `AGENTS.md`; it is a manually invoked backstop, not a scheduled service.
 - **Cratis-specific rules:** remove the Cratis sections of `AGENTS.md`, the `cratis-cli-guard` extension, the `cratis-cli` agent and the Cratis MCP approval patterns in `mcp-adapter.json` if they don't apply. `pi-cleanup`, `loose-threads` and `ai-work-lifecycle` use your configured repositories root.
@@ -276,7 +328,7 @@ has been deleted. Shared layers mean modest savings: about 1 GB on a 13.7 GB
 - **Phase priority and orchestrator mode.** `pi-phase run --priority high` jumps the queue, up to 3 queued/running HIGH phases (`max_high`, configurable 1–10); further approved requests queue as normal without consuming a grant use. `phase-priority.ts` blocks it unless you or a designated orchestrator session approve; subagents can't grant themselves priority.
 - **Reload recovery.** After `/reload`, background jobs survive but subagents don't. `AGENTS.md` tells the agent to run `/jobs`, read the `pi-recover` notice, re-arm only what's missing and not to `/reload` while it needs running subagents.
 - **Guards.** `wait-guard`, `cratis-cli-guard`, `subagent-result-guard`, `lane-policy` and the MCP approval guard share `/guards on|off <name>` (`--persist` to keep it). Disabling a guard is always your call, not the agent's.
-- **Secret sweep (optional).** Install `gitleaks` on PATH and run `~/.pi/agent/bin/secret-sweep`, or load `com.example.secret-sweep.plist` as described above for a daily 05:30 scan. It scans `~/.pi/agent/sessions` and discovers `.ai-work` directories under `~`; set `PI_SECRET_SWEEP_ROOTS` to additional roots separated by `os.pathsep` (`:` on macOS/Linux), or repeat `--root PATH` to add discovery roots (home and sessions are still scanned). For launchd, add `--root` and a root path to the template's `ProgramArguments`, or set `PI_SECRET_SWEEP_ROOTS` in its `EnvironmentVariables`. Discovery prunes symlinks, `~/Library`, `~/.Trash`, caches and build directories (including `.git`, `node_modules`, `bin`, `obj`, virtualenvs, `dist`, `Pods`, `.gradle`, `target` and `.next`). It defaults to depth 8 (`--max-depth`) and 100,000 directories (`--max-directories`), reserving at most 30 seconds or half of the 120-second total budget (`--timeout`) for discovery. Unreadable directories are skipped and counted; hitting a discovery cap still scans discovered records and marks the report partial. Each file scan is capped at 20 MiB. Reports are `~/.pi/agent/logs/secret-sweep/<date>.md`: file, rule, count and line numbers only; scanner output is suppressed and matched values are excluded defensively. Exit codes: 0 clean, 1 findings, 2 tool/report error (including missing gitleaks). Depth-limited discovery is not exhaustive. The scan never rewrites records; redacting ended sessions is a follow-up. Rotate exposed credentials.
+- **Secret sweep (optional).** Install `gitleaks` on PATH and run `~/.pi/agent/bin/secret-sweep`, or opt in with `./install.sh --with secret-sweep` for a daily 05:30 scan (`com.<user>.secret-sweep.plist`). It scans `~/.pi/agent/sessions` and discovers `.ai-work` directories under `~`; set `PI_SECRET_SWEEP_ROOTS` to additional roots separated by `os.pathsep` (`:` on macOS/Linux), or repeat `--root PATH` to add discovery roots (home and sessions are still scanned). For launchd, add `--root` and a root path to the template's `ProgramArguments`, or set `PI_SECRET_SWEEP_ROOTS` in its `EnvironmentVariables`. Discovery prunes symlinks, `~/Library`, `~/.Trash`, caches and build directories (including `.git`, `node_modules`, `bin`, `obj`, virtualenvs, `dist`, `Pods`, `.gradle`, `target` and `.next`). It defaults to depth 8 (`--max-depth`) and 100,000 directories (`--max-directories`), reserving at most 30 seconds or half of the 120-second total budget (`--timeout`) for discovery. Unreadable directories are skipped and counted; hitting a discovery cap still scans discovered records and marks the report partial. Each file scan is capped at 20 MiB. Reports are `~/.pi/agent/logs/secret-sweep/<date>.md`: file, rule, count and line numbers only; scanner output is suppressed and matched values are excluded defensively. Exit codes: 0 clean, 1 findings, 2 tool/report error (including missing gitleaks). Depth-limited discovery is not exhaustive. The scan never rewrites records; redacting ended sessions is a follow-up. Rotate exposed credentials.
 - **Secret-mask limits.** User shell escapes (`!`/`!!`) have no completed-output hook API, so their output is not redacted. Output-cap pre-masking honours secret-mask's `allowlist` and `enabled: false`; disabling it permits raw offloads.
 - **Guards and the Cratis hooks.** When Pi has actually loaded the managed Cratis hooks extension from the process cwd (its `cratis_quality_gate` tool is registered in `pi.getAllTools()` from `.cratis/ai/harnesses/pi/extensions/cratis-hooks`, which the `.pi/extensions` symlink points to; an untrusted project's extensions are skipped by Pi, so they never count, no repository script is run and the Cratis switch is not honoured), `cratis-cli-guard` and `secret-mask` ask the Cratis script itself (same script, cwd and payload) about a command they would block, and stand down only when it exits 2, so the command is refused once. For `cratis chronicle` mutations the switch is `CRATIS_HOOKS_ALLOW_STORE_MUTATIONS=1`; for credential-printing commands it is `CRATIS_HOOKS_ALLOW_SECRET_READS=1` (both set in the environment the harness starts from; `/guards off cratis|secrets` is not needed there). If the script allows the command, cannot run or times out (for example it silently no-ops without `jq`), or the Cratis extension is not proven loaded, the local guard blocks as before. `secret-mask` redaction always stays on; `cratis-cli-guard` also keeps `cratis prologue start` confirmation, still denies production targets when the Cratis switch is set, and reads the Cratis read-only list at runtime, falling back to its built-in list.
 - **Issue work.** `issue_work` keeps a registry of the issues each session works on under `~/.pi/agent/issue-work/` (runtime state, not included).

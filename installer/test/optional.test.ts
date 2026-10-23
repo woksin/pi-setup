@@ -19,7 +19,7 @@ function box(platform = "darwin", tools = ["python3", "npm", "cs-mcp", "systemct
   roots.push(home);
   const b: Box = { home, pi: join(home, ".pi/agent"), calls: [], out: [], err: [], ctx: undefined as never };
   b.ctx = {
-    env: { USER: "tester" }, platform, home, cwd: REPO, repoDir: REPO, now: () => new Date(2026, 0, 2, 3, 4, 5),
+    env: { USER: "tester" }, platform, home, userHome: home, cwd: REPO, repoDir: REPO, now: () => new Date(2026, 0, 2, 3, 4, 5),
     run: async (cmd, args) => {
       if (cmd === "launchctl" || cmd === "systemctl") {
         b.calls.push(`${cmd} ${args.join(" ")}`);

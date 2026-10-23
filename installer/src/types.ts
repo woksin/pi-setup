@@ -33,6 +33,9 @@ export interface Ctx {
   err: (line: string) => void;
   /** Node binary used to re-run the installer after `update` (default: process.execPath). */
   nodePath?: string;
+  /** OS account home, independent of HOME; injectable for service tests. */
+  userHome?: string;
+  noLaunchd?: boolean;
 }
 
 export class SetupError extends Error {}
@@ -45,7 +48,8 @@ export interface Settings {
 /** One reversible change to a JSON file that pi-setup merged into rather than owns. */
 export type JsonOp =
   | { op: "set"; key: string; before: { present: boolean; value?: unknown }; after: unknown }
-  | { op: "array-add"; key: string; value: unknown; keyCreated: boolean };
+  | { op: "array-add"; key: string; value: unknown; keyCreated: boolean }
+  | { op: "array-replace"; key: string; before: unknown; after: unknown };
 
 export type Decision = "new" | "update" | "replace" | "take";
 

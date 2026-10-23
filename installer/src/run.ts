@@ -32,6 +32,7 @@ import type { ResolvedSettings } from "./settings.ts";
 import { CANCEL, SetupError } from "./types.ts";
 import type { Action, Ctx, Detection, ProfileMeta, Prompter } from "./types.ts";
 import { collectChoices, confirmApply, resolveConflicts } from "./wizard.ts";
+import { configureShellPath } from "./shell-path.ts";
 
 const savedString = (saved: Record<string, unknown>, key: string): string =>
   typeof saved[key] === "string" ? (saved[key] as string) : "";
@@ -192,7 +193,7 @@ export async function main(argv: string[], baseCtx: Ctx, injected?: Prompter): P
     return 0;
   }
   const interactive = isInteractive(options, baseCtx.env, baseCtx.stdinTTY, baseCtx.stdoutTTY);
-  const ctx: Ctx = options.json ? { ...baseCtx, out: baseCtx.err } : baseCtx;
+  const ctx: Ctx = { ...baseCtx, noLaunchd: options.noLaunchd, out: options.json ? baseCtx.err : baseCtx.out };
   let prompter = injected;
   if (interactive && !prompter) prompter = (await import("./prompter-clack.ts")).clackPrompter();
   try {
@@ -261,7 +262,10 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   r.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
   const summary = summaryLines({ ...r, detection, kimi: readOnly ? undefined : kimiNote(r.profile, r.ready), skipNpm: options.skipNpm, probed: !readOnly, components: r.components, componentNotes: r.componentNotes });
-  if (options.plan) return finish(ctx, baseCtx, options, r, detection, summary, 0);
+  if (options.plan) {
+    configureShellPath(ctx, options.editShellProfile, true);
+    return finish(ctx, baseCtx, options, r, detection, summary, 0);
+  }
   if (prompter && !(await confirmApply(prompter, summary))) return cancelled(ctx);
 
   const applyOptions: ApplyOptions = {
@@ -278,6 +282,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const live = await retire(ctx, piDir, manifest, off, options.dryRun);
   const result = await apply(ctx, r.actions, applyOptions, live);
   if (result.code === 0) await syncServices(ctx, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
+  if (result.code === 0) configureShellPath(ctx, options.editShellProfile, readOnly);
   const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l));
   if (result.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
   if (prompter && result.code === 0 && !options.dryRun && !options.plan && r.components.lanes.on && !existsSync(join(r.settings.reposRoot, ".lanes/lanes.json"))) {

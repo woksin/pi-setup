@@ -7,6 +7,7 @@ import type { Overlay } from "./profiles.ts";
 import { dropGuardExtension, isCratisFile, stripSections, WEB_PACKAGES } from "./components.ts";
 import { preapprovalDefault } from "./lanes/config.ts";
 import { SetupError } from "./types.ts";
+import { PACKAGE_BINS, pinPackages } from "./packages.ts";
 import type { Action, JsonOp, Settings } from "./types.ts";
 
 const TREES = ["agents", "extensions", "early-extensions", "lib", "workflows", "templates", "profiles", "loose-threads", "bin", "pi-phase", "lane-policy"];
@@ -156,9 +157,9 @@ function addPackage(data: Record<string, unknown>, value: string, fresh: boolean
   ops.push({ op: "array-add", key: "packages", value, keyCreated: !list });
 }
 
-function settingsEdit(web: boolean | undefined, activate: boolean, drop: string[]): (data: Record<string, unknown>, fresh: boolean) => JsonOp[] {
+function settingsEdit(web: boolean | undefined, activate: boolean, drop: string[], piDir: string): (data: Record<string, unknown>, fresh: boolean) => JsonOp[] {
   return (data, fresh) => {
-    const ops: JsonOp[] = [];
+    const ops: JsonOp[] = pinPackages(data, piDir);
     if (fresh && web !== true && Array.isArray(data.packages)) {
       if (web === false) data.packages = (data.packages as unknown[]).filter((p) => !WEB_PACKAGES.includes(p as string));
     }
@@ -221,7 +222,7 @@ export function buildPlan(input: PlanInput): Action[] {
   for (const name of ONLY_IF_ABSENT) {
     if (!existsSync(join(piDir, name))) putSource(actions, join(agent, name), join(piDir, name), settings);
   }
-  registerJson(actions, join(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web")), input.drop ?? []));
+  registerJson(actions, join(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web")), input.drop ?? [], piDir));
   registerJson(actions, join(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => undefined)));
   const absent: [string, string][] = [
     ["docker-guardian/pinned.example.txt", "docker-guardian/pinned.txt"],
@@ -247,9 +248,9 @@ export function buildPlan(input: PlanInput): Action[] {
     putTree(actions, join(repoDir, "installer/lanes/templates"), join(lanesDir, "templates"), settings);
     linkIfFree(actions, input.notes, join(home, ".local/bin/lanes"), join(lanesDir, "lanes.mjs"), home);
   }
-  for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"]]) {
+  for (const [pkg, cmd] of PACKAGE_BINS) {
     const target = join(piDir, "npm/node_modules/@woksin", pkg, "bin", cmd);
-    if (existsSync(target)) linkIfFree(actions, input.notes, join(home, ".local/bin", cmd), target, home);
+    linkIfFree(actions, input.notes, join(home, ".local/bin", cmd), target, home);
   }
   return actions;
 }

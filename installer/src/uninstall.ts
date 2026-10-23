@@ -193,8 +193,17 @@ export function undo(data: Record<string, unknown>, op: JsonOp): boolean {
     else delete data[op.key];
     return true;
   }
+  return undoArray(data, op);
+}
+
+function undoArray(data: Record<string, unknown>, op: Exclude<JsonOp, { op: "set" }>): boolean {
   const list = data[op.key];
   if (!Array.isArray(list)) return true;
+  if (op.op === "array-replace") {
+    const at = list.findIndex((v) => deepEqual(v, op.after));
+    if (at >= 0) list.splice(at, 1, op.before);
+    return true;
+  }
   const at = list.findIndex((v) => deepEqual(v, op.value));
   if (at >= 0) list.splice(at, 1);
   if (op.keyCreated && list.length === 0) delete data[op.key];
@@ -283,6 +292,7 @@ export function revertOps(ctx: Ctx, m: Manifest, rel: string, match: (op: JsonOp
   if (done > 0) {
     const tracked = m.files[rel];
     const wasTracked = Boolean(tracked) && fileSha(path) === tracked.sha256;
+    entry.edited ||= fileSha(path) !== entry.sha256After;
     atomicWrite(path, `${JSON.stringify(data, null, 2)}\n`, statSync(path).mode & 0o7777);
     const sha = sha256(readFileSync(path));
     entry.sha256After = sha;

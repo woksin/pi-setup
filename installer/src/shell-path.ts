@@ -1,0 +1,31 @@
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
+import type { Ctx } from "./types.ts";
+
+export function missingBinDirs(ctx: Ctx): string[] {
+  const paths = (ctx.env.PATH ?? "").split(delimiter).map(p => resolve(ctx.cwd, p));
+  return [".local/bin", ".pi/agent/bin"].filter(p => !paths.includes(join(ctx.home, p)));
+}
+
+export function shellPath(ctx: Ctx): { file: string; snippet: string } {
+  const shell = basename(ctx.env.SHELL ?? "sh");
+  if (shell === "fish") return { file: join(ctx.home, ".config/fish/config.fish"), snippet: 'fish_add_path "$HOME/.local/bin" "$HOME/.pi/agent/bin"' };
+  const rc = shell === "zsh" ? ".zshrc" : shell === "bash" ? (ctx.platform === "darwin" ? ".bash_profile" : ".bashrc") : ".profile";
+  return { file: join(ctx.home, rc), snippet: 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"' };
+}
+
+/** Shell startup files are user-owned: append only on explicit opt-in, never replace them. */
+export function configureShellPath(ctx: Ctx, edit: boolean, dryRun: boolean): void {
+  if (!missingBinDirs(ctx).length) return;
+  const { file, snippet } = shellPath(ctx);
+  ctx.out(`PATH: add this to ${file}, then restart your shell:\n${snippet}`);
+  if (!edit) { ctx.out("Shell profile unchanged (opt in with --edit-shell-profile)."); return; }
+  if (dryRun) { ctx.out(`would append PATH snippet to ${file}`); return; }
+  let text = "";
+  try { text = readFileSync(file, "utf8"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (text.split("\n").includes(snippet)) return;
+  mkdirSync(dirname(file), { recursive: true });
+  appendFileSync(file, `\n# pi-setup tools\n${snippet}\n`);
+  ctx.out(`Appended PATH snippet to ${file}`);
+}

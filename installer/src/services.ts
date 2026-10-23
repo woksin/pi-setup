@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { userInfo } from "node:os";
 import { available, COMPONENTS } from "./components.ts";
 import { fileSha, homeRel } from "./manifest.ts";
 import type { ComponentRecord, Manifest, ServiceRecord } from "./manifest.ts";
@@ -108,6 +109,19 @@ export function planServices(
   return out;
 }
 
+/** launchctl targets the logged-in user domain, not HOME. Never mutate it from a sandbox. */
+export function launchdSkipReason(ctx: Ctx): string | undefined {
+  if (ctx.noLaunchd) return "--no-launchd was given";
+  if (resolve(ctx.home) !== resolve(ctx.userHome ?? userInfo().homedir)) return "HOME is not the real user home";
+  return undefined;
+}
+
+function skipLaunchd(ctx: Ctx): boolean {
+  const reason = launchdSkipReason(ctx);
+  if (reason) ctx.out(`skipping launchd load/unload: ${reason}`);
+  return Boolean(reason);
+}
+
 export const uid = (): number => (typeof process.getuid === "function" ? process.getuid() : 0);
 
 async function sh(ctx: Ctx, cmd: string, args: string[]): Promise<{ ok: boolean; text: string }> {
@@ -129,6 +143,7 @@ export async function syncServices(
     const plist = join(ctx.home, svc.files[0]);
     const domain = `gui/${uid()}`;
     if (svc.kind === "launchd") {
+      if (skipLaunchd(ctx)) continue;
       if (dryRun) { ctx.out(`would load ${svc.label} (launchctl bootstrap ${domain} ${plist})`); continue; }
       mkdirSync(join(ctx.home, ".pi/agent/logs"), { recursive: true });
       const loaded = (await sh(ctx, "launchctl", ["print", `${domain}/${svc.label}`])).ok;
@@ -158,6 +173,7 @@ const NOT_LOADED = /no such process|could not find service|not loaded|not found|
 /** Stop a managed service before its files are removed. "Not loaded" is success; any other failure is a warning and the removal goes on. */
 export async function unloadService(ctx: Ctx, svc: ServiceRecord): Promise<void> {
   if (!svc.managed) return;
+  if (svc.kind === "launchd" && skipLaunchd(ctx)) return;
   const [cmd, args] = svc.kind === "launchd"
     ? ["launchctl", ["bootout", `gui/${uid()}/${svc.label}`]]
     : ["systemctl", ["--user", "disable", "--now", svc.label]];

@@ -23,17 +23,17 @@ function ready(cleanCheckout = false) {
   assert.equal(run.status, 0, run.stdout + run.stderr);
   writeFileSync(piPath(box, "dev-doctor.json"), '{"disk":{"build_floor_gib":0,"cleanup_trigger_gib":0}}');
   const bin = join(box.home, ".local/bin"); mkdirSync(bin, { recursive: true });
-  for (const cmd of ["pi-session", "orch"]) { const p = join(bin, cmd); writeFileSync(p, "#!/bin/sh\nexit 0\n"); chmodSync(p, 0o755); }
+  for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"], ["pi-orch", "orch-poll"]]) { const target = piPath(box, "npm/node_modules/@woksin", pkg, "bin"); mkdirSync(target, { recursive: true }); const p = join(bin, cmd); writeFileSync(p, "#!/bin/sh\nexit 0\n"); chmodSync(p, 0o755); }
   const settings = JSON.parse(readFileSync(piPath(box, "settings.json"), "utf8"));
   const deps = Object.keys(JSON.parse(readFileSync(piPath(box, "npm/package.json"), "utf8")).dependencies);
   for (const pkg of settings.packages.filter((p: string) => p.startsWith("npm:"))) { const full = pkg.slice(4); const at = full.indexOf("@", 1); deps.push(at < 0 ? full : full.slice(0, at)); }
-  for (const dep of deps) { const d = piPath(box, "npm/node_modules", dep); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "package.json"), "{}"); }
+  for (const dep of deps) { const d = piPath(box, "npm/node_modules", dep); mkdirSync(d, { recursive: true }); const source = settings.packages.find((p: string) => p.startsWith(`npm:${dep}@`)); writeFileSync(join(d, "package.json"), JSON.stringify({ version: source?.slice(source.lastIndexOf("@") + 1) ?? "1.0.0" })); }
   const pins = new Set<string>([`${settings.defaultProvider}/${settings.defaultModel}`]);
   for (const file of readdirSync(piPath(box, "agents"))) { const pin = /^model:\s*(\S+)/m.exec(readFileSync(piPath(box, "agents", file), "utf8"))?.[1]; if (pin) pins.add(pin); }
   const fallback = JSON.parse(readFileSync(piPath(box, "provider-fallback.json"), "utf8"));
   for (const pair of fallback.pairs) for (const model of pair) pins.add(model);
   for (const targets of Object.values(fallback.chains) as string[][]) for (const model of targets) pins.add(model);
-  const options = { repo, entry: repo ? "node" as const : "shim" as const, path: [box.stubs, bin, dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter), env: { PI_OFFLINE: "1", STUB_MODELS: [...pins].map(p => p.replace("/", " ")).join("\n") } };
+  const options = { repo, entry: repo ? "node" as const : "shim" as const, path: [box.stubs, bin, piPath(box, "bin"), dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter), env: { PI_OFFLINE: "1", STUB_MODELS: [...pins].map(p => p.replace("/", " ")).join("\n") } };
   return { box, options };
 }
 

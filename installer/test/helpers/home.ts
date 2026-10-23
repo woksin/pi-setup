@@ -47,6 +47,7 @@ function realPython(): string {
 }
 
 function writeStubs(box: Sandbox): void {
+  for (const name of ["jq", "rg", "fd", "gitleaks", "rtk", "docker", "tmux"]) script(box.stubs, name, "exit 0");
   script(box.stubs, "pi", `echo "pi $*" >> "$STUB_LOG"
 case "$1" in
   --version) echo 1.4.0; exit 0 ;;
@@ -69,6 +70,13 @@ exit 0`);
   script(box.stubs, "npm", `case "$1" in --version) echo 10.0.0; exit 0 ;; esac
 echo "npm $* cwd=$PWD" >> "$STUB_LOG"
 mkdir -p node_modules
+for spec in "$@"; do
+  case "$spec" in
+    @woksin/*@*) name="\${spec%@*}"; version="\${spec##*@}"
+      mkdir -p "node_modules/$name"
+      printf '{"version":"%s"}\\n' "$version" > "node_modules/$name/package.json" ;;
+  esac
+done
 : > node_modules/.package-lock.json`);
   // Never the real service managers: record the call and report "not loaded".
   for (const name of ["launchctl", "systemctl"]) script(box.stubs, name, `echo "${name} $*" >> "$STUB_LOG"\nexit 0`);

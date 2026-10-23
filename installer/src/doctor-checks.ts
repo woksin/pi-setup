@@ -1,5 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { PACKAGE_BINS, npmPackageCheck } from "./packages.ts";
+import { missingBinDirs, shellPath } from "./shell-path.ts";
 import { fileSha, fromHomeRel, symlinkTarget, readManifest, validateManifest } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
 import { chooseProfile, loadProfiles } from "./profiles.ts";
@@ -110,8 +112,8 @@ function npm(s: State): DoctorCheck[] {
   const result: DoctorCheck[] = [{ ...check("npm", missing.length ? "fail" : "ok", missing.length ? `${missing.length} missing dependencies` : "dependencies present", "(cd ~/.pi/agent/npm && npm install --legacy-peer-deps)", missing), ...(missing.length ? { fixable: "npm" as const } : {}) }];
   for (const spec of packages(s)) {
     if (spec.startsWith("npm:")) {
-      const full = spec.slice(4); const at = full.indexOf("@", 1); const name = at < 0 ? full : full.slice(0, at);
-      if (!installed(name)) result.push(check(`package:${name}`, "warn", `${spec} is missing`, `pi install npm:${name}`));
+      const finding = npmPackageCheck(spec, s.piDir);
+      if (finding) result.push(finding);
     } else if (spec.startsWith(".") && !existsSync(resolve(s.piDir, spec))) result.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
   }
   return result;
@@ -172,12 +174,10 @@ function guards(s: State): DoctorCheck {
   return check("guards", "ok", detail);
 }
 function path(s: State): DoctorCheck[] {
-  const bin = join(s.ctx.home, ".local/bin");
-  const onPath = (s.ctx.env.PATH ?? "").split(delimiter).some(p => resolve(s.ctx.cwd, p) === bin);
-  const shell = basename(s.ctx.env.SHELL ?? "");
-  const rc = shell === "zsh" ? "zshrc" : shell === "bash" ? "bashrc" : "profile";
-  const result = [check("path", onPath ? "ok" : "warn", onPath ? "~/.local/bin is on PATH" : "~/.local/bin is not on PATH", `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.${rc}`)];
-  for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"]]) {
+  const missing = missingBinDirs(s.ctx);
+  const { file, snippet } = shellPath(s.ctx);
+  const result = [check("path", missing.length ? "warn" : "ok", missing.length ? `${missing.map(p => `~/${p}`).join(", ")} not on PATH` : "~/.local/bin and ~/.pi/agent/bin are on PATH", `add ${snippet} to ${file}`)];
+  for (const [pkg, cmd] of PACKAGE_BINS) {
     if (!packages(s).some(p => p.includes(pkg))) continue;
     const target = `~/.pi/agent/npm/node_modules/@woksin/${pkg}/bin/${cmd}`;
     const fix = existsSync(join(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
@@ -186,7 +186,26 @@ function path(s: State): DoctorCheck[] {
   return result;
 }
 
+function prerequisites(s: State): DoctorCheck[] {
+  const required = ["git", "gh", "jq", "rg", "fd", "python3", "npm", "pi", "node"];
+  const optional: Record<string, string> = {
+    gitleaks: "secret-sweep cannot scan without it; https://github.com/gitleaks/gitleaks#installing",
+    rtk: "optional output compression unavailable; https://github.com/rtk-ai/rtk#installation",
+    docker: "Docker tooling and docker-guardian require Docker Desktop/Engine",
+    tmux: "optional lanes terminal backend unavailable; macOS Terminal remains an alternative",
+  };
+  const tools = [...required, ...Object.keys(optional)];
+  const brew: Record<string, string> = { rg: "ripgrep", python3: "python", npm: "node" };
+  const apt: Record<string, string> = { rg: "ripgrep", fd: "fd-find" };
+  return tools.map(tool => {
+    const found = s.ctx.which(tool);
+    const fix = tool === "pi" ? "npm install -g @earendil-works/pi-coding-agent" : s.ctx.platform === "darwin" ? `brew install ${brew[tool] ?? tool}` : `sudo apt install ${apt[tool] ?? tool}${tool === "fd" ? "; expose fdfind as fd on PATH" : ""}`;
+    const missingStatus = required.includes(tool) ? "fail" : "warn";
+    return check(`tool:${tool}`, found ? "ok" : missingStatus, found ? `${tool} is on PATH` : `${tool} is missing`, found ? undefined : optional[tool] ?? fix);
+  });
+}
+
 export function localChecks(ctx: Ctx, facts: DoctorFacts): { checks: DoctorCheck[]; manifest?: Manifest; profile: string; modePaths: string[] } {
   const s = state(ctx, facts);
-  return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), ...providers(s), models(s), ...fallback(s), guards(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
+  return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), ...providers(s), models(s), ...fallback(s), guards(s), ...prerequisites(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
 }

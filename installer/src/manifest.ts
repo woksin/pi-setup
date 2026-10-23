@@ -196,7 +196,12 @@ export function recordSet(entry: JsonEntry, op: Extract<JsonOp, { op: "set" }>):
   else entry.ops.push(op);
 }
 
-export function recordArrayAdd(entry: JsonEntry, op: Extract<JsonOp, { op: "array-add" }>): void {
-  const known = entry.ops.some((o) => o.op === "array-add" && o.key === op.key && deepEqual(o.value, op.value));
+function arrayIdentity(op: JsonOp): unknown {
+  if (op.op === "array-add") return { op: op.op, key: op.key, value: op.value };
+  return op;
+}
+
+export function recordArrayAdd(entry: JsonEntry, op: Exclude<JsonOp, { op: "set" }>): void {
+  const known = entry.ops.some((o) => deepEqual(arrayIdentity(o), arrayIdentity(op)));
   if (!known) entry.ops.push(op);
 }

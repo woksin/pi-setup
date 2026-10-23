@@ -31,7 +31,7 @@ function fixture() {
   const calls: { cmd: string; args: string[]; options?: RunOptions }[] = [];
   const out: string[] = [];
   const facts: DoctorFacts = { providers: Object.fromEntries(["anthropic", "openai-codex", "kimi-coding"].map(p => [p, { status: "ready" }])), catalog: new Set(["anthropic/claude-opus-5-5", "kimi-coding/k3-256k", "openai-codex/gpt-6.1-sol"]), head: "abc123", checkoutClean: true, summary: false };
-  const ctx = testCtx(box.home, { env: { PATH: join(box.home, ".local/bin") }, which: () => "/stub", run: async (cmd, args, options) => {
+  const ctx = testCtx(box.home, { env: { PATH: [join(box.home, ".local/bin"), join(box.home, ".pi/agent/bin")].join(":") }, which: () => "/stub", run: async (cmd, args, options) => {
     calls.push({ cmd, args, options });
     let stdout = "";
     if (cmd === "pi") stdout = args[0] === "auth" ? JSON.stringify(facts.providers[args[3]]) : args[0] === "--version" ? "1.0" : "provider model\n" + [...facts.catalog!].map(p => p.replace("/", " ")).join("\n");
@@ -321,9 +321,9 @@ test("guard env, malformed shapes and shell-specific PATH suggestions are read-o
     assert.equal(f.checks().find(c => c.id === "guards")?.status, "warn");
   }
   f.ctx.env.PATH = "/bin";
-  for (const [shell, rc] of [["/bin/bash", "bashrc"], ["/bin/fish", "profile"]]) {
+  for (const [shell, rc] of [["/bin/bash", ".bashrc"], ["/bin/fish", ".config/fish/config.fish"]]) {
     f.ctx.env.SHELL = shell;
-    assert.ok(f.checks().find(c => c.id === "path")!.fix!.endsWith(`~/.${rc}`));
+    assert.ok(f.checks().find(c => c.id === "path")!.fix!.endsWith(join(f.ctx.home, rc)));
   }
 });
 

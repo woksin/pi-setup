@@ -39,7 +39,7 @@ describe("manifest and re-runs (lifecycle e2e)", () => {
       assert.equal(sha, createHash("sha256").update(readFileSync(path)).digest("hex"), r);
     }
     assert.ok(!text.includes(REPO), "manifest names the checkout");
-    assert.ok(!text.includes("woksin"), "manifest names the remote");
+    assert.ok(!text.includes("github.com/woksin"), "manifest names the remote");
   });
 
   test("L2 a re-run is a no-op: nothing written, manifest bytes unchanged", () => {

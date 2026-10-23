@@ -2,6 +2,7 @@ import {
   chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { npmSpec, selectedPins, pinsMissing } from "./packages.ts";
 import { atomicWrite } from "./fsx.ts";
 import { BackupRun, prune } from "./backups.ts";
 import {
@@ -286,13 +287,18 @@ function applyProfile(options: ApplyOptions, piDir: string, run: Run): void {
   run.execute({ op: "install", path, content: Buffer.from(`${options.profile}\n`), mode: 0o644, existed: options.activeBefore !== undefined });
 }
 
+function npmChanged(actions: Action[], piDir: string, manifest: Manifest, force: boolean): boolean {
+  return pinsMissing(piDir, selectedPins(piDir)) || needsNpm(actions, piDir, manifest, force);
+}
+
 async function runNpm(ctx: Ctx, actions: Action[], options: ApplyOptions, piDir: string, manifest?: Manifest): Promise<{ code: number; ran: boolean }> {
   if (options.skipNpm) return { code: 0, ran: false };
-  if (!needsNpm(actions, piDir, manifest, options.reinstallNpm)) {
+  const selected = selectedPins(piDir);
+  if (!npmChanged(actions, piDir, manifest, options.reinstallNpm)) {
     ctx.out("npm packages up to date");
     return { code: 0, ran: false };
   }
-  const args = ["install", "--legacy-peer-deps"];
+  const args = ["install", ...selected.map(npmSpec), "--save-exact", "--legacy-peer-deps"];
   const cwd = join(piDir, "npm");
   options.spinner?.start("Installing npm packages");
   const result = await ctx.run("npm", args, { cwd, inherit: options.inheritNpm });

@@ -19,6 +19,8 @@ export interface Options {
   yes: boolean;
   skipNpm: boolean;
   reinstallNpm: boolean;
+  noLaunchd: boolean;
+  editShellProfile: boolean;
   preapproveMcp: boolean;
   plan: boolean;
   json: boolean;
@@ -49,6 +51,8 @@ export const USAGE = `Usage: ./install.sh [install] [options]
   --yes                 never prompt
   --skip-npm            do not run npm install in ~/.pi/agent/npm
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
+  --no-launchd          do not load or unload launchd jobs
+  --edit-shell-profile  append the suggested PATH snippet to your shell profile
   --help                this text`;
 
 const VALUE_FLAGS = new Set(["--dir", "--user", "--repos-root", "--profile", "--ref", "--keep", "--with", "--without"]);
@@ -57,7 +61,7 @@ const ALLOWED: Record<Command, string[] | undefined> = {
   install: undefined,
   lanes: ["--help", "--dir"],
   doctor: ["--help", "--json", "--fix"],
-  uninstall: [...COMMON, "--yes"],
+  uninstall: [...COMMON, "--yes", "--no-launchd"],
   update: [...COMMON, "--yes", "--skip-npm", "--ref"],
   backups: [...COMMON, "--keep"],
 };
@@ -66,6 +70,8 @@ const BOOLEAN_FLAGS: Record<string, keyof Options> = {
   "--yes": "yes",
   "--skip-npm": "skipNpm",
   "--reinstall-npm": "reinstallNpm",
+  "--no-launchd": "noLaunchd",
+  "--edit-shell-profile": "editShellProfile",
   "--preapprove-mcp": "preapproveMcp",
   "--plan": "plan",
   "--json": "json",
@@ -80,7 +86,7 @@ function isAbsoluteOrHome(value: string): boolean {
 export function parseArgs(argv: string[], cwd: string): Parsed {
   const options: Options = {
     command: "install", sub: "list", keep: 10, ref: "", help: false, dryRun: false, user: "", reposRoot: "", dir: "", profile: "",
-    yes: false, skipNpm: false, reinstallNpm: false, preapproveMcp: false, plan: false, json: false, fix: false, with: [], without: [],
+    yes: false, skipNpm: false, reinstallNpm: false, noLaunchd: false, editShellProfile: false, preapproveMcp: false, plan: false, json: false, fix: false, with: [], without: [],
   };
   let args = argv[0] === "install" ? argv.slice(1) : argv;
   if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor" || args[0] === "lanes") {

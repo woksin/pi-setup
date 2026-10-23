@@ -4,7 +4,7 @@ import { detectBackend } from "./lanes/terminal.ts";
 import { findRoot, loadConfig, preapprovalDefault } from "./lanes/config.ts";
 import { COMPONENTS, CS_SKILLS } from "./components.ts";
 import type { Manifest } from "./manifest.ts";
-import { expectedUnit, uid } from "./services.ts";
+import { expectedUnit, launchdSkipReason, uid } from "./services.ts";
 import type { Ctx } from "./types.ts";
 import type { DoctorCheck } from "./doctor.ts";
 
@@ -57,6 +57,8 @@ export async function componentChecks(ctx: Ctx, manifest: Manifest | undefined):
     const exists = existsSync(unit.file);
     if (rec?.on && rec.service?.managed) {
       const manual = unit.kind === "launchd" ? `launchctl bootstrap gui/${uid()} ${unit.file}` : `systemctl --user enable --now ${unit.label}`;
+      const skipped = unit.kind === "launchd" ? launchdSkipReason(ctx) : undefined;
+      if (skipped) { checks.push(check(id, "ok", `launchd load/unload skipped: ${skipped}`)); continue; }
       checks.push(await isLoaded(ctx, unit.kind, unit.label)
         ? check(id, "ok", `${unit.label} is loaded`)
         : check(id, "warn", `${unit.label} is not loaded`, manual));
