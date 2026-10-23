@@ -21,7 +21,7 @@ export const HELP = `Usage: pi-train [--repo-dir path] [--dry-run] [--json] <com
   eta <PR#|branch> <when|clear> [--train branch]
   status [--all] [--train branch] [--json] [--gate duration]
   ship [--train branch] [--label major|minor|patch|no-release] [--summary-file f] [--title text] [--allow-behind]
-  close [--train branch] [--abandoned]   (mark released, or abandoned; touches nothing else)
+  close [train-branch] [--shipped PR#] [--head sha] | [--abandoned]   (manifest only; works when the worktree is gone)
   hook install|uninstall
   guard --stdin [--push-url url]
 
@@ -32,7 +32,8 @@ Local train packages are not implemented in this slice.`;
 const FLAGS = new Map(Object.entries({ '--dry-run': 'dryRun', '--json': 'json', '--all': 'all', '--allow-foreign': 'allowForeign',
   '--adopt': 'adopt', '--allow-behind': 'allowBehind', '--stdin': 'stdin', '--abandoned': 'abandoned' }));
 const VALUES = new Map(Object.entries({ '--repo-dir': 'repoDir', '--train': 'train', '--from': 'from', '--worktree': 'worktree',
-  '--base': 'base', '--label': 'label', '--summary-file': 'summaryFile', '--title': 'title', '--push-url': 'pushUrl', '--eta': 'eta', '--gate': 'gate' }));
+  '--base': 'base', '--label': 'label', '--summary-file': 'summaryFile', '--title': 'title', '--push-url': 'pushUrl', '--eta': 'eta', '--gate': 'gate',
+  '--shipped': 'shipped', '--head': 'head' }));
 
 function takeValue(argv, flag) {
   const value = argv.shift();
@@ -47,7 +48,7 @@ const OPTION_GROUPS = [
   { command: 'init', keys: ['adopt', 'base'], message: '--adopt/--base require init' },
   { command: 'ship', keys: ['label', 'summaryFile', 'title', 'allowBehind'], message: 'ship options require ship' },
   { command: 'guard', keys: ['stdin', 'pushUrl'], message: '--stdin/--push-url require guard' },
-  { command: 'close', keys: ['abandoned'], message: '--abandoned requires close' },
+  { command: 'close', keys: ['abandoned', 'shipped', 'head'], message: '--abandoned/--shipped/--head require close' },
 ];
 
 function validateAdopt(options) {
@@ -78,6 +79,7 @@ function addArgument(argv, parsed) {
 }
 
 function validateArity(command, args) {
+  if (command === 'close' && args.length <= 1) return;
   const arity = new Map(Object.entries({ init: 2, fold: 1, planned: 2, eta: 2, status: 0, ship: 0, close: 0, hook: 1, guard: 0 }));
   if (args.length !== arity.get(command)) throw new TrainError(HELP, 2);
 }
@@ -100,7 +102,7 @@ async function mutateTrain(ctx, api, request, repo) {
   const { options, command, args } = request;
   if (command === 'eta') return setEta(ctx, repo, options, args);
   if (command === 'ship') return shipTrain(ctx, api, options, repo);
-  if (command === 'close') return closeTrain(ctx, repo, options);
+  if (command === 'close') return closeTrain(ctx, repo, { ...options, train: args[0] ?? options.train });
   if (command === 'init') return (options.adopt ? adoptTrain : initTrain)(ctx, api, { ...options, repo, args });
   return foldTrain(ctx, api, { options, repo, args, planned: command === 'planned' });
 }

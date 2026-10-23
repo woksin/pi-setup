@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { activeRuns, defaultBranch } from './train-gh.mjs';
 import { listManifests } from './train-manifest.mjs';
 import { gateEstimate } from './train-gate.mjs';
@@ -88,8 +89,8 @@ function matches(manifest, options) {
 const anomalous = status => status.anomalies.length || status.activeRuns.length || status.pending.length;
 
 // A train whose worktree or refs are gone is reported, never allowed to hide the other trains.
-function unavailable(manifest, error) {
-  const reason = String(error?.message ?? error).split('\n')[0];
+function unavailable(manifest) {
+  const reason = `worktree missing: ${manifest.worktree ?? '(none recorded)'}; close the train with pi-train close if it is done`;
   return { repo: manifest.repo, train: manifest.train, state: manifest.state, head: null, manifestHead: manifest.head,
     ahead: null, behind: null, items: [], activeRuns: [], pending: [], anomalies: [`train unavailable: ${reason}`],
     gateSeconds: null, gateSource: null, gateRuns: 0, recommendation: 'unknown',
@@ -100,9 +101,8 @@ export async function statusTrains(ctx, api, options, repo) {
   const entries = await listManifests(ctx.env, options.all ? undefined : repo);
   const trains = [];
   for (const entry of entries.filter(entry => matches(entry.manifest, options))) {
-    let status;
-    try { status = await trainStatus(api, entry.manifest); }
-    catch (error) { trains.push(unavailable(entry.manifest, error)); continue; }
+    if (!existsSync(entry.manifest.worktree ?? '')) { trains.push(unavailable(entry.manifest)); continue; }
+    const status = await trainStatus(api, entry.manifest);
     const gate = await gateEstimate(ctx, api, entry.manifest, options.gate);
     trains.push({ ...status, ...gate, ...cutRecommendation(status.items, gate, ctx.now()) });
   }
