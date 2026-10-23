@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import signal
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -124,8 +125,41 @@ def utc_stamp():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def env_hash():
+    """Hash selected build inputs without storing environment values (or secret names)."""
+    names = r"^(PI_PHASE_|DOTNET_|NUGET_|MSBUILD|NODE_|NPM_|YARN_|VITE_|CONFIGURATION$|ASPNETCORE_|CI$)"
+    pairs = sorted(f"{name}={value}" for name, value in os.environ.items()
+                   if re.match(names, name) and not re.search(r"TOKEN|SECRET|PASSWORD|KEY", name, re.I))
+    return hashlib.sha256(os.fsencode("\0".join(pairs))).hexdigest()
+
+
+def untracked_state(cwd, paths, max_files, max_bytes):
+    """Frame sorted paths and content digests; called in a deadline-bounded subprocess."""
+    if len(paths) > max_files:
+        raise ValueError("too many untracked files")
+    payload = bytearray()
+    total = 0
+    for path in sorted(paths):
+        fd = os.open(os.path.join(os.fsencode(cwd), path), os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or total + before.st_size > max_bytes:
+                raise ValueError("untracked file cannot be hashed within bounds")
+            digest = hashlib.sha256()
+            while chunk := stream.read(min(1024 * 1024, max_bytes - total + 1)):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError("too many untracked bytes")
+                digest.update(chunk)
+            after = os.fstat(stream.fileno())
+            if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise ValueError("untracked file changed while hashing")
+        payload.extend(path + b"\0" + digest.digest())
+    return bytes(payload)
+
+
 def git_state(cwd, timeout=None):
-    """Capture queued code without optional index writes, filenames or diffs in the ledger."""
+    """Capture code without optional index writes, filenames or diffs in the ledger."""
     head = dirty = None
     if cwd is None:
         return head, dirty
@@ -142,8 +176,7 @@ def git_state(cwd, timeout=None):
         head = subprocess.run(["git", "--no-optional-locks", "rev-parse", "HEAD"], cwd=cwd, env=environment, capture_output=True,
                               text=True, check=True, timeout=budget(2)).stdout.strip()
     except subprocess.TimeoutExpired:
-        if timeout is not None:
-            raise
+        return head, None
     except (OSError, subprocess.SubprocessError):
         pass
     dirty_deadline = time.monotonic() + 5
@@ -153,19 +186,28 @@ def git_state(cwd, timeout=None):
         if not status:
             dirty = "clean"
         else:
-            remaining = dirty_deadline - time.monotonic()
-            if remaining <= 0:
-                if timeout is not None:
-                    raise subprocess.TimeoutExpired("git", timeout)
-                return head, None
             diff = subprocess.run(["git", "--no-optional-locks", "diff", "HEAD", "--binary"], cwd=cwd,
-                                  env=environment, capture_output=True, check=True, timeout=budget(remaining)).stdout
-            dirty = hashlib.sha256(status + diff).hexdigest()
-    except subprocess.TimeoutExpired:
-        if timeout is not None:
-            raise
+                                  env=environment, capture_output=True, check=True,
+                                  timeout=budget(dirty_deadline - time.monotonic())).stdout
+            paths = subprocess.run(["git", "--no-optional-locks", "ls-files", "-o", "--exclude-standard", "-z"],
+                                   cwd=cwd, env=environment, capture_output=True, check=True,
+                                   timeout=budget(dirty_deadline - time.monotonic())).stdout.split(b"\0")[:-1]
+            if len(paths) > 2000:
+                return head, None
+            contents = b""
+            if paths:
+                # File opens/reads can block even on a regular file. Kill this helper on the
+                # remaining snapshot deadline rather than leaving a reader thread behind.
+                script = ("import sys;sys.path.insert(0,sys.argv[1]);from pi_phase import untracked_state;"
+                          "sys.stdout.buffer.write(untracked_state('.',sys.stdin.buffer.read().split(b'\\0')[:-1],2000,200_000_000))")
+                contents = subprocess.run([sys.executable, "-B", "-c", script, str(ROOT)], cwd=cwd,
+                                          input=b"\0".join(paths) + b"\0", capture_output=True, check=True,
+                                          timeout=budget(dirty_deadline - time.monotonic())).stdout
+            budget(1)
+            dirty = hashlib.sha256(status + diff + contents).hexdigest()
+        budget(1)
     except (OSError, subprocess.SubprocessError):
-        pass
+        dirty = None
     return head, dirty
 
 
@@ -216,7 +258,7 @@ class PhaseLedger:
                            cwd=cwd, kind=args.kind, label=args.label, priority=args.priority,
                            stack=getattr(args, "stack", None) or command_stack(command),
                            queuedAt=utc_stamp(), startedAt=None, endedAt=None, waitS=0, runS=0,
-                           exit=None, outcome="rejected", head=None, dirty=None,
+                           exit=None, outcome="rejected", head=None, dirty=None, verified=False, envHash=env_hash(),
                            argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest())
         self.queued = time.monotonic()
         self.started = None
@@ -228,9 +270,8 @@ class PhaseLedger:
     def prepare_snapshot(self):
         try:
             result = git_state(self.record["cwd"], timeout=3)
-            if result[0] is not None:
-                self.record["head"], self.record["dirty"] = self.git_result = result
-                self.snapshot_ready = True
+            self.record["head"], self.record["dirty"] = self.git_result = result
+            self.snapshot_ready = all(value is not None for value in result)
         except Exception:
             pass  # Timeout/non-Git cwd retains the post-registration best-effort snapshot.
 
@@ -241,8 +282,8 @@ class PhaseLedger:
             records, _ = read_ledger(state, days=14)
         except (OSError, ValueError):
             return None  # Unreadable history must not prevent execution.
-        keys = ("cwd", "kind", "label", "argvHash", "head", "dirty", "stack")
-        return next((r for r in reversed(records) if r["outcome"] == "passed"
+        keys = ("cwd", "kind", "label", "argvHash", "head", "dirty", "stack", "envHash")
+        return next((r for r in reversed(records) if r["outcome"] == "passed" and r.get("verified") is True
                      and all(r.get(k) == self.record[k] for k in keys)), None)
 
     def enqueue(self):
@@ -287,6 +328,14 @@ class PhaseLedger:
             self.snapshot_thread.join(timeout=1)
             if not self.snapshot_thread.is_alive():
                 self.record["head"], self.record["dirty"] = self.git_result
+        if self.started is not None:
+            try:
+                # main calls finish only after run's finally has released all permits.
+                end = git_state(self.record["cwd"], timeout=3)
+                self.record["verified"] = (self.snapshot_ready and all(value is not None for value in end)
+                                           and end == self.git_result and env_hash() == self.record["envHash"])
+            except Exception:
+                pass  # Failed verification never changes the producer's result.
         append_ledger(state, self.record)
 
 
@@ -1103,6 +1152,7 @@ def register_waiter(state, args, token):
         return False, None
     path = state / "waiters" / f"{token}.json"
     fd = None
+    downgrade_note = None
     try:
         if args.priority == "high":
             cap = getattr(args, "max_high", 3)
@@ -1110,7 +1160,7 @@ def register_waiter(state, args, token):
                 if priority_grant(state) is None:
                     raise ValueError(APPROVAL_REQUIRED)
                 args.priority = "normal"
-                note(f"high-priority cap ({cap}) reached; queued as normal")
+                downgrade_note = f"high-priority cap ({cap}) reached; queued as normal"
             else:
                 consume_priority(state)
         if args.kind == "ci":
@@ -1127,12 +1177,20 @@ def register_waiter(state, args, token):
         os.write(fd, json.dumps(data).encode())
         return True, fd
     except BaseException:
+        downgrade_note = None
         path.unlink(missing_ok=True)
         if fd is not None:
             unlock(fd)
         raise
     finally:
         unlock(coordinator)
+        if downgrade_note:
+            try:
+                note(downgrade_note)
+            except BaseException:
+                if fd is not None:
+                    deregister_waiter(state, token, fd)
+                raise
 
 
 def deregister_waiter(state, token, fd):
@@ -1385,8 +1443,8 @@ def stop_group(pgid):
 
 def bounded(value, name, approved):
     if name == "queue-timeout":
-        if not math.isfinite(value) or not 0 < value <= 7200:
-            raise ValueError("queue-timeout must be positive and at most 7200s")
+        if not math.isfinite(value) or value <= 0 or (value > 7200 and not approved):
+            raise ValueError("queue-timeout must be positive and at most 7200s without --approved-long-timeout")
         return value
     if not math.isfinite(value) or value <= 0 or (value > 600 and not approved):
         raise ValueError(f"{name} must be positive and at most 600s without --approved-long-timeout")
@@ -1446,22 +1504,6 @@ def run(args, state, configuration, output=None):
     ledger = getattr(args, "ledger", None)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     ci_key = (args.repo, args.pr, args.commit)
-    config_notes = set()
-    settings = config(configuration, notes=config_notes)
-    options = settings.options
-    if ledger:
-        ledger.prepare_snapshot()
-        if (not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1" and args.kind != "ci"
-                and (args.kind != "integration" or options["skip_passed_integration"])):
-            passed = ledger.passed_state(state)
-            if passed:
-                note(f"skipped: this exact state already passed at {passed['ts']} "
-                     f"(kind={args.kind} label={args.label} head={passed['head'][:7]} "
-                     f"run={passed['runS']:g}s); pass --rerun to run again")
-                ledger.outcome("skipped")
-                return 0
-    queued = time.monotonic()
-    deadline = queued + args.queue_timeout
     long_queue_hint = False
     next_heartbeat = 0
     cancelled = [None]
@@ -1482,8 +1524,25 @@ def run(args, state, configuration, output=None):
     shim_dir = None
     detector_stopped = threading.Event()
     fingerprint = test_fingerprint(os.getcwd(), command)
-    admission_args = argparse.Namespace(**vars(args), max_high=options["max_high"])
+    admission_args = argparse.Namespace(**vars(args))
     try:
+        config_notes = set()
+        settings = config(configuration, notes=config_notes)
+        options = settings.options
+        if ledger:
+            ledger.prepare_snapshot()
+            if (not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1" and args.kind != "ci"
+                    and (args.kind != "integration" or options["skip_passed_integration"])):
+                passed = ledger.passed_state(state)
+                if passed:
+                    note(f"skipped: this exact state already passed at {passed['ts']} "
+                         f"(kind={args.kind} label={args.label} head={passed['head'][:7]} "
+                         f"run={passed['runS']:g}s); pass --rerun to run again")
+                    ledger.outcome("skipped")
+                    return 0
+        queued = time.monotonic()
+        deadline = queued + args.queue_timeout
+        admission_args.max_high = options["max_high"]
         admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
         burst_settings = options["memory_admission"].get("integration_burst") if admission else None
         burst = IntegrationBurst(admission, burst_settings) if burst_settings else None

@@ -158,7 +158,7 @@ class PhaseTests(unittest.TestCase):
     def passed_state(self, **changes):
         args = SimpleNamespace(kind="test", label="repeat", priority="normal", command=["true"])
         record = pi_phase.PhaseLedger(args).record
-        record.update(ts=pi_phase.utc_stamp(), outcome="passed", head="a" * 40, dirty="clean",
+        record.update(ts=pi_phase.utc_stamp(), outcome="passed", verified=True, head="a" * 40, dirty="clean",
                       startedAt=pi_phase.utc_stamp(), waitS=1, runS=2)
         record.update(changes)
         pi_phase.append_ledger(self.state, record)
@@ -174,6 +174,172 @@ class PhaseTests(unittest.TestCase):
                 patch.object(sys, "stderr", new_callable=io.StringIO):
             code = pi_phase.main([*flags, "--", "true"], state=self.state, configuration=self.config)
         return code, output.getvalue(), register
+
+    def git_repo(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        for command in (["init", "-q"], ["config", "user.name", "Test"],
+                        ["config", "user.email", "test@example.invalid"]):
+            subprocess.run(["git", *command], cwd=repo, check=True, capture_output=True)
+        (repo / "tracked").write_text("initial")
+        subprocess.run(["git", "add", "tracked"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True, capture_output=True)
+        return repo
+
+    def test_untracked_file_content_changes_dirty_without_status_changes(self):
+        repo = self.git_repo()
+        untracked = repo / "new-file"
+        untracked.write_bytes(b"before")
+        before = pi_phase.git_state(repo, timeout=3)
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
+                                check=True, capture_output=True).stdout
+        untracked.write_bytes(b"after!")
+        after = pi_phase.git_state(repo, timeout=3)
+        self.assertEqual(before[0], after[0])
+        self.assertIsNotNone(before[1])
+        self.assertIsNotNone(after[1])
+        self.assertNotEqual(before[1], after[1])
+        self.assertEqual(status, subprocess.run(["git", "status", "--porcelain"], cwd=repo,
+                                               check=True, capture_output=True).stdout)
+
+    def test_untracked_file_count_bytes_and_read_errors_disable_dirty(self):
+        repo = self.git_repo()
+        for i in range(2001):
+            (repo / f"untracked-{i}").touch()
+        self.assertIsNone(pi_phase.git_state(repo, timeout=3)[1])
+        for i in range(2001):
+            (repo / f"untracked-{i}").unlink()
+        with (repo / "large").open("wb") as stream:
+            stream.truncate(200_000_001)
+        self.assertIsNone(pi_phase.git_state(repo, timeout=3)[1])
+        (repo / "large").unlink()
+        (repo / "broken-link").symlink_to("missing-target")
+        self.assertIsNone(pi_phase.git_state(repo, timeout=3)[1])
+
+    def test_untracked_hash_is_sorted_and_counts_bytes_across_files(self):
+        repo = self.git_repo()
+        (repo / "a").write_bytes(b"123")
+        (repo / "b").write_bytes(b"456")
+        expected = b"a\0" + hashlib.sha256(b"123").digest() + b"b\0" + hashlib.sha256(b"456").digest()
+        self.assertEqual(pi_phase.untracked_state(repo, [b"b", b"a"], 2, 6), expected)
+        with self.assertRaises(ValueError):
+            pi_phase.untracked_state(repo, [b"a", b"b"], 2, 5)
+
+    def test_untracked_hash_timeout_leaves_dirty_null(self):
+        replies = [SimpleNamespace(stdout="head"), SimpleNamespace(stdout=b"?? untracked\0"),
+                   SimpleNamespace(stdout=b"diff"), SimpleNamespace(stdout=b"untracked\0"),
+                   subprocess.TimeoutExpired("hash", 3)]
+        with patch.object(pi_phase.subprocess, "run", side_effect=replies):
+            self.assertEqual(pi_phase.git_state(self.root, timeout=3), ("head", None))
+
+    def test_unverified_and_legacy_passes_are_never_skip_eligible(self):
+        self.passed_state(verified=False)
+        self.assertEqual(self.repeat_state()[0], 125)
+        record = self.passed_state()
+        for path in (self.state / "ledger").glob("*.jsonl"):
+            path.write_text("")
+        record.pop("verified")
+        pi_phase.append_ledger(self.state, record)
+        self.assertEqual(self.repeat_state()[0], 125)
+
+    def test_environment_hash_changes_skip_key_and_excludes_secrets(self):
+        names = ["PI_PHASE_TEST", "DOTNET_TEST", "NUGET_TEST", "MSBUILD_TEST", "NODE_TEST",
+                 "NPM_TEST", "YARN_TEST", "VITE_TEST", "CONFIGURATION", "ASPNETCORE_TEST", "CI"]
+        with patch.dict(os.environ, {name: "before" for name in names}, clear=True):
+            self.passed_state()
+            original = pi_phase.env_hash()
+            self.assertEqual(self.repeat_state()[0], 0)
+            for name in names:
+                with self.subTest(name=name), patch.dict(os.environ, {name: "after"}):
+                    self.assertNotEqual(pi_phase.env_hash(), original)
+                    self.assertEqual(self.repeat_state()[0], 125)
+            with patch.dict(os.environ, DOTNET_TOKEN="hidden", NUGET_SECRET="hidden",
+                            NPM_PASSWORD="hidden", NODE_API_KEY="hidden", UNRELATED="other"):
+                self.assertEqual(pi_phase.env_hash(), original)
+            expected = hashlib.sha256("\0".join(sorted(f"{n}=before" for n in names)).encode()).hexdigest()
+            self.assertEqual(original, expected)
+
+    def test_edit_during_run_is_unverified_and_never_skipped(self):
+        repo = self.git_repo()
+        counter = self.root / "runs"
+        command = [sys.executable, "-c",
+                   "import pathlib,sys;pathlib.Path('tracked').write_text('after');"
+                   "p=pathlib.Path(sys.argv[1]);p.write_text(p.read_text()+'x' if p.exists() else 'x')",
+                   str(counter)]
+        flags = self.cli("run", "--kind", "test", "--label", "editing", "--", *command)
+        for _ in range(2):
+            (repo / "tracked").write_text("dirty before")
+            result = subprocess.run(flags, cwd=repo, check=True, capture_output=True, text=True, timeout=8)
+            self.assertNotIn("skipped:", result.stdout)
+            self.assertFalse(self.ledger_records()[-1]["verified"])
+        self.assertEqual(counter.read_text(), "xx")
+
+    def test_unchanged_untracked_state_verifies_and_skips(self):
+        repo = self.git_repo()
+        (repo / "untracked").write_text("unchanged")
+        flags = self.cli("run", "--kind", "test", "--label", "unchanged", "--", "true")
+        first = subprocess.run(flags, cwd=repo, check=True, capture_output=True, text=True, timeout=8)
+        self.assertNotIn("skipped:", first.stdout)
+        self.assertTrue(self.ledger_records()[-1]["verified"])
+        second = subprocess.run(flags, cwd=repo, check=True, capture_output=True, text=True, timeout=8)
+        self.assertIn("skipped:", second.stdout)
+        self.assertEqual(self.ledger_records()[-1]["outcome"], "skipped")
+
+    def test_verification_snapshot_is_after_release_and_not_in_runtime(self):
+        calls = []
+        def snapshot(cwd, timeout=None):
+            if calls:
+                self.assertTrue(any(self.state.glob("heavy-*.lock")))
+                self.assertFalse(any(pi_phase.readonly_busy(p) for p in self.state.glob("heavy-*.lock")))
+            calls.append(timeout)
+            return "head", "clean"
+        with patch.object(pi_phase, "git_state", side_effect=snapshot):
+            code = pi_phase.main(["run", "--kind", "test", "--label", "verify", "--", "true"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [3, 3])
+        self.assertTrue(self.ledger_records()[-1]["verified"])
+
+    def test_end_snapshot_null_timeout_or_environment_change_is_unverified(self):
+        args = SimpleNamespace(kind="test", label="verify", priority="normal", command=["true"])
+        for end in [("head", None), (None, None), ("different", "clean"),
+                    subprocess.TimeoutExpired("git", 3), ("head", "clean")]:
+            with self.subTest(end=end):
+                ledger = pi_phase.PhaseLedger(args)
+                with patch.object(pi_phase, "git_state", side_effect=[("head", "clean"), end]):
+                    ledger.prepare_snapshot()
+                    ledger.enqueue()
+                    ledger.start()
+                    if end == ("head", "clean"):
+                        with patch.dict(os.environ, DOTNET_TEST="changed"):
+                            ledger.finish(self.state, 0)
+                    else:
+                        ledger.finish(self.state, 0)
+                self.assertFalse(ledger.record["verified"])
+                self.assertEqual(ledger.record["outcome"], "passed")
+
+    def test_high_downgrade_note_does_not_hold_coordinator(self):
+        pi_phase.grant_priority(self.state, 10, None)
+        def note(message):
+            fd = pi_phase.lock_file(self.state / "coordinator.lock")
+            self.assertIsNotNone(fd, message)
+            pi_phase.unlock(fd)
+        with patch.object(pi_phase, "high_count", return_value=3), patch.object(pi_phase, "note", side_effect=note):
+            self.waiter("downgraded", "high")
+
+    def test_config_errors_restore_signal_handlers(self):
+        original = signal.getsignal(signal.SIGTERM)
+        handlers = []
+        def configuration(*args, **kwargs):
+            handlers.append(signal.getsignal(signal.SIGTERM))
+            raise ValueError("configuration failed")
+        with patch.object(pi_phase, "config", side_effect=configuration), \
+                patch.object(sys, "stderr", new_callable=io.StringIO):
+            code = pi_phase.main(["run", "--kind", "test", "--label", "config", "--", "true"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, 125)
+        self.assertNotEqual(handlers, [original])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), original)
 
     def test_exact_passed_state_skips_before_registration_and_records_zero_times(self):
         passed = self.passed_state()
@@ -252,8 +418,7 @@ class PhaseTests(unittest.TestCase):
                    subprocess.TimeoutExpired("git", .2)]
         with patch.object(pi_phase.time, "monotonic", side_effect=[0, .2, .5, 1, 2.5, 2.8]), \
                 patch.object(pi_phase.subprocess, "run", side_effect=replies) as probe:
-            with self.assertRaises(subprocess.TimeoutExpired):
-                pi_phase.git_state(self.root, timeout=3)
+            self.assertEqual(pi_phase.git_state(self.root, timeout=3), ("head", None))
         self.assertEqual(probe.call_count, 3)
         for call in probe.call_args_list:
             self.assertEqual(call.args[0][:2], ["git", "--no-optional-locks"])
@@ -274,14 +439,14 @@ class PhaseTests(unittest.TestCase):
             code = pi_phase.main(["run", "--kind", "build", "--label", "sync", "--", "true"],
                                  state=self.state, configuration=self.config)
         self.assertEqual(code, 0)
-        self.assertEqual(calls, [("snapshot", 3), ("register", None)])
+        self.assertEqual(calls, [("snapshot", 3), ("register", None), ("snapshot", 3)])
         self.assertEqual(self.ledger_records()[0]["head"], "head")
 
     def test_queue_budget_accepts_7200_but_execution_still_needs_approval(self):
         self.assertEqual(pi_phase.bounded(7200, "queue-timeout", False), 7200)
-        for approved in (False, True):
-            with self.assertRaises(ValueError):
-                pi_phase.bounded(7201, "queue-timeout", approved)
+        with self.assertRaises(ValueError):
+            pi_phase.bounded(7201, "queue-timeout", False)
+        self.assertEqual(pi_phase.bounded(7201, "queue-timeout", True), 7201)
         with self.assertRaisesRegex(ValueError, "600s without --approved-long-timeout"):
             pi_phase.bounded(601, "timeout", False)
         self.assertEqual(pi_phase.bounded(601, "timeout", True), 601)
@@ -352,7 +517,7 @@ class PhaseTests(unittest.TestCase):
         record = records[0]
         self.assertEqual(set(record), {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
-                                      "head", "dirty", "argvHash", "stack"})
+                                      "head", "dirty", "argvHash", "stack", "envHash", "verified"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
@@ -493,7 +658,8 @@ class PhaseTests(unittest.TestCase):
         source.write_text("changed\n")
         (self.root / "untracked.txt").write_text("untracked")
         expected = hashlib.sha256(git("status", "--porcelain=v1", "-z", "--untracked-files=normal")
-                                  + git("diff", "HEAD", "--binary")).hexdigest()
+                                  + git("diff", "HEAD", "--binary")
+                                  + b"untracked.txt\0" + hashlib.sha256(b"untracked").digest()).hexdigest()
         self.assertEqual(pi_phase.git_state(self.root), (head, expected))
         with patch.object(pi_phase.subprocess, "run", side_effect=subprocess.TimeoutExpired("git", 2)):
             self.assertEqual(pi_phase.git_state(self.root), (None, None))
@@ -503,7 +669,7 @@ class PhaseTests(unittest.TestCase):
             self.assertEqual(pi_phase.git_state(self.root), (head, None))
             self.assertLessEqual(probe.call_args.kwargs["timeout"], 5)
 
-    def test_ledger_one_sync_snapshot_before_registration_not_admission(self):
+    def test_ledger_sync_snapshots_before_registration_and_after_execution(self):
         calls = self.root / "git-calls.jsonl"
         patch = ("import json,threading\n"
                  f"calls=pi_phase.Path({str(calls)!r})\n"
@@ -522,7 +688,7 @@ class PhaseTests(unittest.TestCase):
         child, _ = self.patched_phase(patch)
         code, output = self.done(child)
         self.assertEqual(code, 0, output)
-        self.assertEqual(calls.read_text().splitlines(), ["[false, false]"])
+        self.assertEqual(calls.read_text().splitlines(), ["[false, false]", "[true, false]"])
         record = self.ledger_records()[0]
         self.assertEqual((record["head"], record["dirty"]), ("queued-head", "queued-dirty"))
 
@@ -589,11 +755,12 @@ class PhaseTests(unittest.TestCase):
                          ("passed", 0, None, None))
 
     def test_ledger_git_probes_disable_optional_locks(self):
-        replies = [SimpleNamespace(stdout="head\n"), SimpleNamespace(stdout=b"dirty"), SimpleNamespace(stdout=b"diff")]
+        replies = [SimpleNamespace(stdout="head\n"), SimpleNamespace(stdout=b"dirty"),
+                   SimpleNamespace(stdout=b"diff"), SimpleNamespace(stdout=b"")]
         with patch.dict(os.environ, GIT_OPTIONAL_LOCKS="1"), \
                 patch.object(pi_phase.subprocess, "run", side_effect=replies) as probe:
             self.assertEqual(pi_phase.git_state(self.root), ("head", hashlib.sha256(b"dirtydiff").hexdigest()))
-        self.assertEqual(probe.call_count, 3)
+        self.assertEqual(probe.call_count, 4)
         for call in probe.call_args_list:
             self.assertEqual(call.args[0][:2], ["git", "--no-optional-locks"])
             self.assertEqual(call.kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
