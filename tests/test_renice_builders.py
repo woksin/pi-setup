@@ -73,6 +73,16 @@ class ReniceBuildersTests(unittest.TestCase):
 """
         self.assertEqual(list(rb.candidates(listing)), [(306, 0), (307, 0)])
 
+    def test_framework_and_python3_phase_ancestors_with_ps_labels(self):
+        for python in ("/opt/homebrew/Cellar/python@3.x/Frameworks/Python.framework/Versions/3.x/Resources/Python.app/Contents/MacOS/Python",
+                       "python3"):
+            for label in ('"it\'s"', "it's"):
+                with self.subTest(python=python, label=label):
+                    args = f"{python} /Users/x/.pi/agent/pi-phase/pi_phase.py run --kind test --label {label} -- dotnet test"
+                    self.assertTrue(rb.is_phase(args))
+                    listing = f"301 0 1 {args}\n302 0 301 dotnet test\n303 0 302 dotnet exec /sdk/testhost.dll\n"
+                    self.assertEqual(list(rb.candidates(listing)), [])
+
     def test_real_process_is_lowered(self):
         proc = subprocess.Popen(["sleep", "30"])
         try:

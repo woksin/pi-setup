@@ -27,8 +27,41 @@ test("unwrapped build-type commands are blocked, including paths and wrappers", 
 
 test("replacement preserves original arguments and quoting", () => {
 	assert.equal(dotnetBlockReason('cd repo && dotnet test "My Tests.csproj" -c Release'),
-		'dotnet guard: run .NET work inside pi-phase:\n~/.pi/agent/bin/pi-phase run --kind test --label \'dotnet test\' --timeout 300 --queue-timeout 600 -- dotnet test "My Tests.csproj" -c Release');
+		'dotnet guard: run .NET work inside pi-phase:\ncd repo && ~/.pi/agent/bin/pi-phase run --kind test --label \'dotnet test\' --timeout 300 --queue-timeout 600 -- dotnet test "My Tests.csproj" -c Release');
 	assert.ok(dotnetBlockReason('X="some value" dotnet build')?.endsWith('-- env X="some value" dotnet build'));
+});
+
+test("replacement retains leading cd and drops the exec builtin", () => {
+	for (const command of ['cd "my repo" && dotnet build -c Release', 'cd "my repo" && exec dotnet build -c Release']) {
+		const reason = dotnetBlockReason(command);
+		assert.ok(reason?.includes('\ncd "my repo" && ~/.pi/agent/bin/pi-phase run --kind build'), command);
+		assert.ok(reason?.endsWith('-- dotnet build -c Release'), command);
+	}
+	assert.ok(dotnetBlockReason("exec dotnet test")?.endsWith("-- dotnet test"));
+});
+
+test("common trailing output redirections and display pipes are guarded", () => {
+	for (const suffix of ["2>&1 | tail -n 20", "| head -n 5", "| grep error", "| tee build.log",
+		"> build.log 2>&1", ">build.log", ">>build.log", "2>&1", "> 'build output.log' 2>&1",
+		"2>&1 | tee build.log | tail -n 20", "2>&1 | /usr/bin/tail -n 20"]) {
+		const reason = dotnetBlockReason(`dotnet build My.sln -c Release ${suffix}`);
+		assert.ok(reason, suffix);
+		assert.ok(reason.includes("-- dotnet build My.sln -c Release\n"), suffix);
+		assert.ok(reason.includes("--log FILE --tail N"), suffix);
+		assert.ok(!reason.includes(suffix), suffix);
+	}
+	assert.ok(dotnetBlockReason("cd repo && exec dotnet build 2>&1 | tail -n 20")?.includes(
+		"\ncd repo && ~/.pi/agent/bin/pi-phase run --kind build"));
+	assert.equal(dotnetBlockReason("pi-phase run --kind build -- dotnet build 2>&1 | tail -n 20"), undefined);
+});
+
+test("output filtering never makes mentions or uncertain shell syntax into dotnet commands", () => {
+	for (const command of ['echo "dotnet build" | tee x', "git log | grep dotnet",
+		"dotnet build < input", "dotnet build `echo My.sln`", "dotnet build $(echo My.sln)",
+		"(dotnet build)", "{ dotnet build; }", "dotnet build 2> errors.log", "dotnet build >out extra",
+		"dotnet build >out <input", "dotnet build >>$(filename)", "dotnet build | tail -n $(count)",
+		'dotnet build "$(project)"', 'dotnet build "`project`"'])
+		assert.equal(dotnetBlockReason(command), undefined, command);
 });
 
 test("phase scope applies only to its own command, including nested shell payloads", () => {
