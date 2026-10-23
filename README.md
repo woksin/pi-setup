@@ -1,8 +1,43 @@
 # pi-setup
 
-My [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) agent setup: global rules, custom agents, extensions, workflows, model-routing profiles, skills and helper scripts. Take the whole thing or copy the pieces you want.
+My pi coding agent setup, ready to install: global rules, subagents, extensions, an installer, `lanes` and `pi-train`.
 
-Auth, sessions, caches and machine identity are never included.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/woksin/pi-setup)](https://github.com/woksin/pi-setup/releases)
+
+This is the setup I run [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) with every day. Take the whole thing or copy the pieces you want. Auth, sessions, caches and machine identity are never included.
+
+## What you get
+
+- **Global rules** (`AGENTS.md`) for scope, execution budgets, delegation briefs, review loops, GitHub issue hygiene and shipping.
+- **Custom subagents** pinned to a model and thinking level, and **model-routing profiles** you switch with `pi-profile`.
+- **Extensions and guards** for long waits, usage-limit fallback, output caps, issue tracking and more.
+- **Workflows and tools**: cross-provider `review`, the `pi-phase` build/test queue, `pi-train` release trains and opt-in `lanes` for parallel sessions.
+- **An installer** that detects your setup, backs up what it overwrites and can update, uninstall and run a doctor check.
+- **Standalone packages** from the same author: [pi-jobs](https://github.com/woksin/pi-jobs), [pi-recover](https://github.com/woksin/pi-recover), [pi-context-budget](https://github.com/woksin/pi-context-budget) and the experimental [pi-orch](https://github.com/woksin/pi-orch).
+
+```sh
+git clone https://github.com/woksin/pi-setup && cd pi-setup
+./install.sh --dry-run   # show what would change
+./install.sh             # overwritten files are backed up first
+```
+
+It needs Node.js 22.19 or newer and Python 3. The full installer reference follows below.
+
+## Contents
+
+- [Install](#install), including update, uninstall, doctor and the opt-in lanes
+- [For Cratis team members](#for-cratis-team-members)
+- [Machine performance](#machine-performance)
+- [What's in it](#whats-in-it)
+- [Related repositories](#related-repositories)
+- [What is deliberately not included](#what-is-deliberately-not-included)
+- [Keeping it up to date](#keeping-it-up-to-date)
+
+## Highlights
+
+- Safe to re-run: files you changed are kept and the new version is written next to them, and every overwrite is backed up.
+- Nothing is scheduled unless you choose it. The `docker-guardian`, `cleanup` and `secret-sweep` schedules are opt-in extras.
+- Releases are cut by hand from tagged versions; `./install.sh update` moves a checkout to the latest release tag.
 
 ## Install
 
@@ -229,6 +264,7 @@ has been deleted. Shared layers mean modest savings: about 1 GB on a 13.7 GB
 
 - `pi-train fold <PR#|branch> [--eta when]` and `pi-train planned <PR#> <train-branch> [--eta when]` store a delivery's expected ready time as UTC. Use an ISO 8601 timestamp with seconds and timezone, or `+90m`/`+2h`/`+1d` resolved when invoked. Repeating a command with `--eta` updates it; omitting the flag preserves it. `pi-train eta <PR#|branch> <when|clear> [--train branch]` updates or clears an existing delivery locally.
 - `pi-train status [--gate 90m]` lists ETAs and recommends holding only for pending/planned deliveries due within one gate (including overdue deliveries). Completed folded deliveries and deliveries with no ETA never hold the train. Without history it reports `unknown`; `--json` includes `recommendation`, `gateSeconds`, `gateSource`, `gateRuns` and item ETAs. The gate is the sum of per-kind nearest-rank p90 execution wall times (`runS`) for completed build/test/integration runs in the last seven days, matched by Git common directory across repository worktrees. Cancelled, skipped and unstarted runs are excluded. History comes from `${PI_PHASE_STATE:-~/.pi/agent/pi-phase/state}/ledger`. `--gate` overrides a manifest's positive `gateSeconds`, which overrides history; durations accept positive numbers with `s`, `m`, `h` or `d`. No additional network calls are made for the recommendation.
+- `pi-train close [train-branch] [--shipped PR#] [--head sha]` marks a train `released` once it has shipped, recording the train PR and shipped head; `--abandoned` marks a dropped train. Never hand-edit a manifest. It only updates the manifest, so it also works when the train worktree or branch is gone. Closed trains leave `status` and the push guard. `status --all` reports a train whose worktree is missing as `train unavailable` instead of stopping.
 - `pi-train init --adopt <repo-dir> <existing-train-branch> [--base origin/main]` adopts an existing local branch, reusing its worktree or attaching it to a new one without recreating the branch. It records the merge-base and lists first-parent merges and open PR heads already in the train; it does **not** fold them. Run the suggested `pi-train fold <pr>` commands to close/cancel superseded PRs without re-merging their commits. Main/default branches and existing manifests are refused.
 - `pi-train ship [--train branch] [--label major|minor|patch|no-release] [--summary-file f] [--title text]` checks the clean train head, completed fold steps, closed folded PRs and ancestry against the fetched base (`--allow-behind` is explicit). It writes `.ai-work/trains/<train>/pr-body.md` and `pr-notes.md`, checks the body, pushes, and creates or updates one train PR. Repeating it does not duplicate comments or PRs. The body contains the optional summary and collected release bullets; reviewer notes contain folded heads, cancelled runs and gate evidence.
 - Without `--label`, the highest release label on folded PRs wins: major, minor, then patch. The no-release fallback requires every folded PR to carry no-release; otherwise missing release labels require an explicit choice. A Cratis repo's `.cratis/ai/hooks/scripts/cratis-check-pr.mjs` checks the body before any push or PR mutation. Otherwise `${PI_TRAIN_DIR:-~/.pi/trains}/config.json` may supply `"checkPr": ["checker", "--body-file", "{bodyFile}", "--label", "{label}"]` (argv, not a shell command). Without either checker, ship prints `no PR-body check in this repo`.

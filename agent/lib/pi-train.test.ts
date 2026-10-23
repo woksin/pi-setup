@@ -34,7 +34,7 @@ async function setup(t: any, init = true) {
   const manifest = { v: 1, repo: REPO, train: TRAIN, base: { ref: 'origin/main', sha: BASE },
     worktree: join(root, 'worktree'), owner: 'me', state: 'open', head: BASE, pr: null, shippedHead: null,
     label: null, items: [], notes: {}, packages: [], upstream: [], downstream: [], log: [] };
-  if (init) await saveManifest(path, manifest);
+  if (init) { await saveManifest(path, manifest); await mkdir(manifest.worktree, { recursive: true }); }
   const ghRoutes = {
     'api user': () => ok('me\n'),
     'repo view': () => ok(JSON.stringify({ defaultBranchRef: { name: state.defaultBranch } })),
@@ -158,6 +158,32 @@ test('eta command updates and clears an existing delivery locally, respecting dr
   assert.equal((await f.read()).items[0].eta, undefined);
   assert.equal(await f.invoke('eta', 'missing', '+2h'), 1);
   assert.ok(f.calls.every(call => call.command === 'git'));
+});
+
+test('close --shipped records the train PR and head for a named train', async t => {
+  const f = await setup(t);
+  assert.equal(await f.invoke('close', TRAIN, '--shipped', '#42', '--head', 'abcdef1'), 0);
+  const manifest = await f.read();
+  assert.equal(manifest.state, 'released'); assert.equal(manifest.pr, 42); assert.equal(manifest.shippedHead, 'abcdef1');
+  assert.equal(await f.invoke('close', TRAIN, '--shipped', 'x'), 2);
+  assert.equal(await f.invoke('fold', '7', '--shipped', '1'), 2);
+});
+
+test('close marks a train released or abandoned without gh calls, and only once', async t => {
+  const f = await setup(t);
+  f.calls.length = 0;
+  assert.equal(await f.invoke('close', '--dry-run'), 0);
+  assert.equal((await f.read()).state, 'open');
+  assert.equal(await f.invoke('close', '--abandoned'), 0);
+  const manifest = await f.read();
+  assert.equal(manifest.state, 'abandoned'); assert.ok(manifest.closedAt);
+  assert.equal(manifest.log.at(-1).op, 'close');
+  assert.equal(await f.invoke('close', '--train', TRAIN), 1);
+  assert.equal(await f.invoke('close', TRAIN, '--abandoned', '--shipped', '9'), 2);
+  assert.equal(await f.invoke('status', '--abandoned'), 2);
+  assert.ok(f.calls.every(call => call.command === 'git'));
+  assert.equal(await f.invoke('status', '--all', '--json'), 0);
+  assert.deepEqual(JSON.parse(f.output.at(-1)!).trains, []);
 });
 
 test('status exposes ETA recommendations and override precedence without additional gh calls', async t => {
