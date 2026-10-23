@@ -671,7 +671,7 @@ def requested_policy(args):
 def configured_policy(state, args, options, fingerprint):
     cwd = os.path.realpath(os.getcwd())
     for rule in options["policy"]:
-        if args.kind not in rule["kinds"] or not fnmatch.fnmatchcase(cwd, rule["path"]):
+        if args.kind not in rule["kinds"] or not fnmatch.fnmatchcase(cwd, os.path.expanduser(rule["path"])):
             continue
         return rule_policy(state, rule, fingerprint), "config"
     fast = fast_phase(state, args, options["fast_lane"], fingerprint)
@@ -690,7 +690,7 @@ def rule_policy(state, rule, fingerprint):
 def policy_history(state, fingerprint):
     try:
         return fast_history(state, fingerprint)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         note(f"fast history unavailable: {exc}")
         return []
 

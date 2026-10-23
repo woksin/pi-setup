@@ -1,6 +1,8 @@
 {
   "policy": [
-    { "path": "{{REPOS_ROOT}}/woksin/*", "kinds": ["build", "test"], "policy": "direct", "max_expected_s": 90 }
+    { "path": "{{REPOS_ROOT}}/cratis/Specifications*", "kinds": ["build", "test"], "policy": "direct", "max_expected_s": 90 },
+    { "path": "{{REPOS_ROOT}}/cratis/Fundamentals*", "kinds": ["build", "test"], "policy": "direct", "max_expected_s": 90 },
+    { "path": "{{REPOS_ROOT}}/cratis/.worktrees/spec*", "kinds": ["build", "test"], "policy": "direct", "max_expected_s": 90 }
   ],
   "heavy_slots": 2,
   "integration_slots": 1,

@@ -47,7 +47,11 @@ test("pi-phase policy paths render from reposRoot as valid JSON without changing
   const text = action.content.toString("utf8");
   assert.ok(!text.includes("{{REPOS_ROOT}}"));
   const rendered = JSON.parse(text);
-  assert.deepEqual(rendered.policy, [{ path: `${reposRoot}/woksin/*`, kinds: ["build", "test"], policy: "direct", max_expected_s: 90 }]);
+  assert.deepEqual(
+    rendered.policy.map((rule: { path: string }) => rule.path),
+    ["Specifications*", "Fundamentals*", ".worktrees/spec*"].map((suffix) => `${reposRoot}/cratis/${suffix}`),
+  );
+  for (const rule of rendered.policy) assert.deepEqual({ ...rule, path: undefined }, { path: undefined, kinds: ["build", "test"], policy: "direct", max_expected_s: 90 });
   const source = JSON.parse(readFileSync(join(REPO, "agent/pi-phase/config.json"), "utf8"));
   delete rendered.policy;
   delete source.policy;

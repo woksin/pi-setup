@@ -43,13 +43,13 @@ PI_PHASE_POLICY=queued pi-phase run --kind test --label 'tests' -- npm test
 
 `direct` bypasses heavy/fast capacity queues but retains memory admission, nice, MSBuild caps, RSS monitoring, timeout/cancellation and ledger recording. Its per-run ownership lease is not a capacity slot. Integration phases and fingerprints recorded as container tests refuse direct admission, print a note and use queued admission (including normal container promotion). CI watcher singleton locking is unchanged. `fast` uses the existing fast permits and eligibility/budget safeguards. `queued` forces normal admission, without automatic fast selection. Running and queued `status` lines, and every ledger record, include `policy` and `source` (`flag`, `env`, `config`, `history` or `default`). Older ledger entries remain readable.
 
-The shipped config contains an ordered policy rule:
+The shipped config contains ordered policy rules (Specifications, Fundamentals and spec worktrees under the Cratis root); this is the first:
 
 ```json
-{"policy":[{"path":"{{REPOS_ROOT}}/woksin/*","kinds":["build","test"],"policy":"direct","max_expected_s":90}]}
+{"policy":[{"path":"{{REPOS_ROOT}}/cratis/Specifications*","kinds":["build","test"],"policy":"direct","max_expected_s":90}]}
 ```
 
-The installer renders `{{REPOS_ROOT}}` from the configured repositories root, preserving valid JSON. Paths are case-sensitive globs matched against the real cwd (including nested worktrees); kinds must match too. A config-direct rule requires at least one completed run of the same exact cwd/command fingerprint in the last seven days with p90 at or below its `max_expected_s` (default 90). No history or a slower p90 downgrades the rule to fast, subject to the normal fast safeguards; slow history can therefore fall back to queued. Explicit direct overrides do not require history. Nonmatching paths retain existing automatic fast/heavy behaviour.
+The installer renders `{{REPOS_ROOT}}` from the configured repositories root, preserving valid JSON. Paths are case-sensitive globs (`*` also matches `/`; a leading `~` is expanded) matched against the real cwd (including nested worktrees); kinds must match too. A config-direct rule requires at least one completed run of the same exact cwd/command fingerprint in the last seven days with p90 at or below its `max_expected_s` (default 90). No history or a slower p90 downgrades the rule to fast, subject to the normal fast safeguards; slow history can therefore fall back to queued. Explicit direct overrides do not require history. Nonmatching paths retain existing automatic fast/heavy behaviour.
 
 A parent's brief may bind the execution policy or authorize a direct light check; subagents follow it instead of re-deciding policy or priority. High priority is used only when the brief grants it. Python/Node/TS unit checks, lint and small bundle builds finishing in about two minutes without Docker or .NET are light gates; the parent can authorize these to run directly under `nice -n 10` without waiting in the heavy queue. These are execution permissions, not permission to skip gates.
 
