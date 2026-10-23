@@ -94,25 +94,47 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
     require(lane.group === null || (typeof lane.group === "string" && validId(lane.group) && !["ALL", c.messages.broadcast].includes(lane.group)), `${key}.group`);
     require(lane.issue === undefined || (Number.isInteger(lane.issue) && lane.issue > 0), `${key}.issue`);
     require(lane.goal === undefined || text(lane.goal), `${key}.goal`);
-    require(lane.role === undefined || ["lane", "repo-orch", "sub-orch"].includes(lane.role), `${key}.role`);
-    require(lane.retired === undefined || typeof lane.retired === "boolean", `${key}.retired`);
-    require(lane.stateFile === undefined || text(lane.stateFile), `${key}.stateFile`);
-    require(lane.parent === undefined || lane.parent === c.coordinator.id || c.lanes.some(l => l.id === lane.parent && (lane.retired || !l.retired)), `${key}.parent`);
-    require(lane.role !== "repo-orch" || lane.parent === undefined || lane.parent === c.coordinator.id, `${key}.parent`);
+    validateHierarchyFields(lane, c, key);
   }
+  validateHierarchy(c);
+}
+function requireField(ok: unknown, key: string): void {
+  if (!ok) throw new UsageError(`invalid ${key}`);
+}
+function validParent(lane: Lane, c: Config): boolean {
+  if (lane.parent === undefined || lane.parent === c.coordinator.id) return true;
+  return c.lanes.some(parent => parent.id === lane.parent && (lane.retired || !parent.retired));
+}
+function validOrchestratorParent(lane: Lane, c: Config): boolean {
+  if (lane.role !== "repo-orch") return true;
+  return lane.parent === undefined || lane.parent === c.coordinator.id;
+}
+function validateHierarchyFields(lane: Lane, c: Config, key: string): void {
+  requireField(lane.role === undefined || ["lane", "repo-orch", "sub-orch"].includes(lane.role), `${key}.role`);
+  requireField(lane.retired === undefined || typeof lane.retired === "boolean", `${key}.retired`);
+  requireField(validStateFile(lane.stateFile), `${key}.stateFile`);
+  requireField(validParent(lane, c), `${key}.parent`);
+  requireField(validOrchestratorParent(lane, c), `${key}.parent`);
+}
+function validStateFile(value: string | undefined): boolean {
+  return value === undefined || (typeof value === "string" && value.length > 0);
+}
+function validateHierarchy(c: Config): void {
   const active = c.lanes.filter(l => !l.retired);
-  require(new Set(active.map(l => l.worktree)).size === active.length, "duplicate worktree");
+  requireField(new Set(active.map(l => l.worktree)).size === active.length, "duplicate worktree");
   const orchs = active.filter(l => l.role === "repo-orch");
-  require(new Set(orchs.map(l => l.repo)).size === orchs.length, "duplicate repo-orch");
-  for (const lane of active) {
-    const seen = new Set([lane.id]); let parent = effectiveParent(lane, c);
-    while (parent !== c.coordinator.id) {
-      require(!seen.has(parent), "parent cycle"); seen.add(parent);
-      const next = c.lanes.find(l => l.id === parent);
-      require(next, "parent"); parent = effectiveParent(next!, c);
-    }
+  requireField(new Set(orchs.map(l => l.repo)).size === orchs.length, "duplicate repo-orch");
+  for (const lane of active) validateParentChain(lane, c);
+}
+function validateParentChain(lane: Lane, c: Config): void {
+  const seen = new Set([lane.id]); let parent = effectiveParent(lane, c);
+  while (parent !== c.coordinator.id) {
+    requireField(!seen.has(parent), "parent cycle"); seen.add(parent);
+    const next = c.lanes.find(l => l.id === parent);
+    requireField(next, "parent"); parent = effectiveParent(next!, c);
   }
 }
+
 export function expand(value: string, c: Config, root: string, home: string, base = root): string {
   let out = value;
   for (let n = 0; n < 8; n++) {

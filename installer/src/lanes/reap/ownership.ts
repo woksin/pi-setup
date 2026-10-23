@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { optionalText, jsonFiles } from "./files.ts";
-import type { Claim, EvidenceContext, Signals } from "./model.ts";
+import type { Claim, EvidenceContext, Signals } from "./signals.ts";
 function registry(text: string): Claim[] {
   const folded = new Map<string, Claim>();
   for (const line of text.split("\n").filter(l => l.trim())) {

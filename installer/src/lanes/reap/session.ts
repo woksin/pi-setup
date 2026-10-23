@@ -4,7 +4,7 @@ import type { LanesCtx } from "../ctx.ts";
 import { sessionDirFor } from "../names.ts";
 import { jsonFiles, mtime } from "./files.ts";
 import { absolute } from "./process.ts";
-import type { Signals } from "./model.ts";
+import type { Signals } from "./signals.ts";
 function sameProcess(value: Record<string, any>, s: Signals, ctx: LanesCtx): boolean {
   if (value.pid !== s.pid) return false;
   return !value.cwd || absolute(ctx, value.cwd) === s.cwd;

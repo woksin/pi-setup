@@ -4,7 +4,7 @@ import { expand } from "../config.ts";
 import { parseMessageName } from "../names.ts";
 import { suppressed } from "../status-line.ts";
 import { optionalText, mtime } from "./files.ts";
-import type { EvidenceContext, Signals } from "./model.ts";
+import type { EvidenceContext, Signals } from "./signals.ts";
 function isAddressed(to: string[], ids: (string | null)[]): boolean {
   return ids.filter(Boolean).some(id => to.some(recipient => recipient === id || (`-${recipient}-`).includes(`-${id}-`)));
 }

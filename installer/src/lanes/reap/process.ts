@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { LanesCtx } from "../ctx.ts";
-import type { Signals } from "./model.ts";
+import type { Signals } from "./signals.ts";
 export function absolute(ctx: LanesCtx, path: string): string { return normalize(ctx.realpath(path)); }
 export function requireProbe(result: { code: number; timedOut: boolean }, message: string): void { if (result.code !== 0 || result.timedOut) throw new Error(message); }
 export async function processCwd(ctx: LanesCtx, pid: number): Promise<string> {

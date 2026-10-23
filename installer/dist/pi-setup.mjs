@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 25e063d3cdc60223f5b81568d648c24cf38a84a8e21908092cce1155cb47432e
+// pi-setup-source-sha256: 502379ec56ab76fbd48f66a0cac13c40db49f6e984d59a03473ca1b4a6648235
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -530,26 +530,47 @@ function validate(value, root = process.cwd(), home = homedir3()) {
     require2(lane.group === null || typeof lane.group === "string" && validId(lane.group) && !["ALL", c2.messages.broadcast].includes(lane.group), `${key}.group`);
     require2(lane.issue === void 0 || Number.isInteger(lane.issue) && lane.issue > 0, `${key}.issue`);
     require2(lane.goal === void 0 || text3(lane.goal), `${key}.goal`);
-    require2(lane.role === void 0 || ["lane", "repo-orch", "sub-orch"].includes(lane.role), `${key}.role`);
-    require2(lane.retired === void 0 || typeof lane.retired === "boolean", `${key}.retired`);
-    require2(lane.stateFile === void 0 || text3(lane.stateFile), `${key}.stateFile`);
-    require2(lane.parent === void 0 || lane.parent === c2.coordinator.id || c2.lanes.some((l2) => l2.id === lane.parent && (lane.retired || !l2.retired)), `${key}.parent`);
-    require2(lane.role !== "repo-orch" || lane.parent === void 0 || lane.parent === c2.coordinator.id, `${key}.parent`);
+    validateHierarchyFields(lane, c2, key);
   }
+  validateHierarchy(c2);
+}
+function requireField(ok, key) {
+  if (!ok) throw new UsageError(`invalid ${key}`);
+}
+function validParent(lane, c2) {
+  if (lane.parent === void 0 || lane.parent === c2.coordinator.id) return true;
+  return c2.lanes.some((parent) => parent.id === lane.parent && (lane.retired || !parent.retired));
+}
+function validOrchestratorParent(lane, c2) {
+  if (lane.role !== "repo-orch") return true;
+  return lane.parent === void 0 || lane.parent === c2.coordinator.id;
+}
+function validateHierarchyFields(lane, c2, key) {
+  requireField(lane.role === void 0 || ["lane", "repo-orch", "sub-orch"].includes(lane.role), `${key}.role`);
+  requireField(lane.retired === void 0 || typeof lane.retired === "boolean", `${key}.retired`);
+  requireField(validStateFile(lane.stateFile), `${key}.stateFile`);
+  requireField(validParent(lane, c2), `${key}.parent`);
+  requireField(validOrchestratorParent(lane, c2), `${key}.parent`);
+}
+function validStateFile(value) {
+  return value === void 0 || typeof value === "string" && value.length > 0;
+}
+function validateHierarchy(c2) {
   const active = c2.lanes.filter((l2) => !l2.retired);
-  require2(new Set(active.map((l2) => l2.worktree)).size === active.length, "duplicate worktree");
+  requireField(new Set(active.map((l2) => l2.worktree)).size === active.length, "duplicate worktree");
   const orchs = active.filter((l2) => l2.role === "repo-orch");
-  require2(new Set(orchs.map((l2) => l2.repo)).size === orchs.length, "duplicate repo-orch");
-  for (const lane of active) {
-    const seen = /* @__PURE__ */ new Set([lane.id]);
-    let parent = effectiveParent(lane, c2);
-    while (parent !== c2.coordinator.id) {
-      require2(!seen.has(parent), "parent cycle");
-      seen.add(parent);
-      const next = c2.lanes.find((l2) => l2.id === parent);
-      require2(next, "parent");
-      parent = effectiveParent(next, c2);
-    }
+  requireField(new Set(orchs.map((l2) => l2.repo)).size === orchs.length, "duplicate repo-orch");
+  for (const lane of active) validateParentChain(lane, c2);
+}
+function validateParentChain(lane, c2) {
+  const seen = /* @__PURE__ */ new Set([lane.id]);
+  let parent = effectiveParent(lane, c2);
+  while (parent !== c2.coordinator.id) {
+    requireField(!seen.has(parent), "parent cycle");
+    seen.add(parent);
+    const next = c2.lanes.find((l2) => l2.id === parent);
+    requireField(next, "parent");
+    parent = effectiveParent(next, c2);
   }
 }
 function expand(value, c2, root, home, base = root) {
@@ -683,22 +704,48 @@ var init_files = __esm({
 });
 
 // src/lanes/reap/git.ts
+function succeeded(probe) {
+  return !probe.code && !probe.timedOut;
+}
+function validHead(head) {
+  return succeeded(head) && /^[a-f0-9]{40,64}$/.test(head.stdout.trim());
+}
+function aheadCount(ahead) {
+  return !ahead.code && /^\d+$/.test(ahead.stdout.trim()) ? Number(ahead.stdout) : void 0;
+}
+function mergedAtHead(prs, head) {
+  if (!succeeded(prs)) return void 0;
+  try {
+    const rows = JSON.parse(prs.stdout);
+    if (Array.isArray(rows)) return rows.some((p) => p.headRefOid === head);
+  } catch {
+  }
+  return void 0;
+}
 async function gitEvidence(ctx, lane, cwd) {
   const run = (args) => ctx.run("git", ["--no-optional-locks", "-C", cwd, ...args], { timeoutMs: 4e3 });
   const head = await run(["rev-parse", "HEAD"]);
   const status2 = await run(["status", "--porcelain"]);
-  if (head.code || head.timedOut || !/^[a-f0-9]{40,64}$/.test(head.stdout.trim()) || status2.code || status2.timedOut) return { error: "git HEAD/status unknown" };
+  if (!validHead(head) || !succeeded(status2)) return { error: "git HEAD/status unknown" };
   const ahead = await run(["rev-list", "--count", "@{upstream}..HEAD"]);
-  const prs = await ctx.run("gh", ["pr", "list", "--repo", lane.repo, "--head", lane.branch, "--state", "merged", "--json", "headRefOid"], { cwd, timeoutMs: 5e3 });
-  let merged;
-  if (!prs.code && !prs.timedOut) {
-    try {
-      const rows = JSON.parse(prs.stdout);
-      if (Array.isArray(rows)) merged = rows.some((p) => p.headRefOid === head.stdout.trim());
-    } catch {
-    }
-  }
-  return { head: head.stdout.trim(), dirty: Boolean(status2.stdout.trim()), merged, ahead: !ahead.code && /^\d+$/.test(ahead.stdout.trim()) ? Number(ahead.stdout) : void 0 };
+  const prs = await ctx.run("gh", [
+    "pr",
+    "list",
+    "--repo",
+    lane.repo,
+    "--head",
+    lane.branch,
+    "--state",
+    "merged",
+    "--json",
+    "headRefOid"
+  ], { cwd, timeoutMs: 5e3 });
+  return {
+    head: head.stdout.trim(),
+    dirty: Boolean(status2.stdout.trim()),
+    merged: mergedAtHead(prs, head.stdout.trim()),
+    ahead: aheadCount(ahead)
+  };
 }
 var init_git = __esm({
   "src/lanes/reap/git.ts"() {
@@ -997,16 +1044,29 @@ import { join as join11 } from "node:path";
 function snooze(s, env) {
   const text3 = optionalText(join11(env.root, ".state/snooze", s.id));
   if (text3 === void 0) return;
-  const until = Date.parse(text3.trim());
-  if (!Number.isFinite(until)) throw new Error("cannot read snooze");
-  if (until > env.ctx.now().getTime()) s.keeps.push("snoozed");
+  const until2 = Date.parse(text3.trim());
+  if (!Number.isFinite(until2)) throw new Error("cannot read snooze");
+  if (until2 > env.ctx.now().getTime()) s.keeps.push("snoozed");
 }
 function idle(s, env) {
-  if (env.ctx.now().getTime() - s.lastWrite < env.minutes * 6e4) s.keeps.push(`recent write (< ${env.minutes} minutes)`);
+  if (env.ctx.now().getTime() - s.lastWrite < env.minutes * 6e4) {
+    s.keeps.push(`recent write (< ${env.minutes} minutes)`);
+  }
 }
 async function collect(env) {
   const { c: c2, lane, root, ctx } = env;
-  const s = { id: lane.id, cwd: "", asks: [], keeps: [], finished: false, takeover: false, pids: [], claims: [], git: {}, unread: [] };
+  const s = {
+    id: lane.id,
+    cwd: "",
+    asks: [],
+    keeps: [],
+    finished: false,
+    takeover: false,
+    pids: [],
+    claims: [],
+    git: {},
+    unread: []
+  };
   try {
     s.cwd = absolute(ctx, join11(expand(c2.worktreesDir, c2, root, ctx.home), lane.worktree));
     s.pids = await processIds(ctx, s.cwd);
@@ -1162,10 +1222,11 @@ function readPack(env) {
 async function recipient(env, to) {
   const { c: c2, lane, root, ctx } = env;
   const target = c2.lanes.find((l2) => l2.id === to && !l2.retired);
-  if (to === lane.id) throw new UsageError("handoff recipient must be another active lane or coordinator");
-  if (!target && to !== c2.coordinator.id) throw new UsageError("handoff recipient must be another active lane or coordinator");
+  validateRecipient({ to, target }, env);
   const cwd = recipientCwd(env, target);
-  if ((await processIds(ctx, absolute(ctx, cwd))).length !== 1) throw new UsageError("handoff recipient is not live or has shared cwd");
+  if ((await processIds(ctx, absolute(ctx, cwd))).length !== 1) {
+    throw new UsageError("handoff recipient is not live or has shared cwd");
+  }
 }
 async function prepare(env, to, s) {
   const { c: c2, lane, root, ctx } = env;
@@ -1176,41 +1237,58 @@ async function prepare(env, to, s) {
   if (reusable(old, hash, to)) return old;
   const dir = packPath(env);
   mkdirSync3(dir, { recursive: true });
-  const pack = { version: 1, id: `${lane.id}-${hash.slice(0, 12)}`, from: lane.id, to, at: ctx.now().toISOString(), fingerprint: hash, signals: s };
+  const pack = {
+    version: 1,
+    id: `${lane.id}-${hash.slice(0, 12)}`,
+    from: lane.id,
+    to,
+    at: ctx.now().toISOString(),
+    fingerprint: hash,
+    signals: s
+  };
   const notes = ["NOW.md", "WATCHES.md", "STATE.md"].map((n3) => `## ${n3}
 ${optionalText(join13(root, "coordinator", n3)) || "unknown/not present"}`).join("\n\n");
-  writeFileSync4(join13(dir, "HANDOFF.md"), `# Handoff ${pack.id}
-Recipient: ${to}
-Branch: ${lane.branch}
-SHA: ${s.git.head || "unknown"}
-Dirty: ${s.git.dirty}
-Ahead: ${s.git.ahead ?? "unknown"}
-PR merged at HEAD: ${s.git.merged ?? "unknown"}
-
-## Claims
-${JSON.stringify(s.claims, null, 2)}
-
-## Deliveries / pending acknowledgements / candidate ownership
-Unknown: file messages are not machine-readable acknowledgements. Recipient must take these over explicitly.
-
-## Next action
-Review claims, branch, preserved worktree and pending acknowledgements. Accept using lanes handoff ${lane.id} --accept --from ${to}. Never mark claims done just to retire.
-
-${notes}
-`);
+  writeFileSync4(join13(dir, "HANDOFF.md"), [
+    `# Handoff ${pack.id}`,
+    `Recipient: ${to}`,
+    `Branch: ${lane.branch}`,
+    `SHA: ${s.git.head || "unknown"}`,
+    `Dirty: ${s.git.dirty}`,
+    `Ahead: ${s.git.ahead ?? "unknown"}`,
+    `PR merged at HEAD: ${s.git.merged ?? "unknown"}`,
+    ``,
+    `## Claims`,
+    `${JSON.stringify(s.claims, null, 2)}`,
+    ``,
+    `## Deliveries / pending acknowledgements / candidate ownership`,
+    `Unknown: file messages are not machine-readable acknowledgements. Recipient must take these over explicitly.`,
+    ``,
+    `## Next action`,
+    `Review claims, branch, preserved worktree and pending acknowledgements. Accept using lanes handoff ${lane.id} --accept --from ${to}. Never mark claims done just to retire.`,
+    ``,
+    `${notes}`,
+    ``
+  ].join("\n"));
   atomicJson(join13(dir, "handoff.json"), pack);
-  const message = await backendFor(c2, ctx, root).send({ from: c2.coordinator.id, to, topic: "handoff-request", body: `Review ${join13(dir, "HANDOFF.md")} and ${join13(dir, "handoff.json")}. Explicitly accept with: lanes handoff ${lane.id} --accept --from ${to}. This transfers next-action and pending acknowledgement ownership; it does not complete claims.` });
+  const message = await backendFor(c2, ctx, root).send({
+    from: c2.coordinator.id,
+    to,
+    topic: "handoff-request",
+    body: `Review ${join13(dir, "HANDOFF.md")} and ${join13(dir, "handoff.json")}. Explicitly accept with: lanes handoff ${lane.id} --accept --from ${to}. This transfers next-action and pending acknowledgement ownership; it does not complete claims.`
+  });
   pack.requestMessage = message.name;
   atomicJson(join13(dir, "handoff.json"), pack);
   return pack;
 }
 async function accept(env, from) {
-  const { c: c2, lane, root, ctx, minutes } = env;
+  const { lane, ctx } = env;
   const pack = readPack(env);
   if (!pack || pack.to !== from) throw new UsageError("acceptance must come from the named handoff recipient");
   await recipient(env, from);
   const current = await collect(env);
-  if (fingerprint(current) !== pack.fingerprint) throw new Error("handoff evidence changed; prepare a new pack before accepting");
+  if (fingerprint(current) !== pack.fingerprint) {
+    throw new Error("handoff evidence changed; prepare a new pack before accepting");
+  }
   pack.acceptance = { from, at: ctx.now().toISOString(), fingerprint: pack.fingerprint };
   atomicJson(join13(packPath(env), "handoff.json"), pack);
   return pack;
@@ -1229,6 +1307,11 @@ function reusable(pack, hash, to) {
   if (!pack?.requestMessage) return false;
   return pack.fingerprint === hash && pack.to === to;
 }
+function validateRecipient(input, env) {
+  const error = "handoff recipient must be another active lane or coordinator";
+  if (input.to === env.lane.id) throw new UsageError(error);
+  if (!input.target && input.to !== env.c.coordinator.id) throw new UsageError(error);
+}
 var init_handoff = __esm({
   "src/lanes/reap/handoff.ts"() {
     init_backend();
@@ -1241,12 +1324,12 @@ var init_handoff = __esm({
 
 // src/lanes/commands/handoff.ts
 import { join as join14, relative as relative2 } from "node:path";
-async function handoff(args, opts, c2, root, ctx) {
-  const lane = c2.lanes.find((l2) => l2.id === args[0] && !l2.retired);
-  if (args.length !== 1 || !lane) throw new UsageError("handoff requires an active lane ID");
+async function handoff(args, opts, env) {
+  const { c: c2, root, ctx } = env;
+  const lane = activeLane(args, c2);
   const minutes = c2.idle?.minutes ?? 90;
   if (opts.accept) {
-    if (!opts.from || opts.to) throw new UsageError("handoff --accept requires --from ID and no --to");
+    validateAcceptance(opts);
     await accept({ c: c2, lane, root, ctx, minutes }, opts.from);
     ctx.out(`accepted handoff ${lane.id} by ${opts.from}`);
     return 0;
@@ -1254,9 +1337,22 @@ async function handoff(args, opts, c2, root, ctx) {
   if (opts.from) throw new UsageError("--from requires --accept");
   const s = await collect({ c: c2, lane, root, ctx, minutes });
   const pack = await prepare({ c: c2, lane, root, ctx, minutes }, handoffRecipient(lane, c2, opts.to), s);
-  atomicJson(join14(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), rows: [{ id: lane.id, verdict: "handoff", pack: relative2(root, packPath({ root, lane })), signals: s }] });
+  atomicJson(join14(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), rows: [{
+    id: lane.id,
+    verdict: "handoff",
+    pack: relative2(root, packPath({ root, lane })),
+    signals: s
+  }] });
   ctx.out(`handoff ${pack.id}: ${packPath({ root, lane })}`);
   return 0;
+}
+function activeLane(args, c2) {
+  const lane = c2.lanes.find((l2) => l2.id === args[0] && !l2.retired);
+  if (args.length !== 1 || !lane) throw new UsageError("handoff requires an active lane ID");
+  return lane;
+}
+function validateAcceptance(opts) {
+  if (!opts.from || opts.to) throw new UsageError("handoff --accept requires --from ID and no --to");
 }
 var init_handoff2 = __esm({
   "src/lanes/commands/handoff.ts"() {
@@ -1498,9 +1594,7 @@ function validateArgs(args, opts, c2) {
   if (args.length > 1) throw new UsageError("reap accepts one active lane ID");
   validateId(args[0], c2);
   if (opts.apply && opts["dry-run"]) throw new UsageError("choose --apply or --dry-run");
-  const minutes = Number(opts.minutes ?? c2.idle?.minutes ?? 90);
-  if (!Number.isFinite(minutes) || minutes < 1) throw new UsageError("--minutes must be positive");
-  return minutes;
+  return idleMinutes(opts, c2);
 }
 async function applyRow(row, env, opts) {
   const { lane, c: c2, root, ctx } = env;
@@ -1538,9 +1632,12 @@ function display(rows, json, ctx) {
     return;
   }
   ctx.out("LANE	VERDICT	REASON");
-  for (const row of rows) ctx.out(`${row.id}	${row.verdict}${row.ground ? ` (${row.ground})` : ""}	${row.reason}`);
+  for (const row of rows) {
+    ctx.out(`${row.id}	${row.verdict}${row.ground ? ` (${row.ground})` : ""}	${row.reason}`);
+  }
 }
-async function reap(args, opts, c2, root, ctx) {
+async function reap(args, opts, env) {
+  const { c: c2, root, ctx } = env;
   const minutes = validateArgs(args, opts, c2);
   const rows = [];
   const active = c2.lanes.filter((l2) => !l2.retired).filter((l2) => !args[0] || l2.id === args[0]);
@@ -1552,6 +1649,11 @@ async function reap(args, opts, c2, root, ctx) {
 function validateId(id, c2) {
   if (!id) return;
   if (!c2.lanes.some((l2) => l2.id === id && !l2.retired)) throw new UsageError("reap accepts one active lane ID");
+}
+function idleMinutes(opts, c2) {
+  const minutes = Number(opts.minutes ?? c2.idle?.minutes ?? 90);
+  if (!Number.isFinite(minutes) || minutes < 1) throw new UsageError("--minutes must be positive");
+  return minutes;
 }
 var init_reap = __esm({
   "src/lanes/commands/reap.ts"() {
@@ -1568,27 +1670,40 @@ var init_reap = __esm({
 // src/lanes/commands/snooze.ts
 import { mkdirSync as mkdirSync5, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
 import { join as join18 } from "node:path";
-async function snooze2(args, opts, c2, root, ctx) {
+async function snooze2(args, opts, env) {
+  const { c: c2, root, ctx } = env;
   const lane = c2.lanes.find((l2) => l2.id === args[0] && !l2.retired);
-  if (args.length !== 1 || !lane || Boolean(opts.clear) === Boolean(opts.until)) throw new UsageError("snooze requires ID and --until ISO|+90m or --clear");
+  if (invalidRequest(args, lane, opts)) throw new UsageError("snooze requires ID and --until ISO|+90m or --clear");
   const dir = join18(root, ".state/snooze");
   const path2 = join18(dir, lane.id);
   if (opts.clear) {
-    try {
-      unlinkSync2(path2);
-    } catch (e) {
-      if (e.code !== "ENOENT") throw e;
-    }
+    clear(path2);
     ctx.out(`snooze cleared ${lane.id}`);
     return 0;
   }
-  const relative7 = /^\+(\d+)m$/.exec(opts.until);
-  const date = relative7 ? ctx.now().getTime() + Number(relative7[1]) * 6e4 : Date.parse(opts.until);
-  if (!Number.isFinite(date) || date <= ctx.now().getTime()) throw new UsageError("--until must be a future ISO timestamp or +90m");
+  const date = until(opts.until, ctx);
+  if (!Number.isFinite(date) || date <= ctx.now().getTime()) {
+    throw new UsageError("--until must be a future ISO timestamp or +90m");
+  }
   mkdirSync5(dir, { recursive: true });
   writeFileSync5(path2, new Date(date).toISOString() + "\n");
   ctx.out(`snoozed ${lane.id} until ${new Date(date).toISOString()}`);
   return 0;
+}
+function invalidRequest(args, lane, opts) {
+  if (args.length !== 1 || !lane) return true;
+  return Boolean(opts.clear) === Boolean(opts.until);
+}
+function until(value, ctx) {
+  const relative7 = /^\+(\d+)m$/.exec(value);
+  return relative7 ? ctx.now().getTime() + Number(relative7[1]) * 6e4 : Date.parse(value);
+}
+function clear(path2) {
+  try {
+    unlinkSync2(path2);
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
 }
 var init_snooze = __esm({
   "src/lanes/commands/snooze.ts"() {
@@ -1727,87 +1842,203 @@ var init_preapprove = __esm({
 import { existsSync as existsSync8, mkdirSync as mkdirSync7, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname6, join as join22, resolve as resolve6 } from "node:path";
 async function add(id, opts, c2, root, ctx) {
-  if (!validId(id) || ["ALL", c2.messages.broadcast, c2.coordinator.id].includes(id)) throw new UsageError("invalid lane id");
-  if (c2.lanes.some((l2) => l2.id === id)) throw new Error(`lane ${id} already exists`);
-  const repo = opts.repo;
-  if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || repo.split("/").some((s) => [".", ".."].includes(s))) throw new UsageError("invalid repo (expected owner/name)");
-  if (opts.issue !== void 0 && (!/^\d+$/.test(opts.issue) || Number(opts.issue) < 1)) throw new UsageError("invalid issue");
-  if (opts.goal !== void 0 && !opts.goal.trim()) throw new UsageError("invalid goal");
-  const [owner, name] = repo.split("/");
-  const lower = id.toLowerCase();
-  const worktree = `${lower}-${name.toLowerCase()}`;
-  const branch = opts.branch || (opts.issue ? `${lower}-issue-${Number(opts.issue)}` : opts.goal ? `${lower}-${slug(opts.goal)}` : worktree);
-  const lane = { id, repo, ...opts.issue ? { issue: Number(opts.issue) } : {}, ...opts.goal ? { goal: opts.goal } : {}, group: opts.group || null, worktree, branch, prompt: `prompts/${id}.md` };
+  validateInput(id, opts, c2);
+  const lane = newLane(id, opts);
   validate({ ...c2, lanes: [...c2.lanes, lane] });
-  const siblings = c2.lanes.filter((l2) => !l2.retired && l2.repo === repo);
-  let orchestrator = siblings.find((l2) => l2.role === "repo-orch");
-  let candidate;
-  if (opts["orchestrator"] && opts["no-orchestrator"]) throw new UsageError("choose --orchestrator or --no-orchestrator");
-  if (opts.orchestrator) {
-    orchestrator = siblings.find((l2) => l2.id === opts.orchestrator);
-    if (!orchestrator) throw new UsageError("--orchestrator must name an existing lane in the repository");
-    if (siblings.some((l2) => l2.role === "repo-orch" && l2.id !== orchestrator.id)) throw new UsageError("repository already has a repo-orch");
-  } else if (!orchestrator && siblings.length && !opts["no-orchestrator"]) {
-    const orchId = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
-    if (!validId(orchId) || [id, c2.coordinator.id, "ALL", c2.messages.broadcast, ...c2.lanes.map((l2) => l2.id)].includes(orchId)) throw new Error("repo-orch ID collision or invalid ID; choose --orchestrator-id");
-    const lower2 = orchId.toLowerCase();
-    candidate = { id: orchId, repo, group: null, role: "repo-orch", parent: c2.coordinator.id, worktree: lower2, branch: `${lower2}-candidate`, prompt: `prompts/${orchId}.md` };
-    orchestrator = candidate;
-  }
+  const orchestration2 = planOrchestration(lane, opts, c2);
+  const { orchestrator, candidate, siblings } = orchestration2;
   if (orchestrator) lane.parent = orchestrator.id;
-  const code = await createWorktree(lane, opts, c2, root, ctx);
+  const env = { c: c2, root, ctx };
+  const code = await createWorktree(lane, opts, env);
   if (code !== 0) return code;
-  if (candidate && await createWorktree(candidate, opts, c2, root, ctx) !== 0) return 1;
-  if (orchestrator) {
-    orchestrator.role = "repo-orch";
-    orchestrator.parent = c2.coordinator.id;
-    for (const sibling of c2.lanes.filter((l2) => !l2.retired && l2.repo === repo && l2.id !== orchestrator.id)) sibling.parent = orchestrator.id;
-    saveConfig(root, c2);
-    for (const sibling of siblings.filter((l2) => l2.id !== orchestrator.id)) await backendFor(c2, ctx, root).send({ from: c2.coordinator.id, to: sibling.id, topic: "repo-orch-assigned", body: `Report to ${orchestrator.id} from now on.` });
-    ctx.out(`next: lanes start ${orchestrator.id}`);
-  } else if (siblings.length) ctx.err(`warning: ${siblings.length + 1} lanes, no repo-orch`);
+  if (candidate && await createWorktree(candidate, opts, env) !== 0) return 1;
+  if (orchestrator) await assignOrchestrator(orchestration2, env);
+  else if (siblings.length) ctx.err(`warning: ${siblings.length + 1} lanes, no repo-orch`);
   saveConfig(root, c2);
   ctx.out(`next: lanes start ${id}`);
   return 0;
 }
-async function createWorktree(lane, opts, c2, root, ctx) {
-  const { id, repo, worktree, branch } = lane;
-  const [owner, name] = repo.split("/");
-  const repos = expand(c2.reposRoot, c2, root, ctx.home);
-  const candidates = [opts.path ? resolve6(ctx.cwd, opts.path) : void 0, c2.repos[repo] ? expand(c2.repos[repo], c2, root, ctx.home) : void 0, join22(repos, name), join22(repos, owner, name)].filter((p) => Boolean(p));
-  const git2 = (clone2, args, timeoutMs = 1e4) => ctx.run("git", ["-C", clone2, ...args], { timeoutMs });
-  let clone;
-  for (const p of candidates) if ((await git2(p, ["rev-parse", "--git-dir"])).code === 0) {
-    clone = p;
-    break;
+function validateInput(id, opts, c2) {
+  if (!validId(id) || ["ALL", c2.messages.broadcast, c2.coordinator.id].includes(id)) {
+    throw new UsageError("invalid lane id");
   }
-  if (!clone) throw new Error(`clone it first: gh repo clone ${repo} ${join22(repos, name)}`);
+  if (c2.lanes.some((l2) => l2.id === id)) throw new Error(`lane ${id} already exists`);
+  validateRepo(opts.repo);
+  validateIssueAndGoal(opts);
+}
+function validateRepo(repo) {
+  if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new UsageError("invalid repo (expected owner/name)");
+  }
+  if (repo.split("/").some((s) => [".", ".."].includes(s))) {
+    throw new UsageError("invalid repo (expected owner/name)");
+  }
+}
+function validateIssueAndGoal(opts) {
+  if (invalidIssue(opts.issue)) {
+    throw new UsageError("invalid issue");
+  }
+  if (opts.goal !== void 0 && !opts.goal.trim()) throw new UsageError("invalid goal");
+}
+function newLane(id, opts) {
+  const repo = opts.repo;
+  const name = repo.split("/")[1];
+  const lower = id.toLowerCase();
+  const worktree = `${lower}-${name.toLowerCase()}`;
+  const branch = opts.branch || defaultBranch(lower, worktree, opts);
+  return {
+    id,
+    repo,
+    ...opts.issue ? { issue: Number(opts.issue) } : {},
+    ...opts.goal ? { goal: opts.goal } : {},
+    group: opts.group || null,
+    worktree,
+    branch,
+    prompt: `prompts/${id}.md`
+  };
+}
+function defaultBranch(lower, worktree, opts) {
+  if (opts.issue) return `${lower}-issue-${Number(opts.issue)}`;
+  return opts.goal ? `${lower}-${slug(opts.goal)}` : worktree;
+}
+function planOrchestration(lane, opts, c2) {
+  const siblings = c2.lanes.filter((l2) => !l2.retired && l2.repo === lane.repo);
+  const current = siblings.find((l2) => l2.role === "repo-orch");
+  if (opts.orchestrator && opts["no-orchestrator"]) {
+    throw new UsageError("choose --orchestrator or --no-orchestrator");
+  }
+  if (opts.orchestrator) return { siblings, orchestrator: promotedOrchestrator(siblings, opts.orchestrator) };
+  if (!needsOrchestrator({ current, siblings }, opts)) return { siblings, orchestrator: current };
+  const candidate = newOrchestrator(lane, opts, c2);
+  return { siblings, orchestrator: candidate, candidate };
+}
+function promotedOrchestrator(siblings, id) {
+  const orchestrator = siblings.find((l2) => l2.id === id);
+  if (!orchestrator) throw new UsageError("--orchestrator must name an existing lane in the repository");
+  if (siblings.some((l2) => l2.role === "repo-orch" && l2.id !== orchestrator.id)) {
+    throw new UsageError("repository already has a repo-orch");
+  }
+  return orchestrator;
+}
+function newOrchestrator(lane, opts, c2) {
+  const name = lane.repo.split("/")[1];
+  const id = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
+  const reserved = [lane.id, c2.coordinator.id, "ALL", c2.messages.broadcast, ...c2.lanes.map((l2) => l2.id)];
+  if (!validId(id) || reserved.includes(id)) {
+    throw new Error("repo-orch ID collision or invalid ID; choose --orchestrator-id");
+  }
+  const lower = id.toLowerCase();
+  return {
+    id,
+    repo: lane.repo,
+    group: null,
+    role: "repo-orch",
+    parent: c2.coordinator.id,
+    worktree: lower,
+    branch: `${lower}-candidate`,
+    prompt: `prompts/${id}.md`
+  };
+}
+async function assignOrchestrator(plan, { c: c2, root, ctx }) {
+  const orchestrator = plan.orchestrator;
+  orchestrator.role = "repo-orch";
+  orchestrator.parent = c2.coordinator.id;
+  const active = c2.lanes.filter((l2) => !l2.retired && l2.repo === orchestrator.repo);
+  for (const sibling of active.filter((l2) => l2.id !== orchestrator.id)) sibling.parent = orchestrator.id;
+  saveConfig(root, c2);
+  for (const sibling of plan.siblings.filter((l2) => l2.id !== orchestrator.id)) {
+    await backendFor(c2, ctx, root).send({
+      from: c2.coordinator.id,
+      to: sibling.id,
+      topic: "repo-orch-assigned",
+      body: `Report to ${orchestrator.id} from now on.`
+    });
+  }
+  ctx.out(`next: lanes start ${orchestrator.id}`);
+}
+async function createWorktree(lane, opts, env) {
+  const { c: c2, root, ctx } = env;
+  const git2 = (clone2, args, timeoutMs = 1e4) => ctx.run("git", ["-C", clone2, ...args], { timeoutMs });
+  const clone = await findClone(lane, opts, env, git2);
+  const base = await prepareBase({ clone, lane, opts, env }, git2);
+  const wt = join22(expand(c2.worktreesDir, c2, root, ctx.home), lane.worktree);
+  await addWorktree({ clone, lane, wt, base }, git2);
+  try {
+    const lock = await git2(clone, ["worktree", "lock", "--reason", `lanes ${lane.id}`, wt]);
+    if (lock.code !== 0) throw new Error(`git worktree lock failed: ${lock.stderr.trim()}`);
+    writePrompt({ lane, wt, base }, env);
+    c2.lanes.push(lane);
+    await preapprove(ctx, wt, c2.launch.preapproveMcp);
+  } catch (e) {
+    ctx.err(e.message);
+    ctx.err(`undo: git -C ${shellQuote(clone)} worktree unlock ${shellQuote(wt)} && git -C ${shellQuote(clone)} worktree remove ${shellQuote(wt)} && git -C ${shellQuote(clone)} branch -D ${shellQuote(lane.branch)}`);
+    return 1;
+  }
+  return 0;
+}
+async function findClone(lane, opts, { c: c2, root, ctx }, git2) {
+  const [owner, name] = lane.repo.split("/");
+  const repos = expand(c2.reposRoot, c2, root, ctx.home);
+  const candidates = [
+    opts.path ? resolve6(ctx.cwd, opts.path) : void 0,
+    c2.repos[lane.repo] ? expand(c2.repos[lane.repo], c2, root, ctx.home) : void 0,
+    join22(repos, name),
+    join22(repos, owner, name)
+  ].filter((p) => Boolean(p));
+  for (const path2 of candidates) if ((await git2(path2, ["rev-parse", "--git-dir"])).code === 0) return path2;
+  throw new Error(`clone it first: gh repo clone ${lane.repo} ${join22(repos, name)}`);
+}
+async function prepareBase(input, git2) {
+  const { clone, lane, opts, env: { c: c2, ctx } } = input;
   const remote = await git2(clone, ["remote", "get-url", "origin"]);
-  if (!remote.stdout.trim().endsWith(repo) && !remote.stdout.trim().endsWith(`${repo}.git`)) ctx.err(`warning: origin does not match ${repo}`);
+  if (!remote.stdout.trim().endsWith(lane.repo) && !remote.stdout.trim().endsWith(`${lane.repo}.git`)) {
+    ctx.err(`warning: origin does not match ${lane.repo}`);
+  }
   const base = opts.base || c2.baseBranch;
   const fetch = await git2(clone, ["fetch", "origin"], 12e4);
   const ref = await git2(clone, ["rev-parse", "--verify", `${base}^{commit}`]);
   if (ref.code !== 0) throw new Error(`base ${base} does not resolve`);
   if (fetch.code !== 0) ctx.err(`warning: fetch origin failed; using local ${base}`);
-  const wt = join22(expand(c2.worktreesDir, c2, root, ctx.home), worktree);
+  return base;
+}
+async function addWorktree(input, git2) {
+  const { clone, lane, wt, base } = input;
   if (existsSync8(wt)) throw new Error(`worktree already exists: ${wt}`);
-  if ((await git2(clone, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).code === 0) throw new Error(`branch already exists: ${branch}`);
-  const created = await git2(clone, ["worktree", "add", "-b", branch, wt, base], 12e4);
-  if (created.code !== 0) throw new Error(`git worktree add failed: ${created.stderr.trim()}`);
-  try {
-    const lock = await git2(clone, ["worktree", "lock", "--reason", `lanes ${id}`, wt]);
-    if (lock.code !== 0) throw new Error(`git worktree lock failed: ${lock.stderr.trim()}`);
-    const prompt = expand(lane.prompt, c2, root, ctx.home);
-    mkdirSync7(dirname6(prompt), { recursive: true });
-    writeFileSync7(prompt, renderTemplate(readTemplate(ctx, lane.role === "repo-orch" ? "repo-orchestrator.md" : "lane.md"), { ...templateVars(c2, ctx, root), id, repo, parent: effectiveParent(lane, c2), parent_sh: shellQuote(effectiveParent(lane, c2)), lanes: c2.lanes.filter((l2) => l2.repo === repo).map((l2) => l2.id).join(", "), issue: lane.issue ?? "none", goal: lane.goal || "none", group: lane.group || "none", worktree: wt, branch, base }), { flag: "wx" });
-    c2.lanes.push(lane);
-    await preapprove(ctx, wt, c2.launch.preapproveMcp);
-  } catch (e) {
-    ctx.err(e.message);
-    ctx.err(`undo: git -C ${shellQuote(clone)} worktree unlock ${shellQuote(wt)} && git -C ${shellQuote(clone)} worktree remove ${shellQuote(wt)} && git -C ${shellQuote(clone)} branch -D ${shellQuote(branch)}`);
-    return 1;
+  if ((await git2(clone, ["show-ref", "--verify", "--quiet", `refs/heads/${lane.branch}`])).code === 0) {
+    throw new Error(`branch already exists: ${lane.branch}`);
   }
-  return 0;
+  const created = await git2(clone, ["worktree", "add", "-b", lane.branch, wt, base], 12e4);
+  if (created.code !== 0) throw new Error(`git worktree add failed: ${created.stderr.trim()}`);
+}
+function writePrompt(input, { c: c2, root, ctx }) {
+  const { lane, wt, base } = input;
+  const { id, repo, branch } = lane;
+  const prompt = expand(lane.prompt, c2, root, ctx.home);
+  mkdirSync7(dirname6(prompt), { recursive: true });
+  const template = readTemplate(ctx, lane.role === "repo-orch" ? "repo-orchestrator.md" : "lane.md");
+  const vars = {
+    ...templateVars(c2, ctx, root),
+    id,
+    repo,
+    parent: effectiveParent(lane, c2),
+    parent_sh: shellQuote(effectiveParent(lane, c2)),
+    lanes: c2.lanes.filter((l2) => l2.repo === repo).map((l2) => l2.id).join(", "),
+    issue: lane.issue ?? "none",
+    goal: lane.goal || "none",
+    group: lane.group || "none",
+    worktree: wt,
+    branch,
+    base
+  };
+  writeFileSync7(prompt, renderTemplate(template, vars), { flag: "wx" });
+}
+function invalidIssue(issue) {
+  if (issue === void 0) return false;
+  return !/^\d+$/.test(issue) || Number(issue) < 1;
+}
+function needsOrchestrator(plan, opts) {
+  if (plan.current || !plan.siblings.length) return false;
+  return !opts["no-orchestrator"];
 }
 var init_add = __esm({
   "src/lanes/commands/add.ts"() {
@@ -1899,7 +2130,7 @@ function laneTarget(id, c2, root, ctx) {
   const cwd = coordinator ? expand(c2.coordinator.cwd, c2, root, ctx.home) : join23(expand(c2.worktreesDir, c2, root, ctx.home), lane.worktree);
   return { id: coordinator ? c2.coordinator.id : id, cwd, coordinator, lane };
 }
-function idleMinutes(cwd, ctx) {
+function idleMinutes2(cwd, ctx) {
   try {
     const dir = sessionDirFor(cwd, ctx.piAgentDir);
     const times = readdirSync7(dir).map((n3) => statSync5(join23(dir, n3))).filter((s) => s.isFile()).map((s) => s.mtimeMs);
@@ -2097,16 +2328,23 @@ async function send(args, opts, c2, root, ctx) {
   if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
   const body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync11(resolve7(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
   if (!body.trim()) throw new UsageError("empty message body");
-  const sender = c2.lanes.find((l2) => l2.id === from && !l2.retired);
-  if (!opts.direct && to === c2.coordinator.id && sender && sender.role !== "repo-orch") {
-    const parent = effectiveParent(sender, c2);
-    if (parent !== to) {
-      to = parent;
-      ctx.err(`routed to ${parent} (repo orchestrator of ${sender.repo}); --direct to bypass`);
-    }
-  }
+  to = route({ to, from, direct: opts.direct }, c2, ctx);
   ctx.out((await backendFor(c2, ctx, root).send({ from, to, topic, body })).path);
   return 0;
+}
+function route(input, c2, ctx) {
+  const sender = c2.lanes.find((l2) => l2.id === input.from && !l2.retired);
+  if (!routeToParent(input, sender, c2)) return input.to;
+  const parent = effectiveParent(sender, c2);
+  if (parent !== input.to) {
+    ctx.err(`routed to ${parent} (repo orchestrator of ${sender.repo}); --direct to bypass`);
+    return parent;
+  }
+  return input.to;
+}
+function routeToParent(input, sender, c2) {
+  if (input.direct || input.to !== c2.coordinator.id) return false;
+  return Boolean(sender && sender.role !== "repo-orch");
 }
 var init_send = __esm({
   "src/lanes/commands/send.ts"() {
@@ -2126,7 +2364,7 @@ async function idleCheck(opts, c2, root, ctx) {
     const { cwd } = laneTarget(lane.id, c2, root, ctx);
     const pid = await piIn(cwd, ctx);
     if (!pid || (await descendants(ctx, pid)).some((s) => /\bpi-phase run\b/.test(s))) continue;
-    const minutes = idleMinutes(cwd, ctx);
+    const minutes = idleMinutes2(cwd, ctx);
     if (minutes !== void 0 && minutes > Number(opts.minutes ?? c2.idle?.minutes ?? 75)) silent.push(`${lane.id}:${minutes}m`);
   }
   if (!silent.length) return 1;
@@ -2182,10 +2420,10 @@ import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync a
 import { join as join25 } from "node:path";
 function parseWatches(text3) {
   return text3.split(/\r?\n/).flatMap((line) => {
-    const [tag, label, until, interval, ...check3] = line.split("|");
+    const [tag, label, until2, interval, ...check3] = line.split("|");
     if (tag !== "WATCH") return [];
-    if (!label || !until || !/^\d+$/.test(interval) || Number(interval) <= 0 || !check3.join("|")) throw new Error("invalid WATCH line");
-    return [{ label, until, interval: Number(interval), check: check3.join("|") }];
+    if (!label || !until2 || !/^\d+$/.test(interval) || Number(interval) <= 0 || !check3.join("|")) throw new Error("invalid WATCH line");
+    return [{ label, until: until2, interval: Number(interval), check: check3.join("|") }];
   });
 }
 function chunk(path2, length, position) {
@@ -2373,7 +2611,7 @@ async function quit(id, pid, cwd, c2, root, ctx) {
     ctx.err(`REFUSED: busy children: ${busy.join(" ")}`);
     return false;
   }
-  const age = idleMinutes(cwd, ctx);
+  const age = idleMinutes2(cwd, ctx);
   if (age !== void 0 && age < 3) {
     ctx.err("REFUSED: session wrote less than 180s ago");
     return false;
@@ -2431,26 +2669,71 @@ async function status(c2, root, ctx, all = false) {
   const backend = backendFor(c2, ctx, root);
   const processes = await runningPi(ctx);
   const rows = [["LANE", "ROLE", "PARENT", "REPO", "BRANCH", "RUN", "IDLE", "STATUS", "LAST MESSAGE"]];
-  const lanes = [{ id: c2.coordinator.id, repo: "-", branch: "-", group: null, role: "coord", parent: "-", label: c2.coordinator.id, cwd: expand(c2.coordinator.cwd, c2, root, ctx.home) }, ...laneTree(c2, all).map(({ lane: l2, depth }) => ({ ...l2, role: l2.role || "lane", parent: effectiveParent(l2, c2), label: "  ".repeat(depth) + l2.id, cwd: join28(expand(c2.worktreesDir, c2, root, ctx.home), l2.worktree) }))];
-  for (const lane of lanes) {
-    let pid = "missing";
-    if (existsSync12(lane.cwd)) {
-      try {
-        pid = String(processes.find((p) => p.cwd === ctx.realpath(lane.cwd))?.pid || "-");
-      } catch {
-      }
-    }
-    const messages2 = [...await backend.inbox(lane.id, { groups: lane.group ? [lane.group] : [] }), ...await backend.list({ from: lane.id, limit: 1 })].sort((a2, b) => b.at.getTime() - a2.at.getTime());
-    const last = messages2[0];
-    rows.push([lane.label, lane.role, lane.parent, lane.repo, lane.branch, pid, String(idleMinutes(lane.cwd, ctx) ?? "-"), await backend.status(lane.id) || "-", last ? `${last.name} (${Math.max(0, Math.floor((ctx.now().getTime() - last.at.getTime()) / 6e4))}m)` : "-"]);
+  for (const lane of statusLanes({ c: c2, root, ctx }, all)) {
+    const pid = findPid(lane.cwd, processes, ctx);
+    const messages2 = [
+      ...await backend.inbox(lane.id, { groups: lane.group ? [lane.group] : [] }),
+      ...await backend.list({ from: lane.id, limit: 1 })
+    ].sort((a2, b) => b.at.getTime() - a2.at.getTime());
+    rows.push([
+      lane.label,
+      lane.role,
+      lane.parent,
+      lane.repo,
+      lane.branch,
+      pid,
+      String(idleMinutes2(lane.cwd, ctx) ?? "-"),
+      await backend.status(lane.id) || "-",
+      lastMessage(messages2[0], ctx)
+    ]);
   }
-  for (const repo of new Set(c2.lanes.filter((l2) => !l2.retired).map((l2) => l2.repo))) {
-    const lanes2 = c2.lanes.filter((l2) => !l2.retired && l2.repo === repo);
-    if (lanes2.length > 1 && !lanes2.some((l2) => l2.role === "repo-orch")) ctx.err(`warning: ${repo}: ${lanes2.length} lanes, no repo-orch`);
-  }
+  warnMissingOrchestrators(c2, ctx);
   const widths = rows[0].map((_, i2) => Math.max(...rows.map((r2) => r2[i2].length)));
   ctx.out(rows.map((r2) => r2.map((s, i2) => i2 === r2.length - 1 ? s : s.padEnd(widths[i2])).join("  ")).join("\n"));
   return 0;
+}
+function statusLanes(env, all) {
+  const { c: c2, root, ctx } = env;
+  return [
+    {
+      id: c2.coordinator.id,
+      repo: "-",
+      branch: "-",
+      group: null,
+      role: "coord",
+      parent: "-",
+      label: c2.coordinator.id,
+      cwd: expand(c2.coordinator.cwd, c2, root, ctx.home)
+    },
+    ...laneTree(c2, all).map(({ lane, depth }) => ({
+      ...lane,
+      role: lane.role || "lane",
+      parent: effectiveParent(lane, c2),
+      label: "  ".repeat(depth) + lane.id,
+      cwd: join28(expand(c2.worktreesDir, c2, root, ctx.home), lane.worktree)
+    }))
+  ];
+}
+function findPid(cwd, processes, ctx) {
+  let pid = "missing";
+  if (existsSync12(cwd)) {
+    try {
+      pid = String(processes.find((p) => p.cwd === ctx.realpath(cwd))?.pid || "-");
+    } catch {
+    }
+  }
+  return pid;
+}
+function lastMessage(last, ctx) {
+  return last ? `${last.name} (${Math.max(0, Math.floor((ctx.now().getTime() - last.at.getTime()) / 6e4))}m)` : "-";
+}
+function warnMissingOrchestrators(c2, ctx) {
+  for (const repo of new Set(c2.lanes.filter((l2) => !l2.retired).map((l2) => l2.repo))) {
+    const lanes = c2.lanes.filter((l2) => !l2.retired && l2.repo === repo);
+    if (lanes.length > 1 && !lanes.some((l2) => l2.role === "repo-orch")) {
+      ctx.err(`warning: ${repo}: ${lanes.length} lanes, no repo-orch`);
+    }
+  }
 }
 var init_status = __esm({
   "src/lanes/commands/status.ts"() {
@@ -2462,6 +2745,102 @@ var init_status = __esm({
 });
 
 // src/lanes/main.ts
+function parseOption(argv, i2, opts) {
+  const token = argv[i2];
+  const { equals, key } = optionName({ argv, index: i2 });
+  if (FLAGS.includes(key)) {
+    if (equals >= 0) throw new UsageError(`unknown option ${token}`);
+    opts[key] = "true";
+    return i2;
+  }
+  if (equals < 0) requireValue({ argv, index: i2 });
+  if (Object.hasOwn(opts, key)) throw new UsageError(`duplicate option ${token}`);
+  opts[key] = equals < 0 ? argv[++i2] : token.slice(equals + 1);
+  return i2;
+}
+function requireValue({ argv, index }) {
+  const value = argv[index + 1];
+  if (value === void 0 || value.startsWith("--")) throw new UsageError(`missing value for ${argv[index]}`);
+}
+function parse(argv) {
+  const positional = [];
+  const opts = {};
+  for (let i2 = 0; i2 < argv.length; i2++) {
+    const token = argv[i2];
+    if (token === "--") {
+      positional.push(...argv.slice(i2 + 1));
+      break;
+    }
+    if (token.startsWith("--") || token === "-m") i2 = parseOption(argv, i2, opts);
+    else appendPositional({ argv, index: i2 }, positional);
+  }
+  return { positional, opts };
+}
+function validateInvocation({ command, positional, opts }) {
+  if (!Object.hasOwn(OPTIONS, command)) throw new UsageError(HELP);
+  validateOptions({ command, opts });
+  const bounds = {
+    init: [0, 1],
+    add: [1, 1],
+    start: [1, 1],
+    send: [2, 3],
+    status: [0, 0],
+    messages: [1, 1],
+    "idle-check": [0, 0],
+    nudge: [2, 2],
+    "resume-check": [0, 0],
+    "green-prs": [0, 0],
+    handoff: [1, 1],
+    reap: [0, 1],
+    snooze: [1, 1],
+    close: [opts.inactive ? 0 : 1, 1]
+  };
+  validateBounds(positional, bounds[command]);
+  if (command === "messages" && positional[0] !== "prune") throw new UsageError(HELP);
+  validateMinutes(opts.minutes);
+}
+function validateMinutes(minutes) {
+  if (minutes === void 0) return;
+  if (invalidMinutes(minutes)) {
+    throw new UsageError("--minutes must be a positive integer");
+  }
+}
+async function dispatch(input, env) {
+  const { command, positional: args, opts } = input;
+  const { c: c2, root, ctx } = env;
+  const handlers = {
+    add: () => add(args[0], opts, c2, root, ctx),
+    start: () => start(args[0], opts, c2, root, ctx),
+    messages: () => messagesPrune(opts, c2, root, ctx),
+    send: () => send(args, opts, c2, root, ctx),
+    "idle-check": () => idleCheck(opts, c2, root, ctx),
+    nudge: () => nudge(args[0], args[1], opts, c2, root, ctx),
+    "resume-check": () => resumeCheck(c2, root, ctx),
+    "green-prs": () => greenPrs(opts, c2, root, ctx),
+    handoff: () => handoff(args, opts, env),
+    snooze: () => snooze2(args, opts, env),
+    reap: () => reap(args, opts, env),
+    close: () => closeCommand(input, env),
+    status: () => status(c2, root, ctx, Boolean(opts.all))
+  };
+  return await handlers[command]();
+}
+function closeCommand({ positional, opts }, env) {
+  if (opts.inactive) return reap(positional, opts, env);
+  return close(positional[0], opts, env.c, env.root, env.ctx);
+}
+function errorCode({ e, command }) {
+  return e instanceof UsageError || [
+    "idle-check",
+    "nudge",
+    "resume-check",
+    "green-prs",
+    "close",
+    "reap",
+    "snooze",
+    "handoff"
+  ].includes(command) ? 2 : 1;
+}
 async function main(argv, ctx) {
   let command = "";
   try {
@@ -2469,57 +2848,43 @@ async function main(argv, ctx) {
       ctx.out(HELP);
       return 0;
     }
-    const positional = [];
-    const opts = {};
-    for (let i2 = 0; i2 < argv.length; i2++) {
-      const token = argv[i2];
-      if (token === "--") {
-        positional.push(...argv.slice(i2 + 1));
-        break;
-      }
-      if (token.startsWith("--") || token === "-m") {
-        const equals = token.startsWith("--") ? token.indexOf("=") : -1;
-        const key = token === "-m" ? "m" : token.slice(2, equals < 0 ? void 0 : equals);
-        if (["preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all", "no-orchestrator", "inactive", "clear", "apply", "accept"].includes(key)) {
-          if (equals >= 0) throw new UsageError(`unknown option ${token}`);
-          opts[key] = "true";
-          continue;
-        }
-        if (equals < 0 && (argv[i2 + 1] === void 0 || argv[i2 + 1].startsWith("--"))) throw new UsageError(`missing value for ${token}`);
-        if (Object.hasOwn(opts, key)) throw new UsageError(`duplicate option ${token}`);
-        opts[key] = equals < 0 ? argv[++i2] : token.slice(equals + 1);
-      } else if (token.startsWith("-") && token !== "-") throw new UsageError(`unknown option ${token}`);
-      else positional.push(token);
-    }
+    const { positional, opts } = parse(argv);
     command = positional.shift() || "";
-    if (!Object.hasOwn(OPTIONS, command)) throw new UsageError(HELP);
-    for (const key of Object.keys(opts)) if (key !== "dir" && !OPTIONS[command].includes(key)) throw new UsageError(`unknown option --${key}`);
-    const bounds = { init: [0, 1], add: [1, 1], start: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1], "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], handoff: [1, 1], reap: [0, 1], snooze: [1, 1], close: [opts.inactive ? 0 : 1, 1] };
-    if (positional.length < bounds[command][0] || positional.length > bounds[command][1]) throw new UsageError(HELP);
-    if (command === "messages" && positional[0] !== "prune") throw new UsageError(HELP);
-    if (opts.minutes !== void 0 && (!/^\d+$/.test(opts.minutes) || !Number.isSafeInteger(Number(opts.minutes)) || Number(opts.minutes) <= 0)) throw new UsageError("--minutes must be a positive integer");
+    const input = { command, positional, opts };
+    validateInvocation(input);
     if (command === "init") return await init(positional, opts, ctx);
     const root = findRoot(opts.dir, ctx.env, ctx.cwd);
     const c2 = loadConfig(root);
-    if (command === "add") return await add(positional[0], opts, c2, root, ctx);
-    if (command === "start") return await start(positional[0], opts, c2, root, ctx);
-    if (command === "messages") return messagesPrune(opts, c2, root, ctx);
-    if (command === "send") return await send(positional, opts, c2, root, ctx);
-    if (command === "idle-check") return await idleCheck(opts, c2, root, ctx);
-    if (command === "nudge") return await nudge(positional[0], positional[1], opts, c2, root, ctx);
-    if (command === "resume-check") return await resumeCheck(c2, root, ctx);
-    if (command === "green-prs") return await greenPrs(opts, c2, root, ctx);
-    if (command === "handoff") return await handoff(positional, opts, c2, root, ctx);
-    if (command === "snooze") return await snooze2(positional, opts, c2, root, ctx);
-    if (command === "reap" || command === "close" && opts.inactive) return await reap(positional, opts, c2, root, ctx);
-    if (command === "close") return await close(positional[0], opts, c2, root, ctx);
-    return await status(c2, root, ctx, Boolean(opts.all));
+    return await dispatch(input, { c: c2, root, ctx });
   } catch (e) {
     ctx.err(e.message);
-    return e instanceof UsageError || ["idle-check", "nudge", "resume-check", "green-prs", "close", "reap", "snooze", "handoff"].includes(command) ? 2 : 1;
+    return errorCode({ e, command });
   }
 }
-var HELP, OPTIONS;
+function optionName({ argv, index }) {
+  const token = argv[index];
+  const equals = token.startsWith("--") ? token.indexOf("=") : -1;
+  const key = token === "-m" ? "m" : token.slice(2, equals < 0 ? void 0 : equals);
+  return { equals, key };
+}
+function validateOptions({ command, opts }) {
+  for (const key of Object.keys(opts)) {
+    if (key !== "dir" && !OPTIONS[command].includes(key)) throw new UsageError(`unknown option --${key}`);
+  }
+}
+function invalidMinutes(minutes) {
+  if (!/^\d+$/.test(minutes)) return true;
+  return !Number.isSafeInteger(Number(minutes)) || Number(minutes) <= 0;
+}
+function validateBounds(args, bounds) {
+  if (args.length < bounds[0] || args.length > bounds[1]) throw new UsageError(HELP);
+}
+function appendPositional({ argv, index }, positional) {
+  const token = argv[index];
+  if (token.startsWith("-") && token !== "-") throw new UsageError(`unknown option ${token}`);
+  positional.push(token);
+}
+var HELP, OPTIONS, FLAGS;
 var init_main = __esm({
   "src/lanes/main.ts"() {
     init_handoff2();
@@ -2557,7 +2922,48 @@ Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
-    OPTIONS = { init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"], add: ["repo", "issue", "goal", "group", "branch", "base", "path", "orchestrator", "orchestrator-id", "no-orchestrator"], start: ["terminal"], send: ["m", "from", "direct"], status: ["all"], messages: ["dry-run", "json"], "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"], handoff: ["to", "accept", "from"], reap: ["minutes", "dry-run", "json", "apply", "handoff-to"], snooze: ["until", "clear"], close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"] };
+    OPTIONS = {
+      init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"],
+      add: [
+        "repo",
+        "issue",
+        "goal",
+        "group",
+        "branch",
+        "base",
+        "path",
+        "orchestrator",
+        "orchestrator-id",
+        "no-orchestrator"
+      ],
+      start: ["terminal"],
+      send: ["m", "from", "direct"],
+      status: ["all"],
+      messages: ["dry-run", "json"],
+      "idle-check": ["minutes"],
+      nudge: ["terminal"],
+      "resume-check": [],
+      "green-prs": ["new", "ack"],
+      handoff: ["to", "accept", "from"],
+      reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
+      snooze: ["until", "clear"],
+      close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"]
+    };
+    FLAGS = [
+      "preapprove-mcp",
+      "new",
+      "ack",
+      "quit",
+      "dry-run",
+      "json",
+      "direct",
+      "all",
+      "no-orchestrator",
+      "inactive",
+      "clear",
+      "apply",
+      "accept"
+    ];
   }
 });
 
@@ -5784,12 +6190,12 @@ var require_src = __commonJS({
       lineEnd: `${CSI2}K`,
       lineStart: `${CSI2}1K`,
       lines(count) {
-        let clear = "";
+        let clear2 = "";
         for (let i2 = 0; i2 < count; i2++)
-          clear += this.line + (i2 < count - 1 ? cursor3.up() : "");
+          clear2 += this.line + (i2 < count - 1 ? cursor3.up() : "");
         if (count)
-          clear += cursor3.left;
-        return clear;
+          clear2 += cursor3.left;
+        return clear2;
       }
     };
     module.exports = { cursor: cursor3, scroll, erase: erase3, beep };
