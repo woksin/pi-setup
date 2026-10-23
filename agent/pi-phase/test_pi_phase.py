@@ -519,7 +519,7 @@ class PhaseTests(unittest.TestCase):
         record = records[0]
         self.assertEqual(set(record), {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
-                                      "head", "dirty", "argvHash", "stack", "envHash", "verified", "fingerprint", "fast"})
+                                      "head", "dirty", "argvHash", "stack", "envHash", "verified", "fingerprint", "fast", "policy", "source"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
@@ -979,7 +979,7 @@ class PhaseTests(unittest.TestCase):
     def test_performance_config_defaults_and_auto(self):
         settings = pi_phase.config(self.config)
         self.assertEqual(settings, (2, 1))
-        self.assertEqual(settings.options, dict(msbuild_max_cpu=0, container_test_detection="hint",
+        self.assertEqual(settings.options, dict(policy=[], msbuild_max_cpu=0, container_test_detection="hint",
                                                 cold_worktree_hint=True, memory_admission=False, phase_nice=0,
                                                 rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
                                                 fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"])))
@@ -1008,7 +1008,7 @@ class PhaseTests(unittest.TestCase):
                 note.assert_called_once()
         self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
         self.assertEqual(pi_phase.config(self.config).options,
-                         dict(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0,
+                         dict(policy=[], msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0,
                               rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
                               fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"])))
 
@@ -1730,6 +1730,151 @@ class PhaseTests(unittest.TestCase):
         fd = pi_phase.lock_file(self.state / f"{name}.lock")
         self.addCleanup(os.close, fd)
         return fd
+
+    def policy_options(self, **fields):
+        return dict(pi_phase.config(self.config).options, **fields)
+
+    def policy(self, **fields):
+        return pi_phase.select_policy(self.state, self.fast_args(**fields), self.policy_options(), "fingerprint")
+
+    def test_policy_flag_env_and_alias_precedence(self):
+        with patch.dict(os.environ, PI_PHASE_POLICY="direct"):
+            self.assertEqual(self.policy(), ("direct", "env"))
+            for value in pi_phase.POLICIES:
+                self.assertEqual(self.policy(policy=value), (value, "flag"))
+            self.assertEqual(self.policy(expect_fast=True), ("fast", "flag"))
+            self.assertEqual(self.policy(policy="queued", expect_fast=True), ("queued", "flag"))
+        with patch.dict(os.environ, PI_PHASE_POLICY="unknown"):
+            with self.assertRaisesRegex(ValueError, "PI_PHASE_POLICY must be"):
+                self.policy()
+            self.assertEqual(self.policy(policy="direct"), ("direct", "flag"))
+
+    def test_policy_default_and_history_sources(self):
+        self.assertEqual(self.policy(), ("queued", "default"))
+        self.fast_records([1, 2, 3])
+        self.assertEqual(self.policy(), ("fast", "history"))
+        self.assertEqual(self.policy(policy="queued"), ("queued", "flag"))
+
+    def test_policy_rules_real_cwd_kind_no_history_and_slow_p90(self):
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        rule = dict(path=str(self.root) + "*", kinds=["build", "test"], policy="direct", max_expected_s=90)
+        self.configure(policy=[rule])
+        with patch.object(pi_phase.os, "getcwd", return_value=str(alias)):
+            self.assertEqual(self.policy(), ("fast", "config"))
+            self.fast_records([90])
+            self.assertEqual(self.policy(), ("direct", "config"))
+            self.assertEqual(self.policy(policy="queued"), ("queued", "flag"))
+            self.assertEqual(self.policy(kind="integration"), ("queued", "default"))
+            self.fast_records([91])
+            self.assertEqual(self.policy(), ("queued", "config"))
+        rule["max_expected_s"] = 10
+        self.configure(policy=[rule])
+        with patch.object(pi_phase.os, "getcwd", return_value=str(alias)), \
+                patch.object(pi_phase, "fast_history", return_value=[dict(runS=11)]):
+            self.assertEqual(self.policy(), ("fast", "config"))
+        self.configure(policy=[dict(rule, path="/never/matches/*")])
+        self.assertEqual(self.policy(), ("queued", "default"))
+
+    def test_policy_config_validation(self):
+        self.configure(policy=[None, {}, dict(path="*", kinds=["build"], policy="invalid"),
+                               dict(path="*", kinds=["build"], policy="direct", max_expected_s=True)])
+        with patch.object(pi_phase, "note") as note:
+            self.assertEqual(self.policy_options()["policy"], [])
+            self.assertTrue(note.called)
+        self.configure(policy=False)
+        with patch.object(pi_phase, "note"):
+            self.assertEqual(self.policy_options()["policy"], [])
+
+    def test_policy_direct_integration_and_container_refused_with_note(self):
+        with patch.object(pi_phase, "note") as note:
+            self.assertEqual(self.policy(kind="integration", policy="direct"), ("queued", "flag"))
+            self.assertIn("integration phase", note.call_args.args[0])
+        self.state.mkdir(exist_ok=True)
+        pi_phase.save(self.state / "container-tests.json", {"fingerprint": True})
+        with patch.object(pi_phase, "note") as note:
+            self.assertEqual(self.policy(policy="direct"), ("queued", "flag"))
+            self.assertIn("recorded container test", note.call_args.args[0])
+
+    def test_policy_direct_starts_without_capacity_and_status_ledger_fields(self):
+        self.config.write_text(json.dumps(dict(heavy_slots=1, fast_lane=dict(slots=1))))
+        self.hold_fast_slot("heavy-0")
+        self.hold_fast_slot()
+        job = self.run_phase(extra=("--policy", "direct"), command=self.marker_job("direct", .6))
+        self.wait_for(lambda: bool(list(self.state.glob("direct-*.json"))))
+        code, out = self.done(self.start("status"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("policy=direct source=flag", out)
+        self.assertFalse(list((self.state / "waiters").glob("*.json")))
+        code, out = self.done(job)
+        self.assertEqual(code, 0, out)
+        record = self.ledger_records()[-1]
+        self.assertEqual((record["policy"], record["source"], record["fast"]), ("direct", "flag", False))
+        self.assertFalse(list(self.state.glob("direct-*")))
+
+    def test_policy_queued_forces_capacity_queue_and_records_status(self):
+        self.config.write_text('{"heavy_slots":1}')
+        self.hold_fast_slot("heavy-0")
+        job = self.run_phase(queue=".8", extra=("--policy", "queued", "--expect-fast"))
+        self.wait_for(lambda: bool(list((self.state / "waiters").glob("*.json"))))
+        code, out = self.done(self.start("status"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("policy=queued source=flag", out)
+        self.assertEqual(self.done(job)[0], 75)
+        self.assertEqual(self.ledger_records()[-1]["policy"], "queued")
+
+    def test_policy_fast_flag_uses_fast_lane(self):
+        code, out = self.done(self.run_phase(extra=("--policy", "fast")))
+        self.assertEqual(code, 0, out)
+        self.assertIn("fast lane (budget", out)
+        self.assertEqual(self.ledger_records()[-1]["policy"], "fast")
+
+    def test_policy_direct_memory_admission_nice_shim_and_timeout(self):
+        self.configure(phase_nice=10, msbuild_max_cpu=1, memory_admission=True)
+        self.waiter("active")
+        active = self.admit("active")
+        pi_phase.publish(active, dict(token="active", pid=os.getpid(), kind="build"))
+        with patch.object(pi_phase.MemoryAdmission, "reason", return_value="memory low"), \
+                patch.object(pi_phase, "note"):
+            code = pi_phase.main(["run", "--kind", "build", "--label", "memory", "--policy", "direct",
+                                  "--queue-timeout", ".05", "--", sys.executable, "-c", "pass"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, 75)
+        with patch.object(pi_phase.MemoryAdmission, "reason", return_value=None), patch.object(pi_phase, "note") as note:
+            code = pi_phase.main(["run", "--kind", "build", "--label", "timeout", "--policy", "direct",
+                                  "--timeout", ".1", "--", sys.executable, "-c", "import time;time.sleep(3)"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, 124)
+        messages = [call.args[0] for call in note.call_args_list]
+        self.assertTrue(any("msbuild cap -m:1" in msg for msg in messages))
+        self.assertTrue(any("nice 10" in msg for msg in messages))
+        self.assertFalse(list(self.state.glob("direct-*.json")))
+
+    def test_policy_direct_rss_and_cancellation_cleanup(self):
+        self.configure(rss_cap_mb=100)
+        with patch.object(pi_phase.RunningMemory, "offender", return_value=(1, 200, "producer")), \
+                patch.object(pi_phase, "MEMORY_SAMPLE_INTERVAL", .02), patch.object(pi_phase, "note"):
+            code = pi_phase.main(["run", "--kind", "test", "--label", "rss", "--policy", "direct", "--",
+                                  sys.executable, "-c", "import time;time.sleep(2)"],
+                                 state=self.state, configuration=self.config)
+        self.assertEqual(code, pi_phase.EXIT_RSS_CAP)
+        job = self.run_phase(extra=("--policy", "direct"), command=[sys.executable, "-c", "import time;time.sleep(5)"])
+        self.wait_for(lambda: bool(list(self.state.glob("direct-*.json"))))
+        job.send_signal(signal.SIGTERM)
+        self.assertEqual(self.done(job)[0], 143)
+        self.assertFalse(list(self.state.glob("direct-*")))
+
+    def test_policy_direct_ci_preserves_singleton_and_never_memory_gates(self):
+        options = ("--policy", "direct", "--repo", "org/repo", "--pr", "42", "--commit", "abc123")
+        active = self.run_phase(kind="ci", extra=options, command=self.marker_job("ci-direct", 1.5))
+        self.wait_for(lambda: (self.root / "ci-direct.json").exists())
+        code, out = self.done(self.run_phase(kind="ci", extra=options))
+        self.assertEqual(code, 75, out)
+        self.assertIn("already watching", out)
+        self.assertFalse(list(self.state.glob("direct-*")))
+        self.assertEqual(self.done(active)[0], 0)
+        candidates = pi_phase.phase_candidates(self.state, self.fast_args(kind="ci", policy="direct"), (2, 1, "key", "token"))
+        self.assertEqual(candidates, pi_phase.slot_paths(self.state, "ci", 2, 1, "key"))
 
     def test_fast_config_defaults_overrides_disabled_invalid(self):
         self.assertEqual(self.fast_settings(), dict(slots=2, max_expected_s=90, kinds=["build", "test"]))

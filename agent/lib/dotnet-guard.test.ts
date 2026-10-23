@@ -25,6 +25,17 @@ test("unwrapped build-type commands are blocked, including paths and wrappers", 
 	}
 });
 
+test("explicit pi-phase policies are already wrapped and are never rewritten", () => {
+	for (const policy of ["direct", "fast", "queued"]) {
+		for (const command of [
+			`pi-phase run --kind build --policy ${policy} -- dotnet build My.sln`,
+			`~/.pi/agent/bin/pi-phase run --kind test --policy ${policy} -- dotnet test`,
+			`cd repo && nice -n 10 pi-phase run --policy ${policy} --kind build -- dotnet build`,
+			`bash -c 'pi-phase run --kind test --policy ${policy} -- dotnet test'`,
+		]) assert.equal(dotnetBlockReason(command), undefined, command);
+	}
+});
+
 test("replacement preserves original arguments and quoting", () => {
 	assert.equal(dotnetBlockReason('cd repo && dotnet test "My Tests.csproj" -c Release'),
 		'dotnet guard: run .NET work inside pi-phase:\ncd repo && ~/.pi/agent/bin/pi-phase run --kind test --label \'dotnet test\' --timeout 300 --queue-timeout 600 -- dotnet test "My Tests.csproj" -c Release');

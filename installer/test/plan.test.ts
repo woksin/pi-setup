@@ -38,6 +38,22 @@ test("a clean plan starts with user.json and installs rendered files; applying i
   assert.ok(lstatSync(join(h, ".pi/agent/skills/ai-work-lifecycle")).isSymbolicLink());
 });
 
+test("pi-phase policy paths render from reposRoot as valid JSON without changing other settings", () => {
+  const reposRoot = '/tmp/my "repositories"';
+  const renderedSettings = { ...settings, reposRoot };
+  const actions = buildPlan({ repoDir: REPO, home: home(), settings: renderedSettings, overlay: overlayFor(REPO, "balanced", renderedSettings) });
+  const action = actions.find((a) => a.op === "install" && a.path.endsWith("/pi-phase/config.json"));
+  assert.ok(action?.op === "install");
+  const text = action.content.toString("utf8");
+  assert.ok(!text.includes("{{REPOS_ROOT}}"));
+  const rendered = JSON.parse(text);
+  assert.deepEqual(rendered.policy, [{ path: `${reposRoot}/woksin/*`, kinds: ["build", "test"], policy: "direct", max_expected_s: 90 }]);
+  const source = JSON.parse(readFileSync(join(REPO, "agent/pi-phase/config.json"), "utf8"));
+  delete rendered.policy;
+  delete source.policy;
+  assert.deepEqual(rendered, source);
+});
+
 test("the overlay puts the chosen profile's agents live; other profile files stay in profiles/", async () => {
   const h = home();
   await apply(ctxFor(h), plan(h, "openai-only"), { ...opts, profile: "openai-only" });

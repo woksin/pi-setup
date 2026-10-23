@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 72a127f79a0a8eedcc3c56099b690fd2cce30e165e4693bb9b3f05c221617eae
+// pi-setup-source-sha256: a963cb17bc42a54ec1fa1e383199d390100ff2b2a0e0f11b90645292929df19c
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5062,7 +5062,7 @@ function fromSource(src, settings2) {
   const raw = readFileSync23(src);
   const st = statSync14(src);
   const mode = st.mode & 4095;
-  return hasTokens(raw) ? { content: render(raw, settings2), mode } : { content: raw, mode, mtimeMs: st.mtimeMs };
+  return hasTokens(raw) ? { content: src.endsWith("/pi-phase/config.json") ? Buffer.from(raw.toString("utf8").split("{{REPOS_ROOT}}").join(JSON.stringify(settings2.reposRoot).slice(1, -1))) : render(raw, settings2), mode } : { content: raw, mode, mtimeMs: st.mtimeMs };
 }
 function sameBytes(dest, content) {
   return existsSync24(dest) && statSync14(dest).isFile() && readFileSync23(dest).equals(content);

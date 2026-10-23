@@ -49,7 +49,9 @@ function fromSource(src: string, settings: Settings): Desired {
   const st = statSync(src);
   const mode = st.mode & 0o7777;
   return hasTokens(raw)
-    ? { content: render(raw, settings), mode }
+    ? { content: src.endsWith("/pi-phase/config.json")
+      ? Buffer.from(raw.toString("utf8").split("{{REPOS_ROOT}}").join(JSON.stringify(settings.reposRoot).slice(1, -1)))
+      : render(raw, settings), mode }
     : { content: raw, mode, mtimeMs: st.mtimeMs };
 }
 

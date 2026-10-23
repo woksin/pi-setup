@@ -8,6 +8,7 @@ from collections import deque
 from datetime import datetime, timezone, timedelta
 import errno
 import fcntl
+import fnmatch
 import hashlib
 import json
 import math
@@ -54,6 +55,7 @@ def note(message):
 
 
 KINDS = ("build", "test", "integration", "ci")
+POLICIES = ("direct", "fast", "queued")
 OUTCOMES = ("passed", "failed", "queue-timeout", "timeout", "cancelled", "rejected", "error", "skipped")
 
 
@@ -256,6 +258,7 @@ class PhaseLedger:
         self.record = dict(v=1, ts=None, session=os.environ.get("PI_SESSION_ID") or None,
                            lane=os.environ.get("PI_ORCH_ID") or os.environ.get("PI_LANE_ID") or None,
                            cwd=cwd, kind=args.kind, label=args.label, priority=args.priority,
+                           policy="queued", source="default",
                            stack=getattr(args, "stack", None) or command_stack(command),
                            queuedAt=utc_stamp(), startedAt=None, endedAt=None, waitS=0, runS=0,
                            exit=None, outcome="rejected", head=None, dirty=None, verified=False, envHash=env_hash(),
@@ -346,7 +349,7 @@ def rejected_ledger(argv):
         return None
     options, command = [], []
     valued = {"--kind", "--label", "--priority", "--timeout", "--queue-timeout", "--repo", "--pr",
-              "--commit", "--log", "--tail", "--vstest-hang-minutes", "--stack"}
+              "--commit", "--log", "--tail", "--vstest-hang-minutes", "--stack", "--policy"}
     index = 1
     while index < len(argv):
         arg = argv[index]
@@ -573,7 +576,7 @@ def config(path, *, notes=None):
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
-                    fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"]))
+                    fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"]), policy=[])
     try:
         data = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(data, dict):
@@ -584,7 +587,7 @@ def config(path, *, notes=None):
     for key in data.keys() - defaults.keys():
         warn(f"unknown config key {key}; ignored")
     values = defaults.copy()
-    for key, default in defaults.items():
+    for key, default in configure_policy(defaults, values, data, warn).items():
         value = data.get(key, default)
         if key in ("heavy_slots", "integration_slots"):
             valid = type(value) is int and 1 <= value <= 32
@@ -613,6 +616,116 @@ def config(path, *, notes=None):
     heavy = values.pop("heavy_slots")
     integration = values.pop("integration_slots")
     return PhaseConfig(heavy, integration, values)
+
+
+def configure_policy(defaults, values, data, warn):
+    defaults = defaults.copy()
+    default = defaults.pop("policy")
+    values["policy"] = policy_config(data.get("policy", default), warn)
+    return defaults
+
+
+def policy_config(value, warn):
+    if not isinstance(value, list):
+        warn("invalid policy; using no rules")
+        return []
+    rules = []
+    for rule in value:
+        if valid_policy_rule(rule):
+            rules.append(rule)
+        else:
+            warn("invalid policy rule; ignored")
+    return rules
+
+
+def valid_policy_rule(rule):
+    if not isinstance(rule, dict):
+        return False
+    if not isinstance(rule.get("path"), str) or rule.get("policy") not in POLICIES:
+        return False
+    if not valid_policy_kinds(rule.get("kinds")):
+        return False
+    limit = rule.get("max_expected_s", 90)
+    return type(limit) in (int, float) and 0 < limit <= sys.float_info.max / 3
+
+
+def valid_policy_kinds(kinds):
+    if not isinstance(kinds, list):
+        return False
+    return bool(kinds) and all(kind in KINDS for kind in kinds)
+
+
+def requested_policy(args):
+    if getattr(args, "policy", None):
+        return args.policy, "flag"
+    if getattr(args, "expect_fast", False):
+        return "fast", "flag"
+    value = os.environ.get("PI_PHASE_POLICY")
+    if value:
+        if value not in POLICIES:
+            raise ValueError("PI_PHASE_POLICY must be direct, fast or queued")
+        return value, "env"
+    return None, "default"
+
+
+def configured_policy(state, args, options, fingerprint):
+    cwd = os.path.realpath(os.getcwd())
+    for rule in options["policy"]:
+        if args.kind not in rule["kinds"] or not fnmatch.fnmatchcase(cwd, rule["path"]):
+            continue
+        return rule_policy(state, rule, fingerprint), "config"
+    fast = fast_phase(state, args, options["fast_lane"], fingerprint)
+    return ("fast", "history") if fast else ("queued", "default")
+
+
+def rule_policy(state, rule, fingerprint):
+    if rule["policy"] != "direct":
+        return rule["policy"]
+    history = policy_history(state, fingerprint)
+    if not history or slow_fast_history(history, rule.get("max_expected_s", 90)):
+        return "fast"
+    return "direct"
+
+
+def policy_history(state, fingerprint):
+    try:
+        return fast_history(state, fingerprint)
+    except OSError as exc:
+        note(f"fast history unavailable: {exc}")
+        return []
+
+
+def select_policy(state, args, options, fingerprint):
+    policy, source = requested_policy(args)
+    if policy is None:
+        policy, source = configured_policy(state, args, options, fingerprint)
+    if policy == "direct":
+        policy = safe_direct_policy(state, args.kind, fingerprint)
+    if policy == "fast":
+        policy = hinted_fast_policy(state, args, options["fast_lane"], fingerprint)
+    return policy, source
+
+
+def safe_direct_policy(state, kind, fingerprint):
+    refusal = direct_refusal(state, kind, fingerprint)
+    if refusal:
+        note(f"direct policy ignored: {refusal}; queued")
+        return "queued"
+    return "direct"
+
+
+def hinted_fast_policy(state, args, settings, fingerprint):
+    fast_args = argparse.Namespace(**vars(args))
+    fast_args.expect_fast = True
+    return "fast" if fast_phase(state, fast_args, settings, fingerprint) else "queued"
+
+
+def direct_refusal(state, kind, fingerprint):
+    if kind == "integration":
+        return "integration phase"
+    if metadata(state / "container-tests.json").get(fingerprint) is True:
+        return "recorded container test"
+    return None
 
 
 def fast_lane_config(value, warn):
@@ -879,7 +992,7 @@ def burst_available(state, available, prior, live, ceiling):
 def phases_running(state, available, prior, live):
     """Caller holds the coordinator; do not mistake our tentative locks for owners."""
     return any(lease_running(path, prior, live) for path in state.glob("*.lock")
-               if path.name.startswith(("heavy-", "integration-", "ci-", "fast-")) and path not in available)
+               if path.name.startswith(("heavy-", "integration-", "ci-", "fast-", "direct-")) and path not in available)
 
 
 def sample_tree(root_pid):
@@ -1222,7 +1335,7 @@ def revoke_priority(state):
 def high_count(state):
     """Caller holds the coordinator; count queued and leased HIGH tokens only once."""
     tokens = {w["token"] for w in all_waiters(state) if w["priority"] == "high"}
-    for path in list(state.glob("heavy-*.lock")) + list(state.glob("fast-*.lock")):
+    for path in list(state.glob("heavy-*.lock")) + list(state.glob("fast-*.lock")) + list(state.glob("direct-*.lock")):
         data = metadata(path.with_suffix(".json"))
         if data.get("priority") != "high":
             continue
@@ -1238,6 +1351,10 @@ def high_count(state):
         if busy:
             tokens.add(data.get("token", path.name))
     return len(tokens)
+
+
+def slotless_policy(args):
+    return args.kind == "ci" or getattr(args, "policy", None) == "direct"
 
 
 def register_waiter(state, args, token):
@@ -1258,7 +1375,7 @@ def register_waiter(state, args, token):
                 downgrade_note = f"high-priority cap ({cap}) reached; queued as normal"
             else:
                 consume_priority(state)
-        if args.kind == "ci":
+        if slotless_policy(args):
             return True, None
         path.parent.mkdir(mode=0o700, exist_ok=True)
         counter = state / "waiter-seq.json"
@@ -1268,7 +1385,8 @@ def register_waiter(state, args, token):
         if fd is None:
             raise ValueError("cannot lock new waiter")
         data = dict(token=token, pid=os.getpid(), priority=args.priority, kind=args.kind,
-                    label=args.label, cwd=os.getcwd(), enqueued=time.time(), seq=seq)
+                    label=args.label, cwd=os.getcwd(), enqueued=time.time(), seq=seq,
+                    policy=getattr(args, "policy", "queued"), source=getattr(args, "source", "default"))
         if getattr(args, "fast", False):
             data["fast"] = True
         os.write(fd, json.dumps(data).encode())
@@ -1379,11 +1497,11 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
     """One bounded admission scan; kernel locks and metadata identity are checked atomically."""
     paths = claim_paths(state, candidates, waiter, limits)
     reason = admission.reason(deadline) if admission and any(
-        path.name.startswith(("heavy-", "fast-")) for path in paths) else None
+        path.name.startswith(("heavy-", "fast-", "direct-")) for path in paths) else None
     snapshot_paths = paths.copy()
     if reason:
         snapshot_paths.update(path for path in state.glob("*.lock")
-                              if path.name.startswith(("heavy-", "integration-", "ci-", "fast-")))
+                              if path.name.startswith(("heavy-", "integration-", "ci-", "fast-", "direct-")))
     if integration_ceiling is not None:
         snapshot_paths.update(state.glob("integration-*.lock"))
     prior = {}
@@ -1455,11 +1573,17 @@ def release(state, held, token, safe):
             for path, _ in held:
                 entry = metadata(path.with_suffix(".json"))
                 if entry.get("token") == token:
-                    path.with_suffix(".json").unlink(missing_ok=True)
+                    remove_lease(path)
         for _, fd in held:
             # Never explicitly unlock a shared open-file description if the
             # producer may still hold its inherited FD after supervisor failure.
             os.close(fd)
+
+
+def remove_lease(path):
+    path.with_suffix(".json").unlink(missing_ok=True)
+    if path.name.startswith("direct-"):
+        path.unlink(missing_ok=True)
 
 
 def status(state, configuration=CONFIG):
@@ -1503,14 +1627,16 @@ def status(state, configuration=CONFIG):
         note(f"{data.get('kind', 'unknown')} {data.get('label', 'unknown')} "
              f"pid={data.get('pid', '?')} cwd={data.get('cwd', '?')} "
              f"elapsed={age}s {'orphan-group' if orphan else 'running'}"
-             f"{' fast' if data.get('fast') or path.name.startswith('fast-') else ''}")
+             f"{' fast' if data.get('fast') or path.name.startswith('fast-') else ''}"
+             f" policy={data.get('policy', 'queued')} source={data.get('source', 'default')}")
     if not seen:
         note("no active phases")
     for rank, waiter in enumerate(waiters, 1):
         age = max(0, int(time.time() - waiter["enqueued"]))
         note(f"queued priority={waiter['priority']} kind={waiter['kind']} "
              f"label={waiter.get('label', '?')} waited={age}s rank={rank}"
-             f"{' fast' if waiter.get('fast') else ''}")
+             f"{' fast' if waiter.get('fast') else ''}"
+             f" policy={waiter.get('policy', 'queued')} source={waiter.get('source', 'default')}")
     note(f"fast={fast_running}/{fast_slots} queued={sum(bool(w.get('fast')) for w in waiters)}")
     note(f"high={high}/{cap}")
     if grant:
@@ -1596,11 +1722,20 @@ def report_log(path, tail, return_code):
     note(f"log={path} exit={return_code} lines={lines}")
 
 
-def prepare_fast(state, args, settings, fingerprint):
-    fast = fast_phase(state, args, settings, fingerprint)
+def prepare_policy(state, args, options, fingerprint):
+    args.policy, args.source = select_policy(state, args, options, fingerprint)
+    args.fast = args.policy == "fast"
+    note(f"policy={args.policy} source={args.source}")
     if getattr(args, "ledger", None):
-        args.ledger.record.update(fingerprint=fingerprint, fast=fast)
-    return fast
+        args.ledger.record.update(fingerprint=fingerprint, fast=args.fast, policy=args.policy, source=args.source)
+
+
+def phase_candidates(state, args, context):
+    heavy, integration, identity, token = context
+    if args.policy == "direct" and args.kind != "ci":
+        # A per-run lease tracks ownership, not capacity. CI keeps its singleton watcher lock.
+        return [[state / f"direct-{token}.lock"]]
+    return slot_paths(state, args.kind, heavy, integration, identity)
 
 
 def apply_fast_budget(args, settings, held):
@@ -1681,6 +1816,7 @@ def run(args, state, configuration, output=None):
         config_notes = set()
         settings = config(configuration, notes=config_notes)
         options = settings.options
+        prepare_policy(state, admission_args, options, fingerprint)
         if ledger:
             ledger.prepare_snapshot()
             if (not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1" and args.kind != "ci"
@@ -1702,7 +1838,6 @@ def run(args, state, configuration, output=None):
                 and metadata(state / "container-tests.json").get(fingerprint) is True):
             admission_args.kind = "integration"
             note("recorded container test: also claiming an integration permit (container_test_detection)")
-        admission_args.fast = prepare_fast(state, admission_args, options["fast_lane"], fingerprint)
         while True:
             if cancelled[0]:
                 note("cancelled while queued")
@@ -1728,7 +1863,7 @@ def run(args, state, configuration, output=None):
             heavy, integration = settings
             if burst and admission_args.kind == "integration":
                 integration = burst.effective(integration, deadline)
-            held = claim(state, slot_paths(state, admission_args.kind, heavy, integration, ci_key),
+            held = claim(state, phase_candidates(state, admission_args, (heavy, integration, ci_key, token)),
                          deadline, lambda: bool(cancelled[0]),
                          token if waiter_fd is not None else None, PhaseConfig(heavy, integration, settings.options), admission,
                          integration if burst and admission_args.kind == "integration" else None)
@@ -1793,7 +1928,7 @@ def run(args, state, configuration, output=None):
             read_gate = -1
             publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, cwd=os.getcwd(),
                                label=args.label, kind=args.kind, priority=admission_args.priority, started=time.time(),
-                               fast=admission_args.fast))
+                               fast=admission_args.fast, policy=admission_args.policy, source=admission_args.source))
             if cancelled[0]:
                 note("cancelled before execution; command not started")
                 if ledger:
@@ -1887,6 +2022,11 @@ def run(args, state, configuration, output=None):
         signal.signal(signal.SIGTERM, old_term)
 
 
+def add_policy_arguments(runner):
+    runner.add_argument("--expect-fast", action="store_true", help="alias for --policy fast")
+    runner.add_argument("--policy", choices=POLICIES, help="override admission policy (default: PI_PHASE_POLICY or automatic)")
+
+
 def main(argv=None, *, state=None, configuration=None):
     parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner")
     commands = parser.add_subparsers(dest="action", required=True)
@@ -1915,7 +2055,7 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--queue-timeout", type=float, default=120, help="separate permit wait in seconds")
     runner.add_argument("--approved-long-timeout", action="store_true", help="declare explicit user approval for execution >600 seconds")
     runner.add_argument("--rerun", action="store_true", help="run even if this exact state already passed")
-    runner.add_argument("--expect-fast", action="store_true", help="request fast lane for a short build/test")
+    add_policy_arguments(runner)
     runner.add_argument("--repo", help="ci watcher repo identity")
     runner.add_argument("--pr", help="ci watcher PR identity")
     runner.add_argument("--commit", help="ci watcher commit identity")

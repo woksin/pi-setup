@@ -1,4 +1,7 @@
 {
+  "policy": [
+    { "path": "{{REPOS_ROOT}}/woksin/*", "kinds": ["build", "test"], "policy": "direct", "max_expected_s": 90 }
+  ],
   "heavy_slots": 2,
   "integration_slots": 1,
   "fast_lane": {

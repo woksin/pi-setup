@@ -32,6 +32,27 @@ The shipped config sets heavy capacity **4** (build/test/integration); without a
 {"heavy_slots": 2, "integration_slots": 1}
 ```
 
+### Execution policy
+
+Every build/test gate still enters through pi-phase. It selects `direct`, `fast` or `queued` in this order: `--policy`, `PI_PHASE_POLICY`, the first matching config rule, then automatic history/default classification. `--expect-fast` remains an alias for `--policy fast`; an explicit `--policy` wins if both are present. Flag/environment choices override config, including forcing `queued` in a direct-eligible repository. Invalid environment policies fail with a diagnostic.
+
+```sh
+pi-phase run --kind build --label 'bundle' --policy direct -- npm run build
+PI_PHASE_POLICY=queued pi-phase run --kind test --label 'tests' -- npm test
+```
+
+`direct` bypasses heavy/fast capacity queues but retains memory admission, nice, MSBuild caps, RSS monitoring, timeout/cancellation and ledger recording. Its per-run ownership lease is not a capacity slot. Integration phases and fingerprints recorded as container tests refuse direct admission, print a note and use queued admission (including normal container promotion). CI watcher singleton locking is unchanged. `fast` uses the existing fast permits and eligibility/budget safeguards. `queued` forces normal admission, without automatic fast selection. Running and queued `status` lines, and every ledger record, include `policy` and `source` (`flag`, `env`, `config`, `history` or `default`). Older ledger entries remain readable.
+
+The shipped config contains an ordered policy rule:
+
+```json
+{"policy":[{"path":"{{REPOS_ROOT}}/woksin/*","kinds":["build","test"],"policy":"direct","max_expected_s":90}]}
+```
+
+The installer renders `{{REPOS_ROOT}}` from the configured repositories root, preserving valid JSON. Paths are case-sensitive globs matched against the real cwd (including nested worktrees); kinds must match too. A config-direct rule requires at least one completed run of the same exact cwd/command fingerprint in the last seven days with p90 at or below its `max_expected_s` (default 90). No history or a slower p90 downgrades the rule to fast, subject to the normal fast safeguards; slow history can therefore fall back to queued. Explicit direct overrides do not require history. Nonmatching paths retain existing automatic fast/heavy behaviour.
+
+A parent's brief may bind the execution policy or authorize a direct light check; subagents follow it instead of re-deciding policy or priority. High priority is used only when the brief grants it. Python/Node/TS unit checks, lint and small bundle builds finishing in about two minutes without Docker or .NET are light gates; the parent can authorize these to run directly under `nice -n 10` without waiting in the heavy queue. These are execution permissions, not permission to skip gates.
+
 ### Fast lane
 
 Short builds/tests can bypass a busy heavy queue using separate fast permits (no heavy permit consumed). The default, even without a config key, is `"fast_lane": {"slots": 2, "max_expected_s": 90, "kinds": ["build", "test"]}`; set `"fast_lane": false` to disable it. Slots accept 1–32, the threshold accepts positive finite seconds, and kinds may contain only `build`/`test`. Integration, CI, and fingerprints recorded as container tests (even in hint mode) are never fast; a container-test fingerprint ignores `--expect-fast` with a note.
