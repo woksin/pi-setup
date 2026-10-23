@@ -119,6 +119,78 @@ async function setup(t: any, init = true) {
     invoke: (...args: string[]) => main(args, ctx), read: () => loadManifest(path) };
 }
 
+test('fold and planned checkpoint ETAs, update them and preserve them without the flag', async t => {
+  const f = await setup(t);
+  assert.equal(await f.invoke('planned', '7', TRAIN, '--eta', '+90m'), 0, f.errors.join('\n'));
+  assert.equal((await f.read()).items[0].eta, '2026-10-23T13:30:00.000Z');
+  assert.equal(await f.invoke('planned', '7', TRAIN, '--eta', '+2h'), 0);
+  assert.equal((await f.read()).items[0].eta, '2026-10-23T14:00:00.000Z');
+  assert.equal(await f.invoke('fold', '7', '--eta', '2026-10-23T15:00:00+02:00'), 0);
+  assert.equal((await f.read()).items[0].eta, '2026-10-23T13:00:00.000Z');
+  assert.equal(await f.invoke('fold', '7', '--eta', '+1d'), 0);
+  assert.equal((await f.read()).items[0].eta, '2026-10-24T12:00:00.000Z');
+  assert.equal(await f.invoke('fold', '7'), 0);
+  assert.equal((await f.read()).items[0].eta, '2026-10-24T12:00:00.000Z');
+});
+
+test('ETA validation happens before any commands; dry runs do not persist ETAs', async t => {
+  const f = await setup(t);
+  const before = await readFile(f.path, 'utf8');
+  assert.equal(await f.invoke('fold', '7', '--eta', 'tomorrow'), 2);
+  assert.match(f.errors.at(-1)!, /invalid eta/);
+  assert.equal(f.calls.length, 0);
+  assert.equal(await f.invoke('fold', '7', '--eta', '+2h', '--dry-run'), 0);
+  assert.equal(await readFile(f.path, 'utf8'), before);
+  assert.equal(await f.invoke('status', '--gate', 'bad'), 2);
+  assert.equal(await f.invoke('status', '--eta', '+2h'), 2);
+  assert.equal(await f.invoke('fold', '7', '--gate', '2h'), 2);
+});
+
+test('eta command updates and clears an existing delivery locally, respecting dry runs', async t => {
+  const f = await setup(t);
+  assert.equal(await f.invoke('planned', '7', TRAIN), 0);
+  f.calls.length = 0;
+  assert.equal(await f.invoke('eta', '#7', '+90m'), 0);
+  assert.equal((await f.read()).items[0].eta, '2026-10-23T13:30:00.000Z');
+  assert.equal(await f.invoke('eta', 'fix/widget', 'clear', '--dry-run'), 0);
+  assert.ok((await f.read()).items[0].eta);
+  assert.equal(await f.invoke('eta', 'fix/widget', 'clear'), 0);
+  assert.equal((await f.read()).items[0].eta, undefined);
+  assert.equal(await f.invoke('eta', 'missing', '+2h'), 1);
+  assert.ok(f.calls.every(call => call.command === 'git'));
+});
+
+test('status exposes ETA recommendations and override precedence without additional gh calls', async t => {
+  const f = await setup(t);
+  assert.equal(await f.invoke('planned', '7', TRAIN, '--eta', '+20m'), 0);
+  f.calls.length = 0;
+  assert.equal(await f.invoke('status', '--json'), 0);
+  let status = JSON.parse(f.output.at(-1)!).trains[0];
+  assert.equal(status.recommendation, 'unknown');
+  assert.equal(status.gateSeconds, null);
+  assert.equal(status.items[0].eta, '2026-10-23T12:20:00.000Z');
+  const calls = f.calls.filter(call => call.command === 'gh').map(call => call.args);
+  f.calls.length = 0;
+  assert.equal(await f.invoke('status', '--json', '--gate', '30m'), 0);
+  status = JSON.parse(f.output.at(-1)!).trains[0];
+  assert.equal(status.recommendation, 'hold'); assert.equal(status.gateSeconds, 1800); assert.equal(status.gateSource, 'flag');
+  assert.deepEqual(f.calls.filter(call => call.command === 'gh').map(call => call.args), calls);
+  assert.equal(await f.invoke('status', '--gate', '10m'), 0);
+  assert.match(f.output.at(-1)!, /recommendation: cut/);
+  const manifest = await f.read(); manifest.gateSeconds = 1800; await saveManifest(f.path, manifest);
+  assert.equal(await f.invoke('status', '--json'), 0);
+  assert.equal(JSON.parse(f.output.at(-1)!).trains[0].gateSource, 'manifest');
+  assert.equal(await f.invoke('status', '--json', '--gate', '10m'), 0);
+  assert.equal(JSON.parse(f.output.at(-1)!).trains[0].recommendation, 'cut');
+  assert.equal(await f.invoke('eta', '7', '2026-10-23T11:00:00Z'), 0);
+  assert.equal(await f.invoke('status'), 0);
+  assert.match(f.output.at(-1)!, /hold.*overdue/);
+  assert.equal(await f.invoke('eta', '7', 'clear'), 0);
+  assert.equal(await f.invoke('status'), 0);
+  assert.match(f.output.join('\n'), /eta: no eta/);
+  assert.match(f.output.at(-1)!, /recommendation: cut/);
+});
+
 const mutations = (f: Fixture) => f.calls.filter(({ command, args }) => command === 'gh'
   ? ['close', 'comment', 'cancel'].includes(args[1]) : ['fetch', 'merge', 'worktree'].includes(args[2]) || (args[2] === 'branch' && args[3] !== '--show-current'));
 

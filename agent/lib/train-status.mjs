@@ -1,5 +1,7 @@
 import { activeRuns, defaultBranch } from './train-gh.mjs';
 import { listManifests } from './train-manifest.mjs';
+import { gateEstimate } from './train-gate.mjs';
+import { cutRecommendation } from './train-eta.mjs';
 
 const needsClosing = (item, liveState) => item.pr && (!item.closedAt || liveState === 'OPEN');
 
@@ -63,9 +65,11 @@ function display(ctx, status) {
   ctx.out(`${status.repo} ${status.train}: ahead ${status.ahead ?? '?'}, behind ${status.behind ?? '?'}`);
   for (const item of status.items) {
     ctx.out(`  ${item.kind} ${item.branch} ${item.sha} ${item.pr ? `#${item.pr} closed=${item.closed}` : '(no PR)'} cancelled=${item.cancelledRunCount ?? 0}`);
+    ctx.out(`    eta: ${item.eta ?? 'no eta'}`);
     if (item.pending?.length) ctx.out(`    pending: ${item.pending.join(', ')}`);
     for (const warning of item.warnings ?? []) ctx.out(`    warning: ${warning}`);
   }
+  ctx.out(status.recommendationText);
   for (const anomaly of status.anomalies) ctx.out(`  anomaly: ${anomaly}`);
   for (const run of status.activeRuns) ctx.out(`  ${run.manual ? 'manual' : 'active'} run: ${run.databaseId} ${run.headBranch} (${run.workflowName}, ${run.status})`);
 }
@@ -87,7 +91,9 @@ export async function statusTrains(ctx, api, options, repo) {
   const entries = await listManifests(ctx.env, options.all ? undefined : repo);
   const trains = [];
   for (const entry of entries.filter(entry => matches(entry.manifest, options))) {
-    trains.push(await trainStatus(api, entry.manifest));
+    const status = await trainStatus(api, entry.manifest);
+    const gate = await gateEstimate(ctx, api, entry.manifest, options.gate);
+    trains.push({ ...status, ...gate, ...cutRecommendation(status.items, gate, ctx.now()) });
   }
   printStatuses(ctx, trains, options.json);
   return trains.some(anomalous) ? 1 : 0;

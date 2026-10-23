@@ -9,25 +9,28 @@ import { adoptTrain } from './train-adopt.mjs';
 import { shipTrain } from './train-ship.mjs';
 import { manageHook } from './train-hook.mjs';
 import { stdinGuard } from './train-push.mjs';
+import { parseDuration, parseEta, setEta } from './train-eta.mjs';
 
 export { realContext };
 export const HELP = `Usage: pi-train [--repo-dir path] [--dry-run] [--json] <command>
   init <repo-dir> <train-branch> [--from origin/main] [--worktree path]
   init --adopt <repo-dir> <existing-train-branch> [--base origin/main]
-  fold <PR#|branch> [--train branch] [--allow-foreign]
-  planned <PR#> <train-branch> [--allow-foreign]
-  status [--all] [--train branch] [--json]
+  fold <PR#|branch> [--train branch] [--allow-foreign] [--eta when]
+  planned <PR#> <train-branch> [--allow-foreign] [--eta when]
+  eta <PR#|branch> <when|clear> [--train branch]
+  status [--all] [--train branch] [--json] [--gate duration]
   ship [--train branch] [--label major|minor|patch|no-release] [--summary-file f] [--title text] [--allow-behind]
   hook install|uninstall
   guard --stdin [--push-url url]
 
 Manifest store: \$PI_TRAIN_DIR or ~/.pi/trains. Dry runs print commands and change nothing.
+ETA: ISO 8601 with timezone or +90m/+2h/+1d. Gate duration: e.g. 90m or 2h.
 Local train packages are not implemented in this slice.`;
 
 const FLAGS = new Map(Object.entries({ '--dry-run': 'dryRun', '--json': 'json', '--all': 'all', '--allow-foreign': 'allowForeign',
   '--adopt': 'adopt', '--allow-behind': 'allowBehind', '--stdin': 'stdin' }));
 const VALUES = new Map(Object.entries({ '--repo-dir': 'repoDir', '--train': 'train', '--from': 'from', '--worktree': 'worktree',
-  '--base': 'base', '--label': 'label', '--summary-file': 'summaryFile', '--title': 'title', '--push-url': 'pushUrl' }));
+  '--base': 'base', '--label': 'label', '--summary-file': 'summaryFile', '--title': 'title', '--push-url': 'pushUrl', '--eta': 'eta', '--gate': 'gate' }));
 
 function takeValue(argv, flag) {
   const value = argv.shift();
@@ -37,6 +40,7 @@ function takeValue(argv, flag) {
 
 const OPTION_GROUPS = [
   { command: 'status', keys: ['all'], message: '--all is only valid for status' },
+  { command: 'status', keys: ['gate'], message: '--gate is only valid for status' },
   { command: 'init', keys: ['from', 'worktree'], message: '--from/--worktree require init' },
   { command: 'init', keys: ['adopt', 'base'], message: '--adopt/--base require init' },
   { command: 'ship', keys: ['label', 'summaryFile', 'title', 'allowBehind'], message: 'ship options require ship' },
@@ -48,12 +52,17 @@ function validateAdopt(options) {
   if (options.adopt && [options.from, options.worktree].some(Boolean)) throw new TrainError('--adopt cannot use --from/--worktree', 2);
 }
 
+function validateEtaOption(command, options) {
+  if (options.eta && !['fold', 'planned'].includes(command)) throw new TrainError('--eta requires fold/planned', 2);
+}
+
 function validateOptions(command, options) {
   for (const group of OPTION_GROUPS) {
     if (command === group.command) continue;
     if (group.keys.some(key => options[key])) throw new TrainError(group.message, 2);
   }
   validateAdopt(options);
+  validateEtaOption(command, options);
   if (command === 'guard' && !options.stdin) throw new TrainError('guard requires --stdin', 2);
 }
 
@@ -66,7 +75,7 @@ function addArgument(argv, parsed) {
 }
 
 function validateArity(command, args) {
-  const arity = new Map(Object.entries({ init: 2, fold: 1, planned: 2, status: 0, ship: 0, hook: 1, guard: 0 }));
+  const arity = new Map(Object.entries({ init: 2, fold: 1, planned: 2, eta: 2, status: 0, ship: 0, hook: 1, guard: 0 }));
   if (args.length !== arity.get(command)) throw new TrainError(HELP, 2);
 }
 
@@ -86,6 +95,7 @@ async function runGuard(ctx, options, repo) {
 
 async function mutateTrain(ctx, api, request, repo) {
   const { options, command, args } = request;
+  if (command === 'eta') return setEta(ctx, repo, options, args);
   if (command === 'ship') return shipTrain(ctx, api, options, repo);
   if (command === 'init') return (options.adopt ? adoptTrain : initTrain)(ctx, api, { ...options, repo, args });
   return foldTrain(ctx, api, { options, repo, args, planned: command === 'planned' });
@@ -122,11 +132,17 @@ function reportError(context, error, request) {
   return errorStatus(error, request);
 }
 
+function normalizeRequest(request, now) {
+  if (request.options.eta) request.options.eta = parseEta(request.options.eta, now);
+  if (request.options.gate) request.options.gate = parseDuration(request.options.gate);
+  return request;
+}
+
 export async function main(argv, context = realContext()) {
   if (argv.includes('--help') || argv.includes('-h')) { context.out(HELP); return 0; }
   let request;
   try {
-    request = parse(argv);
+    request = normalizeRequest(parse(argv), context.now());
     return await dispatch(repoContext(context, request), request);
   } catch (error) {
     return reportError(context, error, request);

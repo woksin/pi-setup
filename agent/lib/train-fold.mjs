@@ -58,8 +58,9 @@ function checkPriorHead(ctx, item, resolved) {
   ctx.err(`warning: planned head moved for ${resolved.branch}`);
 }
 
-function updateItem(operation, item) {
+function updateItem(operation, item, options) {
   const { resolved, planned, record } = operation;
+  if (options.eta !== undefined) item.eta = options.eta;
   item.sha = resolved.sha;
   item.kind = planned ? 'planned' : 'folded';
   if (planned) item.planned ??= { at: record.now() };
@@ -97,7 +98,7 @@ async function applyFold(ctx, api, options, operation) {
   checkPriorHead(ctx, prior, resolved);
   if (!planned) await mergeItem(api, options, operation, prior);
   const item = prior ?? createItem(operation);
-  updateItem(operation, item);
+  updateItem(operation, item, options);
   await record.save(planned ? 'planned' : 'merge', resolved.branch);
   await finishItem(api, operation, item);
   const prefix = options.dryRun ? 'would ' : '';
