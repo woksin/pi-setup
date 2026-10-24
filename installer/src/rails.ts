@@ -207,7 +207,7 @@ interface Session { p: Prompter; input: RailsInput; state: WizardResult; steps: 
 
 async function prepareReview({ p, input, state }: Session): Promise<RailsReview | typeof CANCEL | null> {
   const review = input.review(state);
-  if (input.installed && !review.changes) return null;
+  if (input.installed && !review.changes && !input.pathLine) return null; // a pending PATH edit is a change
   return await conflicts(p, review) ? review : CANCEL;
 }
 
@@ -235,7 +235,6 @@ async function reviewChoice({ p, steps, input, path }: Session, review: RailsRev
 async function reviewLoop(session: Session): Promise<boolean> {
   const { p } = session;
   let review = await prepareReview(session);
-  if (review === null) session.path.on = false; // Review was skipped, so nothing was shown to opt in to.
   while (review && review !== CANCEL) {
     const answer = await reviewChoice(session, review);
     if (p.isCancel(answer) || answer === "cancel") return false;
@@ -250,6 +249,7 @@ async function reviewLoop(session: Session): Promise<boolean> {
     }
     review = await editReview(session);
   }
+  session.path.on = false; // Review ended without Install, so the PATH line was never confirmed.
   return review !== CANCEL;
 }
 

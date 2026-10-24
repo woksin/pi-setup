@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 290647d259d08e4c7a020c3123fcf5c90f638717ea1d815875197f7ca0a77a9a
+// pi-setup-source-sha256: 030500ba26c02081c28dc72c93e8c53d23b50b32f1175e8397192248dc23658d
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -6257,6 +6257,10 @@ function toolLine(checks) {
   const tools = checks.filter((c2) => c2.id.startsWith("tool:")).map((c2) => c2.id.slice(5));
   return tools.length ? `${plural(tools.length, "tool")} not found: ${tools.join(", ")}` : void 0;
 }
+function missingCommandLine(checks, pathEdited) {
+  const cmds = checks.filter((c2) => c2.id.startsWith("path:") && !(pathEdited && offPath(c2))).map((c2) => c2.id.slice(5));
+  return cmds.length ? `${plural(cmds.length, "command")} missing or not on PATH: ${cmds.join(", ")}` : void 0;
+}
 function pathLine(checks) {
   const path2 = checks.find((c2) => c2.id === "path");
   return path2 ? `${path2.detail}; add them to your shell profile (./install.sh --edit-shell-profile does it)` : void 0;
@@ -6271,12 +6275,13 @@ function compactChecks(all, options) {
     profile3 ? `profile: ${profile3.detail}` : void 0,
     options.pathEdited ? void 0 : pathLine(checks),
     toolLine(checks),
+    missingCommandLine(checks, options.pathEdited),
     ...checks.filter((c2) => !consumed(c2)).map((c2) => `${c2.id}: ${c2.detail}`)
   ].filter((line) => Boolean(line)).map((line) => line.split(options.home).join("~"));
   const shown = lines2.length > MAX_HEALTH_LINES ? [...lines2.slice(0, MAX_HEALTH_LINES - 1), `and ${lines2.length - MAX_HEALTH_LINES + 1} more: ./install.sh doctor`] : lines2;
   return { lines: shown, count: lines2.length, logins: logins2 };
 }
-var MAX_HEALTH_LINES, loginLabels, plural, consumed;
+var MAX_HEALTH_LINES, loginLabels, plural, offPath, consumed;
 var init_doctor_compact = __esm({
   "src/doctor-compact.ts"() {
     init_types();
@@ -6295,6 +6300,7 @@ var init_doctor_compact = __esm({
       return [...labels];
     };
     plural = (n3, word) => `${n3} ${word}${n3 === 1 ? "" : "s"}`;
+    offPath = (c2) => c2.id.startsWith("path:") && c2.detail.includes("is not on PATH");
     consumed = (c2) => c2.id === "npm" || c2.id.startsWith("package:") || c2.id.startsWith("tool:") || c2.id === "path" || c2.id.startsWith("path:") || c2.id.startsWith("fallback:") || c2.id === "profile";
   }
 });
@@ -7641,7 +7647,7 @@ async function changeStep(p, input, state2, steps) {
 }
 async function prepareReview({ p, input, state: state2 }) {
   const review = input.review(state2);
-  if (input.installed && !review.changes) return null;
+  if (input.installed && !review.changes && !input.pathLine) return null;
   return await conflicts(p, review) ? review : CANCEL;
 }
 async function editReview(session) {
@@ -7668,7 +7674,6 @@ async function reviewChoice({ p, steps, input, path: path2 }, review) {
 async function reviewLoop(session) {
   const { p } = session;
   let review = await prepareReview(session);
-  if (review === null) session.path.on = false;
   while (review && review !== CANCEL) {
     const answer = await reviewChoice(session, review);
     if (p.isCancel(answer) || answer === "cancel") return false;
@@ -7683,6 +7688,7 @@ async function reviewLoop(session) {
     }
     review = await editReview(session);
   }
+  session.path.on = false;
   return review !== CANCEL;
 }
 async function runRails(p, input) {

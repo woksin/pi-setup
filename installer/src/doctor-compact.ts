@@ -50,6 +50,14 @@ function toolLine(checks: DoctorCheck[]): string | undefined {
   return tools.length ? `${plural(tools.length, "tool")} not found: ${tools.join(", ")}` : undefined;
 }
 
+/** Installed commands whose directory is not on PATH: the confirmed PATH edit fixes exactly these. */
+const offPath = (c: DoctorCheck): boolean => c.id.startsWith("path:") && c.detail.includes("is not on PATH");
+
+function missingCommandLine(checks: DoctorCheck[], pathEdited: boolean): string | undefined {
+  const cmds = checks.filter((c) => c.id.startsWith("path:") && !(pathEdited && offPath(c))).map((c) => c.id.slice(5));
+  return cmds.length ? `${plural(cmds.length, "command")} missing or not on PATH: ${cmds.join(", ")}` : undefined;
+}
+
 function pathLine(checks: DoctorCheck[]): string | undefined {
   const path = checks.find((c) => c.id === "path");
   return path ? `${path.detail}; add them to your shell profile (./install.sh --edit-shell-profile does it)` : undefined;
@@ -70,6 +78,7 @@ export function compactChecks(all: DoctorCheck[], options: CompactOptions): Comp
     profile ? `profile: ${profile.detail}` : undefined,
     options.pathEdited ? undefined : pathLine(checks),
     toolLine(checks),
+    missingCommandLine(checks, options.pathEdited),
     ...checks.filter((c) => !consumed(c)).map((c) => `${c.id}: ${c.detail}`),
   ].filter((line): line is string => Boolean(line)).map((line) => line.split(options.home).join("~"));
   const shown = lines.length > MAX_HEALTH_LINES ? [...lines.slice(0, MAX_HEALTH_LINES - 1), `and ${lines.length - MAX_HEALTH_LINES + 1} more: ./install.sh doctor`] : lines;

@@ -124,7 +124,51 @@ test("compact summary groups packages and logins and caps at six lines with ~ pa
 });
 
 test("a PATH edit made in this run is not listed as left to do", () => {
-  const checks = [check("path", "warn", "~/.local/bin not on PATH"), check("path:rtk", "warn", "rtk is missing")];
+  const checks = [check("path", "warn", "~/.local/bin not on PATH"), check("path:pi-profile", "warn", "pi-profile is installed at ~/.local/bin/pi-profile, but ~/.local/bin is not on PATH")];
   assert.equal(compactChecks(checks, { home: "/h", skipNpm: false, pathEdited: true }).count, 0);
-  assert.equal(compactChecks(checks, { home: "/h", skipNpm: false, pathEdited: false }).count, 1);
+  assert.equal(compactChecks(checks, { home: "/h", skipNpm: false, pathEdited: false }).count, 2);
+});
+
+const reviews = (s: ReturnType<typeof scripted>) => s.events.filter((e) => e === "select:Review").length;
+
+test("an unchanged rerun with PATH missing still shows Review and writes the rc only after Install", async () => {
+  const b = box();
+  assert.equal(await main(flags(b), zsh(b, true), scripted().p), 0);
+  const s = scripted({ Review: ["install"] });
+  assert.equal(await main(flags(b), zsh(b), s.p), 0);
+  assert.equal(reviews(s), 1, s.events.join("\n"));
+  assert.equal(readFileSync(rc(b), "utf8"), `\n# pi-setup tools\n${SNIPPET}\n`);
+});
+
+test("Cancel at Review writes no rc, also after changing a step", async () => {
+  for (const answers of [["cancel"], ["change", "cancel"]]) {
+    const b = box();
+    assert.equal(await main(flags(b), zsh(b, true), scripted().p), 0);
+    const s = scripted({ Review: answers });
+    assert.equal(await main(flags(b), zsh(b), s.p), 1);
+    assert.ok(!existsSync(rc(b)));
+  }
+});
+
+test("changing a step and landing back on the original choices still needs Install for the rc", async () => {
+  const b = box();
+  assert.equal(await main(flags(b), zsh(b, true), scripted().p), 0);
+  const s = scripted({ Review: ["change", "cancel"] });
+  assert.equal(await main(flags(b), zsh(b), s.p), 1);
+  assert.equal(reviews(s), 2, s.events.join("\n"));
+  assert.ok(!existsSync(rc(b)));
+});
+
+test("a truly missing command is kept and counted; only installed-off-PATH ones go away with the PATH edit", () => {
+  const checks = [
+    check("path", "warn", "~/.local/bin not on PATH"),
+    check("path:rtk", "warn", "rtk is missing"),
+    check("path:pi-profile", "warn", "pi-profile is installed at ~/.local/bin/pi-profile, but ~/.local/bin is not on PATH"),
+  ];
+  const edited = compactChecks(checks, { home: "/h", skipNpm: false, pathEdited: true });
+  assert.deepEqual(edited.lines, ["1 command missing or not on PATH: rtk"]);
+  assert.equal(edited.count, 1);
+  const kept = compactChecks(checks, { home: "/h", skipNpm: false, pathEdited: false });
+  assert.equal(kept.count, 2);
+  assert.match(kept.lines[1], /2 commands missing or not on PATH: rtk, pi-profile/);
 });
