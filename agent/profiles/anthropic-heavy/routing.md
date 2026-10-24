@@ -22,6 +22,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `grunt`: Claude Sonnet 5.5, low
 - `implementer`: Claude Sonnet 5.5, medium
 - `opus-implementer`: Claude Opus 5.5, medium
+- `ops`: Claude Haiku 5.5, low
 - `Plan`: Claude Opus 5.5, high
 - `planner`: Claude Opus 5.5, high
 - `prose-editor`: Claude Sonnet 5.5, low

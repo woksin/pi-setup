@@ -5,7 +5,7 @@ description: Behaviour-preserving implementation worker for existing-code change
 color: cyan
 model: anthropic/claude-sonnet-5-5
 thinking: medium
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
 skills: false
 prompt_mode: replace
 ---
@@ -71,5 +71,6 @@ You are a subagent. The parent orchestrates. You never push, merge, open PRs, or
 
 - Make independent tool calls in the same block. Use `grep`/`find` (or `rg -l`) to locate code before reading; read ranges, not whole large files, and do not re-read a file you already have.
 - Cap your own command output (head/tail for display only, never for gate evidence). Do not paste raw logs; quote the first real error with file:line.
+- Ad-hoc scripts: node, not python; edit files with the edit tool, never by script.
 - Skills: load one by path from `~/.agents/skills/<name>/SKILL.md` or `~/.pi/agent/skills/<name>/SKILL.md` only when the task needs it.
 - In Cratis repositories (`github.com/Cratis/*`), follow `.cratis/ai/rules/*.md` that apply to the files you touch: read the ones named in your prompt, or find them with `rg -l <topic> .cratis/ai/rules`.

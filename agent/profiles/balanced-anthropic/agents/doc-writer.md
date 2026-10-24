@@ -6,7 +6,7 @@ color: teal
 model: anthropic/claude-sonnet-5-5
 thinking: medium
 tools: read, write, edit, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, observation-mask]
 skills: true
 prompt_mode: append
 ---

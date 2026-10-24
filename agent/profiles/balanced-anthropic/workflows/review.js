@@ -61,7 +61,7 @@
  */
 export const meta = {
   name: 'review',
-  description: 'Cross-provider code/work review (Opus 5.5 + GPT-6.1 Sol; GPT-6 Astra with deep: true); only blocking findings gate, verified by the other provider',
+  description: 'Two-model code/work review on Anthropic models (Opus 5.5 + Sonnet 5.5; Opus 5.5 high with deep: true); only blocking findings gate, verified by the other model',
   whenToUse: 'Reviewing a diff, change set, document or plan before it is merged or published; pass author, round and full SHAs.',
   phases: [
     { title: 'Review', detail: 'Opus 5.5 and GPT-6.1 Sol (Astra in deep mode) review independently' },
@@ -201,15 +201,15 @@ const VERDICTS = {
 const REVIEWERS = {
   claude: { agentType: 'reviewer', name: 'Opus 5.5' },
   gpt: deep
-    ? { agentType: 'second-opinion', name: 'GPT-6 Astra' }
-    : { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
+    ? { agentType: 'second-opinion', name: 'Opus 5.5 high' }
+    : { agentType: 'sol-reviewer', name: 'Sonnet 5.5' },
 }
 const QUICK_REVIEWERS = {
   claude: { agentType: 'reviewer', name: 'Opus 5.5' },
-  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
+  gpt: { agentType: 'sol-reviewer', name: 'Sonnet 5.5' },
 }
 const other = side => (side === 'claude' ? 'gpt' : 'claude')
-const ASTRA = { agentType: 'second-opinion', name: 'GPT-6 Astra' }
+const ASTRA = { agentType: 'second-opinion', name: 'Opus 5.5 high' }
 // Who checks the findings reported by `side`. Sol must not judge findings against Sol-written work.
 const verifierFor = side =>
   side === 'claude' && author === 'gpt' && !deep ? ASTRA : REVIEWERS[other(side)]

@@ -1,12 +1,12 @@
 ---
 name: reviewer
 display_name: Reviewer
-description: Read-only reviewer (Claude Opus 5.5, medium). Use it to review work produced by GPT models (implementer, grunt, second-opinion) — code, documents, analyses, plans — so a different provider checks it. Also a careful reader for analysis of source data. For a routine check of one slice or small diff, prefer sol-reviewer; before merge, use the review workflow. Cannot edit files.
+description: Read-only reviewer (Claude Opus 5.5, medium). Use it to review work produced by other Claude models (implementer, grunt, second-opinion) — code, documents, analyses, plans — so a different model checks it. Also a careful reader for analysis of source data. For a routine check of one slice or small diff, prefer sol-reviewer; before merge, use the review workflow. Cannot edit files.
 color: orange
 model: anthropic/claude-opus-5-5
 thinking: medium
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, cratis-rules, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-rules, pi-context-budget, output-cap, observation-mask]
 skills: false
 prompt_mode: replace
 ---
