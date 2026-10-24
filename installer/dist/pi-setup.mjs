@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 47490d8a7b7c5c60b55a473c7837cfcc03473c5ae378e12535e326f96d8da5b9
+// pi-setup-source-sha256: c708b93ec8f6292440f129a7b7b2b8b4633ff26154a3b1c6cd701680e8d3066f
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -6820,6 +6820,16 @@ var init_update = __esm({
 // src/doctor-probes.ts
 import { existsSync as existsSync34, readdirSync as readdirSync18, readFileSync as readFileSync32, writeFileSync as writeFileSync11 } from "node:fs";
 import { join as join53 } from "node:path";
+function pythonVersionCheck(ctx, version2) {
+  const match = /^Python (\d+)\.(\d+)\b/.exec(version2 ?? "");
+  const supported = match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 9);
+  return result2("python", supported ? "ok" : "warn", `${version2 || "Python version unknown"}; pi-phase requires Python >=3.9 on macOS/Linux`, installHint(ctx.platform, "python3"));
+}
+async function python(ctx) {
+  if (!ctx.which("python3")) return pythonVersionCheck(ctx);
+  const r2 = await ctx.run("python3", ["--version"], { timeoutMs: 3e3 });
+  return pythonVersionCheck(ctx, r2.code === 0 && !r2.timedOut ? r2.stdout.trim() || r2.stderr.trim() : void 0);
+}
 function plists(ctx) {
   const dir = join53(ctx.home, "Library/LaunchAgents");
   if (ctx.platform !== "darwin" || !existsSync34(dir)) return [];
@@ -6881,7 +6891,7 @@ async function gatherFacts(baseCtx, manifest) {
   const all = plists(ctx);
   const agents = all.filter((p) => !recorded.has(p.label));
   const guardian = all.some((p) => p.label.endsWith(".docker-guardian")) || manifest?.components?.["docker-guardian"]?.on === true;
-  const [providers2, models2, version2, gh, head, checkout, disks, launchd, docker, updates] = await Promise.all([
+  const [providers2, models2, version2, gh, head, checkout, disks, launchd, docker, updates, pythonCheck] = await Promise.all([
     Promise.all(PROVIDER_IDS.map((id) => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" })) : Promise.resolve({ status: "unknown" }))),
     hasPi ? listModels(ctx) : Promise.resolve({ catalog: null, code: null, stderr: "", timedOut: false }),
     hasPi ? ctx.run("pi", ["--version"], { timeoutMs: 8e3 }) : Promise.resolve(skippedRun),
@@ -6894,7 +6904,8 @@ async function gatherFacts(baseCtx, manifest) {
       return result2(`launchd:${p.label}`, r2.code === 0 && !r2.timedOut ? "ok" : "warn", `${p.label}: ${r2.code === 0 && !r2.timedOut ? "loaded" : "not loaded"}`, `launchctl load -w ~/Library/LaunchAgents/${p.file}`);
     })),
     guardian ? ctx.run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 5e3 }) : Promise.resolve(void 0),
-    update(ctx, manifest)
+    update(ctx, manifest),
+    python(ctx)
   ]);
   let pi;
   if (!hasPi) pi = result2("pi", "fail", "not on PATH", installHint(ctx.platform, "pi"));
@@ -6906,7 +6917,7 @@ ${gh.stderr}`);
   const ghCheck = !ctx.which("gh") ? result2("gh", "warn", "not on PATH", installHint(ctx.platform, "gh")) : !github.host ? result2("gh", "warn", "not logged in", "gh auth login") : result2("gh", "ok", `${github.login}@${github.host}`);
   return {
     facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i2) => [id, providers2[i2]])), catalog: models2.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : void 0, checkoutClean: checkout.code === 0 && !checkout.timedOut ? !checkout.stdout.trim() : void 0, github: { ...github, orgs: [] }, summary: false },
-    checks: [pi, ghCheck, ...disks, ...launchd.length ? launchd : [result2("launchd", "skip", "no managed launch agents")], docker ? result2("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result2("docker", "skip", "no docker guardian"), updates]
+    checks: [pi, ghCheck, pythonCheck, ...disks, ...launchd.length ? launchd : [result2("launchd", "skip", "no managed launch agents")], docker ? result2("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result2("docker", "skip", "no docker guardian"), updates]
   };
 }
 var result2, skippedRun;
@@ -8809,7 +8820,13 @@ function pickProfile(options, activeBefore, ready3, profiles, names, readOnly = 
 }
 function requiredToolErrors(ctx, detection, options) {
   const needed = ["python3", ...options.skipNpm ? [] : ["npm"]];
-  return needed.filter((tool) => !toolPath(detection, tool)).map((tool) => `${tool} is required but was not found on PATH; install it with: ${installHint(ctx.platform, tool)}`);
+  const errors = needed.filter((tool) => !toolPath(detection, tool)).map((tool) => `${tool} is required but was not found on PATH; install it with: ${installHint(ctx.platform, tool)}`);
+  const python2 = detection.tools.find((tool) => tool.name === "python3");
+  if (!python2?.path) return errors;
+  const check3 = pythonVersionCheck(ctx, python2.version);
+  if (check3.status !== "ok" && !options.json) ctx.err(`warning: ${check3.detail}; install it with: ${check3.fix}`);
+  if (check3.status === "ok" && !options.json) ctx.out(check3.detail);
+  return errors;
 }
 function extraRows(ctx, options, saved, detection, manifest) {
   const flags = flagMap(options);
@@ -9071,6 +9088,7 @@ var init_run = __esm({
     init_retire();
     init_services();
     init_doctor();
+    init_doctor_probes();
     init_update();
     init_profiles();
     init_report();

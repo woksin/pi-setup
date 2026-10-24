@@ -10,7 +10,7 @@ import type { DoctorFacts } from "../src/doctor-checks.ts";
 import type { Ctx, RunOptions } from "../src/types.ts";
 import { piPath, sandbox, snapshot, testCtx } from "./helpers/home.ts";
 
-function fixture() {
+function fixture(pythonVersion = "Python 3.12.0") {
   const box = sandbox();
   const pi = piPath(box);
   const put = (rel: string, text: string) => { const p = join(pi, rel); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text); return p; };
@@ -37,7 +37,7 @@ function fixture() {
     if (cmd === "pi") stdout = args[0] === "auth" ? JSON.stringify(facts.providers[args[3]]) : args[0] === "--version" ? "1.0" : "provider model\n" + [...facts.catalog!].map(p => p.replace("/", " ")).join("\n");
     if (cmd === "gh") stdout = "Logged in to github.com account tester";
     if (cmd === "git") stdout = args.includes("status") ? "" : args.includes("rev-parse") ? "abc123" : args.includes("ls-remote") ? "hash\trefs/tags/v2" : "v1";
-    if (cmd === "python3") stdout = JSON.stringify([{ id: "disk", severity: "info", evidence: "plenty free", suggest: "df -h ~" }]);
+    if (cmd === "python3") stdout = args[0] === "--version" ? pythonVersion : JSON.stringify([{ id: "disk", severity: "info", evidence: "plenty free", suggest: "df -h ~" }]);
     return { code: 0, stdout, stderr: "", timedOut: false };
   } }, out);
   const checks = () => localChecks(ctx, facts).checks;
@@ -66,6 +66,18 @@ test("green JSON is one object; calls are bounded and restricted; HOME and guard
     if (c.cmd === "pi") assert.ok(c.args[0] === "--version" || c.args.join(" ") === "--offline --list-models" || /^auth check --provider \S+ --no-refresh --json$/.test(c.args.join(" ")));
   }
 });
+
+for (const [version, status, exit] of [["Python 3.9.6", "ok", 0], ["Python 3.14.2", "ok", 0], ["Python 3.8", "warn", 1], ["", "warn", 1]] as const) {
+  test(`doctor checks Python version: ${version || "unknown"}`, async () => {
+    const f = fixture(version);
+    assert.equal(await main(["doctor", "--json"], f.ctx), exit);
+    const check = JSON.parse(f.out[0]).checks.find((c: { id: string }) => c.id === "python");
+    assert.equal(check.status, status);
+    assert.ok(check.detail.includes(version || "Python version unknown"));
+    assert.match(check.detail, /requires Python >=3\.9/);
+    assert.equal(f.calls.filter(c => c.cmd === "python3" && c.args[0] === "--version").length, 1);
+  });
+}
 
 test("files: missing, modified, pending, modes and moved checkout", () => {
   const f = fixture();

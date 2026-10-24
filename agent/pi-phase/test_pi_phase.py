@@ -106,18 +106,21 @@ class PhaseTests(unittest.TestCase):
         self.assertTrue(list(self.state.glob("direct-*.json")))  # Orphan guard retained.
         return output.getvalue() + error_output.getvalue()
 
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
     def test_failed_diagnostic_output_preserves_primary_and_live_guard(self):
         output = self.supervisor_diagnostic(OSError(5, "primary wait fault"), failed_output=True)
         self.assertIn("primary operation=waitid", output)
         self.assertIn("cleanup operation=stop_group", output)
         self.assertIn("producer_exit=unknown", output)
 
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
     def test_failed_diagnostic_output_preserves_unknown_guard(self):
         output = self.supervisor_diagnostic(37, probe=None, failed_output=True)
         self.assertIn("primary operation=stop_group", output)
         self.assertIn("liveness=unknown", output)
         self.assertIn("producer_exit=37", output)
 
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
     def test_finalization_only_error_survives_failed_output(self):
         self.configure(msbuild_max_cpu=0, phase_nice=0, cold_worktree_hint=False, container_test_detection="off")
         output = io.StringIO()
@@ -165,6 +168,7 @@ class PhaseTests(unittest.TestCase):
         self.assertIn("cleanup operation=release", output.getvalue())
         self.assertIn("producer_exit=0", output.getvalue())
 
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
     def test_primary_waitid_error_survives_secondary_cleanup_eperm(self):
         output = self.supervisor_diagnostic(OSError(5, "primary wait fault"))
         self.assertIn("primary operation=waitid", output)
@@ -173,6 +177,7 @@ class PhaseTests(unittest.TestCase):
         self.assertIn("producer_exit=unknown", output)
         self.assertIn("pid=2147483647 pgid=2147483647", output)
 
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
     def test_completion_eperm_preserves_known_producer_exit(self):
         for status in (0, 37):
             with self.subTest(status=status):
@@ -182,6 +187,7 @@ class PhaseTests(unittest.TestCase):
                 self.assertIn("killpg signal=SIGTERM", output)
                 self.assertIn("liveness=live", output)
 
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
     def test_completion_eperm_reports_unknown_liveness(self):
         output = self.supervisor_diagnostic(0, probe=None)
         self.assertIn("liveness=unknown", output)
@@ -206,6 +212,7 @@ class PhaseTests(unittest.TestCase):
                     pi_phase.stop_group(99)
                 self.assertIsNone(pi_phase.group_liveness(99))
 
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
     def test_waitid_observation_reserves_leader_and_maps_signal(self):
         for code, status, expected in ((os.CLD_EXITED, 37, 37), (os.CLD_KILLED, 15, 143),
                                        (os.CLD_DUMPED, 6, 134)):
@@ -280,9 +287,10 @@ class PhaseTests(unittest.TestCase):
 
     def marker_job(self, name, seconds=.6):
         marker = self.root / f"{name}.json"
+        # macOS Python <3.10 has process-relative monotonic clocks.
         script = ("import json,time,sys; p=sys.argv[1]; "
-                  "start=time.monotonic(); time.sleep(float(sys.argv[2])); "
-                  "open(p,'w').write(json.dumps([start,time.monotonic()]))")
+                  "start=time.time(); time.sleep(float(sys.argv[2])); "
+                  "open(p,'w').write(json.dumps([start,time.time()]))")
         return [sys.executable, "-c", script, str(marker), str(seconds)]
 
     def intervals(self, *names):
@@ -2907,11 +2915,17 @@ class PhaseTests(unittest.TestCase):
     def test_crashed_supervisor_keeps_orphan_group_guard(self):
         self.config.write_text('{"heavy_slots": 1, "integration_slots": 1}')
         marker = self.root / "orphan"
-        # Direct producer exits, child closes inherited FDs and stays in group.
-        script = ("import subprocess,sys,pathlib; "
-                  "p=subprocess.Popen([sys.executable,'-c','import signal,time;signal.signal(signal.SIGTERM, signal.SIG_IGN);time.sleep(2)'],close_fds=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
-                  "pathlib.Path(sys.argv[1]).touch(); import time; time.sleep(.5)")
-        job = self.run_phase(command=[sys.executable, "-c", script, str(marker)])
+        # Keep the orphan alive through status/startup overhead, not just a fixed 2s.
+        release = self.root / "release-orphan"
+        self.addCleanup(release.touch)
+        child_script = ("import pathlib,signal,sys,time; "
+                        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                        "release=pathlib.Path(sys.argv[1]); deadline=time.monotonic()+30\n"
+                        "while not release.exists() and time.monotonic()<deadline: time.sleep(.02)\n")
+        script = ("import subprocess,sys,pathlib,time; "
+                  "subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3]],close_fds=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+                  "pathlib.Path(sys.argv[1]).touch(); time.sleep(.5)")
+        job = self.run_phase(command=[sys.executable, "-c", script, str(marker), child_script, str(release)])
         self.wait_for(marker.exists)
         job.kill()  # Supervisor dies without releasing a lease or killing the group.
         job.communicate(timeout=3)
@@ -2921,6 +2935,7 @@ class PhaseTests(unittest.TestCase):
         code, out = self.done(blocked)
         self.assertEqual(code, 75, out)
         self.assertFalse((self.root / "blocked.json").exists())
+        release.touch()
         self.wait_for(lambda: self.done(self.start("status"))[1].strip() ==
                       "pi-phase: no active phases\npi-phase: fast=0/2 queued=0\npi-phase: high=0/3", seconds=4)
         self.assertEqual(self.done(self.run_phase())[0], 0)
