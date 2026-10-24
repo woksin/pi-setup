@@ -280,6 +280,7 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(probe.call_count, 1)
         kill.assert_called_once_with(99, signal.SIGTERM)
 
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
     def test_completion_eperm_retries_probe_and_releases_lease(self):
         # First signal probe, final group_alive probe, then exhausted final probes.
         for retry_at, unknown in ((0, False), (2, False), (2, True)):
