@@ -10,6 +10,7 @@ import errno
 import fcntl
 import fnmatch
 import hashlib
+from itertools import chain
 import json
 import math
 import os
@@ -1547,23 +1548,55 @@ def dump_command_segments(command, depth=0):
         yield from dump_command_segments(segment, depth + 1)
 
 
+def dump_shell_escape(characters):
+    following = next(characters, "")
+    return "" if following == "\n" else "\\" + following
+
+
+def dump_shell_quoted(characters, quote):
+    literal = [quote]
+    for character in characters:
+        if character == "\\" and quote == '"':
+            literal.append(dump_shell_escape(characters))
+            continue
+        literal.append(character)
+        if character == quote:
+            break
+    return "".join(literal)
+
+
+def dump_shell_fragments(script):
+    """Keep quoted/escaped literals atomic; remove only shell continuations."""
+    characters = iter(script)
+    word_start = True
+    for character in characters:
+        if character == "#" and word_start:
+            yield next((item for item in characters if item == "\n"), "")
+            word_start = True
+            continue
+        if character in ("'", '"'):
+            fragment = dump_shell_quoted(characters, character)
+        elif character == "\\":
+            fragment = dump_shell_escape(characters)
+        else:
+            fragment = character
+        if fragment:
+            yield fragment
+            word_start = fragment.isspace() or fragment in ";&|()"
+
+
 def dump_shell_segments(script):
-    # Consume quoted/escaped text before looking for operators, keeping literal
-    # separators inside arguments intact. This is inspection, not a shell parser.
-    pattern = r'''"(?:[^"\\]|\\.)*"|'[^']*'|\\.|#[^\n]*|[;&|()\n]+'''
-    start = 0
-    for match in re.finditer(pattern, script):
-        if match.group()[0] not in ";&|()\n":
+    # Inspect literal words only: no expansion, substitution or execution.
+    segment = []
+    for fragment in chain(dump_shell_fragments(script), ("\n",)):
+        if fragment not in (";", "&", "|", "(", ")", "\n"):
+            segment.append(fragment)
             continue
         try:
-            yield shlex.split(script[start:match.start()], comments=True)
+            yield shlex.split("".join(segment))
         except ValueError:
-            pass
-        start = match.end()
-    try:
-        yield shlex.split(script[start:], comments=True)
-    except ValueError:
-        pass  # Malformed shell text is best effort, like unwrap_command.
+            pass  # Malformed shell text is best effort, like unwrap_command.
+        segment = []
 
 
 def dump_command_options(command):

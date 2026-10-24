@@ -108,6 +108,35 @@ class DumpFlagTests(unittest.TestCase):
             self.assertEqual(self.warnings(["sh", "-c", script]), "")
         self.assertEqual(self.warnings(["sh", "-c", "echo ok # ; --hangdump\necho done"]), "")
 
+    def test_shell_continuations_preserve_dump_flags_and_chains(self):
+        continuation = "\\\n"
+        for prefix in ("", "cd tests && "):
+            for flag, _, _ in DUMP_FLAGS:
+                with self.subTest(prefix=prefix, flag=flag):
+                    script = f"{prefix}dotnet test {flag} {continuation} --logger trx"
+                    self.assertIn(f"{flag} without", self.warnings(["sh", "-c", script]))
+                    script += f" && dotnet test --hangdump-type {continuation} Mini"
+                    self.assertIn(f"{flag} without", self.warnings(["sh", "-c", script]))
+
+    def test_shell_continued_mini_and_none_are_exempt(self):
+        continuation = "\\\n"
+        for (flag, dump_type, _), value in product(DUMP_FLAGS, ("mini", "none")):
+            for prefix in ("", "cd tests && "):
+                with self.subTest(flag=flag, value=value, prefix=prefix):
+                    script = f"{prefix}dotnet test {flag} {continuation} {dump_type} {continuation} {value}"
+                    self.assertEqual(self.warnings(["sh", "-c", script]), "")
+
+    def test_shell_continuations_respect_quote_context(self):
+        continuation = "\\\n"
+        script = f'dotnet test --blame-{continuation}hang --logger "t{continuation}rx"'
+        self.assertEqual(list(pi_phase.dump_shell_segments(script)),
+                         [["dotnet", "test", "--blame-hang", "--logger", "trx"]])
+        self.assertIn("--blame-hang without", self.warnings(["sh", "-c", script]))
+        script = f"dotnet test '--blame-{continuation}hang'"
+        self.assertEqual(list(pi_phase.dump_shell_segments(script)),
+                         [["dotnet", "test", f"--blame-{continuation}hang"]])
+        self.assertEqual(self.warnings(["sh", "-c", script]), "")
+
     def test_shell_full_type_warns(self):
         output = self.warnings(["sh", "-c", "cd tests && dotnet test --hangdump-type FULL"])
         self.assertIn("--hangdump-type full writes full dumps", output)
