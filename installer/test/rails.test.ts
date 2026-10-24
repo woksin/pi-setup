@@ -51,7 +51,7 @@ test("customise shows six steps in order with honest counters", async () => {
   const code = await main(["--skip-npm", "--no-launchd"], ctx, s.p);
   assert.equal(code, 0, diagnostics.join("\n"));
   assert.deepEqual(s.steps, titles.map((title, i) => `Step ${i + 1} of 6 · ${title}`));
-  assert.match(s.notes.join("\n"), /Claude ✓.*ChatGPT ✓.*Kimi ✓/);
+  assert.match(s.notes.join("\n"), /Claude ✓[\s\S]*ChatGPT ✓[\s\S]*Kimi ✓/);
 });
 
 test("user and root flags drop their steps from the count", async () => {
@@ -110,8 +110,8 @@ test("fixed profile and extras skip steps and cannot be edited at Review", async
   assert.equal(await main([
     ...flags(b), "--user", "alice", "--profile", "auto", ...COMPONENT_IDS.flatMap((id) => ["--without", id]),
   ], ctxFor(b), s.p), 1);
-  assert.deepEqual(s.steps, ["Step 1 of 2 · AI logins", "Step 2 of 2 · Review", "Step 2 of 2 · Review"]);
-  assert.deepEqual(s.offered.find((choices) => choices.includes("logins")), ["logins", "review"]);
+  assert.deepEqual(s.steps, ["Step 1 of 3 · AI logins", "Step 2 of 3 · Profile", "Step 3 of 3 · Review", "Step 3 of 3 · Review"]);
+  assert.deepEqual(s.offered.find((choices) => choices.includes("logins")), ["logins", "profile", "review"]);
 });
 
 test("recommended lanes asks only the necessary trust question before Review", async () => {
@@ -134,7 +134,62 @@ test("cancelling at mode or a custom step writes nothing", async () => {
 
 test("recommended without ready providers shows the status-only login step", async () => {
   const b = box(); const ctx = ctxFor(b); ctx.env.STUB_READY = "";
-  const s = scripted(); assert.equal(await main(flags(b), ctx, s.p), 0);
+  const s = scripted({ "Log in to your": ["continue"] }); assert.equal(await main(flags(b), ctx, s.p), 0);
   assert.deepEqual(s.steps, ["Step 1 of 2 · AI logins", "Step 2 of 2 · Review"]);
-  assert.match(s.notes.join("\n"), /Claude ✗.*ChatGPT ✗.*Kimi ✗/);
+  assert.match(s.notes.join("\n"), /Claude ✗[\s\S]*ChatGPT ✗[\s\S]*Kimi ✗/);
+});
+
+function selectHook(p: ReturnType<typeof scripted>["p"], after: (message: string, answer: unknown) => void) {
+  const select = p.select;
+  p.select = (async (o: Parameters<typeof select>[0]) => {
+    const answer = await select(o);
+    after(o.message, answer);
+    return answer;
+  }) as typeof select;
+}
+
+test("the logins step shows each provider with its role", async () => {
+  const b = box(); const s = scripted({ "How do you": ["custom"] });
+  assert.equal(await main(flags(b), ctxFor(b), s.p), 0);
+  const note = s.notes.find((n) => n.includes("Claude ✓")) ?? "";
+  assert.match(note, /Claude ✓ \(main model in most profiles\)/);
+  assert.match(note, /ChatGPT ✓ \(coding in most profiles\)/);
+  assert.match(note, /Kimi ✓ \(optional, research\)/);
+  assert.equal(s.selects.find((x) => x.message.startsWith("Log in to"))?.initial, "continue");
+});
+
+test("Log in now re-probes through the injected probe and flips ChatGPT to ready", async () => {
+  const b = box(); const ctx = ctxFor(b); ctx.env.STUB_READY = "";
+  const s = scripted({ "How do you": ["custom"], "Log in to your": ["login", "continue"] });
+  let probes = 0;
+  const run = ctx.run;
+  ctx.run = (cmd, args, o) => { if (cmd === "pi" && args[0] === "auth") probes++; return run(cmd, args, o); };
+  selectHook(s.p, (message, answer) => { if (message.startsWith("Log in to") && answer === "login") ctx.env.STUB_READY = "openai-codex"; });
+  assert.equal(await main(flags(b), ctx, s.p), 0);
+  const logins = s.selects.filter((x) => x.message.startsWith("Log in to"));
+  assert.deepEqual(logins.map((x) => x.initial), ["login", "continue"]);
+  const notes = s.notes.filter((n) => n.includes("Claude ") && n.includes("Kimi "));
+  assert.match(notes[0], /ChatGPT ✗/);
+  assert.match(notes[1], /Claude ✗[\s\S]*ChatGPT ✓/);
+  assert.match(s.notes.join("\n"), /run pi, type \/login/);
+  assert.equal(probes, 6);
+  assert.match(s.notes.at(-1) ?? "", /Profile: openai-only/);
+});
+
+test("a missing pi shows the install command and offers to check again", async () => {
+  const b = box(); const ctx = ctxFor(b); ctx.env.STUB_READY = "";
+  const which = ctx.which; let installed = false;
+  ctx.which = (name) => name === "pi" && !installed ? undefined : which(name);
+  const s = scripted({ "How do you": ["custom"], "Install pi first": ["login"], "Log in to your": ["continue"] });
+  selectHook(s.p, (message) => { if (message === "Install pi first") installed = true; });
+  assert.equal(await main(flags(b), ctx, s.p), 0);
+  assert.match(s.notes.join("\n"), /npm install -g @earendil-works\/pi-coding-agent/);
+  assert.ok(s.selects.some((x) => x.labels.includes("Check again")));
+  assert.ok(s.selects.some((x) => x.message === "Log in to your AI providers"));
+});
+
+test("customise skips Profile only for an explicit profile name", async () => {
+  const b = box(); const s = scripted({ "How do you": ["custom"] });
+  assert.equal(await main([...flags(b), "--user", "alice", "--profile", "openai-only"], ctxFor(b), s.p), 0);
+  assert.ok(!s.steps.some((step) => step.includes("Profile")), s.steps.join("\n"));
 });

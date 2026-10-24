@@ -79,7 +79,10 @@ export function railsCtxFor(box: Sandbox, output: { lines?: string[]; errors?: s
 
 /** Accept the rails shell without changing a caller's other interactive choices. */
 export function installationChoice({ message }: { message: string }): string | typeof CANCEL {
-  const answers = new Map([["How do you want to set up?", "recommended"], ["Review", "install"]]);
+  const answers = new Map([
+    ["How do you want to set up?", "recommended"], ["Review", "install"],
+    ["Log in to your AI providers", "continue"], ["Install pi first", "continue"],
+  ]);
   return answers.get(message) ?? CANCEL;
 }
 

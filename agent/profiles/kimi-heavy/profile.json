@@ -1,5 +1,5 @@
 {
-  "summary": "Moves more roles to Kimi K3; needs Claude, ChatGPT and Kimi.",
+  "summary": "Moves research, drafts and routine work to Kimi; needs all three logins.",
   "requires": [
     "anthropic",
     "openai-codex",

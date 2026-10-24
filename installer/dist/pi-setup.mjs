@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 82c467051bd1be0d347ac089c9ef99fa584e440c09f7003c203c57f78ed6a8c8
+// pi-setup-source-sha256: 245b2e2d181dadbafdfe73102df8ba63313704282358f14e23e53805a5e5a392
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5608,7 +5608,16 @@ function spliceRouting(agentsMd2, routing, live) {
   const endLine = l2 ? liveText.slice(l2.end, l2.endLineEnd) : text4.slice(m2.end, m2.endLineEnd);
   return Buffer.from(text4.slice(0, m2.start) + startLine + routing.toString("utf8") + endLine + text4.slice(m2.endLineEnd), "utf8");
 }
-var START, END, FALLBACK_PROFILE;
+function profileOption(meta, ready3, recommended, provisional = false) {
+  const optional = meta.uses.filter((id) => !meta.requires.includes(id));
+  const needs = `Needs: ${meta.requires.map(labelOf).join(", ")}${optional.length ? `; optional: ${optional.map(labelOf).join(", ")}` : ""}`;
+  const label = `${meta.name}${recommended ? " (recommended)" : ""} \xB7 ${needs}`;
+  const missing = meta.requires.filter((id) => !ready3.has(id));
+  if (missing.length === 0) return { label, hint: meta.summary, disabled: false };
+  if (provisional) return { label, hint: "installs now; log in later and run ./install.sh --profile auto", disabled: false };
+  return { label, hint: `needs ${missing.map(labelOf).join(" and ")} login`, disabled: true };
+}
+var START, END, FALLBACK_PROFILE, labelOf;
 var init_profiles = __esm({
   "src/profiles.ts"() {
     init_settings();
@@ -5617,6 +5626,7 @@ var init_profiles = __esm({
     START = "<!-- pi-profile:routing:start";
     END = "<!-- pi-profile:routing:end -->";
     FALLBACK_PROFILE = "balanced";
+    labelOf = (id) => PROVIDER_LABELS[id] ?? id;
   }
 });
 
@@ -7254,6 +7264,17 @@ async function askRoot(p, input) {
   const typed = await p.text({ message: "Repositories root", initial: `${input.home}/repos`, validate: validateRoot(input) });
   return p.isCancel(typed) ? CANCEL : expandHome(typed.trim(), input.home);
 }
+function profileChoices(input) {
+  const ready3 = readyProviders(input.detection);
+  const pick2 = chooseProfile(ready3, input.profiles);
+  const ordered = [
+    ...input.profiles.filter((m2) => m2.name === pick2.name),
+    ...input.profiles.filter((m2) => m2.name !== pick2.name).sort((a2, b) => b.rank - a2.rank)
+  ];
+  const options = ordered.map((m2) => ({ value: m2.name, ...profileOption(m2, ready3, m2.name === pick2.name, pick2.provisional && m2.name === pick2.name) }));
+  const current = options.find((o) => o.value === input.initial.name && !o.disabled);
+  return { options, initial: current?.value ?? options.find((o) => !o.disabled)?.value ?? pick2.name };
+}
 async function askProfile(p, input) {
   if (input.options.profile && input.options.profile !== "auto") return void 0;
   const { initial } = input;
@@ -7264,11 +7285,8 @@ async function askProfile(p, input) {
   });
   if (p.isCancel(answer)) return CANCEL;
   if (answer === "keep") return void 0;
-  const chosen = await p.select({
-    message: "Pick a profile",
-    options: input.profiles.map((m2) => ({ value: m2.name, label: m2.name, hint: m2.summary })),
-    initial: initial.name
-  });
+  const choices = profileChoices(input);
+  const chosen = await p.select({ message: "Pick a profile", options: choices.options, initial: choices.initial });
   return p.isCancel(chosen) ? CANCEL : chosen;
 }
 async function askComponents(p, input, root) {
@@ -7327,6 +7345,8 @@ async function resolveConflicts(p, conflicts2, showDiff) {
 var savedString, TAKE;
 var init_wizard = __esm({
   "src/wizard.ts"() {
+    init_profiles();
+    init_detect();
     init_report();
     init_settings();
     init_types();
@@ -7336,13 +7356,18 @@ var init_wizard = __esm({
 });
 
 // src/rails.ts
+function initialFor(input, state2) {
+  if (state2.profile) return { name: state2.profile, reason: "you picked it", provisional: false, source: "prompt" };
+  if (input.initial.source !== "chooser" || input.readOnly) return input.initial;
+  return chooseProfile(readyProviders(input.detection), input.profiles);
+}
 function currentInput(input, state2) {
   const rows = input.extras;
   return {
     ...input,
     saved: { ...input.saved, ...state2.user ? { githubUser: state2.user } : {}, ...state2.root ? { reposRoot: state2.root } : {} },
     detection: state2.root ? { ...input.detection, candidates: [{ path: state2.root, score: 0 }, ...input.detection.candidates.filter((c2) => c2.path !== state2.root)] } : input.detection,
-    initial: state2.profile ? { name: state2.profile, reason: "you picked it", provisional: false, source: "prompt" } : input.initial,
+    initial: initialFor(input, state2),
     extras: rows ? (root) => rows(root).map((row) => ({ ...row, initial: state2.components?.[row.id] ?? row.initial })) : void 0,
     preapproveMcp: state2.preapproveMcp ?? input.preapproveMcp
   };
@@ -7362,9 +7387,44 @@ async function repos(p, input, state2) {
   if (answer !== void 0) state2.root = answer;
   return true;
 }
+function loginLines(input) {
+  const lines2 = PROVIDER_IDS.map((id) => {
+    const status2 = input.detection.providers[id]?.status;
+    const mark = status2 === "ready" ? "\u2713" : status2 === "not_ready" ? "\u2717" : "?";
+    return `${PROVIDER_LABELS[id]} ${mark} (${ROLES[id]})`;
+  });
+  if (input.hasPi && !input.hasPi()) lines2.push("", `pi is not installed yet. Install it with: ${PI_INSTALL}`);
+  return lines2.join("\n");
+}
+async function recheck(input) {
+  const probed = await Promise.all(PROVIDER_IDS.map(async (id) => [id, await input.probe(id)]));
+  for (const [id, state2] of probed) input.detection.providers[id] = state2;
+}
+function loginChoice(input, missingPi) {
+  const none = readyProviders(input.detection).size === 0;
+  return {
+    message: missingPi ? "Install pi first" : "Log in to your AI providers",
+    options: [
+      { value: "continue", label: "Continue", hint: none ? "installs now; log in later" : "use what is logged in" },
+      { value: "login", label: missingPi ? "Check again" : "Log in now, then check again", hint: missingPi ? PI_INSTALL : LOGIN_HOWTO }
+    ],
+    initial: none ? "login" : "continue"
+  };
+}
 async function logins(p, input) {
-  p.note(detectionLines(input.detection).filter((line) => line.startsWith("Providers:")).join("\n"), "AI logins");
-  return true;
+  if (!input.probe || input.readOnly) {
+    p.note(loginLines(input), "AI logins");
+    return true;
+  }
+  for (; ; ) {
+    const missingPi = Boolean(input.hasPi && !input.hasPi());
+    p.note(loginLines(input), "AI logins");
+    const answer = await p.select(loginChoice(input, missingPi));
+    if (p.isCancel(answer)) return false;
+    if (answer === "continue") return true;
+    if (!missingPi) p.note(LOGIN_HOWTO, "Log in");
+    await recheck(input);
+  }
 }
 async function profile2(p, input, state2) {
   const answer = await askProfile(p, input);
@@ -7393,7 +7453,7 @@ function header(p, index, total, title) {
 async function conflicts(p, review) {
   if (!review.conflicts) return true;
   const answer = await p.select({
-    message: `${review.conflicts} files you edited`,
+    message: `${review.conflicts} ${review.conflicts === 1 ? "file" : "files"} you edited`,
     options: [{ value: "keep", label: "Keep yours (recommended)" }, { value: "decide", label: "Decide per file" }],
     initial: "keep"
   });
@@ -7478,20 +7538,27 @@ Ctrl-C quits at any time.`, "Welcome");
   if (!await reviewLoop({ p, input, state: state2, steps })) return CANCEL;
   return { ...state2, mode: selected };
 }
-var saved, rootFor, STEPS;
+var saved, rootFor, ROLES, PI_INSTALL, LOGIN_HOWTO, STEPS;
 var init_rails = __esm({
   "src/rails.ts"() {
     init_detect();
-    init_report();
+    init_profiles();
     init_types();
     init_wizard();
     saved = (input, key) => typeof input.saved[key] === "string" ? input.saved[key] : "";
     rootFor = (input, state2 = {}) => state2.root || input.options.reposRoot || saved(input, "reposRoot") || input.detection.candidates[0]?.path || `${input.home}/repos`;
+    ROLES = {
+      anthropic: "main model in most profiles",
+      "openai-codex": "coding in most profiles",
+      "kimi-coding": "optional, research"
+    };
+    PI_INSTALL = "npm install -g @earendil-works/pi-coding-agent";
+    LOGIN_HOWTO = "Open another terminal, run pi, type /login and pick the providers you have. Then come back here.";
     STEPS = [
       { id: "you", title: "You", needed: (mode, i2) => !i2.options.user && (mode === "custom" || !(saved(i2, "githubUser") || i2.detection.github.login)), run: you },
       { id: "repos", title: "Repositories", needed: (mode, i2) => mode === "custom" && !i2.options.reposRoot, run: repos },
       { id: "logins", title: "AI logins", needed: (mode, i2) => mode === "custom" || readyProviders(i2.detection).size === 0, run: logins },
-      { id: "profile", title: "Profile", needed: (mode, i2) => mode === "custom" && !i2.options.profile, run: profile2 },
+      { id: "profile", title: "Profile", needed: (mode, i2) => mode === "custom" && (!i2.options.profile || i2.options.profile === "auto"), run: profile2 },
       { id: "extras", title: "Extras", needed: (mode, i2) => needsTrust(i2) || mode === "custom" && Boolean(i2.extras?.(rootFor(i2)).some((r2) => !r2.fixed && !r2.unavailable)), run: extras }
     ];
   }
@@ -9195,6 +9262,9 @@ async function guidedResolution({ ctx, options, detection, saved: saved2, manife
     repoDir: ctx.repoDir,
     installed: Boolean(manifest),
     activeProfile: activeBefore,
+    probe: (id) => probeProvider(ctx, id),
+    hasPi: () => Boolean(ctx.which("pi")),
+    readOnly: options.dryRun || options.plan,
     extras: extraRows(ctx, options, saved2, detection, manifest),
     preapproveMcp: savedPreapproval(ctx),
     review: (answers) => {

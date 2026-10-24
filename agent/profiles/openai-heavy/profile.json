@@ -1,5 +1,5 @@
 {
-  "summary": "Most roles on GPT, Claude for a single role.",
+  "summary": "Mostly ChatGPT; Claude for one role.",
   "requires": [
     "openai-codex",
     "anthropic"

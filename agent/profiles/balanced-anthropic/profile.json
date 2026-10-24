@@ -1,5 +1,5 @@
 {
-  "summary": "Balanced routing on Anthropic models only (Opus, Sonnet, Haiku); no OpenAI or Kimi.",
+  "summary": "Claude only (Opus, Sonnet, Haiku), for a Claude subscription without ChatGPT.",
   "requires": [
     "anthropic"
   ],

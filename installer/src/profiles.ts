@@ -143,3 +143,25 @@ export function spliceRouting(agentsMd: Buffer, routing: Buffer, live?: Buffer):
   const endLine = l ? liveText.slice(l.end, l.endLineEnd) : text.slice(m.end, m.endLineEnd);
   return Buffer.from(text.slice(0, m.start) + startLine + routing.toString("utf8") + endLine + text.slice(m.endLineEnd), "utf8");
 }
+
+export interface ProfileOption {
+  label: string;
+  hint: string;
+  disabled: boolean;
+}
+
+const labelOf = (id: string): string => PROVIDER_LABELS[id] ?? id;
+
+/**
+ * A plain-words select option for a profile. A profile whose logins are missing is disabled, except the
+ * provisional fallback (`provisional`), which installs now and fills in once the logins exist.
+ */
+export function profileOption(meta: ProfileMeta, ready: Set<string>, recommended: boolean, provisional = false): ProfileOption {
+  const optional = meta.uses.filter((id) => !meta.requires.includes(id));
+  const needs = `Needs: ${meta.requires.map(labelOf).join(", ")}${optional.length ? `; optional: ${optional.map(labelOf).join(", ")}` : ""}`;
+  const label = `${meta.name}${recommended ? " (recommended)" : ""} · ${needs}`;
+  const missing = meta.requires.filter((id) => !ready.has(id));
+  if (missing.length === 0) return { label, hint: meta.summary, disabled: false };
+  if (provisional) return { label, hint: "installs now; log in later and run ./install.sh --profile auto", disabled: false };
+  return { label, hint: `needs ${missing.map(labelOf).join(" and ")} login`, disabled: true };
+}

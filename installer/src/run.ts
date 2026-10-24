@@ -6,7 +6,7 @@ import { apply, describe, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
 import { isInteractive, parseArgs, USAGE } from "./args.ts";
 import type { Options } from "./args.ts";
-import { detect, installHint, readyProviders, toolPath } from "./detect.ts";
+import { detect, installHint, probeProvider, readyProviders, toolPath } from "./detect.ts";
 import { buildPlan } from "./plan.ts";
 import { backupsCommand } from "./backups.ts";
 import { readManifest } from "./manifest.ts";
@@ -256,6 +256,7 @@ async function guidedResolution({ ctx, options, detection, saved, manifest, p, t
   const result = await runRails(p, {
     options, saved, detection, profiles, initial, home: ctx.home, repoDir: ctx.repoDir,
     installed: Boolean(manifest), activeProfile: activeBefore,
+    probe: (id) => probeProvider(ctx, id), hasPi: () => Boolean(ctx.which("pi")), readOnly: options.dryRun || options.plan,
     extras: extraRows(ctx, options, saved, detection, manifest), preapproveMcp: savedPreapproval(ctx),
     review: (answers) => {
       const r = resolveAll(ctx, options, detection, saved, answers, manifest, true);

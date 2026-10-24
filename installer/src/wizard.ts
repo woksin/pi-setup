@@ -1,5 +1,7 @@
 import type { Detection, ProfileMeta, Prompter } from "./types.ts";
+import { chooseProfile, profileOption } from "./profiles.ts";
 import type { Choice } from "./profiles.ts";
+import { readyProviders } from "./detect.ts";
 import type { Options } from "./args.ts";
 import { detectionLines } from "./report.ts";
 import { expandHome, normalizeRoot, validLogin } from "./settings.ts";
@@ -99,6 +101,19 @@ export async function askRoot(p: Prompter, input: WizardInput): Promise<Answer<s
   return p.isCancel(typed) ? CANCEL : expandHome((typed as string).trim(), input.home);
 }
 
+/** Profile choices in plain words: the chooser's pick first, then the rest by rank; unusable ones are disabled. */
+export function profileChoices(input: WizardInput): { options: { value: string; label: string; hint: string; disabled: boolean }[]; initial: string } {
+  const ready = readyProviders(input.detection);
+  const pick = chooseProfile(ready, input.profiles);
+  const ordered = [
+    ...input.profiles.filter((m) => m.name === pick.name),
+    ...input.profiles.filter((m) => m.name !== pick.name).sort((a, b) => b.rank - a.rank),
+  ];
+  const options = ordered.map((m) => ({ value: m.name, ...profileOption(m, ready, m.name === pick.name, pick.provisional && m.name === pick.name) }));
+  const current = options.find((o) => o.value === input.initial.name && !o.disabled);
+  return { options, initial: current?.value ?? options.find((o) => !o.disabled)?.value ?? pick.name };
+}
+
 export async function askProfile(p: Prompter, input: WizardInput): Promise<Answer<string | undefined>> {
   if (input.options.profile && input.options.profile !== "auto") return undefined;
   const { initial } = input;
@@ -109,11 +124,8 @@ export async function askProfile(p: Prompter, input: WizardInput): Promise<Answe
   });
   if (p.isCancel(answer)) return CANCEL;
   if (answer === "keep") return undefined;
-  const chosen = await p.select<string>({
-    message: "Pick a profile",
-    options: input.profiles.map((m) => ({ value: m.name, label: m.name, hint: m.summary })),
-    initial: initial.name,
-  });
+  const choices = profileChoices(input);
+  const chosen = await p.select<string>({ message: "Pick a profile", options: choices.options, initial: choices.initial });
   return p.isCancel(chosen) ? CANCEL : chosen;
 }
 

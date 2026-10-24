@@ -1,7 +1,7 @@
 import { readyProviders } from "./detect.ts";
-import { detectionLines } from "./report.ts";
-import { CANCEL } from "./types.ts";
-import type { Prompter } from "./types.ts";
+import { chooseProfile } from "./profiles.ts";
+import { CANCEL, PROVIDER_IDS, PROVIDER_LABELS } from "./types.ts";
+import type { ProviderState, Prompter } from "./types.ts";
 import { askComponents, askLogin, askPreapproval, askProfile, askRoot } from "./wizard.ts";
 import type { WizardInput, WizardResult } from "./wizard.ts";
 
@@ -18,12 +18,18 @@ export interface RailsInput extends WizardInput {
   installed: boolean;
   activeProfile?: string;
   review(answers: WizardResult): RailsReview;
+  /** Re-check one login (through ctx.run in production, injected in tests). Omitted: the logins step is status only. */
+  probe?(id: string): Promise<ProviderState>;
+  /** Whether the pi command can be found right now. */
+  hasPi?(): boolean;
+  /** Dry-run and plan never run pi probes. */
+  readOnly?: boolean;
 }
 interface Step {
   id: string;
   title: string;
   needed(mode: RailsMode, input: WizardInput): boolean;
-  run(p: Prompter, input: WizardInput, state: WizardResult, customise: boolean): Promise<boolean>;
+  run(p: Prompter, input: RailsInput, state: WizardResult, customise: boolean): Promise<boolean>;
 }
 
 const saved = (input: WizardInput, key: string): string =>
@@ -31,19 +37,26 @@ const saved = (input: WizardInput, key: string): string =>
 const rootFor = (input: WizardInput, state: WizardResult = {}): string =>
   state.root || input.options.reposRoot || saved(input, "reposRoot") || input.detection.candidates[0]?.path || `${input.home}/repos`;
 
-function currentInput(input: WizardInput, state: WizardResult): WizardInput {
+/** The chooser's pick follows the logins as they are now; a flag, the active profile or the user's pick stays. */
+function initialFor(input: RailsInput, state: WizardResult): WizardInput["initial"] {
+  if (state.profile) return { name: state.profile, reason: "you picked it", provisional: false, source: "prompt" };
+  if (input.initial.source !== "chooser" || input.readOnly) return input.initial;
+  return chooseProfile(readyProviders(input.detection), input.profiles);
+}
+
+function currentInput(input: RailsInput, state: WizardResult): RailsInput {
   const rows = input.extras;
   return {
     ...input,
     saved: { ...input.saved, ...(state.user ? { githubUser: state.user } : {}), ...(state.root ? { reposRoot: state.root } : {}) },
     detection: state.root ? { ...input.detection, candidates: [{ path: state.root, score: 0 }, ...input.detection.candidates.filter((c) => c.path !== state.root)] } : input.detection,
-    initial: state.profile ? { name: state.profile, reason: "you picked it", provisional: false, source: "prompt" } : input.initial,
+    initial: initialFor(input, state),
     extras: rows ? (root) => rows(root).map((row) => ({ ...row, initial: state.components?.[row.id] ?? row.initial })) : undefined,
     preapproveMcp: state.preapproveMcp ?? input.preapproveMcp,
   };
 }
 
-async function you(p: Prompter, input: WizardInput, state: WizardResult): Promise<boolean> {
+async function you(p: Prompter, input: RailsInput, state: WizardResult): Promise<boolean> {
   const login = saved(input, "githubUser") || input.detection.github.login || "not found";
   p.note(`GitHub login: ${login} — used for your scheduled-job names and to find your repos`, "You");
   const answer = await askLogin(p, input);
@@ -52,7 +65,7 @@ async function you(p: Prompter, input: WizardInput, state: WizardResult): Promis
   return true;
 }
 
-async function repos(p: Prompter, input: WizardInput, state: WizardResult): Promise<boolean> {
+async function repos(p: Prompter, input: RailsInput, state: WizardResult): Promise<boolean> {
   p.note(`${rootFor(input)} — where lanes and Cratis checks look`, "Repositories");
   const answer = await askRoot(p, input);
   if (answer === CANCEL) return false;
@@ -60,19 +73,66 @@ async function repos(p: Prompter, input: WizardInput, state: WizardResult): Prom
   return true;
 }
 
-async function logins(p: Prompter, input: WizardInput): Promise<boolean> {
-  p.note(detectionLines(input.detection).filter((line) => line.startsWith("Providers:")).join("\n"), "AI logins");
-  return true;
+const ROLES: Record<string, string> = {
+  anthropic: "main model in most profiles",
+  "openai-codex": "coding in most profiles",
+  "kimi-coding": "optional, research",
+};
+const PI_INSTALL = "npm install -g @earendil-works/pi-coding-agent";
+const LOGIN_HOWTO = "Open another terminal, run pi, type /login and pick the providers you have. Then come back here.";
+
+function loginLines(input: RailsInput): string {
+  const lines = PROVIDER_IDS.map((id) => {
+    const status = input.detection.providers[id]?.status;
+    const mark = status === "ready" ? "✓" : status === "not_ready" ? "✗" : "?";
+    return `${PROVIDER_LABELS[id]} ${mark} (${ROLES[id]})`;
+  });
+  if (input.hasPi && !input.hasPi()) lines.push("", `pi is not installed yet. Install it with: ${PI_INSTALL}`);
+  return lines.join("\n");
 }
 
-async function profile(p: Prompter, input: WizardInput, state: WizardResult): Promise<boolean> {
+async function recheck(input: RailsInput): Promise<void> {
+  const probed = await Promise.all(PROVIDER_IDS.map(async (id) => [id, await input.probe!(id)] as const));
+  for (const [id, state] of probed) input.detection.providers[id] = state;
+}
+
+function loginChoice(input: RailsInput, missingPi: boolean): Parameters<Prompter["select"]>[0] & { options: { value: "continue" | "login"; label: string; hint?: string }[] } {
+  const none = readyProviders(input.detection).size === 0;
+  return {
+    message: missingPi ? "Install pi first" : "Log in to your AI providers",
+    options: [
+      { value: "continue", label: "Continue", hint: none ? "installs now; log in later" : "use what is logged in" },
+      { value: "login", label: missingPi ? "Check again" : "Log in now, then check again", hint: missingPi ? PI_INSTALL : LOGIN_HOWTO },
+    ],
+    initial: none ? "login" : "continue",
+  };
+}
+
+/** Show each login, offer to log in and check again until the user continues. */
+async function logins(p: Prompter, input: RailsInput): Promise<boolean> {
+  if (!input.probe || input.readOnly) {
+    p.note(loginLines(input), "AI logins");
+    return true;
+  }
+  for (;;) {
+    const missingPi = Boolean(input.hasPi && !input.hasPi());
+    p.note(loginLines(input), "AI logins");
+    const answer = await p.select(loginChoice(input, missingPi));
+    if (p.isCancel(answer)) return false;
+    if (answer === "continue") return true;
+    if (!missingPi) p.note(LOGIN_HOWTO, "Log in");
+    await recheck(input);
+  }
+}
+
+async function profile(p: Prompter, input: RailsInput, state: WizardResult): Promise<boolean> {
   const answer = await askProfile(p, input);
   if (answer === CANCEL) return false;
   if (answer !== undefined) state.profile = answer;
   return true;
 }
 
-async function extras(p: Prompter, input: WizardInput, state: WizardResult, customise: boolean): Promise<boolean> {
+async function extras(p: Prompter, input: RailsInput, state: WizardResult, customise: boolean): Promise<boolean> {
   const root = rootFor(input, state);
   const components = customise ? await askComponents(p, input, root) : undefined;
   if (components === CANCEL) return false;
@@ -92,7 +152,7 @@ const STEPS: Step[] = [
   { id: "you", title: "You", needed: (mode, i) => !i.options.user && (mode === "custom" || !(saved(i, "githubUser") || i.detection.github.login)), run: you },
   { id: "repos", title: "Repositories", needed: (mode, i) => mode === "custom" && !i.options.reposRoot, run: repos },
   { id: "logins", title: "AI logins", needed: (mode, i) => mode === "custom" || readyProviders(i.detection).size === 0, run: logins },
-  { id: "profile", title: "Profile", needed: (mode, i) => mode === "custom" && !i.options.profile, run: profile },
+  { id: "profile", title: "Profile", needed: (mode, i) => mode === "custom" && (!i.options.profile || i.options.profile === "auto"), run: profile },
   { id: "extras", title: "Extras", needed: (mode, i) => needsTrust(i) || (mode === "custom" && Boolean(i.extras?.(rootFor(i)).some((r) => !r.fixed && !r.unavailable))), run: extras },
 ];
 
@@ -104,7 +164,7 @@ function header(p: Prompter, index: number, total: number, title: string): void 
 async function conflicts(p: Prompter, review: RailsReview): Promise<boolean> {
   if (!review.conflicts) return true;
   const answer = await p.select({
-    message: `${review.conflicts} files you edited`,
+    message: `${review.conflicts} ${review.conflicts === 1 ? "file" : "files"} you edited`,
     options: [{ value: "keep", label: "Keep yours (recommended)" }, { value: "decide", label: "Decide per file" }],
     initial: "keep",
   });

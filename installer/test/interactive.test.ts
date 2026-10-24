@@ -26,7 +26,7 @@ function seeded(): { box: Sandbox; path: string; original: Buffer; mine: Buffer 
 
 test("L10 the conflict prompt comes before Install; keep writes .pi-setup-new", async () => {
   const { box, path, original, mine } = seeded();
-  const s = scripted({ "files you edited": ["decide"], "changed since install": ["keep"] });
+  const s = scripted({ "you edited": ["decide"], "changed since install": ["keep"] });
   const lines: string[] = [];
   const code = await main(flags(box), ctxFor(box, lines, []), s.p);
   assert.equal(code, 0, lines.join("\n"));
@@ -39,7 +39,7 @@ test("L10 the conflict prompt comes before Install; keep writes .pi-setup-new", 
 
 test("L10 diff shows a note and asks again without the diff choice", async () => {
   const { box, path, mine } = seeded();
-  const s = scripted({ "files you edited": ["decide"], "changed since install": ["diff", "keep"] });
+  const s = scripted({ "you edited": ["decide"], "changed since install": ["diff", "keep"] });
   assert.equal(await main(flags(box), ctxFor(box, [], []), s.p), 0);
   assert.ok(s.notes.some((n) => n.includes("edited by the user")), s.notes.join("\n---\n"));
   const offered = s.offered.filter((options) => options.includes("take"));
@@ -50,7 +50,7 @@ test("L10 diff shows a note and asks again without the diff choice", async () =>
 
 test("L10 take overwrites with a backup of the user's version", async () => {
   const { box, path, original, mine } = seeded();
-  const s = scripted({ "files you edited": ["decide"], "changed since install": ["take"] });
+  const s = scripted({ "you edited": ["decide"], "changed since install": ["take"] });
   assert.equal(await main(flags(box), ctxFor(box, [], []), s.p), 0);
   assert.ok(readFileSync(path).equals(original));
   assert.ok(!existsSync(`${path}.pi-setup-new`));
@@ -62,7 +62,7 @@ test("L10 take overwrites with a backup of the user's version", async () => {
 test("L10 cancelling at the conflict prompt writes nothing", async () => {
   const { box } = seeded();
   const before = snapshot(box.home, true);
-  const s = scripted({ "files you edited": ["decide"], "changed since install": [CANCEL] });
+  const s = scripted({ "you edited": ["decide"], "changed since install": [CANCEL] });
   const errs: string[] = [];
   assert.equal(await main(flags(box), ctxFor(box, [], errs), s.p), 1);
   assert.match(errs.join("\n"), /Cancelled; nothing written/);
@@ -72,7 +72,14 @@ test("L10 cancelling at the conflict prompt writes nothing", async () => {
 test("L10 cancelling Review after keeping writes nothing", async () => {
   const { box } = seeded();
   const before = snapshot(box.home, true);
-  const s = scripted({ "files you edited": ["decide"], "changed since install": ["keep"], "Review": ["cancel"] });
+  const s = scripted({ "you edited": ["decide"], "changed since install": ["keep"], "Review": ["cancel"] });
   assert.equal(await main(flags(box), ctxFor(box, [], []), s.p), 1);
   assert.deepEqual(snapshot(box.home, true), before);
+});
+
+test("the conflict prompt says '1 file you edited' for one file", async () => {
+  const { box } = seeded();
+  const s = scripted({ "you edited": ["keep"] });
+  assert.equal(await main(flags(box), ctxFor(box, [], []), s.p), 0);
+  assert.ok(s.events.includes("select:1 file you edited"), s.events.join("\n"));
 });
