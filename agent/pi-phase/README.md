@@ -1,5 +1,7 @@
 # Local pi phase runner
 
+Requires Python **3.9 or newer** on macOS or Linux, with `ps` on PATH. Python builds without `os.waitid` (including macOS Python <3.13) use a bounded, non-reaping `ps` zombie-state probe; the producer's exit code is collected only after process-group cleanup.
+
 `~/.pi/agent/bin/pi-phase` is an **explicit**, foreground, cooperative wrapper for heavy commands run by this user's pi sessions and subagents on this host. It does not change shell tools or start a daemon. Adopt it for builds, tests, integration runs and local CI watching; ordinary `bash` and pre-existing jobs bypass it. It is not host-wide enforcement for other users or programs.
 
 ```sh

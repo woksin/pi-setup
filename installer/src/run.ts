@@ -21,6 +21,7 @@ import { isService, planServices, syncServices } from "./services.ts";
 import type { ComponentRecord } from "./manifest.ts";
 import type { ExtraRow } from "./wizard.ts";
 import { installSummary, runDoctor } from "./doctor.ts";
+import { pythonVersionCheck } from "./doctor-probes.ts";
 import { runUpdate } from "./update.ts";
 import {
   chooseProfile, kimiNote, loadProfiles, overlayFor, pinnedModels, pinWarnings, profileNames, profilesDir,
@@ -57,9 +58,15 @@ function pickProfile(
 
 function requiredToolErrors(ctx: Ctx, detection: Detection, options: Options): string[] {
   const needed = ["python3", ...(options.skipNpm ? [] : ["npm"])];
-  return needed
+  const errors = needed
     .filter((tool) => !toolPath(detection, tool))
     .map((tool) => `${tool} is required but was not found on PATH; install it with: ${installHint(ctx.platform, tool)}`);
+  const python = detection.tools.find(tool => tool.name === "python3");
+  if (!python?.path) return errors;
+  const check = pythonVersionCheck(ctx, python.version);
+  if (check.status !== "ok" && !options.json) ctx.err(`warning: ${check.detail}; install it with: ${check.fix}`);
+  if (check.status === "ok" && !options.json) ctx.out(check.detail);
+  return errors;
 }
 
 interface Resolved {

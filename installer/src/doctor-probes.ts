@@ -12,6 +12,18 @@ import type { Ctx, RunResult } from "./types.ts";
 const result = (id: string, status: DoctorCheck["status"], detail: string, fix?: string): DoctorCheck => ({ id, title: id, status, detail, ...(fix ? { fix } : {}) });
 const skippedRun: RunResult = { code: null, stdout: "", stderr: "", timedOut: false };
 
+export function pythonVersionCheck(ctx: Ctx, version?: string): DoctorCheck {
+  const match = /^Python (\d+)\.(\d+)\b/.exec(version ?? "");
+  const supported = match && (Number(match[1]) > 3 || (Number(match[1]) === 3 && Number(match[2]) >= 9));
+  return result("python", supported ? "ok" : "warn", `${version || "Python version unknown"}; pi-phase requires Python >=3.9 on macOS/Linux`, installHint(ctx.platform, "python3"));
+}
+
+async function python(ctx: Ctx): Promise<DoctorCheck> {
+  if (!ctx.which("python3")) return pythonVersionCheck(ctx);
+  const r = await ctx.run("python3", ["--version"], { timeoutMs: 3000 });
+  return pythonVersionCheck(ctx, r.code === 0 && !r.timedOut ? (r.stdout.trim() || r.stderr.trim()) : undefined);
+}
+
 interface Plist { file: string; label: string }
 function plists(ctx: Ctx): Plist[] {
   const dir = join(ctx.home, "Library/LaunchAgents");
@@ -74,7 +86,7 @@ export async function gatherFacts(baseCtx: Ctx, manifest?: Manifest): Promise<{ 
   const all = plists(ctx);
   const agents = all.filter((p) => !recorded.has(p.label));
   const guardian = all.some(p => p.label.endsWith(".docker-guardian")) || manifest?.components?.["docker-guardian"]?.on === true;
-  const [providers, models, version, gh, head, checkout, disks, launchd, docker, updates] = await Promise.all([
+  const [providers, models, version, gh, head, checkout, disks, launchd, docker, updates, pythonCheck] = await Promise.all([
     Promise.all(PROVIDER_IDS.map(id => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" as const })) : Promise.resolve({ status: "unknown" as const }))),
     hasPi ? listModels(ctx) : Promise.resolve({ catalog: null, code: null, stderr: "", timedOut: false }),
     hasPi ? ctx.run("pi", ["--version"], { timeoutMs: 8000 }) : Promise.resolve(skippedRun),
@@ -88,6 +100,7 @@ export async function gatherFacts(baseCtx: Ctx, manifest?: Manifest): Promise<{ 
     })),
     guardian ? ctx.run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 5000 }) : Promise.resolve(undefined),
     update(ctx, manifest),
+    python(ctx),
   ]);
   let pi: DoctorCheck;
   if (!hasPi) pi = result("pi", "fail", "not on PATH", installHint(ctx.platform, "pi"));
@@ -98,6 +111,6 @@ export async function gatherFacts(baseCtx: Ctx, manifest?: Manifest): Promise<{ 
   const ghCheck = !ctx.which("gh") ? result("gh", "warn", "not on PATH", installHint(ctx.platform, "gh")) : !github.host ? result("gh", "warn", "not logged in", "gh auth login") : result("gh", "ok", `${github.login}@${github.host}`);
   return {
     facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i) => [id, providers[i]])), catalog: models.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : undefined, checkoutClean: checkout.code === 0 && !checkout.timedOut ? !checkout.stdout.trim() : undefined, github: { ...github, orgs: [] }, summary: false },
-    checks: [pi, ghCheck, ...disks, ...(launchd.length ? launchd : [result("launchd", "skip", "no managed launch agents")]), docker ? result("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result("docker", "skip", "no docker guardian"), updates],
+    checks: [pi, ghCheck, pythonCheck, ...disks, ...(launchd.length ? launchd : [result("launchd", "skip", "no managed launch agents")]), docker ? result("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result("docker", "skip", "no docker guardian"), updates],
   };
 }

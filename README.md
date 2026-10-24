@@ -21,7 +21,7 @@ git clone https://github.com/woksin/pi-setup && cd pi-setup
 ./install.sh             # overwritten files are backed up first
 ```
 
-It needs Node.js 22.19 or newer and Python 3. The full installer reference follows below.
+It needs Node.js 22.19 or newer and Python 3.9 or newer (macOS/Linux). The full installer reference follows below.
 
 ## Contents
 
@@ -43,14 +43,14 @@ It needs Node.js 22.19 or newer and Python 3. The full installer reference follo
 
 ### New machine prerequisites
 
-Use Node.js **22.19 or newer** (including current Node 24/26 releases), npm, Python 3, Git, GitHub CLI (`gh`), `jq`, ripgrep (`rg`) and `fd` on PATH. Install pi with `npm install -g @earendil-works/pi-coding-agent`.
+Use Node.js **22.19 or newer** (including current Node 24/26 releases), npm, Python **3.9 or newer** (macOS/Linux), Git, GitHub CLI (`gh`), `jq`, ripgrep (`rg`) and `fd` on PATH. Install pi with `npm install -g @earendil-works/pi-coding-agent`.
 
 - macOS (Homebrew): `brew install node python git gh jq ripgrep fd`
 - Debian/Ubuntu: `sudo apt install python3 git gh jq ripgrep fd-find`; install a current Node.js/npm from [nodejs.org](https://nodejs.org) if the distro version is too old. Debian calls fd `fdfind`: expose it as `fd` in `~/.local/bin`.
 
 | Prerequisite | Required? | Without it |
 | --- | --- | --- |
-| Node ≥22.19, npm, Python 3, Git, pi | Required | Installer, package fetching or bundled CLI tools cannot run. |
+| Node ≥22.19, npm, Python ≥3.9 (macOS/Linux), Git, pi | Required | Installer, package fetching or bundled CLI tools cannot run. |
 | `gh` (run `gh auth login`) | Required for this setup | GitHub issue/PR workflows fail; use `--user` if login cannot be detected. |
 | `jq`, `rg`, `fd` | Required for this setup | JSON processing and the prescribed search workflow fail. |
 | `gitleaks` | Optional (`brew install gitleaks`) | `secret-sweep` cannot scan; required if enabling that schedule. |
@@ -89,7 +89,7 @@ git clone https://github.com/woksin/pi-setup && cd pi-setup
 ./install.sh             # overwritten files are backed up to ~/.pi/agent/.pi-setup/backups/<timestamp>/
 ```
 
-Install needs Node.js 22.19 or newer (pi needs it too) and Python 3. `install.sh` is a thin shim around the committed bundle `installer/dist/pi-setup.mjs`; it detects your setup first and asks only what it could not find out. In a terminal it runs a short wizard; with `--yes`, `CI` set or no terminal it never prompts. It detects your GitHub login (saved, then `gh`), your repositories root (saved, then the best match among the usual places such as `~/repos` and the parent of this checkout, then `$HOME/repos`), which providers you are logged in to, and picks a profile from `agent/profiles/<name>/profile.json` (an already active profile is kept on re-runs; `--profile <name>` switches). It then runs npm install in pi's global package store, `~/.pi/agent/npm`, when inputs change or a pinned package is missing/wrong. New installs register and fetch `npm:@woksin/pi-jobs@0.3.1`, `npm:@woksin/pi-context-budget@0.4.0`, `npm:@woksin/pi-recover@0.1.1` and `npm:@woksin/pi-orch@0.1.1` (with `--save-exact --legacy-peer-deps`). Existing explicit package versions and local overrides are kept. `--skip-npm` skips fetching; doctor then reports missing packages. Launchers `pi-session`, `orch` and `orch-poll` are linked into `~/.local/bin` on the first install; existing files/foreign links there are left alone.
+Install needs Node.js 22.19 or newer (pi needs it too) and Python 3.9 or newer (macOS/Linux). `install.sh` is a thin shim around the committed bundle `installer/dist/pi-setup.mjs`; it detects your setup first and asks only what it could not find out. In a terminal it runs a short wizard; with `--yes`, `CI` set or no terminal it never prompts. It detects your GitHub login (saved, then `gh`), your repositories root (saved, then the best match among the usual places such as `~/repos` and the parent of this checkout, then `$HOME/repos`), which providers you are logged in to, and picks a profile from `agent/profiles/<name>/profile.json` (an already active profile is kept on re-runs; `--profile <name>` switches). It then runs npm install in pi's global package store, `~/.pi/agent/npm`, when inputs change or a pinned package is missing/wrong. New installs register and fetch `npm:@woksin/pi-jobs@0.3.1`, `npm:@woksin/pi-context-budget@0.4.0`, `npm:@woksin/pi-recover@0.1.1` and `npm:@woksin/pi-orch@0.1.1` (with `--save-exact --legacy-peer-deps`). Existing explicit package versions and local overrides are kept. `--skip-npm` skips fetching; doctor then reports missing packages. Launchers `pi-session`, `orch` and `orch-poll` are linked into `~/.local/bin` on the first install; existing files/foreign links there are left alone.
 
 Flags, in any order: `--user <login>`, `--repos-root <dir>`, `--profile <name|auto>`, `--yes` (never prompt), `--skip-npm`, `--dry-run` (writes nothing), `--plan` (print detection, profile and actions, write nothing) and `--json` (one JSON object on stdout). The operator settings are saved in `~/.pi/agent/user.json` (`githubUser` and `reposRoot`; other keys are kept) and reused on later installs unless flags override them. Without a login from any source, install fails and asks for `--user`. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. A re-run that has nothing to change prints `Everything up to date`, no `install` lines, and creates no backups.
 

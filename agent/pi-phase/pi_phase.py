@@ -2015,7 +2015,20 @@ def launch(gate, command):
         return 127 if exc.errno == errno.ENOENT else 126
 
 
+def zombie_unreaped(pid):
+    """Inspect without reaping on Python builds lacking waitid (macOS < 3.13)."""
+    try:
+        status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                                capture_output=True, text=True, timeout=0.5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False  # Unknown: keep the PGID reserved and retry next tick.
+    return status.returncode == 0 and status.stdout.lstrip().startswith("Z")
+
+
 def exited_unreaped(pid, producer_exit=None):
+    if not hasattr(os, "waitid"):
+        # ps cannot observe the exit code; leave it unknown until the real wait.
+        return zombie_unreaped(pid)
     # WNOWAIT reserves the leader PID/PGID until cleanup signals have been sent,
     # avoiding signalling a recycled, unrelated process group.
     status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
