@@ -46,6 +46,8 @@ export function summaryLines(args: {
   profile: ProfileMeta | undefined;
   actions: Action[];
   probed: boolean;
+  /** False in the guided flow, which already showed "What I found". */
+  withDetection?: boolean;
   npm: boolean;
   skipNpm: boolean;
   kimi: string | undefined;
@@ -58,7 +60,7 @@ export function summaryLines(args: {
   const lines = [
     `GitHub login: ${settings.githubUser} (${USER_SOURCES[settings.userSource]})`,
     `Repositories root: ${settings.reposRoot} (${ROOT_SOURCES[settings.rootSource]})`,
-    ...detectionLines(args.detection, args.probed),
+    ...(args.withDetection === false ? [] : detectionLines(args.detection, args.probed)),
     `Profile: ${choice.name} (${choice.reason})${choice.provisional ? " [provisional]" : ""}`,
   ];
   if (args.profile?.summary) lines.push(args.profile.summary);

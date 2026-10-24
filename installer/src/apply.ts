@@ -26,6 +26,8 @@ export interface ApplyOptions {
   spinner?: { start(message: string): void; stop(message: string): void };
   /** The choices to record in the manifest. */
   components?: Record<string, ComponentRecord>;
+  /** Print one count line instead of a line per action (the guided flow). */
+  quiet?: boolean;
 }
 
 export interface ApplyResult {
@@ -85,8 +87,12 @@ class Run {
     for (const m of missing) this.dirs.add(homeRel(this.ctx.home, m));
   }
 
+  backedUp = 0;
+
   private backupIfThere(path: string): string | undefined {
-    return existsSync(path) && statSync(path).isFile() ? this.backups.backup(path) : undefined;
+    if (!existsSync(path) || !statSync(path).isFile()) return undefined;
+    this.backedUp++;
+    return this.backups.backup(path);
   }
 
   private rel(path: string): string {
@@ -260,9 +266,11 @@ export function needsNpm(actions: Action[], piDir: string, manifest?: Manifest, 
 
 export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, manifest?: Manifest): Promise<ApplyResult> {
   const piDir = join(ctx.home, ".pi", "agent");
-  for (const action of actions) {
-    const line = describe(action);
-    if (line) ctx.out(line);
+  if (!options.quiet) {
+    for (const action of actions) {
+      const line = describe(action);
+      if (line) ctx.out(line);
+    }
   }
   if (options.dryRun) return { code: 0, wrote: false, written: new Set() };
   const run = new Run(ctx, piDir, manifest, noSource());
@@ -271,6 +279,10 @@ export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, 
     run.source = await sourceOf(ctx);
     for (const action of actions) run.execute(action);
     applyProfile(options, piDir, run);
+    if (options.quiet) {
+      const installs = actions.filter((a): a is Extract<Action, { op: "install" }> => a.op === "install");
+      if (installs.length) ctx.out(`Wrote ${installs.length} files (${installs.filter((a) => a.existed).length} changed, ${run.backedUp} backed up)`);
+    }
     if (options.components) run.next.components = options.components;
     if (code === 0) {
       const npm = await runNpm(ctx, actions, options, piDir, manifest);

@@ -56,7 +56,7 @@ function pickProfile(
   return chooseProfile(ready, profiles);
 }
 
-function requiredToolErrors(ctx: Ctx, detection: Detection, options: Options): string[] {
+function requiredToolErrors(ctx: Ctx, detection: Detection, options: Options, guided: boolean): string[] {
   const needed = ["python3", ...(options.skipNpm ? [] : ["npm"])];
   const errors = needed
     .filter((tool) => !toolPath(detection, tool))
@@ -65,7 +65,7 @@ function requiredToolErrors(ctx: Ctx, detection: Detection, options: Options): s
   if (!python?.path) return errors;
   const check = pythonVersionCheck(ctx, python.version);
   if (check.status !== "ok" && !options.json) ctx.err(`warning: ${check.detail}; install it with: ${check.fix}`);
-  if (check.status === "ok" && !options.json) ctx.out(check.detail);
+  if (check.status === "ok" && !options.json && !guided) ctx.out(check.detail);
   return errors;
 }
 
@@ -115,7 +115,7 @@ function savedPreapproval(ctx: Ctx): boolean {
 function resolveAll(
   ctx: Ctx, options: Options, detection: Detection,
   saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean>; preapproveMcp?: boolean },
-  manifest: Manifest | undefined,
+  manifest: Manifest | undefined, prompted = false,
 ): Resolved {
   const piDir = join(ctx.home, ".pi", "agent");
   const settings = resolveSettings({
@@ -123,6 +123,7 @@ function resolveAll(
     flagRoot: answers.root ?? options.reposRoot,
     saved,
     detectedUser: detection.github.login,
+    scanRoot: prompted ? detection.candidates[0]?.path : undefined,
     home: ctx.home,
     repoDir: ctx.repoDir,
   });
@@ -133,7 +134,8 @@ function resolveAll(
   const activeBefore = readActive(piDir);
   const ready = readyProviders(detection);
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
-  const choice = pickProfile(asked, activeBefore, ready, profiles, names, options.dryRun || options.plan);
+  const picked = pickProfile(asked, activeBefore, ready, profiles, names, options.dryRun || options.plan);
+  const choice: Choice = answers.profile ? { name: picked.name, reason: "you picked it", provisional: false, source: "prompt" } : picked;
   const profile = profiles.find((p) => p.name === choice.name);
   const components = resolveComponents({
     flags: flagMap(options), answers: answers.components, saved: manifest?.components, current: currentState(ctx),
@@ -243,7 +245,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     login: options.user || savedString(saved, "githubUser") || undefined,
   });
   spin?.stop("Looked around");
-  const toolErrors = requiredToolErrors(ctx, detection, options);
+  const toolErrors = requiredToolErrors(ctx, detection, options, Boolean(prompter));
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
 
   let answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean>; preapproveMcp?: boolean } = {};
@@ -256,7 +258,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     if (result === CANCEL) return cancelled(ctx);
     answers = result;
   }
-  const r = resolveAll(ctx, options, detection, saved, answers, manifest);
+  const r = resolveAll(ctx, options, detection, saved, answers, manifest, Boolean(prompter));
   if (prompter && r.conflicts.length) {
     const takes = await resolveConflicts(prompter, r.conflicts, (c) => diffText(ctx, c));
     if (takes === CANCEL) return cancelled(ctx);
@@ -268,12 +270,14 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   }
   r.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
-  const summary = summaryLines({ ...r, detection, kimi: readOnly ? undefined : kimiNote(r.profile, r.ready), skipNpm: options.skipNpm, probed: !readOnly, components: r.components, componentNotes: r.componentNotes });
+  const summary = summaryLines({ ...r, detection, kimi: readOnly ? undefined : kimiNote(r.profile, r.ready), skipNpm: options.skipNpm, probed: !readOnly, withDetection: !prompter, components: r.components, componentNotes: r.componentNotes });
   if (options.plan) {
     configureShellPath(ctx, options.editShellProfile, true);
     return finish(ctx, baseCtx, options, r, detection, summary, 0);
   }
-  if (prompter && !(await confirmApply(prompter, summary))) return cancelled(ctx);
+  const off = COMPONENTS.map((c) => c.id).filter((id) => !r.components[id].on && wasOn(manifest, currentState(ctx), id));
+  const changes = r.actions.some((a) => a.op !== "adopt" && a.op !== "chmod-x") || off.length > 0 || (r.npm && !options.skipNpm);
+  if (prompter && changes && !(await confirmApply(prompter, summary))) return cancelled(ctx);
 
   const applyOptions: ApplyOptions = {
     dryRun: options.dryRun,
@@ -284,8 +288,8 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     activeBefore: r.activeBefore,
     spinner: prompter?.spinner(),
     components: r.records,
+    quiet: Boolean(prompter),
   };
-  const off = COMPONENTS.map((c) => c.id).filter((id) => !r.components[id].on && wasOn(manifest, currentState(ctx), id));
   const live = await retire(ctx, piDir, manifest, off, options.dryRun);
   const result = await apply(ctx, r.actions, applyOptions, live);
   if (result.code === 0) await syncServices(ctx, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);

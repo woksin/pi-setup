@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 439804840b073a84bf9e87a98f43b89a7ceebda31bf99ab430ed639cc7e0f2db
+// pi-setup-source-sha256: 8dc8b349770d5ad210f8f7763d9f1551f18a3aadc3d445caf26be695c85d7bc0
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -4849,9 +4849,11 @@ function needsNpm(actions, piDir, manifest, force = false) {
 }
 async function apply(ctx, actions, options, manifest) {
   const piDir = join41(ctx.home, ".pi", "agent");
-  for (const action of actions) {
-    const line = describe(action);
-    if (line) ctx.out(line);
+  if (!options.quiet) {
+    for (const action of actions) {
+      const line = describe(action);
+      if (line) ctx.out(line);
+    }
   }
   if (options.dryRun) return { code: 0, wrote: false, written: /* @__PURE__ */ new Set() };
   const run = new Run(ctx, piDir, manifest, noSource());
@@ -4860,6 +4862,10 @@ async function apply(ctx, actions, options, manifest) {
     run.source = await sourceOf(ctx);
     for (const action of actions) run.execute(action);
     applyProfile(options, piDir, run);
+    if (options.quiet) {
+      const installs = actions.filter((a2) => a2.op === "install");
+      if (installs.length) ctx.out(`Wrote ${installs.length} files (${installs.filter((a2) => a2.existed).length} changed, ${run.backedUp} backed up)`);
+    }
     if (options.components) run.next.components = options.components;
     if (code === 0) {
       const npm2 = await runNpm(ctx, actions, options, piDir, manifest);
@@ -4953,8 +4959,11 @@ var init_apply = __esm({
         mkdirSync13(dir, { recursive: true });
         for (const m2 of missing) this.dirs.add(homeRel(this.ctx.home, m2));
       }
+      backedUp = 0;
       backupIfThere(path2) {
-        return existsSync23(path2) && statSync14(path2).isFile() ? this.backups.backup(path2) : void 0;
+        if (!existsSync23(path2) || !statSync14(path2).isFile()) return void 0;
+        this.backedUp++;
+        return this.backups.backup(path2);
       }
       rel(path2) {
         return homeRel(this.ctx.home, path2);
@@ -5545,7 +5554,7 @@ function reasonFor(ready3, name) {
   if (claude && gpt && kimi) return "you have Claude, ChatGPT and Kimi: each role goes where it is strongest";
   if (claude && gpt) return "you have Claude and ChatGPT; Kimi roles (ops, scout) fall back to GPT via provider-fallback";
   if (gpt && !claude) return `only ChatGPT is logged in: ${name} keeps every role on GPT`;
-  if (claude) return "no Claude-only profile yet; balanced is used and GPT roles need a ChatGPT login";
+  if (claude) return `only Claude is logged in: ${name} keeps every role on Claude`;
   return "log in with /login in pi, then rerun ./install.sh --profile auto";
 }
 function kimiNote(profile2, ready3) {
@@ -7160,7 +7169,7 @@ function summaryLines(args) {
   const lines2 = [
     `GitHub login: ${settings2.githubUser} (${USER_SOURCES[settings2.userSource]})`,
     `Repositories root: ${settings2.reposRoot} (${ROOT_SOURCES[settings2.rootSource]})`,
-    ...detectionLines(args.detection, args.probed),
+    ...args.withDetection === false ? [] : detectionLines(args.detection, args.probed),
     `Profile: ${choice.name} (${choice.reason})${choice.provisional ? " [provisional]" : ""}`
   ];
   if (args.profile?.summary) lines2.push(args.profile.summary);
@@ -7228,6 +7237,11 @@ function validateRoot(input) {
     }
   };
 }
+function keepsDefaultRoot(input, picked) {
+  const saved = savedString(input.saved, "reposRoot");
+  const initial = input.detection.candidates[0]?.path ?? saved;
+  return picked === initial && (!saved || saved === picked);
+}
 async function askRoot(p, input) {
   if (input.options.reposRoot) return void 0;
   const picked = await p.select({
@@ -7236,7 +7250,7 @@ async function askRoot(p, input) {
     initial: input.detection.candidates[0]?.path ?? savedString(input.saved, "reposRoot")
   });
   if (p.isCancel(picked)) return CANCEL;
-  if (picked) return picked;
+  if (picked) return keepsDefaultRoot(input, picked) ? void 0 : picked;
   const typed = await p.text({ message: "Repositories root", initial: `${input.home}/repos`, validate: validateRoot(input) });
   return p.isCancel(typed) ? CANCEL : expandHome(typed.trim(), input.home);
 }
@@ -8823,14 +8837,14 @@ function pickProfile(options, activeBefore, ready3, profiles, names, readOnly = 
   }
   return chooseProfile(ready3, profiles);
 }
-function requiredToolErrors(ctx, detection, options) {
+function requiredToolErrors(ctx, detection, options, guided) {
   const needed = ["python3", ...options.skipNpm ? [] : ["npm"]];
   const errors = needed.filter((tool) => !toolPath(detection, tool)).map((tool) => `${tool} is required but was not found on PATH; install it with: ${installHint(ctx.platform, tool)}`);
   const python2 = detection.tools.find((tool) => tool.name === "python3");
   if (!python2?.path) return errors;
   const check3 = pythonVersionCheck(ctx, python2.version);
   if (check3.status !== "ok" && !options.json) ctx.err(`warning: ${check3.detail}; install it with: ${check3.fix}`);
-  if (check3.status === "ok" && !options.json) ctx.out(check3.detail);
+  if (check3.status === "ok" && !options.json && !guided) ctx.out(check3.detail);
   return errors;
 }
 function extraRows(ctx, options, saved, detection, manifest) {
@@ -8854,13 +8868,14 @@ function extraRows(ctx, options, saved, detection, manifest) {
 function savedPreapproval(ctx) {
   return preapprovalDefault(join56(ctx.home, ".local/share/pi-setup/lanes/templates"));
 }
-function resolveAll(ctx, options, detection, saved, answers, manifest) {
+function resolveAll(ctx, options, detection, saved, answers, manifest, prompted = false) {
   const piDir = join56(ctx.home, ".pi", "agent");
   const settings2 = resolveSettings({
     flagUser: answers.user ?? options.user,
     flagRoot: answers.root ?? options.reposRoot,
     saved,
     detectedUser: detection.github.login,
+    scanRoot: prompted ? detection.candidates[0]?.path : void 0,
     home: ctx.home,
     repoDir: ctx.repoDir
   });
@@ -8871,7 +8886,8 @@ function resolveAll(ctx, options, detection, saved, answers, manifest) {
   const activeBefore = readActive(piDir);
   const ready3 = readyProviders(detection);
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
-  const choice = pickProfile(asked, activeBefore, ready3, profiles, names, options.dryRun || options.plan);
+  const picked = pickProfile(asked, activeBefore, ready3, profiles, names, options.dryRun || options.plan);
+  const choice = answers.profile ? { name: picked.name, reason: "you picked it", provisional: false, source: "prompt" } : picked;
   const profile2 = profiles.find((p) => p.name === choice.name);
   const components = resolveComponents({
     flags: flagMap(options),
@@ -8987,7 +9003,7 @@ async function execute(ctx, options, prompter, baseCtx) {
     login: options.user || savedString2(saved, "githubUser") || void 0
   });
   spin?.stop("Looked around");
-  const toolErrors = requiredToolErrors(ctx, detection, options);
+  const toolErrors = requiredToolErrors(ctx, detection, options, Boolean(prompter));
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
   let answers = {};
   if (prompter) {
@@ -9008,7 +9024,7 @@ async function execute(ctx, options, prompter, baseCtx) {
     if (result4 === CANCEL) return cancelled(ctx);
     answers = result4;
   }
-  const r2 = resolveAll(ctx, options, detection, saved, answers, manifest);
+  const r2 = resolveAll(ctx, options, detection, saved, answers, manifest, Boolean(prompter));
   if (prompter && r2.conflicts.length) {
     const takes = await resolveConflicts(prompter, r2.conflicts, (c2) => diffText(ctx, c2));
     if (takes === CANCEL) return cancelled(ctx);
@@ -9020,12 +9036,14 @@ async function execute(ctx, options, prompter, baseCtx) {
   }
   r2.warnings.push(...toolErrors.map((e) => e));
   if (!toolPath(detection, "pi")) r2.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
-  const summary2 = summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly, components: r2.components, componentNotes: r2.componentNotes });
+  const summary2 = summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly, withDetection: !prompter, components: r2.components, componentNotes: r2.componentNotes });
   if (options.plan) {
     configureShellPath(ctx, options.editShellProfile, true);
     return finish(ctx, baseCtx, options, r2, detection, summary2, 0);
   }
-  if (prompter && !await confirmApply(prompter, summary2)) return cancelled(ctx);
+  const off = COMPONENTS.map((c2) => c2.id).filter((id) => !r2.components[id].on && wasOn(manifest, currentState(ctx), id));
+  const changes = r2.actions.some((a2) => a2.op !== "adopt" && a2.op !== "chmod-x") || off.length > 0 || r2.npm && !options.skipNpm;
+  if (prompter && changes && !await confirmApply(prompter, summary2)) return cancelled(ctx);
   const applyOptions = {
     dryRun: options.dryRun,
     skipNpm: options.skipNpm || options.dryRun,
@@ -9034,9 +9052,9 @@ async function execute(ctx, options, prompter, baseCtx) {
     profile: r2.choice.name,
     activeBefore: r2.activeBefore,
     spinner: prompter?.spinner(),
-    components: r2.records
+    components: r2.records,
+    quiet: Boolean(prompter)
   };
-  const off = COMPONENTS.map((c2) => c2.id).filter((id) => !r2.components[id].on && wasOn(manifest, currentState(ctx), id));
   const live = await retire(ctx, piDir, manifest, off, options.dryRun);
   const result3 = await apply(ctx, r2.actions, applyOptions, live);
   if (result3.code === 0) await syncServices(ctx, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);

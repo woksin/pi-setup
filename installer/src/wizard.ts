@@ -79,6 +79,13 @@ function validateRoot(input: WizardInput): (value: string) => string | undefined
   };
 }
 
+/** Accepting the pre-selected root is not "typing it": leave it to the saved or scanned source. */
+function keepsDefaultRoot(input: WizardInput, picked: string): boolean {
+  const saved = savedString(input.saved, "reposRoot");
+  const initial = input.detection.candidates[0]?.path ?? saved;
+  return picked === initial && (!saved || saved === picked);
+}
+
 async function askRoot(p: Prompter, input: WizardInput): Promise<Answer<string | undefined>> {
   if (input.options.reposRoot) return undefined;
   const picked = await p.select<string>({
@@ -87,7 +94,7 @@ async function askRoot(p: Prompter, input: WizardInput): Promise<Answer<string |
     initial: input.detection.candidates[0]?.path ?? savedString(input.saved, "reposRoot"),
   });
   if (p.isCancel(picked)) return CANCEL;
-  if (picked) return picked;
+  if (picked) return keepsDefaultRoot(input, picked) ? undefined : picked;
   const typed = await p.text({ message: "Repositories root", initial: `${input.home}/repos`, validate: validateRoot(input) });
   return p.isCancel(typed) ? CANCEL : expandHome((typed as string).trim(), input.home);
 }

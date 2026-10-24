@@ -31,7 +31,7 @@ test("the chooser takes the highest rank whose requirements are ready", () => {
   const none = pick();
   assert.deepEqual([none.name, none.provisional], ["balanced", true]);
   assert.match(none.reason, /rerun \.\/install\.sh --profile auto/);
-  assert.deepEqual([pick("anthropic").name, pick("anthropic").provisional], ["balanced", true]);
+  assert.deepEqual([pick("anthropic").name, pick("anthropic").provisional], ["balanced-anthropic", false]);
   assert.match(pick("anthropic", "openai-codex").reason, /Kimi roles \(ops, scout\) fall back to GPT/);
 });
 
