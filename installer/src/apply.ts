@@ -9,7 +9,7 @@ import {
   emptyManifest, fileSha, homeRel, noSource, pinnedBackups, recordArrayAdd, recordSet, saveIfChanged, sha256,
 } from "./manifest.ts";
 import type { ComponentRecord, FileEntry, JsonEntry, Manifest, Source } from "./manifest.ts";
-import type { Action, Ctx, JsonOp } from "./types.ts";
+import type { Action, Ctx, JsonOp, Spinner } from "./types.ts";
 
 const KEEP_RUNS = 10;
 
@@ -23,7 +23,8 @@ export interface ApplyOptions {
   /** Profile to make live, and whether ACTIVE existed before this run. */
   profile: string;
   activeBefore: string | undefined;
-  spinner?: { start(message: string): void; stop(message: string): void };
+  /** Already started by the caller; apply reports its phases through message(). */
+  spinner?: Spinner;
   /** The choices to record in the manifest. */
   components?: Record<string, ComponentRecord>;
   /** Print one count line instead of a line per action (the guided flow). */
@@ -277,6 +278,7 @@ export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, 
   let code = 0;
   try {
     run.source = await sourceOf(ctx);
+    options.spinner?.message?.("Writing files");
     for (const action of actions) run.execute(action);
     applyProfile(options, piDir, run);
     if (options.quiet) {
@@ -319,9 +321,8 @@ async function runNpm(ctx: Ctx, actions: Action[], options: ApplyOptions, piDir:
   }
   const args = ["install", ...selected.map(npmSpec), "--save-exact", "--legacy-peer-deps"];
   const cwd = join(piDir, "npm");
-  options.spinner?.start("Installing npm packages");
+  options.spinner?.message?.("Installing npm packages");
   const result = await installPinnedNpm(ctx, args, cwd, { inherit: options.inheritNpm, selected });
-  options.spinner?.stop(result.code === 0 ? "npm packages installed" : "npm install failed");
   if (result.code === 0) return { code: 0, ran: true };
   if (!options.inheritNpm) ctx.err((result.stdout + result.stderr).trim().split("\n").slice(-15).join("\n"));
   ctx.err("Files installed; npm install failed: (cd ~/.pi/agent/npm && npm install --legacy-peer-deps)");

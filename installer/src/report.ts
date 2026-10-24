@@ -5,7 +5,7 @@ import type { ComponentChoice } from "./components.ts";
 import type { Choice } from "./profiles.ts";
 import type { ResolvedSettings } from "./settings.ts";
 
-const USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it" };
+const USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it", placeholder: "placeholder, pass --user" };
 const ROOT_SOURCES = { flag: "from --repos-root", saved: "saved in user.json", scan: "best match found", default: "default", prompt: "you typed it" };
 
 export function countActions(actions: Action[]): { added: number; changed: number; kept: number; register: number; links: number } {
@@ -82,5 +82,27 @@ export function summaryLines(args: {
   }
   lines.push(...(args.componentNotes ?? []));
   for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines.push(`warning: ${warning}`);
+  return lines;
+}
+
+export interface NextSteps {
+  /** ~/.local/bin or ~/.pi/agent/bin was not on PATH before this run. */
+  pathMissing: boolean;
+  pathEdited: boolean;
+  logins: string[];
+  lanesOffered: boolean;
+}
+
+/** The guided flow's "What's next" note, one action per line. */
+export function whatsNextLines(next: NextSteps): string[] {
+  const lines: string[] = [];
+  if (next.pathMissing) {
+    lines.push(next.pathEdited ? "Open a new terminal so the PATH change takes effect." : "Add ~/.local/bin and ~/.pi/agent/bin to PATH, then open a new terminal.");
+  }
+  lines.push("Start pi: pi");
+  if (next.logins.length) lines.push(`Log in: in pi, type /login for ${next.logins.join(", ")}`);
+  lines.push("Switch profile: pi-profile list, or ./install.sh --profile <name>");
+  lines.push("Check health any time: ./install.sh doctor");
+  if (next.lanesOffered) lines.push("Optional: set up a coordinator and lanes (offered next; or later with ./install.sh lanes)");
   return lines;
 }

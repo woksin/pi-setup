@@ -14,6 +14,14 @@ test("login: flag, then saved, then detected; otherwise an error", () => {
   assert.throws(() => resolveSettings(base), /Cannot determine GitHub login; pass --user <login> \(or authenticate gh\)\./);
 });
 
+test("read-only runs without a login use the <you> placeholder and a note; real installs still error", () => {
+  const r = resolveSettings({ ...base, readOnly: true });
+  assert.deepEqual([r.githubUser, r.userSource], ["<you>", "placeholder"]);
+  assert.ok(r.warnings.some((w) => /pass --user/.test(w)));
+  assert.equal(resolveSettings({ ...base, readOnly: true, flagUser: "a" }).warnings.length, 0);
+  assert.throws(() => resolveSettings({ ...base, readOnly: false }), /Cannot determine GitHub login/);
+});
+
 test("login validation", () => {
   for (const bad of ["-a", "a-", "a b", "a/b", "x".repeat(40)]) assert.equal(validLogin(bad), false, bad);
   for (const good of ["a", "einari", "some-user", "x".repeat(39)]) assert.equal(validLogin(good), true, good);

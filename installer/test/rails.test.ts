@@ -72,7 +72,7 @@ test("Review Change a step reasks only Profile and retains the new choice", asyn
     "select:How do you want to set up?", "select:Review", "select:Change which step?",
     "select:Profile balanced: you have Claude, ChatGPT and Kimi: each role goes where it is strongest", "select:Pick a profile", "select:Review",
   ]);
-  assert.match(s.notes.at(-1) ?? "", /Profile: openai-only \(you picked it\)/);
+  assert.match(s.notes.findLast((n) => n.startsWith("GitHub login")) ?? "", /Profile: openai-only \(you picked it\)/);
 });
 
 test("Cancel at Review writes nothing", async () => {
@@ -86,14 +86,15 @@ test("Cancel at Review writes nothing", async () => {
 });
 
 test("rerun defaults to current choices, names active profile and skips Review when unchanged", async () => {
-  const b = box(); assert.equal(await main(flags(b), ctxFor(b), scripted().p), 0);
+  const b = box(); const bins = (c: ReturnType<typeof ctxFor>) => { c.env.PATH = [join(b.home, ".local/bin"), join(b.home, ".pi/agent/bin")].join(":"); return c; };
+  assert.equal(await main(flags(b), bins(ctxFor(b)), scripted().p), 0);
   const s = scripted();
-  assert.equal(await main(flags(b), ctxFor(b), s.p), 0);
+  assert.equal(await main(flags(b), bins(ctxFor(b)), s.p), 0);
   assert.equal(s.selects[0].initial, "recommended");
   assert.equal(s.selects[0].labels[0], "Update with your current choices (recommended)");
   assert.match(s.notes[0], /installed.*balanced/);
   assert.deepEqual(s.events, ["select:How do you want to set up?"]);
-  assert.match(s.outros.at(-1) ?? "", /Everything is up to date/);
+  assert.match(s.outros.at(-1) ?? "", /Installed, with \d+ things? to finish/);
 });
 
 test("Show every file returns to Review without writing until Install", async () => {
@@ -173,7 +174,7 @@ test("Log in now re-probes through the injected probe and flips ChatGPT to ready
   assert.match(notes[1], /Claude ✗[\s\S]*ChatGPT ✓/);
   assert.match(s.notes.join("\n"), /run pi, type \/login/);
   assert.equal(probes, 6);
-  assert.match(s.notes.at(-1) ?? "", /Profile: openai-only/);
+  assert.match(s.notes.findLast((n) => n.startsWith("GitHub login")) ?? "", /Profile: openai-only/);
 });
 
 test("a missing pi shows the install command; after installing it, Check again re-detects pi and probes providers", async () => {

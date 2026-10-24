@@ -1,8 +1,9 @@
 import { join } from "node:path";
-import { existsSync } from "node:fs";
 import { runLanesFlow } from "./lanes-flow.ts";
+import { applyGuided, applyPlain, guidedNotes, lanesOffered, offerLanesSetup } from "./finish.ts";
+import type { ApplyRun } from "./finish.ts";
 import { preapprovalDefault } from "./lanes/config.ts";
-import { apply, describe, needsNpm, readActive } from "./apply.ts";
+import { describe, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
 import { isInteractive, parseArgs, USAGE } from "./args.ts";
 import type { Options } from "./args.ts";
@@ -16,8 +17,8 @@ import type { KeepAction } from "./reconcile.ts";
 import { runUninstall } from "./uninstall.ts";
 import { available, codesceneNotes, COMPONENTS, currentState, WEB_PACKAGES, detectDefaults, hintFor, resolveComponents } from "./components.ts";
 import type { ComponentChoice } from "./components.ts";
-import { retire, wasOn } from "./retire.ts";
-import { isService, planServices, syncServices } from "./services.ts";
+import { wasOn } from "./retire.ts";
+import { isService, planServices } from "./services.ts";
 import type { ComponentRecord } from "./manifest.ts";
 import type { ExtraRow } from "./wizard.ts";
 import { installSummary, runDoctor } from "./doctor.ts";
@@ -32,9 +33,10 @@ import { readSettings, resolveSettings } from "./settings.ts";
 import type { ResolvedSettings } from "./settings.ts";
 import { CANCEL, SetupError } from "./types.ts";
 import type { Action, Ctx, Detection, ProfileMeta, Prompter } from "./types.ts";
+
 import { resolveConflicts } from "./wizard.ts";
 import { runRails } from "./rails.ts";
-import { configureShellPath } from "./shell-path.ts";
+import { configureShellPath, missingBinDirs, pathEditLine, PATH_EDIT_DEFAULT } from "./shell-path.ts";
 
 const savedString = (saved: Record<string, unknown>, key: string): string =>
   typeof saved[key] === "string" ? (saved[key] as string) : "";
@@ -127,6 +129,7 @@ function resolveAll(
     scanRoot: prompted ? detection.candidates[0]?.path : undefined,
     home: ctx.home,
     repoDir: ctx.repoDir,
+    readOnly: options.dryRun || options.plan,
   });
   if (answers.user) settings.userSource = answers.user === savedString(saved, "githubUser") ? "saved" : "prompt";
   if (answers.root) settings.rootSource = "prompt";
@@ -248,7 +251,7 @@ function addToolWarnings(r: Resolved, detection: Detection, toolErrors: string[]
   if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
 }
 
-async function guidedResolution({ ctx, options, detection, saved, manifest, p, toolErrors }: GuidedInput): Promise<Resolved | typeof CANCEL> {
+async function guidedResolution({ ctx, options, detection, saved, manifest, p, toolErrors }: GuidedInput): Promise<{ r: Resolved; editPath: boolean } | typeof CANCEL> {
   const profiles = loadProfiles(ctx.repoDir);
   const activeBefore = readActive(join(ctx.home, ".pi/agent"));
   const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, profileNames(ctx.repoDir));
@@ -258,6 +261,7 @@ async function guidedResolution({ ctx, options, detection, saved, manifest, p, t
     installed: Boolean(manifest), activeProfile: activeBefore,
     probe: (id) => probeProvider(ctx, id), which: ctx.which, readOnly: options.dryRun || options.plan,
     extras: extraRows(ctx, options, saved, detection, manifest), preapproveMcp: savedPreapproval(ctx),
+    pathLine: pathEditLine(ctx), pathDefault: PATH_EDIT_DEFAULT || options.editShellProfile,
     review: (answers) => {
       const r = resolveAll(ctx, options, detection, saved, answers, manifest, true);
       addToolWarnings(r, detection, toolErrors, ctx);
@@ -275,7 +279,7 @@ async function guidedResolution({ ctx, options, detection, saved, manifest, p, t
       };
     },
   });
-  return result === CANCEL ? CANCEL : resolved!;
+  return result === CANCEL ? CANCEL : { r: resolved!, editPath: result.editPath };
 }
 
 async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefined, baseCtx: Ctx): Promise<number> {
@@ -303,10 +307,10 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const toolErrors = requiredToolErrors(ctx, detection, options, Boolean(prompter));
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
 
-  const r = prompter
-    ? await guidedResolution({ ctx, options, detection, saved, manifest, p: prompter, toolErrors })
-    : resolveAll(ctx, options, detection, saved, {}, manifest);
-  if (r === CANCEL) return cancelled(ctx);
+  const guided = prompter ? await guidedResolution({ ctx, options, detection, saved, manifest, p: prompter, toolErrors }) : undefined;
+  if (guided === CANCEL) return cancelled(ctx);
+  const r = guided?.r ?? resolveAll(ctx, options, detection, saved, {}, manifest);
+  const editPath = guided ? guided.editPath : options.editShellProfile;
   const better = detection.candidates[0]?.path;
   if (!prompter && r.settings.rootSource === "default" && better && better !== r.settings.reposRoot) {
     ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
@@ -315,7 +319,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const summary = summarize(r, detection, options, Boolean(prompter));
   if (options.plan) {
     configureShellPath(ctx, options.editShellProfile, true);
-    return finish(ctx, baseCtx, options, r, detection, summary, 0);
+    return finish({ ctx, baseCtx, options, r, detection, lines: summary, code: 0 });
   }
   const off = offComponents(ctx, r, manifest);
 
@@ -326,25 +330,21 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     inheritNpm: !prompter && !options.json,
     profile: r.choice.name,
     activeBefore: r.activeBefore,
-    spinner: prompter?.spinner(),
     components: r.records,
     quiet: Boolean(prompter),
   };
-  const live = await retire(ctx, piDir, manifest, off, options.dryRun);
-  const result = await apply(ctx, r.actions, applyOptions, live);
-  if (result.code === 0) await syncServices(ctx, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
-  if (result.code === 0) configureShellPath(ctx, options.editShellProfile, readOnly);
+  const pathMissing = missingBinDirs(ctx).length > 0;
+  const run: ApplyRun = { ctx, options, r, applyOptions, manifest, off, editPath };
+  const result = prompter ? await applyGuided(run, prompter) : await applyPlain(run);
   const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l));
-  if (result.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
-  if (prompter && result.code === 0 && !options.dryRun && !options.plan && r.components.lanes.on && !existsSync(join(r.settings.reposRoot, ".lanes/lanes.json"))) {
-    const answer = await prompter.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
-    if (!prompter.isCancel(answer) && answer === true) {
-      try {
-        if (await runLanesFlow(ctx, { ...options, dir: "" }, prompter, true) !== 0) ctx.err("Lanes setup was not completed; run ./install.sh lanes to continue.");
-      } catch (error) { ctx.err(`Lanes setup was not completed: ${(error as Error).message}`); }
-    }
+  if (result.code === 0 && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...await installSummary(ctx, detection, piDir));
+  const offer = lanesOffered(r, options, result.code === 0);
+  let pending = 0;
+  if (prompter && result.code === 0 && !options.dryRun) {
+    pending = guidedNotes(prompter, { ctx, options, detection, profile: r.profile, ready: r.ready, pathMissing, editPath, offerLanes: offer });
   }
-  return finish(ctx, baseCtx, options, r, detection, shown, result.code, prompter, result.wrote);
+  if (prompter && offer) await offerLanesSetup(ctx, options, prompter);
+  return finish({ ctx, baseCtx, options, r, detection, lines: shown, code: result.code, prompter, wrote: result.wrote, pending });
 }
 
 function cancelled(ctx: Ctx): number {
@@ -352,10 +352,12 @@ function cancelled(ctx: Ctx): number {
   return 1;
 }
 
-function finish(
-  ctx: Ctx, baseCtx: Ctx, options: Options, r: Resolved, detection: Detection, lines: string[], code: number,
-  prompter?: Prompter, wrote = true,
-): number {
+interface FinishInput {
+  ctx: Ctx; baseCtx: Ctx; options: Options; r: Resolved; detection: Detection; lines: string[]; code: number;
+  prompter?: Prompter; wrote?: boolean; pending?: number;
+}
+
+function finish({ ctx, baseCtx, options, r, detection, lines, code, prompter, wrote = true, pending = 0 }: FinishInput): number {
   if (options.json) {
     baseCtx.out(jsonReport(r, detection, code));
     return code;
@@ -367,7 +369,8 @@ function finish(
     const upToDate = `${prompter ? "Everything is up to date." : "Everything up to date."}${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
     const done = readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate;
     const hint = r.choice.provisional && !readOnly && wrote ? ` ${r.choice.reason}.` : "";
-    if (prompter) prompter.outro(`${done}${hint}`);
+    if (prompter && pending && !readOnly) prompter.outro(`Installed, with ${pending} ${pending === 1 ? "thing" : "things"} to finish: see "Still to finish" above.`);
+    else if (prompter) prompter.outro(`${done}${hint}`);
     else ctx.out(`${done}${hint}`);
   }
   return code;

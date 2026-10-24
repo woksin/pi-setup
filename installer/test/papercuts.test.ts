@@ -49,13 +49,19 @@ test("(c) the guided flow prints a count line, not one line per file", async () 
   assert.ok(installLines(out.stdout).length > 100);
 });
 
+/** Both pi-setup bin directories on PATH, so a rerun has no pending PATH edit and Review can be skipped. */
+function onPath(b: ReturnType<typeof box>, ctx: ReturnType<typeof ctxFor>) {
+  ctx.env.PATH = [join(b.home, ".local/bin"), join(b.home, ".pi/agent/bin"), ctx.env.PATH ?? ""].join(":");
+  return ctx;
+}
+
 test("(d) an unchanged rerun ends up to date without Review; first install reaches Review", async () => {
   const b = box();
   assert.equal(install(b, ["--yes", ...base(b)]).status, 0);
   const s = scripted({});
-  assert.equal(await main(base(b), ctxFor(b, [], []), s.p), 0);
+  assert.equal(await main(base(b), onPath(b, ctxFor(b, [], [])), s.p), 0);
   assert.ok(!s.events.includes("select:Review"), s.events.join("\n"));
-  assert.match(s.outros.at(-1) ?? "", /Everything is up to date/);
+  assert.match(s.outros.at(-1) ?? "", /Installed, with \d+ things? to finish/);
   const first = box();
   const f = scripted({});
   assert.equal(await main(base(first), ctxFor(first, [], []), f.p), 0);
@@ -85,11 +91,11 @@ test("(g) keeping an edit reaches Review once; an unchanged rerun skips Review a
   assert.equal(install(b, ["--yes", ...base(b)]).status, 0);
   appendFileSync(join(b.home, ".pi/agent/extensions/guards.ts"), "\n// edited by the user\n");
   const first = scripted({ "changed since install": ["keep"] });
-  assert.equal(await main(base(b), ctxFor(b, [], []), first.p), 0);
+  assert.equal(await main(base(b), onPath(b, ctxFor(b, [], [])), first.p), 0);
   assert.ok(first.events.includes("select:Review"), first.events.join("\n"));
   assert.equal(first.selects.find((s) => s.message === "Review")?.initial, "install");
   const again = scripted({ "changed since install": ["keep"] });
-  assert.equal(await main(base(b), ctxFor(b, [], []), again.p), 0);
+  assert.equal(await main(base(b), onPath(b, ctxFor(b, [], [])), again.p), 0);
   assert.ok(!again.events.includes("select:Review"), again.events.join("\n"));
-  assert.match(again.outros.at(-1) ?? "", /Everything is up to date/);
+  assert.match(again.outros.at(-1) ?? "", /Installed, with \d+ things? to finish/);
 });

@@ -17,15 +17,15 @@ This is the setup I run [pi](https://www.npmjs.com/package/@earendil-works/pi-co
 
 ```sh
 git clone https://github.com/woksin/pi-setup && cd pi-setup
-./install.sh --dry-run   # show what would change
-./install.sh             # overwritten files are backed up first
+./install.sh --dry-run   # show what would change, no flags needed
+./install.sh             # guided setup; overwritten files are backed up first
 ```
 
-It needs Node.js 22.19 or newer and Python 3.9 or newer (macOS/Linux). The full installer reference follows below.
+In a terminal, `./install.sh` is a guided setup (see [The guided installer](#the-guided-installer)). It needs Node.js 22.19 or newer and Python 3.9 or newer (macOS/Linux). The full installer reference follows below.
 
 ## Contents
 
-- [Install](#install), including update, uninstall, doctor and the opt-in lanes
+- [Install](#install), the guided installer, including update, uninstall, doctor and the opt-in lanes
 - [For Cratis team members](#for-cratis-team-members)
 - [Machine performance](#machine-performance)
 - [What's in it](#whats-in-it)
@@ -36,7 +36,7 @@ It needs Node.js 22.19 or newer and Python 3.9 or newer (macOS/Linux). The full 
 ## Highlights
 
 - Safe to re-run: files you changed are kept and the new version is written next to them, and every overwrite is backed up.
-- Nothing is scheduled unless you choose it. The `docker-guardian`, `cleanup` and `secret-sweep` schedules are opt-in extras.
+- Nothing is scheduled behind your back. The `docker-guardian`, `cleanup` and `secret-sweep` schedules are extras: the guided installer pre-selects the ones your machine supports and shows them in the Review before anything is written, and unattended installs need `--with <id>`.
 - Releases are cut by hand from tagged versions; `./install.sh update` moves a checkout to the latest release tag.
 
 ## Install
@@ -61,24 +61,41 @@ Use Node.js **22.19 or newer** (including current Node 24/26 releases), npm, Pyt
 
 Doctor fails missing required tools/packages and warns about missing optional tools. It never installs system prerequisites.
 
-### First ten minutes: pi, login, then auto
+### The guided installer
+
+In a terminal, `./install.sh` opens a short welcome and one first choice:
+
+- **Use our recommended setup** (the default; on a rerun it reads **Update with your current choices**). It uses what detection finds and asks only what it cannot settle itself, such as your GitHub login or repositories folder. The recommended extras are the detected defaults: `docker-guardian` (macOS with Docker), `cleanup`, `secret-sweep` (macOS with `gitleaks`), `codescene` (when `cs-mcp` or `CS_ACCESS_TOKEN` is found), `cratis` (when Cratis repositories are found) and web tools. `lanes` is off.
+- **Customise step by step** asks every step: GitHub login, repositories folder, AI logins, profile and extras.
+
+Each question shows "Step n of N". Steps already answered by flags such as `--user`, `--repos-root` or `--profile` are skipped and not counted.
+
+1. **AI logins** shows Claude, ChatGPT and Kimi with ✓ or ✗. "Log in now, then check again" lets you run `pi` and `/login` and come back without quitting.
+2. **Profile** lists every profile with what it needs. Profiles whose logins are missing are shown but cannot be picked, and the recommended one comes first. With no logins yet, `balanced` stays available so you can install now and run `./install.sh --profile auto` after logging in.
+3. **Review** shows everything that will change before anything is written. Choose Install, Change a step…, Show every file or Cancel. Files you edited are handled here. When `~/.local/bin` or `~/.pi/agent/bin` is missing from your PATH, "Add them to PATH in your shell profile" is pre-selected; your shell profile is only changed when you choose Install with that line selected.
+4. **Installing** shows one progress line per phase, then a health summary that says "Installed, with N things to finish" if something still needs you.
+5. **What's next** lists: open a new terminal if PATH changed, start `pi`, log in to any missing provider, switch profiles with `pi-profile list` or `./install.sh --profile <name>`, and check with `./install.sh doctor`. The lanes offer follows as an optional step.
+
+A rerun with nothing to change ends with "Everything is up to date." Non-interactive runs (`--yes`, `--plan`, `--dry-run`, `--json`, `CI`, no terminal) never prompt and print the full file list. `--plan` and `--dry-run` work without `--user` or a `gh` login: names then show `<you>` and a note asks you to pass `--user` for the final names.
+
+### First ten minutes: pi, login, then install
 
 1. Install prerequisites and pi: `npm install -g @earendil-works/pi-coding-agent`.
 2. Start `pi`, then use `/login` for the providers/subscriptions you have; exit pi afterwards. Also run `gh auth login` for GitHub access.
-3. From this checkout, run `./install.sh --profile auto` (or rerun it after adding a login). Use `--user <GitHub-login> --yes` for an unattended install.
+3. From this checkout, run `./install.sh` and follow the prompts (rerun it after adding a login, or use `./install.sh --profile auto` to recompute the profile). Use `--user <GitHub-login> --yes` for an unattended install.
 4. Restart your shell/pi and run `./install.sh doctor`. Review the selected profile with `pi-profile list`; select another with `./install.sh --profile <name>`.
 
 | Profile | Required logins/subscriptions | Optional provider |
 | --- | --- | --- |
 | `openai-only` | ChatGPT (`openai-codex`) | — |
 | `balanced` | Claude (`anthropic`) + ChatGPT | Kimi (`kimi-coding`), otherwise ops/scout fall back to GPT |
-| `balanced-anthropic` | Claude + ChatGPT | Kimi, otherwise GPT fallback |
+| `balanced-anthropic` | Claude | — (Claude only, every role) |
 | `balanced-openai` | Claude + ChatGPT | Kimi, otherwise GPT fallback |
 | `anthropic-heavy` | Claude + ChatGPT | — |
 | `openai-heavy` | Claude + ChatGPT | — |
 | `kimi-heavy` | Claude + ChatGPT + Kimi | — |
 
-`auto` chooses the highest-ranked profile whose required logins are ready: `balanced` with Claude + ChatGPT (with or without Kimi), `openai-only` with ChatGPT alone. No matching profile (including Claude-only or Kimi-only) gives provisional `balanced` and asks for the missing logins. It does **not** automatically prefer `kimi-heavy`; select that explicitly. A normal rerun keeps the active profile; `--profile auto` recomputes it.
+`auto` chooses the highest-ranked profile whose required logins are ready: `balanced` with Claude + ChatGPT (with or without Kimi), `balanced-anthropic` with Claude alone, `openai-only` with ChatGPT alone. No matching profile (for example Kimi-only, or no logins yet) gives provisional `balanced` and asks for the missing logins. It does **not** automatically prefer `kimi-heavy`; select that explicitly. A normal rerun keeps the active profile; `--profile auto` recomputes it.
 
 `pi-questions` is deliberately **bundled** in `agent/local-packages/pi-questions`, installed into `~/.pi/agent/local-packages/pi-questions` and registered as `./local-packages/pi-questions`. It needs no separate publication, npm install or private clone.
 
@@ -91,7 +108,7 @@ git clone https://github.com/woksin/pi-setup && cd pi-setup
 
 Install needs Node.js 22.19 or newer (pi needs it too) and Python 3.9 or newer (macOS/Linux). `install.sh` is a thin shim around the committed bundle `installer/dist/pi-setup.mjs`; it detects your setup first and asks only what it could not find out. In a terminal it runs a short wizard; with `--yes`, `CI` set or no terminal it never prompts. It detects your GitHub login (saved, then `gh`), your repositories root (saved, then the best match among the usual places such as `~/repos` and the parent of this checkout, then `$HOME/repos`), which providers you are logged in to, and picks a profile from `agent/profiles/<name>/profile.json` (an already active profile is kept on re-runs; `--profile <name>` switches). It then runs npm install in pi's global package store, `~/.pi/agent/npm`, when inputs change or a pinned package is missing/wrong. New installs register and fetch `npm:@woksin/pi-jobs@0.3.1`, `npm:@woksin/pi-context-budget@0.4.0`, `npm:@woksin/pi-recover@0.1.1` and `npm:@woksin/pi-orch@0.1.1` (with `--save-exact --legacy-peer-deps`). Existing explicit package versions and local overrides are kept. `--skip-npm` skips fetching; doctor then reports missing packages. Launchers `pi-session`, `orch` and `orch-poll` are linked into `~/.local/bin` on the first install; existing files/foreign links there are left alone.
 
-Flags, in any order: `--user <login>`, `--repos-root <dir>`, `--profile <name|auto>`, `--yes` (never prompt), `--skip-npm`, `--dry-run` (writes nothing), `--plan` (print detection, profile and actions, write nothing) and `--json` (one JSON object on stdout). The operator settings are saved in `~/.pi/agent/user.json` (`githubUser` and `reposRoot`; other keys are kept) and reused on later installs unless flags override them. Without a login from any source, install fails and asks for `--user`. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. A re-run that has nothing to change prints `Everything up to date`, no `install` lines, and creates no backups.
+Flags, in any order: `--user <login>`, `--repos-root <dir>`, `--profile <name|auto>`, `--yes` (never prompt), `--skip-npm`, `--dry-run` (writes nothing), `--plan` (print detection, profile and actions, write nothing) and `--json` (one JSON object on stdout). The operator settings are saved in `~/.pi/agent/user.json` (`githubUser` and `reposRoot`; other keys are kept) and reused on later installs unless flags override them. Without a login from any source, a real install fails and asks for `--user`; `--plan` and `--dry-run` use the placeholder `<you>` instead. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. A re-run that has nothing to change prints `Everything up to date`, no `install` lines, and creates no backups.
 
 ### Update, uninstall and backups
 
@@ -125,7 +142,7 @@ For temporary-HOME testing use `--no-launchd`. Loading/unloading launchd is also
 
 `inbox-watch` accepts an explicit directory with `INBOX_DIR=/absolute/path/to/messages ~/.pi/agent/bin/inbox-watch`. Set it for your checkout rather than relying on the legacy default.
 
-Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" question) turn on `docker-guardian`, `cleanup`, `secret-sweep`, `codescene`, `cratis`, `web` or `lanes`. Your choice is saved in the manifest and reused on later runs; turning one off removes what pi-setup added and leaves files you changed. The schedules (`docker-guardian`, `cleanup`, `secret-sweep`) are never installed without an explicit choice: on macOS they are written to `~/Library/LaunchAgents/com.<user>.<name>.plist` and loaded with `launchctl bootstrap`; `cleanup` on Linux uses a systemd user timer. `codescene` needs `cs-mcp` on PATH and `CS_ACCESS_TOKEN` in your shell profile; pi-setup never stores the token.
+Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" question) turn on `docker-guardian`, `cleanup`, `secret-sweep`, `codescene`, `cratis`, `web` or `lanes`. Your choice is saved in the manifest and reused on later runs; turning one off removes what pi-setup added and leaves files you changed. The schedules (`docker-guardian`, `cleanup`, `secret-sweep`) are only installed when you choose them (the guided installer pre-selects the supported ones in its Review; unattended runs need `--with`): on macOS they are written to `~/Library/LaunchAgents/com.<user>.<name>.plist` and loaded with `launchctl bootstrap`; `cleanup` on Linux uses a systemd user timer. `codescene` needs `cs-mcp` on PATH and `CS_ACCESS_TOKEN` in your shell profile; pi-setup never stores the token.
 
 ### Lanes (opt-in)
 
@@ -174,7 +191,7 @@ Restart pi. Agents assign issues and PRs to you and request you as reviewer (ski
 
 Remove the parts you don't want:
 
-- **docker-guardian:** not installed by default. For a managed schedule, run `./install.sh --without docker-guardian` to unload and remove it. For a manually copied template, unload and remove your actual plist in `~/Library/LaunchAgents/` (managed names use `com.<user>.docker-guardian.plist`).
+- **docker-guardian:** the guided installer pre-selects it when Docker is found on macOS; untick it in the Review, or for an existing schedule run `./install.sh --without docker-guardian` to unload and remove it. For a manually copied template, unload and remove your actual plist in `~/Library/LaunchAgents/` (managed names use `com.<user>.docker-guardian.plist`).
 - **pi-orch:** remove `npm:@woksin/pi-orch` from `packages` in `~/.pi/agent/settings.json`.
 - **loose-threads:** remove `~/.pi/agent/loose-threads` and its entry from `AGENTS.md`; it is a manually invoked backstop, not a scheduled service.
 - **Cratis-specific rules:** remove the Cratis sections of `AGENTS.md`, the `cratis-cli-guard` extension, the `cratis-cli` agent and the Cratis MCP approval patterns in `mcp-adapter.json` if they don't apply. `pi-cleanup`, `loose-threads` and `ai-work-lifecycle` use your configured repositories root.
@@ -283,6 +300,8 @@ has been deleted. Shared layers mean modest savings: about 1 GB on a 13.7 GB
 ## What's in it
 
 ### `agent/` → `~/.pi/agent/`
+
+The lessons behind the global rules are in [docs/operating-lessons.md](docs/operating-lessons.md).
 
 | Path | What it is |
 | --- | --- |

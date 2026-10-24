@@ -113,12 +113,14 @@ export interface ProfileMeta {
   rank: number;
 }
 
+export interface Spinner { start(message: string): void; stop(message: string): void; message?(text: string): void }
+
 export interface Prompter {
   intro(title: string): void;
   outro(message: string): void;
   note(body: string, title?: string): void;
   step?(index: number, total: number, title: string): void;
-  spinner(): { start(message: string): void; stop(message: string): void };
+  spinner(): Spinner;
   confirm(options: { message: string; initial?: boolean }): Promise<boolean | typeof CANCEL>;
   select<T extends string>(options: {
     message: string;

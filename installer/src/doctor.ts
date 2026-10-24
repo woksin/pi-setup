@@ -9,6 +9,7 @@ import type { Ctx, Detection } from "./types.ts";
 import { componentChecks } from "./doctor-components.ts";
 
 export { setupCmd } from "./doctor-checks.ts";
+export { compactChecks } from "./doctor-compact.ts";
 export interface DoctorCheck {
   id: string;
   title: string;
@@ -86,4 +87,9 @@ export async function installSummary(ctx: Ctx, detection: Detection, _piDir: str
   const checks = local.checks;
   if (!doctorExitCode(checks)) return [`Doctor: all ${checks.filter(c => c.status === "ok").length} checks passed (full check: \`${setupCmd(ctx)} doctor\`).`];
   return [`Doctor: ${counts(checks)}:`, ...render(checks.filter(c => c.status === "warn" || c.status === "fail")), `Full check: \`${setupCmd(ctx)} doctor\``];
+}
+
+/** The same checks as installSummary, for grouping by cause in the guided flow. */
+export function installChecks(ctx: Ctx, detection: Detection): DoctorCheck[] {
+  return localChecks(ctx, { providers: detection.providers, catalog: detection.catalog, github: detection.github.host ? detection.github : undefined, summary: true }).checks;
 }
