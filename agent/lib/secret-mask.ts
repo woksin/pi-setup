@@ -242,8 +242,7 @@ function envAssignments(text: string, out: Candidate[]): void {
 			const group = match[2] !== undefined ? 2 : match[3] !== undefined ? 3 : 4;
 			const value = match[group];
 			if (value.length < 4 || !secretValue(value, group !== 4, false, true)) continue;
-			const [start, end] = match.indices![group]!;
-			connectionCandidate(text, start, end, out);
+			connectionCandidate(text, match[1], match.indices![group]!, out);
 		}
 	}
 	// A whole quoted entry (docker `Env` JSON, list items): the value runs to the closing quote, spaces included.
@@ -252,8 +251,7 @@ function envAssignments(text: string, out: Candidate[]): void {
 		if (!isSecretKey(match[2])) continue;
 		const value = match[3];
 		if (value.length < 4 || !secretValue(value, true, false, true)) continue;
-		const [start, end] = match.indices![3]!;
-		connectionCandidate(text, start, end, out);
+		connectionCandidate(text, match[2], match.indices![3]!, out);
 	}
 }
 
@@ -263,19 +261,44 @@ function loopbackHost(authority: string): boolean {
 	return host === "localhost" || host === "[::1]" || (!!host && isIP(host) === 4 && host.startsWith("127."));
 }
 
+const LOOPBACK_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,31}$/;
+const LOOPBACK_BOOLEAN = /^(?:true|false)$/;
+const LOOPBACK_OPTIONS = new Map<string, RegExp>([
+	["replicaSet", LOOPBACK_NAME], ["authSource", LOOPBACK_NAME], ["appName", LOOPBACK_NAME],
+	["directConnection", LOOPBACK_BOOLEAN], ["tls", LOOPBACK_BOOLEAN], ["ssl", LOOPBACK_BOOLEAN],
+	["retryWrites", LOOPBACK_BOOLEAN], ["w", /^(?:majority|[0-9]{1,2})$/],
+	["sslmode", /^(?:disable|allow|prefer|require|verify-ca|verify-full)$/],
+	["connectTimeoutMS", /^[0-9]{1,8}$/], ["serverSelectionTimeoutMS", /^[0-9]{1,8}$/],
+]);
+
+function benignLoopbackOption(pair: string): boolean {
+	const option = /^([A-Za-z][A-Za-z0-9]*)=([A-Za-z0-9_.-]{1,64})$/.exec(pair);
+	if (!option) return false;
+	const [, key, value] = option;
+	if (!LOOPBACK_OPTIONS.get(key)?.test(value)) return false;
+	// Numbers are expected for these typed options, not arbitrary names or secrets.
+	return /^(?:connectTimeoutMS|serverSelectionTimeoutMS|w)$/.test(key)
+		|| !secretValue(value.replace(/[_.-]/g, ""), false, false);
+}
+
 function loopbackConnection(text: string, start: number, end: number): boolean {
 	// Bare field captures stop at separators (or IPv6 brackets in env forms). Inspect
 	// the rest of that token too, never exempting a local prefix of a remote/secret URL.
 	const suffix = /^[,;&\[\]][^\s"'`|(){}<>\\]*/.exec(text.slice(end))?.[0] ?? "";
-	const uri = /^[a-z][a-z0-9+.-]{0,31}:\/\/([^/?#\s\\]+)([^\s\\]*)$/i.exec(text.slice(start, end) + suffix);
+	// Only known development database paths; no fragments, matrix params, escapes or second query.
+	const uri = /^[a-z][a-z0-9+.-]{0,31}:\/\/([^/?#;\s\\]+)(?:\/(?:db|test|cratis-dev)?)?(?:\?([^?#;\s\\]+))?$/i.exec(text.slice(start, end) + suffix);
 	if (!uri || !uri[1].split(",").every(loopbackHost)) return false;
-	const query = /\?([^#]*)/.exec(uri[2])?.[1] ?? "";
-	return [...new URLSearchParams(query.replaceAll(";", "&")).keys()]
-		.every(key => !isSecretKey(key) && !/^(?:key|signature|auth|authorization)$/i.test(key));
+	return !uri[2] || uri[2].split("&").every(benignLoopbackOption);
 }
 
-function connectionCandidate(text: string, start: number, end: number, out: Candidate[]): void {
-	if (!loopbackConnection(text, start, end)) out.push({ start, end, kind: "connection-string" });
+function connectionField(name: string): boolean {
+	const normalized = name.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+	if (/pass|pwd|secret|token|key|credential|sig|auth|sas/.test(normalized)) return false;
+	return /connection|(?:url|uri)$|^mongo/.test(normalized);
+}
+
+function connectionCandidate(text: string, field: string, [start, end]: [number, number], out: Candidate[]): void {
+	if (!connectionField(field) || !loopbackConnection(text, start, end)) out.push({ start, end, kind: "connection-string" });
 }
 
 function connections(text: string, out: Candidate[]): void {
@@ -291,7 +314,7 @@ function connections(text: string, out: Candidate[]): void {
 		const regexLiteral = !match[3] && value.startsWith("/")
 			&& /\b(?:const|let|var)[ \t]+$/.test(text.slice(text.lastIndexOf("\n", match.index) + 1, match.index));
 		if (value.length < 8 || regexLiteral || !secretValue(value, !!match[3], terminated)) continue;
-		connectionCandidate(text, start, end, out);
+		connectionCandidate(text, match[2], [start, end], out);
 	}
 }
 

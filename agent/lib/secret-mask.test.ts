@@ -137,7 +137,7 @@ test("credential-free loopback URLs are not secret field values", () => {
 	for (const url of [
 		"mongodb://localhost:27017", "postgres://127.0.0.1:5432/db",
 		"postgres://127.12.34.56:5432/db", "mongodb://[::1]:27017", "mongodb://::1",
-		"mongodb://LOCALHOST:27017/db", "https://localhost:8443/?mode=dev&replicaSet=rs0",
+		"mongodb://LOCALHOST:27017/db", "https://localhost:8443/?tls=true&replicaSet=rs0",
 		"mongodb://localhost:27017,localhost:27018/?replicaSet=rs0",
 		"mongodb://localhost:27017,[::1]:27018,127.0.0.2:27019/db",
 	]) {
@@ -163,6 +163,55 @@ test("loopback exemption never hides user-info, secret parameters or remote host
 	}
 	assert.equal(scan('"ConnectionString": "Server=localhost;Password=x"').text,
 		'"ConnectionString": "[REDACTED:connection-string]"');
+});
+
+test("loopback exemption rejects secrets in paths, fragments, matrix parameters and second queries", () => {
+	for (const url of [
+		"mongodb://localhost/hunter2SuperSecret",
+		`https://localhost:8443/#access_token=${MIX}`,
+		`https://localhost:8443/db;Password=${MIX}`,
+		`mongodb://localhost;Password=${MIX}`,
+		`mongodb://localhost/?replicaSet=rs0?password=${MIX}`,
+		`mongodb://localhost/?tls=true?token=${MIX}`,
+		"mongodb://localhost/db#", "mongodb://localhost/db/other", "mongodb://localhost/%64b",
+		"mongodb://localhost/arbitrary", "mongodb://localhost/?mode=dev",
+		"mongodb://localhost/?replicaSet=rs0;tls=true", "mongodb://localhost/?replicaSet=rs0&",
+		"mongodb://localhost/?replicaSet", "mongodb://localhost/?replicaSet=rs0=other",
+		"mongodb://localhost/?replicaSet=", "mongodb://localhost/?replicaSet=rs%30",
+		"mongodb://localhost/?replicaSet=hunter2SuperSecret", "mongodb://localhost/?appName=hunter2SuperSecret",
+		"mongodb://localhost/?tls=hunter2SuperSecret", "mongodb://localhost/?__proto__=x",
+	]) {
+		const text = `"ConnectionString": "${url}"`;
+		assert.equal(scan(text).text, '"ConnectionString": "[REDACTED:connection-string]"', text);
+		assert.ok(scan(`CONNECTION_STRING=${url}`).count > 0, url);
+	}
+});
+test("loopback exemption is restricted to connection-ish field names, never credential names", () => {
+	for (const key of [
+		"DB_PASSWORD", "API_TOKEN", "API_KEY", "SECRET", "MONGO_PASSWORD", "MONGO_PASS",
+		"CONNECTION_STRING_TOKEN", "PASSWORD_COUNT_CONNECTION_STRING", "CONNECTION_API_KEY",
+		"ConnectionStringSecret", "MONGO_CREDENTIALS", "MONGO_AUTH_TOKEN_URL", "MONGO_SIG",
+		"SHARED_ACCESS_SIGNATURE", "PRIVATE_KEY_URI", "SAS_CONNECTION_STRING",
+	]) {
+		for (const text of [
+			`"${key}": "mongodb://localhost:27017"`, `${key}=mongodb://localhost:27017`,
+			`["${key}=mongodb://localhost:27017"]`, `${key}: mongodb://localhost:27017`,
+		]) assert.ok(scan(text).count > 0, text);
+	}
+});
+test("loopback exemption permits only known database paths and benign query options", () => {
+	for (const tail of [
+		"", "/", "/db", "/test", "/cratis-dev", "/?replicaSet=rs0&authSource=admin",
+		"/db?directConnection=true&tls=false&ssl=true&retryWrites=false",
+		"/test?w=majority&appName=cratis-dev&sslmode=verify-full",
+		"/cratis-dev?connectTimeoutMS=5000&serverSelectionTimeoutMS=30000&w=1",
+	]) {
+		const url = `mongodb://localhost:27017${tail}`;
+		for (const text of [
+			`"ConnectionString": "${url}"`, `CONNECTION_STRING=${url}`,
+			`["CONNECTION_STRING=${url}"]`, `CONNECTION_STRING: "${url}"`,
+		]) assert.deepEqual(scan(text), { text, count: 0, kinds: [], skipped: false }, text);
+	}
 });
 
 test("URL redaction preserves scheme, username, host and path", () => {
