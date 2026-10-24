@@ -13,13 +13,20 @@ from datetime import datetime, timezone, timedelta
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 
 import pi_phase
 
 HERE = Path(__file__).resolve().parent
 AI_WORK = HERE.parent.parent / ".ai-work"
 ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from pi_phase import main; sys.exit(main(sys.argv[4:], state=sys.argv[2], configuration=sys.argv[3]))"
+
+
+def fail_diagnostic_flush(output):
+    markers = ("pi-phase: primary", "pi-phase: cleanup", "pi-phase: killpg", "pi-phase: producer_exit=")
+    if any(marker in output.getvalue() for marker in markers):
+        raise BrokenPipeError(32, "diagnostic output failed")
 
 
 class PhaseTests(unittest.TestCase):
@@ -43,6 +50,171 @@ class PhaseTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         self.children = []
         self.addCleanup(self.finish_children)
+
+    def supervisor_diagnostic(self, observation, *, probe=True, failed_output=False):
+        """No real child or signal: reserve a synthetic identity entirely inside mocks."""
+        pid = 2147483647
+        producer = Mock(pid=pid, returncode=None)
+        output = io.StringIO()
+        error_output = io.StringIO()
+        self.config.write_text(json.dumps(dict(msbuild_max_cpu=0, phase_nice=0,
+                                              cold_worktree_hint=False, container_test_detection="off")))
+        identity = pi_phase.work_identity(os.getcwd(), ["synthetic"], "test")
+        original_run = pi_phase.run
+        denied = PermissionError(1, "denied")
+        faults = []
+        handlers = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+
+        def capture_run(*args, **kwargs):
+            try:
+                return original_run(*args, **kwargs)
+            except Exception as exc:
+                faults.append(exc)
+                raise
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(pi_phase, "run", side_effect=capture_run))
+            release = stack.enter_context(patch.object(pi_phase, "release", wraps=pi_phase.release))
+            stack.enter_context(redirect_stderr(error_output))
+            stack.enter_context(redirect_stdout(output))
+            stack.enter_context(patch.object(output, "flush",
+                                             side_effect=(lambda: fail_diagnostic_flush(output)) if failed_output else None))
+            for name, value in (("PhaseLedger", None), ("work_identity", identity),
+                                ("test_fingerprint", "synthetic"), ("group_alive", True)):
+                stack.enter_context(patch.object(pi_phase, name, return_value=value))
+            stack.enter_context(patch.object(pi_phase.subprocess, "Popen", return_value=producer))
+            stack.enter_context(patch.object(pi_phase.os, "write", return_value=1))
+            waitid = stack.enter_context(patch.object(pi_phase.os, "waitid"))
+            if isinstance(observation, Exception):
+                waitid.side_effect = observation
+            else:
+                waitid.return_value = SimpleNamespace(si_code=os.CLD_EXITED, si_status=observation)
+            kill = stack.enter_context(patch.object(pi_phase.os, "killpg",
+                                                   side_effect=denied))
+            stack.enter_context(patch.object(pi_phase, "group_liveness", return_value=probe,
+                                            create=True))
+            stack.enter_context(patch.object(pi_phase, "live_group_members", return_value=True))
+            result = pi_phase.main(["run", "--kind", "test", "--label", "diagnostic",
+                                    "--policy", "direct", "--timeout", "2", "--", "synthetic"],
+                                   state=self.state, configuration=self.config)
+        self.assertEqual(result, 125)
+        self.assertIs(faults[0], observation if isinstance(observation, Exception) else denied)
+        self.assertEqual(handlers, (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)))
+        self.assertFalse(release.call_args.args[-1])
+        producer.wait.assert_not_called()  # Never reap after failed group signals.
+        self.assertEqual(kill.call_args_list, [call(pid, signal.SIGTERM)] * (1 + (not isinstance(observation, Exception))))
+        self.assertTrue(list(self.state.glob("direct-*.json")))  # Orphan guard retained.
+        return output.getvalue() + error_output.getvalue()
+
+    def test_failed_diagnostic_output_preserves_primary_and_live_guard(self):
+        output = self.supervisor_diagnostic(OSError(5, "primary wait fault"), failed_output=True)
+        self.assertIn("primary operation=waitid", output)
+        self.assertIn("cleanup operation=stop_group", output)
+        self.assertIn("producer_exit=unknown", output)
+
+    def test_failed_diagnostic_output_preserves_unknown_guard(self):
+        output = self.supervisor_diagnostic(37, probe=None, failed_output=True)
+        self.assertIn("primary operation=stop_group", output)
+        self.assertIn("liveness=unknown", output)
+        self.assertIn("producer_exit=37", output)
+
+    def test_finalization_only_error_survives_failed_output(self):
+        self.configure(msbuild_max_cpu=0, phase_nice=0, cold_worktree_hint=False, container_test_detection="off")
+        output = io.StringIO()
+        producer = Mock(pid=2147483647, returncode=0)
+        fault = OSError(5, "final release fault")
+        observed = []
+        release_failed = [False]
+        original_run, original_release = pi_phase.run, pi_phase.release
+        identity = pi_phase.work_identity(os.getcwd(), ["synthetic"], "test")
+        handlers = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+
+        def fail_release(*args):
+            original_release(*args)  # Close owned FDs, retaining live/unknown metadata.
+            release_failed[0] = True  # Output fails starting with this finalization fault.
+            raise fault
+
+        def capture_run(*args, **kwargs):
+            try:
+                return original_run(*args, **kwargs)
+            except Exception as exc:
+                observed.append(exc)
+                raise
+
+        with ExitStack() as stack:
+            stack.enter_context(redirect_stdout(output))
+            stack.enter_context(redirect_stderr(io.StringIO()))
+            stack.enter_context(patch.object(output, "flush", side_effect=lambda:
+                                             fail_diagnostic_flush(output) if release_failed[0] else None))
+            for name, value in (("PhaseLedger", None), ("work_identity", identity), ("test_fingerprint", "synthetic"),
+                                ("group_alive", True), ("stop_group", None)):
+                stack.enter_context(patch.object(pi_phase, name, return_value=value))
+            stack.enter_context(patch.object(pi_phase, "run", side_effect=capture_run))
+            release = stack.enter_context(patch.object(pi_phase, "release", side_effect=fail_release))
+            stack.enter_context(patch.object(pi_phase.subprocess, "Popen", return_value=producer))
+            stack.enter_context(patch.object(pi_phase.os, "write", return_value=1))
+            stack.enter_context(patch.object(pi_phase.os, "waitid",
+                                             return_value=SimpleNamespace(si_code=os.CLD_EXITED, si_status=0)))
+            result = pi_phase.main(["run", "--kind", "test", "--label", "finalization", "--policy", "direct",
+                                    "--timeout", "2", "--", "synthetic"], state=self.state, configuration=self.config)
+        self.assertEqual(result, 125)
+        self.assertIs(observed[0], fault)
+        self.assertEqual(handlers, (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)))
+        self.assertFalse(release.call_args.args[-1])
+        self.assertTrue(list(self.state.glob("direct-*.json")))
+        self.assertIn("cleanup operation=release", output.getvalue())
+        self.assertIn("producer_exit=0", output.getvalue())
+
+    def test_primary_waitid_error_survives_secondary_cleanup_eperm(self):
+        output = self.supervisor_diagnostic(OSError(5, "primary wait fault"))
+        self.assertIn("primary operation=waitid", output)
+        self.assertIn("cleanup operation=stop_group", output)
+        self.assertIn("primary wait fault", output)
+        self.assertIn("producer_exit=unknown", output)
+        self.assertIn("pid=2147483647 pgid=2147483647", output)
+
+    def test_completion_eperm_preserves_known_producer_exit(self):
+        for status in (0, 37):
+            with self.subTest(status=status):
+                output = self.supervisor_diagnostic(status)
+                self.assertIn(f"producer_exit={status}", output)
+                self.assertIn("primary operation=stop_group", output)
+                self.assertIn("killpg signal=SIGTERM", output)
+                self.assertIn("liveness=live", output)
+
+    def test_completion_eperm_reports_unknown_liveness(self):
+        output = self.supervisor_diagnostic(0, probe=None)
+        self.assertIn("liveness=unknown", output)
+        self.assertIn("producer_exit=0", output)
+
+    def test_eperm_probe_live_unknown_and_zombie_distinctions(self):
+        cases = (("12 99 S\n", True), ("12 99 Z\n", False), ("", False))
+        with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")), \
+                patch.object(pi_phase.time, "sleep"):
+            for listing, live in cases:
+                with self.subTest(listing=listing), patch.object(pi_phase.subprocess, "run",
+                                                               return_value=SimpleNamespace(stdout=listing)):
+                    self.assertEqual(pi_phase.live_group_members(99), live)
+                    if live:
+                        with self.assertRaises(PermissionError):
+                            pi_phase.stop_group(99)
+                    else:
+                        pi_phase.stop_group(99)
+            with patch.object(pi_phase.subprocess, "run", side_effect=OSError("probe failed")):
+                self.assertTrue(pi_phase.live_group_members(99))
+                with self.assertRaises(PermissionError):
+                    pi_phase.stop_group(99)
+                self.assertIsNone(pi_phase.group_liveness(99))
+
+    def test_waitid_observation_reserves_leader_and_maps_signal(self):
+        for code, status, expected in ((os.CLD_EXITED, 37, 37), (os.CLD_KILLED, 15, 143),
+                                       (os.CLD_DUMPED, 6, 134)):
+            with self.subTest(code=code), patch.object(pi_phase.os, "waitid", return_value=SimpleNamespace(
+                    si_code=code, si_status=status)) as waitid:
+                observed = [None]
+                self.assertTrue(pi_phase.exited_unreaped(99, observed))
+                self.assertEqual(observed, [expected])
+                waitid.assert_called_once_with(os.P_PID, 99, os.WEXITED | os.WNOHANG | os.WNOWAIT)
 
     def finish_children(self):
         for child in self.children:

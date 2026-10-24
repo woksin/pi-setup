@@ -1474,15 +1474,20 @@ def unlock(fd):
     os.close(fd)
 
 
-def live_group_members(pgid):
-    """macOS can return EPERM for a group containing only an unreaped zombie."""
+def group_liveness(pgid):
+    """Return live/empty/unknown without treating a failed probe as empty."""
     try:
         listing = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="],
                                  capture_output=True, text=True, timeout=2, check=True).stdout
         return any(int(parts[1]) == pgid and not parts[2].startswith("Z")
                    for line in listing.splitlines() if len(parts := line.split()) >= 3)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return True  # Unknown is never treated as safe to release.
+        return None
+
+
+def live_group_members(pgid):
+    """macOS can return EPERM for a group containing only an unreaped zombie."""
+    return group_liveness(pgid) is not False  # Unknown is never safe to release.
 
 
 def live_groups(timeout):
@@ -2010,10 +2015,16 @@ def launch(gate, command):
         return 127 if exc.errno == errno.ENOENT else 126
 
 
-def exited_unreaped(pid):
+def exited_unreaped(pid, producer_exit=None):
     # WNOWAIT reserves the leader PID/PGID until cleanup signals have been sent,
     # avoiding signalling a recycled, unrelated process group.
-    return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    if status is not None and producer_exit is not None:
+        if status.si_code == os.CLD_EXITED:
+            producer_exit[0] = status.si_status
+        elif status.si_code in (os.CLD_KILLED, os.CLD_DUMPED):
+            producer_exit[0] = 128 + status.si_status
+    return status is not None
 
 
 def stop_group(pgid):
@@ -2023,9 +2034,42 @@ def stop_group(pgid):
         except ProcessLookupError:
             pass
         except PermissionError:
-            if live_group_members(pgid):
+            live = group_liveness(pgid)
+            if live is not False:
+                failure_note(f"killpg signal={sig.name} pgid={pgid} liveness={'live' if live else 'unknown'}")
                 raise
         time.sleep(delay)
+
+
+def failure_note(message):
+    """Best-effort diagnostics must not replace failures or interrupt cleanup."""
+    try:
+        note(message)
+    except Exception:
+        pass
+
+
+def supervisor_error(role, operation, proc, exc):
+    # Exception strings can contain paths/arguments; report only type and errno.
+    identity = "" if proc is None else f" pid={proc.pid} pgid={proc.pid}"
+    failure_note(f"{role} operation={operation}{identity} error={type(exc).__name__} errno={getattr(exc, 'errno', None)}")
+
+
+def cleanup_step(errors, operation, proc, action):
+    try:
+        return action()
+    except Exception as exc:
+        errors.append(exc)
+        supervisor_error("cleanup", operation, proc, exc)
+        return None
+
+
+def producer_outcome(proc, producer_exit):
+    if proc is not None and proc.returncode is not None:
+        producer_exit[0] = proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
+    value = "unknown" if producer_exit[0] is None else producer_exit[0]
+    identity = "" if proc is None else f" pid={proc.pid} pgid={proc.pid}"
+    failure_note(f"producer_exit={value}{identity}; wrapper exit=125")
 
 
 def bounded(value, name, approved):
@@ -2157,6 +2201,9 @@ def run(args, state, configuration, output=None):
     waiter_fd = None
     shim_dir = None
     detector_stopped = threading.Event()
+    producer_exit = [None]
+    operation = "prepare"
+    primary = None
     fingerprint = test_fingerprint(os.getcwd(), command)
     admission_args = argparse.Namespace(**vars(args))
     try:
@@ -2270,10 +2317,12 @@ def run(args, state, configuration, output=None):
         try:
             launcher = [sys.executable, str(Path(__file__).resolve()), "_launch", str(read_gate), "--", *command]
             output_options = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
+            operation = "Popen"
             proc = subprocess.Popen(launcher, pass_fds=[read_gate, *(fd for _, fd in held)],
                                     start_new_session=True, env=child_env, **output_options)
             os.close(read_gate)
             read_gate = -1
+            operation = "publish"
             publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, cwd=os.getcwd(),
                                label=args.label, kind=args.kind, priority=admission_args.priority, started=time.time(),
                                fast=admission_args.fast, policy=admission_args.policy, source=admission_args.source))
@@ -2309,8 +2358,10 @@ def run(args, state, configuration, output=None):
                 if ledger:
                     ledger.outcome("cancelled")
                 break
-            if exited_unreaped(proc.pid):
+            operation = "waitid"
+            if exited_unreaped(proc.pid, producer_exit):
                 break
+            operation = "supervise"
             now = time.monotonic()
             if now - started >= args.timeout:
                 note(f"phase timed out ({args.timeout:g}s); stopping owned process group")
@@ -2333,41 +2384,55 @@ def run(args, state, configuration, output=None):
             time.sleep(min(TICK, max(0, args.timeout - (now-started))))
         # Keep the group leader unreaped through both signals so its PGID cannot
         # be reused by an unrelated process, even when it exited first.
+        operation = "stop_group"
         stop_group(proc.pid)
         try:
+            operation = "wait"
             proc.wait(timeout=2)
             if return_code == 125:
                 return_code = proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
                 if ledger and proc.returncode < 0:
                     ledger.outcome("cancelled")
         except subprocess.TimeoutExpired:
-            note("cleanup incomplete; lease retained while group exists")
+            failure_note("cleanup incomplete; lease retained while group exists")
             return_code = 125
+        operation = "group_alive"
         safe = not group_alive({"pgid": proc.pid})
         if not safe:
-            note("process group still exists; retaining orphan guard")
+            failure_note("process group still exists; retaining orphan guard")
             return_code = 125
+        if return_code == 125:
+            producer_outcome(proc, producer_exit)
         note(f"finished kind={args.kind} label={args.label} exit={return_code}")
         return return_code
+    except BaseException as exc:
+        primary = exc
+        supervisor_error("primary", operation, proc, exc)
+        raise
     finally:
+        errors = []
         detector_stopped.set()
         if waiter_fd is not None:
-            deregister_waiter(state, token, waiter_fd)
-        # A failed launch sees EOF at its gate. An unexpected exception during
-        # execution must also terminate the owned group before releasing a lease.
+            cleanup_step(errors, "deregister_waiter", proc,
+                         lambda: deregister_waiter(state, token, waiter_fd))
+        # Do not reap if signals fail: the leader still reserves its PGID.
         if proc is not None and proc.returncode is None:
-            try:
-                stop_group(proc.pid)
-                proc.wait(timeout=2)
-            except (subprocess.TimeoutExpired, ProcessLookupError):
-                pass
-            safe = not group_alive({"pgid": proc.pid})
+            before_stop = len(errors)
+            cleanup_step(errors, "stop_group", proc, lambda: stop_group(proc.pid))
+            if len(errors) == before_stop:
+                cleanup_step(errors, "wait", proc, lambda: proc.wait(timeout=2))
+            alive = cleanup_step(errors, "group_alive", proc, lambda: group_alive({"pgid": proc.pid}))
+            safe = alive is False
         if held:
-            release(state, held, token, safe or proc is None)
+            cleanup_step(errors, "release", proc, lambda: release(state, held, token, safe or proc is None))
         if shim_dir is not None:
-            shim_dir.cleanup()
-        signal.signal(signal.SIGINT, old_int)
-        signal.signal(signal.SIGTERM, old_term)
+            cleanup_step(errors, "shim_cleanup", proc, shim_dir.cleanup)
+        cleanup_step(errors, "restore_sigint", proc, lambda: signal.signal(signal.SIGINT, old_int))
+        cleanup_step(errors, "restore_sigterm", proc, lambda: signal.signal(signal.SIGTERM, old_term))
+        if primary is not None or errors:
+            producer_outcome(proc, producer_exit)
+        if errors and primary is None:
+            raise errors[0]
 
 
 def add_policy_arguments(runner):
@@ -2463,7 +2528,7 @@ def main(argv=None, *, state=None, configuration=None):
     except SystemExit as exc:
         return_code = exc.code
         raise
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+    except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         if ledger and ledger.enqueued and ledger.started is None:
             ledger.outcome("error")
         print(f"pi-phase: {exc}", file=sys.stderr, flush=True)
