@@ -2,11 +2,11 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { runLanesFlow } from "./lanes-flow.ts";
 import { preapprovalDefault } from "./lanes/config.ts";
-import { apply, needsNpm, readActive } from "./apply.ts";
+import { apply, describe, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
 import { isInteractive, parseArgs, USAGE } from "./args.ts";
 import type { Options } from "./args.ts";
-import { detect, installHint, readyProviders, toolPath } from "./detect.ts";
+import { detect, installHint, probeProvider, readyProviders, toolPath } from "./detect.ts";
 import { buildPlan } from "./plan.ts";
 import { backupsCommand } from "./backups.ts";
 import { readManifest } from "./manifest.ts";
@@ -32,7 +32,8 @@ import { readSettings, resolveSettings } from "./settings.ts";
 import type { ResolvedSettings } from "./settings.ts";
 import { CANCEL, SetupError } from "./types.ts";
 import type { Action, Ctx, Detection, ProfileMeta, Prompter } from "./types.ts";
-import { collectChoices, confirmApply, resolveConflicts } from "./wizard.ts";
+import { resolveConflicts } from "./wizard.ts";
+import { runRails } from "./rails.ts";
 import { configureShellPath } from "./shell-path.ts";
 
 const savedString = (saved: Record<string, unknown>, key: string): string =>
@@ -56,7 +57,7 @@ function pickProfile(
   return chooseProfile(ready, profiles);
 }
 
-function requiredToolErrors(ctx: Ctx, detection: Detection, options: Options): string[] {
+function requiredToolErrors(ctx: Ctx, detection: Detection, options: Options, guided: boolean): string[] {
   const needed = ["python3", ...(options.skipNpm ? [] : ["npm"])];
   const errors = needed
     .filter((tool) => !toolPath(detection, tool))
@@ -65,7 +66,7 @@ function requiredToolErrors(ctx: Ctx, detection: Detection, options: Options): s
   if (!python?.path) return errors;
   const check = pythonVersionCheck(ctx, python.version);
   if (check.status !== "ok" && !options.json) ctx.err(`warning: ${check.detail}; install it with: ${check.fix}`);
-  if (check.status === "ok" && !options.json) ctx.out(check.detail);
+  if (check.status === "ok" && !options.json && !guided) ctx.out(check.detail);
   return errors;
 }
 
@@ -115,7 +116,7 @@ function savedPreapproval(ctx: Ctx): boolean {
 function resolveAll(
   ctx: Ctx, options: Options, detection: Detection,
   saved: Record<string, unknown>, answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean>; preapproveMcp?: boolean },
-  manifest: Manifest | undefined,
+  manifest: Manifest | undefined, prompted = false,
 ): Resolved {
   const piDir = join(ctx.home, ".pi", "agent");
   const settings = resolveSettings({
@@ -123,6 +124,7 @@ function resolveAll(
     flagRoot: answers.root ?? options.reposRoot,
     saved,
     detectedUser: detection.github.login,
+    scanRoot: prompted ? detection.candidates[0]?.path : undefined,
     home: ctx.home,
     repoDir: ctx.repoDir,
   });
@@ -133,7 +135,8 @@ function resolveAll(
   const activeBefore = readActive(piDir);
   const ready = readyProviders(detection);
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
-  const choice = pickProfile(asked, activeBefore, ready, profiles, names, options.dryRun || options.plan);
+  const picked = pickProfile(asked, activeBefore, ready, profiles, names, options.dryRun || options.plan);
+  const choice: Choice = answers.profile ? { name: picked.name, reason: "you picked it", provisional: false, source: "prompt" } : picked;
   const profile = profiles.find((p) => p.name === choice.name);
   const components = resolveComponents({
     flags: flagMap(options), answers: answers.components, saved: manifest?.components, current: currentState(ctx),
@@ -221,6 +224,60 @@ async function runCommand(ctx: Ctx, options: Options, prompter: Prompter | undef
   return backupsCommand(ctx, options.sub, options.keep, options.dryRun);
 }
 
+function offComponents(ctx: Ctx, r: Resolved, manifest: Manifest | undefined): string[] {
+  return COMPONENTS.map((c) => c.id).filter((id) => !r.components[id].on && wasOn(manifest, currentState(ctx), id));
+}
+
+function hasChanges(ctx: Ctx, options: Options, r: Resolved, manifest: Manifest | undefined): boolean {
+  return r.actions.some((a) => a.op === "keep" ? a.write : a.op !== "adopt" && a.op !== "chmod-x") ||
+    offComponents(ctx, r, manifest).length > 0 || (r.npm && !options.skipNpm);
+}
+
+function summarize(r: Resolved, detection: Detection, options: Options, guided: boolean): string[] {
+  const readOnly = options.dryRun || options.plan;
+  return summaryLines({ ...r, detection, kimi: readOnly ? undefined : kimiNote(r.profile, r.ready), skipNpm: options.skipNpm, probed: !readOnly, withDetection: !guided, components: r.components, componentNotes: r.componentNotes });
+}
+
+interface GuidedInput {
+  ctx: Ctx; options: Options; detection: Detection; saved: Record<string, unknown>;
+  manifest: Manifest | undefined; p: Prompter; toolErrors: string[];
+}
+
+function addToolWarnings(r: Resolved, detection: Detection, toolErrors: string[], ctx: Ctx): void {
+  r.warnings.push(...toolErrors);
+  if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
+}
+
+async function guidedResolution({ ctx, options, detection, saved, manifest, p, toolErrors }: GuidedInput): Promise<Resolved | typeof CANCEL> {
+  const profiles = loadProfiles(ctx.repoDir);
+  const activeBefore = readActive(join(ctx.home, ".pi/agent"));
+  const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, profileNames(ctx.repoDir));
+  let resolved: Resolved | undefined;
+  const result = await runRails(p, {
+    options, saved, detection, profiles, initial, home: ctx.home, repoDir: ctx.repoDir,
+    installed: Boolean(manifest), activeProfile: activeBefore,
+    probe: (id) => probeProvider(ctx, id), which: ctx.which, readOnly: options.dryRun || options.plan,
+    extras: extraRows(ctx, options, saved, detection, manifest), preapproveMcp: savedPreapproval(ctx),
+    review: (answers) => {
+      const r = resolveAll(ctx, options, detection, saved, answers, manifest, true);
+      addToolWarnings(r, detection, toolErrors, ctx);
+      resolved = r;
+      return {
+        summary: () => summarize(r, detection, options, true),
+        files: () => r.actions.map(describe).filter((line): line is string => line !== undefined),
+        changes: hasChanges(ctx, options, r, manifest), conflicts: r.conflicts.length,
+        decideConflicts: async () => {
+          const takes = await resolveConflicts(p, r.conflicts, (c) => diffText(ctx, c));
+          if (takes === CANCEL) return false;
+          r.actions = applyTakes(r.actions, takes);
+          return true;
+        },
+      };
+    },
+  });
+  return result === CANCEL ? CANCEL : resolved!;
+}
+
 async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefined, baseCtx: Ctx): Promise<number> {
   const piDir = join(ctx.home, ".pi", "agent");
   const saved = readSettings(join(piDir, "user.json"));
@@ -243,37 +300,24 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     login: options.user || savedString(saved, "githubUser") || undefined,
   });
   spin?.stop("Looked around");
-  const toolErrors = requiredToolErrors(ctx, detection, options);
+  const toolErrors = requiredToolErrors(ctx, detection, options, Boolean(prompter));
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
 
-  let answers: { user?: string; root?: string; profile?: string; components?: Record<string, boolean>; preapproveMcp?: boolean } = {};
-  if (prompter) {
-    const profiles = loadProfiles(ctx.repoDir);
-    const activeBefore = readActive(piDir);
-    const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, names);
-    const result = await collectChoices(prompter, { options, saved, detection, profiles, initial, home: ctx.home, repoDir: ctx.repoDir,
-      extras: extraRows(ctx, options, saved, detection, manifest), preapproveMcp: savedPreapproval(ctx) });
-    if (result === CANCEL) return cancelled(ctx);
-    answers = result;
-  }
-  const r = resolveAll(ctx, options, detection, saved, answers, manifest);
-  if (prompter && r.conflicts.length) {
-    const takes = await resolveConflicts(prompter, r.conflicts, (c) => diffText(ctx, c));
-    if (takes === CANCEL) return cancelled(ctx);
-    r.actions = applyTakes(r.actions, takes);
-  }
+  const r = prompter
+    ? await guidedResolution({ ctx, options, detection, saved, manifest, p: prompter, toolErrors })
+    : resolveAll(ctx, options, detection, saved, {}, manifest);
+  if (r === CANCEL) return cancelled(ctx);
   const better = detection.candidates[0]?.path;
   if (!prompter && r.settings.rootSource === "default" && better && better !== r.settings.reposRoot) {
     ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
   }
-  r.warnings.push(...toolErrors.map((e) => e));
-  if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
-  const summary = summaryLines({ ...r, detection, kimi: readOnly ? undefined : kimiNote(r.profile, r.ready), skipNpm: options.skipNpm, probed: !readOnly, components: r.components, componentNotes: r.componentNotes });
+  if (!prompter) addToolWarnings(r, detection, toolErrors, ctx);
+  const summary = summarize(r, detection, options, Boolean(prompter));
   if (options.plan) {
     configureShellPath(ctx, options.editShellProfile, true);
     return finish(ctx, baseCtx, options, r, detection, summary, 0);
   }
-  if (prompter && !(await confirmApply(prompter, summary))) return cancelled(ctx);
+  const off = offComponents(ctx, r, manifest);
 
   const applyOptions: ApplyOptions = {
     dryRun: options.dryRun,
@@ -284,8 +328,8 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     activeBefore: r.activeBefore,
     spinner: prompter?.spinner(),
     components: r.records,
+    quiet: Boolean(prompter),
   };
-  const off = COMPONENTS.map((c) => c.id).filter((id) => !r.components[id].on && wasOn(manifest, currentState(ctx), id));
   const live = await retire(ctx, piDir, manifest, off, options.dryRun);
   const result = await apply(ctx, r.actions, applyOptions, live);
   if (result.code === 0) await syncServices(ctx, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
@@ -320,7 +364,7 @@ function finish(
   if (code === 0) {
     const readOnly = options.plan || options.dryRun;
     const kept = r.actions.filter((a) => a.op === "keep").length;
-    const upToDate = `Everything up to date.${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
+    const upToDate = `${prompter ? "Everything is up to date." : "Everything up to date."}${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
     const done = readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate;
     const hint = r.choice.provisional && !readOnly && wrote ? ` ${r.choice.reason}.` : "";
     if (prompter) prompter.outro(`${done}${hint}`);

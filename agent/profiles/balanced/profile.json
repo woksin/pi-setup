@@ -1,5 +1,5 @@
 {
-  "summary": "Default. Each role goes where its provider is strongest; Claude is the constrained quota, so low-risk roles run on GPT.",
+  "summary": "Recommended. Claude leads and reviews, ChatGPT does most coding, Kimi helps with research.",
   "requires": [
     "anthropic",
     "openai-codex"

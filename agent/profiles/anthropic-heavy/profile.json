@@ -1,5 +1,5 @@
 {
-  "summary": "Most roles on Claude, GPT for review and the heaviest reasoning.",
+  "summary": "Mostly Claude; ChatGPT only for review and the hardest reasoning.",
   "requires": [
     "anthropic",
     "openai-codex"

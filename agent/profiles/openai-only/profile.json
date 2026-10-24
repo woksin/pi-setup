@@ -1,5 +1,5 @@
 {
-  "summary": "Everything on GPT; needs only a ChatGPT login.",
+  "summary": "ChatGPT only, for a ChatGPT subscription without Claude.",
   "requires": [
     "openai-codex"
   ],

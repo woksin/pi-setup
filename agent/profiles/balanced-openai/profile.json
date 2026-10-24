@@ -1,5 +1,5 @@
 {
-  "summary": "Balanced, leaning on GPT for more roles.",
+  "summary": "Like balanced, but more work goes to ChatGPT to save Claude usage.",
   "requires": [
     "anthropic",
     "openai-codex"

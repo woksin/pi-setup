@@ -11,6 +11,7 @@ export function clackPrompter(): Prompter {
     intro: (title) => clack.intro(title),
     outro: (message) => clack.outro(message),
     note: (body, title) => clack.note(body, title),
+    step: (i, n, title) => clack.log.step(`Step ${i} of ${n} · ${title}`),
     spinner: () => clack.spinner(),
     confirm: async (o) => wrap(await clack.confirm({ message: o.message, initialValue: o.initial })),
     select: async <T extends string>(o: Parameters<Prompter["select"]>[0] & { options: { value: T }[] }) =>

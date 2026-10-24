@@ -44,7 +44,7 @@ export interface Choice {
   name: string;
   reason: string;
   provisional: boolean;
-  source: "flag" | "active" | "chooser";
+  source: "flag" | "active" | "chooser" | "prompt";
 }
 
 export function chooseProfile(ready: Set<string>, profiles: ProfileMeta[]): Choice {
@@ -62,7 +62,7 @@ export function reasonFor(ready: Set<string>, name: string): string {
   if (claude && gpt && kimi) return "you have Claude, ChatGPT and Kimi: each role goes where it is strongest";
   if (claude && gpt) return "you have Claude and ChatGPT; Kimi roles (ops, scout) fall back to GPT via provider-fallback";
   if (gpt && !claude) return `only ChatGPT is logged in: ${name} keeps every role on GPT`;
-  if (claude) return "no Claude-only profile yet; balanced is used and GPT roles need a ChatGPT login";
+  if (claude) return `only Claude is logged in: ${name} keeps every role on Claude`;
   return "log in with /login in pi, then rerun ./install.sh --profile auto";
 }
 
@@ -142,4 +142,26 @@ export function spliceRouting(agentsMd: Buffer, routing: Buffer, live?: Buffer):
   const startLine = l ? liveText.slice(l.start, l.bodyStart) : text.slice(m.start, m.bodyStart);
   const endLine = l ? liveText.slice(l.end, l.endLineEnd) : text.slice(m.end, m.endLineEnd);
   return Buffer.from(text.slice(0, m.start) + startLine + routing.toString("utf8") + endLine + text.slice(m.endLineEnd), "utf8");
+}
+
+export interface ProfileOption {
+  label: string;
+  hint: string;
+  disabled: boolean;
+}
+
+const labelOf = (id: string): string => PROVIDER_LABELS[id] ?? id;
+
+/**
+ * A plain-words select option for a profile. A profile whose logins are missing is disabled, except the
+ * provisional fallback (`provisional`), which installs now and fills in once the logins exist.
+ */
+export function profileOption(meta: ProfileMeta, ready: Set<string>, recommended: boolean, provisional = false): ProfileOption {
+  const optional = meta.uses.filter((id) => !meta.requires.includes(id));
+  const needs = `Needs: ${meta.requires.map(labelOf).join(", ")}${optional.length ? `; optional: ${optional.map(labelOf).join(", ")}` : ""}`;
+  const label = `${meta.name}${recommended ? " (recommended)" : ""} · ${needs}`;
+  const missing = meta.requires.filter((id) => !ready.has(id));
+  if (missing.length === 0) return { label, hint: meta.summary, disabled: false };
+  if (provisional) return { label, hint: "installs now; log in later and run ./install.sh --profile auto", disabled: false };
+  return { label, hint: `needs ${missing.map(labelOf).join(" and ")} login`, disabled: true };
 }
