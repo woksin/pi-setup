@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 83c811455084c6731d0ffff236869fdf31c89d2179d077b31418ab130e82ae0d
+// pi-setup-source-sha256: 290647d259d08e4c7a020c3123fcf5c90f638717ea1d815875197f7ca0a77a9a
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 83c811455084c6731d0ffff236869fdf31c89d2179d077b31418ab130e82ae0d
+// pi-setup-source-sha256: 290647d259d08e4c7a020c3123fcf5c90f638717ea1d815875197f7ca0a77a9a
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5099,9 +5099,722 @@ var init_apply = __esm({
   }
 });
 
+// src/shell-path.ts
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync14, readFileSync as readFileSync23 } from "node:fs";
+import { basename as basename5, delimiter as delimiter2, dirname as dirname12, join as join42, resolve as resolve12 } from "node:path";
+function missingBinDirs(ctx) {
+  const paths = (ctx.env.PATH ?? "").split(delimiter2).map((p) => resolve12(ctx.cwd, p));
+  return [".local/bin", ".pi/agent/bin"].filter((p) => !paths.includes(join42(ctx.home, p)));
+}
+function shellPath(ctx) {
+  const shell = basename5(ctx.env.SHELL ?? "sh");
+  if (shell === "fish") return { file: join42(ctx.home, ".config/fish/config.fish"), snippet: 'fish_add_path "$HOME/.local/bin" "$HOME/.pi/agent/bin"' };
+  const rc = shell === "zsh" ? ".zshrc" : shell === "bash" ? ctx.platform === "darwin" ? ".bash_profile" : ".bashrc" : ".profile";
+  return { file: join42(ctx.home, rc), snippet: 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"' };
+}
+function pathEditLine(ctx) {
+  if (!missingBinDirs(ctx).length) return void 0;
+  return `Add ~/.local/bin and ~/.pi/agent/bin to PATH in ${shellPath(ctx).file.replace(ctx.home, "~")}`;
+}
+function configureShellPath(ctx, edit, dryRun, guided = false) {
+  if (!missingBinDirs(ctx).length) return;
+  const { file, snippet } = shellPath(ctx);
+  if (guided && !edit) return;
+  if (!guided) ctx.out(`PATH: add this to ${file}, then restart your shell:
+${snippet}`);
+  if (!edit) {
+    ctx.out("Shell profile unchanged (opt in with --edit-shell-profile).");
+    return;
+  }
+  if (dryRun) {
+    ctx.out(`would append PATH snippet to ${file}`);
+    return;
+  }
+  let text4 = "";
+  try {
+    text4 = readFileSync23(file, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (text4.split("\n").includes(snippet)) return;
+  mkdirSync14(dirname12(file), { recursive: true });
+  appendFileSync2(file, `
+# pi-setup tools
+${snippet}
+`);
+  if (!guided) ctx.out(`Appended PATH snippet to ${file}`);
+}
+var PATH_EDIT_DEFAULT;
+var init_shell_path = __esm({
+  "src/shell-path.ts"() {
+    PATH_EDIT_DEFAULT = true;
+  }
+});
+
+// src/profiles.ts
+import { existsSync as existsSync24, readdirSync as readdirSync14, readFileSync as readFileSync24 } from "node:fs";
+import { join as join43 } from "node:path";
+function profilesDir(repoDir2) {
+  return join43(repoDir2, "agent", "profiles");
+}
+function profileNames(repoDir2) {
+  const dir = profilesDir(repoDir2);
+  if (!existsSync24(dir)) return [];
+  return readdirSync14(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+}
+function stringList(value) {
+  return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
+}
+function loadProfiles(repoDir2) {
+  const metas = [];
+  for (const name of profileNames(repoDir2)) {
+    const file = join43(profilesDir(repoDir2), name, "profile.json");
+    if (!existsSync24(file)) continue;
+    const data = JSON.parse(readFileSync24(file, "utf8"));
+    metas.push({
+      name,
+      summary: typeof data.summary === "string" ? data.summary : "",
+      requires: stringList(data.requires),
+      uses: stringList(data.uses),
+      rank: typeof data.rank === "number" ? data.rank : 0
+    });
+  }
+  return metas;
+}
+function chooseProfile(ready3, profiles) {
+  const fit = profiles.filter((p) => p.requires.every((r2) => ready3.has(r2))).sort((a2, b) => b.rank - a2.rank)[0];
+  const name = fit?.name ?? FALLBACK_PROFILE;
+  return { name, reason: reasonFor(ready3, name), provisional: !fit, source: "chooser" };
+}
+function reasonFor(ready3, name) {
+  const claude = ready3.has("anthropic");
+  const gpt = ready3.has("openai-codex");
+  const kimi = ready3.has("kimi-coding");
+  if (claude && gpt && kimi) return "you have Claude, ChatGPT and Kimi: each role goes where it is strongest";
+  if (claude && gpt) return "you have Claude and ChatGPT; Kimi roles (ops, scout) fall back to GPT via provider-fallback";
+  if (gpt && !claude) return `only ChatGPT is logged in: ${name} keeps every role on GPT`;
+  if (claude) return `only Claude is logged in: ${name} keeps every role on Claude`;
+  return "log in with /login in pi, then rerun ./install.sh --profile auto";
+}
+function kimiNote(profile3, ready3) {
+  if (!profile3?.uses.includes("kimi-coding") || ready3.has("kimi-coding")) return void 0;
+  return "Kimi is not logged in: the Kimi roles fall back to GPT.";
+}
+function missingLogins(profile3, ready3) {
+  return (profile3?.requires ?? []).filter((r2) => !ready3.has(r2)).map((r2) => PROVIDER_LABELS[r2] ?? r2);
+}
+function pinnedModels(profileDir) {
+  const pins = /* @__PURE__ */ new Set();
+  for (const file of listFiles(join43(profileDir, "agents")).filter((f) => f.endsWith(".md"))) {
+    const text4 = readFileSync24(join43(profileDir, "agents", file), "utf8");
+    const match = /^model:\s*(\S+)/m.exec(text4);
+    if (match) pins.add(match[1]);
+  }
+  return [...pins].sort();
+}
+function pinWarnings(pins, ready3, catalog) {
+  if (!catalog || catalog.size === 0) return [];
+  return pins.filter((pin) => ready3.has(pin.split("/")[0]) && !catalog.has(pin)).map((pin) => `Pinned model ${pin} is not in this pi's model catalog.`);
+}
+function overlayFor(repoDir2, name, settings2) {
+  const base = join43(profilesDir(repoDir2), name);
+  if (!existsSync24(base)) throw new SetupError(`unknown profile '${name}'. available: ${profileNames(repoDir2).join(", ")}`);
+  const sources = /* @__PURE__ */ new Map();
+  for (const [sub, ext] of [["agents", ".md"], ["workflows", ".js"]]) {
+    for (const file of listFiles(join43(base, sub))) {
+      if (!file.includes("/") && file.endsWith(ext)) sources.set(`${sub}/${file}`, join43(base, sub, file));
+    }
+  }
+  const routingPath = join43(base, "routing.md");
+  return { sources, routing: existsSync24(routingPath) ? render(readFileSync24(routingPath), settings2) : void 0 };
+}
+function markerLines(text4) {
+  const start2 = text4.indexOf(START);
+  const end = text4.indexOf(END);
+  if (start2 < 0 || end < 0 || end < start2) return void 0;
+  const bodyStart = text4.indexOf("\n", start2) + 1;
+  if (bodyStart === 0 || bodyStart > end) return void 0;
+  const nl = text4.indexOf("\n", end);
+  return { start: start2, bodyStart, end, endLineEnd: nl < 0 ? text4.length : nl };
+}
+function hasRoutingMarkers(content) {
+  return markerLines(content.toString("utf8")) !== void 0;
+}
+function spliceRouting(agentsMd2, routing, live) {
+  const text4 = agentsMd2.toString("utf8");
+  const m2 = markerLines(text4);
+  if (!m2) throw new SetupError("routing markers not found in AGENTS.md");
+  const l2 = live ? markerLines(live.toString("utf8")) : void 0;
+  const liveText = live?.toString("utf8") ?? "";
+  const startLine = l2 ? liveText.slice(l2.start, l2.bodyStart) : text4.slice(m2.start, m2.bodyStart);
+  const endLine = l2 ? liveText.slice(l2.end, l2.endLineEnd) : text4.slice(m2.end, m2.endLineEnd);
+  return Buffer.from(text4.slice(0, m2.start) + startLine + routing.toString("utf8") + endLine + text4.slice(m2.endLineEnd), "utf8");
+}
+function profileOption(meta, ready3, recommended, provisional = false) {
+  const optional = meta.uses.filter((id) => !meta.requires.includes(id));
+  const needs = `Needs: ${meta.requires.map(labelOf).join(", ")}${optional.length ? `; optional: ${optional.map(labelOf).join(", ")}` : ""}`;
+  const label = `${meta.name}${recommended ? " (recommended)" : ""} \xB7 ${needs}`;
+  const missing = meta.requires.filter((id) => !ready3.has(id));
+  if (missing.length === 0) return { label, hint: meta.summary, disabled: false };
+  if (provisional) return { label, hint: "installs now; log in later and run ./install.sh --profile auto", disabled: false };
+  return { label, hint: `needs ${missing.map(labelOf).join(" and ")} login`, disabled: true };
+}
+var START, END, FALLBACK_PROFILE, labelOf;
+var init_profiles = __esm({
+  "src/profiles.ts"() {
+    init_settings();
+    init_fsx();
+    init_types();
+    START = "<!-- pi-profile:routing:start";
+    END = "<!-- pi-profile:routing:end -->";
+    FALLBACK_PROFILE = "balanced";
+    labelOf = (id) => PROVIDER_LABELS[id] ?? id;
+  }
+});
+
+// src/doctor-checks.ts
+import { existsSync as existsSync25, lstatSync as lstatSync7, readdirSync as readdirSync15, readFileSync as readFileSync25, readlinkSync as readlinkSync2 } from "node:fs";
+import { basename as basename6, dirname as dirname13, join as join44, resolve as resolve13 } from "node:path";
+function setupCmd(ctx) {
+  if (ctx.which("pi-setup")) return "pi-setup";
+  const path2 = join44(ctx.repoDir, "install.sh");
+  return path2.startsWith(`${ctx.home}/`) ? `~/${path2.slice(ctx.home.length + 1)}` : path2;
+}
+function readJson(path2) {
+  try {
+    const value = JSON.parse(readFileSync25(path2, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function livePins(piDir, settings2) {
+  const pins = /* @__PURE__ */ new Map();
+  const dir = join44(piDir, "agents");
+  if (existsSync25(dir)) for (const file of readdirSync15(dir).filter((f) => f.endsWith(".md"))) {
+    const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text2(join44(dir, file)))?.[1] ?? "";
+    const model = /^model:\s*(\S+)/m.exec(front)?.[1];
+    if (!model) continue;
+    const extensions = /^extensions:\s*([^\n]*(?:\n[ \t]+[^\n]*)*)/m.exec(front)?.[1] ?? "";
+    const agents = pins.get(model) ?? [];
+    agents.push({ name: basename6(file, ".md"), fallback: /\bprovider-fallback\b/.test(extensions) });
+    pins.set(model, agents);
+  }
+  if (typeof settings2.defaultProvider === "string" && typeof settings2.defaultModel === "string") {
+    const model = `${settings2.defaultProvider}/${settings2.defaultModel}`;
+    pins.set(model, [...pins.get(model) ?? [], { name: "settings.json", fallback: true }]);
+  }
+  return [...pins].map(([model, agents]) => ({ model, agents }));
+}
+function state(ctx, facts) {
+  const piDir = join44(ctx.home, ".pi", "agent");
+  const s = { ctx, facts, piDir, setup: setupCmd(ctx), profile: text2(join44(piDir, "profiles/ACTIVE")), settings: readJson(join44(piDir, "settings.json")) ?? {}, pins: [], missing: [], changed: [], modes: [] };
+  try {
+    s.manifest = readManifest(piDir);
+    if (s.manifest) validateManifest(ctx.home, s.manifest);
+  } catch (error) {
+    s.manifest = void 0;
+    s.manifestError = error.message;
+  }
+  s.pins = livePins(piDir, s.settings);
+  for (const [rel, entry2] of Object.entries(s.manifest?.files ?? {})) {
+    const path2 = fromHomeRel(ctx.home, rel);
+    if (!present(path2)) s.missing.push(rel);
+    else if (fileSha(path2) !== entry2.sha256) s.changed.push(rel);
+    else if ((lstatSync7(path2).mode & 4095) !== entry2.mode) s.modes.push(rel);
+  }
+  for (const [rel, link] of Object.entries(s.manifest?.symlinks ?? {})) {
+    const path2 = fromHomeRel(ctx.home, rel);
+    try {
+      if (!lstatSync7(path2).isSymbolicLink() || resolve13(dirname13(path2), readlinkSync2(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
+    } catch {
+      s.missing.push(rel);
+    }
+  }
+  return s;
+}
+function files(s) {
+  if (!existsSync25(s.piDir)) return check("files", "fail", "not installed", s.setup);
+  if (s.manifestError) return check("files", "fail", s.manifestError, s.setup);
+  if (!s.manifest) return check("files", "warn", "no install manifest", s.setup);
+  const moved = s.manifest.source.commit && s.facts.head && s.manifest.source.commit !== s.facts.head;
+  let detail = `${s.missing.length} missing, ${s.changed.length} changed by you`;
+  if (moved) detail += `; checkout is at ${s.facts.head.slice(0, 7)}, installed ${s.manifest.source.commit.slice(0, 7)}; the checkout moved since the install; this would also update`;
+  const restorable = s.missing.length > 0 && s.facts.checkoutClean === true && Boolean(s.facts.head) && s.facts.head === s.manifest.source.commit;
+  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...restorable ? { fixable: "restore" } : {} };
+}
+function pending(s) {
+  const paths = [.../* @__PURE__ */ new Set([...Object.values(s.manifest?.files ?? {}).flatMap((e) => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter((p) => existsSync25(fromHomeRel(s.ctx.home, p)));
+  const first = paths[0] && fromHomeRel(s.ctx.home, paths[0]);
+  return check("pending", paths.length ? "warn" : "ok", `${paths.length} pending .pi-setup-new files`, first ? `diff ${first.replace(/\.pi-setup-new$/, "")} ${first}` : void 0, paths);
+}
+function modes(s) {
+  return { ...check("modes", s.modes.length ? "warn" : "skip", `${s.modes.length} unchanged files have mode drift`, `${s.setup} doctor --fix`, s.modes), ...s.modes.length ? { fixable: "chmod" } : {} };
+}
+function npm(s) {
+  const pkg = readJson(join44(s.piDir, "npm/package.json"));
+  const deps = pkg?.dependencies && typeof pkg.dependencies === "object" ? Object.keys(pkg.dependencies) : [];
+  const installed = (name) => existsSync25(join44(s.piDir, "npm/node_modules", name, "package.json"));
+  const missing = deps.filter((n3) => !installed(n3));
+  const result3 = [{ ...check("npm", missing.length ? "fail" : "ok", missing.length ? `${missing.length} missing dependencies` : "dependencies present", "(cd ~/.pi/agent/npm && npm install --legacy-peer-deps)", missing), ...missing.length ? { fixable: "npm" } : {} }];
+  for (const spec of packages(s)) {
+    if (spec.startsWith("npm:")) {
+      const finding = npmPackageCheck(spec, s.piDir);
+      if (finding) result3.push(finding);
+    } else if (spec.startsWith(".") && !existsSync25(resolve13(s.piDir, spec))) result3.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
+  }
+  return result3;
+}
+function profile(s) {
+  if (!s.profile) return check("profile", "warn", "no ACTIVE profile", `${s.setup} --profile auto`);
+  const meta = loadProfiles(s.ctx.repoDir).find((p) => p.name === s.profile);
+  if (!meta) return check("profile", "warn", `unknown profile ${s.profile}`, `${s.setup} --profile auto`);
+  const missing = meta.requires.filter((p) => s.facts.providers[p]?.status === "not_ready");
+  if (missing.length) return check("profile", "fail", `${s.profile}: ${missing.map((p) => PROVIDER_LABELS[p] ?? p).join(", ")} has no login`, `run \`pi\`, type /login and choose ${PROVIDER_LABELS[missing[0]] ?? missing[0]}`);
+  const unknown = meta.requires.filter((p) => s.facts.providers[p]?.status !== "ready");
+  if (unknown.length) return check("profile", "warn", `${unknown.map((p) => PROVIDER_LABELS[p] ?? p).join(", ")}: could not check (pi auth check timed out)`, `${s.setup} doctor`);
+  return check("profile", "ok", `${s.profile}; ready: ${Object.keys(s.facts.providers).filter((p) => ready2(s, `${p}/`)).map((p) => PROVIDER_LABELS[p] ?? p).join(", ")}`);
+}
+function providers(s) {
+  return Object.entries(s.facts.providers).filter(([, provider]) => provider.status === "unknown").map(([id]) => check(`provider:${id}`, "warn", `${PROVIDER_LABELS[id] ?? id}: could not determine`, `${s.setup} doctor`));
+}
+function models(s) {
+  if (!s.facts.catalog?.size) {
+    if (s.facts.summary || !Object.values(s.facts.providers).some((p) => p.status === "ready")) return check("models", "skip", "catalog not checked");
+    return check("models", "fail", "pi lists no models", "pi update");
+  }
+  const missing = s.pins.filter((p) => ready2(s, p.model) && !s.facts.catalog.has(p.model)).map((p) => p.model);
+  return check("models", missing.length ? "fail" : "ok", missing.length ? "pins missing from catalog" : "available pins are in the catalog", "pi update", missing);
+}
+function fallback(s) {
+  const config = readJson(join44(s.piDir, "provider-fallback.json")) ?? {};
+  const pairs = Array.isArray(config.pairs) ? config.pairs.filter((p) => Array.isArray(p) && p.length === 2 && p.every((v) => typeof v === "string")) : [];
+  const chains = config.chains && typeof config.chains === "object" ? config.chains : {};
+  const targets = (pin) => Array.isArray(chains[pin]) ? chains[pin].filter((v) => typeof v === "string") : pairs.filter((p) => p.includes(pin)).map((p) => p[0] === pin ? p[1] : p[0]);
+  const available2 = (pin) => ready2(s, pin) && (!s.facts.catalog?.size || s.facts.catalog.has(pin));
+  const result3 = [];
+  for (const pin of s.pins.filter((p) => providerStatus(s, p.model) === "not_ready")) {
+    const target = targets(pin.model).find(available2);
+    const safe = config.enabled === true && target && pin.agents.every((a2) => a2.fallback);
+    const label = PROVIDER_LABELS[pin.model.split("/")[0]] ?? pin.model.split("/")[0];
+    const choice = chooseProfile(new Set(Object.keys(s.facts.providers).filter((p) => ready2(s, `${p}/`))), loadProfiles(s.ctx.repoDir));
+    result3.push(check(`fallback:${pin.model}`, safe ? "warn" : "fail", `${pin.agents.map((a2) => a2.name).join(", ")} pin ${pin.model} but ${label} has no login: subagents may run on the parent model or fail before fallback switches${target ? ` to ${target}` : "; no ready target"}${!safe ? " (fallback unavailable)" : ""}`, `run \`pi\`, type /login and choose ${label}; or \`${s.setup} --profile auto\` (would pick ${choice.name})`));
+  }
+  const sources = /* @__PURE__ */ new Set([...Object.keys(chains), ...pairs.flat()]);
+  const unavailable = [...sources].filter((p) => ready2(s, p) && !targets(p).some(available2));
+  if (config.enabled === true && unavailable.length) result3.push(check("fallback-targets", "warn", "fallback sources have no ready target", "edit ~/.pi/agent/provider-fallback.json", unavailable));
+  if (!result3.length) result3.push(check("fallback", "ok", "fallback targets ready"));
+  return result3;
+}
+function guards(s) {
+  const path2 = join44(s.piDir, "guards.json");
+  const config = readJson(path2);
+  let detail = "all on";
+  if (existsSync25(path2)) {
+    const off = config?.off;
+    if (!off || typeof off !== "object" || Array.isArray(off) || Object.values(off).some((v) => typeof v !== "boolean")) return check("guards", "warn", "invalid guards.json shape", "/guards in pi (guards default to on)");
+    const names = Object.entries(off).filter(([, v]) => v).map(([n3]) => n3);
+    if (names.length) detail = `on, except ${names.join(", ")} (persisted off)`;
+  }
+  if (s.ctx.env.PI_GUARDS_OFF) detail += `; PI_GUARDS_OFF=${s.ctx.env.PI_GUARDS_OFF}`;
+  return check("guards", "ok", detail);
+}
+function path(s) {
+  const missing = missingBinDirs(s.ctx);
+  const { file, snippet } = shellPath(s.ctx);
+  const result3 = [check("path", missing.length ? "warn" : "ok", missing.length ? `${missing.map((p) => `~/${p}`).join(", ")} not on PATH` : "~/.local/bin and ~/.pi/agent/bin are on PATH", `add ${snippet} to ${file}`)];
+  for (const [pkg, cmd] of PACKAGE_BINS) {
+    if (!packages(s).some((p) => p.includes(pkg))) continue;
+    const target = `~/.pi/agent/npm/node_modules/@woksin/${pkg}/bin/${cmd}`;
+    const fix = existsSync25(join44(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
+    const link = join44(s.ctx.home, ".local/bin", cmd);
+    if (s.ctx.which(cmd)) result3.push(check(`path:${cmd}`, "ok", `${cmd} found`, fix));
+    else if (present(link) && missing.includes(".local/bin")) result3.push(check(`path:${cmd}`, "warn", `${cmd} is installed at ~/.local/bin/${cmd}, but ~/.local/bin is not on PATH`, `add ${snippet} to ${file} (or reinstall with --edit-shell-profile)`));
+    else result3.push(check(`path:${cmd}`, "warn", `${cmd} is missing`, fix));
+  }
+  return result3;
+}
+function prerequisites(s) {
+  const required = ["git", "gh", "jq", "rg", "fd", "python3", "npm", "pi", "node"];
+  const optional = {
+    gitleaks: "secret-sweep cannot scan without it; https://github.com/gitleaks/gitleaks#installing",
+    rtk: "optional output compression unavailable; https://github.com/rtk-ai/rtk#installation",
+    docker: "Docker tooling and docker-guardian require Docker Desktop/Engine",
+    tmux: "optional lanes terminal backend unavailable; macOS Terminal remains an alternative"
+  };
+  const tools = [...required, ...Object.keys(optional)];
+  const brew = { rg: "ripgrep", python3: "python", npm: "node" };
+  const apt = { rg: "ripgrep", fd: "fd-find" };
+  return tools.map((tool) => {
+    const found = s.ctx.which(tool);
+    const fix = tool === "pi" ? "npm install -g @earendil-works/pi-coding-agent" : s.ctx.platform === "darwin" ? `brew install ${brew[tool] ?? tool}` : `sudo apt install ${apt[tool] ?? tool}${tool === "fd" ? "; expose fdfind as fd on PATH" : ""}`;
+    const missingStatus = required.includes(tool) ? "fail" : "warn";
+    return check(`tool:${tool}`, found ? "ok" : missingStatus, found ? `${tool} is on PATH` : `${tool} is missing`, found ? void 0 : optional[tool] ?? fix);
+  });
+}
+function localChecks(ctx, facts) {
+  const s = state(ctx, facts);
+  return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), ...providers(s), models(s), ...fallback(s), guards(s), ...prerequisites(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
+}
+var text2, present, providerStatus, ready2, check, packages;
+var init_doctor_checks = __esm({
+  "src/doctor-checks.ts"() {
+    init_packages();
+    init_shell_path();
+    init_manifest();
+    init_profiles();
+    init_types();
+    text2 = (path2) => {
+      try {
+        return readFileSync25(path2, "utf8").trim();
+      } catch {
+        return "";
+      }
+    };
+    present = (path2) => {
+      try {
+        lstatSync7(path2);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    providerStatus = (s, model) => s.facts.providers[model.split("/")[0]]?.status;
+    ready2 = (s, model) => providerStatus(s, model) === "ready";
+    check = (id, status2, detail, fix, items) => ({ id, title: id, status: status2, detail, ...fix ? { fix } : {}, ...items?.length ? { items } : {} });
+    packages = (s) => Array.isArray(s.settings.packages) ? s.settings.packages.filter((p) => typeof p === "string") : [];
+  }
+});
+
+// src/detect.ts
+import { existsSync as existsSync26 } from "node:fs";
+import { join as join45 } from "node:path";
+function parseAuthStatus(text4) {
+  const match = /Logged in to (\S+) account (\S+)/.exec(text4);
+  return match ? { host: match[1], login: match[2] } : {};
+}
+function parseProviderCheck(stdout2) {
+  try {
+    const data = JSON.parse(stdout2);
+    if (data.status === "ready" || data.status === "not_ready") {
+      return {
+        status: data.status,
+        authType: typeof data.authType === "string" ? data.authType : void 0,
+        reason: typeof data.reason === "string" ? data.reason : void 0
+      };
+    }
+  } catch {
+  }
+  return { status: "unknown" };
+}
+function parseModelTable(stdout2) {
+  const lines2 = stdout2.split("\n");
+  const header2 = lines2.findIndex((l2) => /^\s*provider\s+model\b/i.test(l2));
+  if (header2 < 0) return null;
+  const ids = /* @__PURE__ */ new Set();
+  for (const line of lines2.slice(header2 + 1)) {
+    const [provider, model] = line.trim().split(/\s+/);
+    if (provider && model) ids.add(`${provider}/${model}`);
+  }
+  return ids.size ? ids : null;
+}
+async function probeTool(ctx, name) {
+  const path2 = ctx.which(name);
+  if (!path2) return { name };
+  const result3 = await ctx.run(name, ["--version"], { timeoutMs: name === "pi" ? PI_MS : SHORT_MS });
+  const first = result3.stdout.trim().split("\n")[0] || result3.stderr.trim().split("\n")[0];
+  return { name, path: path2, version: result3.timedOut || !first ? void 0 : first };
+}
+async function lines(ctx, args) {
+  const result3 = await ctx.run("gh", args, { timeoutMs: SHORT_MS });
+  if (result3.code !== 0) return void 0;
+  return result3.stdout.split("\n").map((l2) => l2.trim()).filter(Boolean);
+}
+async function probeGithub(ctx, request2) {
+  const state2 = { orgs: [] };
+  if (!ctx.which("gh") || !(request2.needLogin || request2.wantGithubDetails || request2.needScan)) return state2;
+  const status2 = request2.wantGithubDetails ? ctx.run("gh", ["auth", "status"], { timeoutMs: SHORT_MS }) : Promise.resolve(void 0);
+  const user = request2.needLogin || request2.wantGithubDetails ? lines(ctx, ["api", "user", "--jq", ".login"]) : void 0;
+  const orgs = request2.needScan && request2.needLogin || request2.wantGithubDetails ? lines(ctx, ["api", "user/orgs", "--jq", ".[].login"]) : void 0;
+  const parsed = parseAuthStatus(`${(await status2)?.stdout ?? ""}
+${(await status2)?.stderr ?? ""}`);
+  state2.host = parsed.host;
+  state2.login = (await user)?.[0] ?? parsed.login;
+  state2.orgs = await orgs ?? [];
+  return state2;
+}
+async function probeProvider(ctx, id) {
+  const result3 = await ctx.run("pi", ["auth", "check", "--provider", id, "--no-refresh", "--json"], { timeoutMs: PI_MS });
+  return result3.timedOut ? { status: "unknown" } : parseProviderCheck(result3.stdout);
+}
+async function listModels(ctx) {
+  const result3 = await ctx.run("pi", ["--offline", "--list-models"], { timeoutMs: PI_MS });
+  const text4 = `${result3.stdout}
+${result3.stderr}`;
+  const catalog = result3.timedOut ? null : /No models available/i.test(text4) ? /* @__PURE__ */ new Set() : parseModelTable(result3.stdout);
+  return { catalog, code: result3.code, timedOut: result3.timedOut, stderr: result3.stderr.split("\n").slice(0, 3).join("\n") };
+}
+async function probeCatalog(ctx) {
+  return (await listModels(ctx)).catalog;
+}
+async function detect(ctx, request2) {
+  const piPresent = Boolean(ctx.which("pi"));
+  const providers2 = {};
+  const probePi = request2.probePi && piPresent;
+  const [tools, github, states, catalog] = await Promise.all([
+    Promise.all(TOOLS.map((t2) => t2 === "pi" && !request2.probePi ? Promise.resolve({ name: t2, path: ctx.which(t2) }) : probeTool(ctx, t2))),
+    probeGithub(ctx, request2),
+    Promise.all(PROVIDER_IDS.map((id) => probePi ? probeProvider(ctx, id) : Promise.resolve({ status: "unknown" }))),
+    probePi ? probeCatalog(ctx) : Promise.resolve(null)
+  ]);
+  PROVIDER_IDS.forEach((id, i2) => {
+    providers2[id] = states[i2];
+  });
+  const warnings = [];
+  if (probePi && catalog?.size === 0) warnings.push("pi reports no models yet; pinned models were not checked.");
+  const candidates = request2.needScan ? scanRoots(await candidateRoots(ctx), [request2.login ?? github.login ?? "", ...github.orgs], {
+    now: () => ctx.now().getTime()
+  }) : [];
+  return {
+    os: ctx.platform,
+    tools: [...tools, { name: "node", path: process.execPath, version: ctx.nodeVersion }],
+    github,
+    providers: providers2,
+    hints: {
+      codexAuthFile: existsSync26(join45(ctx.home, ".codex", "auth.json")),
+      claudeDir: existsSync26(join45(ctx.home, ".claude"))
+    },
+    catalog,
+    candidates,
+    warnings
+  };
+}
+function readyProviders(detection) {
+  return new Set(Object.entries(detection.providers).filter(([, s]) => s.status === "ready").map(([id]) => id));
+}
+function toolPath(detection, name) {
+  return detection.tools.find((t2) => t2.name === name)?.path;
+}
+function installHint(platform, tool) {
+  if (tool === "pi") return "npm i -g @earendil-works/pi-coding-agent";
+  const brewName = tool === "python3" ? "python" : tool;
+  return platform === "darwin" ? `brew install ${brewName}` : `apt install ${tool === "npm" ? "npm" : tool}`;
+}
+var TOOLS, SHORT_MS, PI_MS;
+var init_detect = __esm({
+  "src/detect.ts"() {
+    init_repos_scan();
+    init_types();
+    TOOLS = ["pi", "python3", "jq", "git", "gh", "docker", "dotnet", "rsync", "npm"];
+    SHORT_MS = 3e3;
+    PI_MS = 8e3;
+  }
+});
+
+// src/update.ts
+import { existsSync as existsSync27 } from "node:fs";
+import { join as join46 } from "node:path";
+function compareTags(a2, b) {
+  const x = a2.slice(1).split(".").map(Number);
+  const y2 = b.slice(1).split(".").map(Number);
+  for (let i2 = 0; i2 < Math.max(x.length, y2.length); i2++) {
+    const d = (x[i2] ?? 0) - (y2[i2] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+function latestTag(tags) {
+  return tags.filter((t2) => TAG.test(t2)).sort(compareTags).at(-1);
+}
+async function git(ctx, args, timeoutMs = 3e4) {
+  const r2 = await ctx.run("git", ["-C", ctx.repoDir, ...args], { timeoutMs });
+  return { ok: r2.code === 0, out: r2.stdout.trim(), err: (r2.stderr || r2.stdout).trim() };
+}
+async function remoteTags(ctx, timeoutMs = 3e4) {
+  const r2 = await git(ctx, ["ls-remote", "--tags", "--refs", "origin", "v*"], timeoutMs);
+  if (!r2.ok) throw new SetupError(`git ls-remote failed: ${r2.err}`);
+  return r2.out.split("\n").map((l2) => l2.split("	refs/tags/")[1]).filter((t2) => Boolean(t2));
+}
+async function pickTarget(ctx, options) {
+  if (options.dryRun) {
+    if (options.ref) return options.ref;
+    const tag = latestTag(await remoteTags(ctx));
+    if (!tag) throw new SetupError("no v* release tags found on origin");
+    return tag;
+  }
+  const fetched = await git(ctx, ["fetch", "--tags", "--quiet", "origin"], 6e4);
+  if (!fetched.ok) throw new SetupError(`git fetch failed: ${fetched.err}`);
+  let target = options.ref;
+  if (!target) {
+    const listed = await git(ctx, ["tag", "--list", "v*"]);
+    target = latestTag(listed.out.split("\n").filter(Boolean)) ?? "";
+    if (!target) throw new SetupError("no v* release tags found");
+  }
+  if (!(await git(ctx, ["rev-parse", "--verify", "--quiet", `${target}^{commit}`])).ok) {
+    throw new SetupError(`unknown ref '${target}'`);
+  }
+  return target;
+}
+async function releaseNotes(ctx, tag) {
+  if (!TAG.test(tag) || !ctx.which("gh")) return;
+  const r2 = await ctx.run("gh", ["release", "view", tag, "--json", "name,body", "--jq", '.name + "\n\n" + .body'], { cwd: ctx.repoDir, timeoutMs: 15e3 });
+  if (r2.code === 0 && r2.stdout.trim()) ctx.out(r2.stdout.trim());
+}
+async function runUpdate(ctx, options, prompter) {
+  if (!existsSync27(join46(ctx.repoDir, ".git"))) throw new SetupError("update needs a git checkout of pi-setup");
+  const status2 = await git(ctx, ["status", "--porcelain"]);
+  if (!status2.ok) throw new SetupError(`git status failed: ${status2.err}`);
+  if (status2.out) throw new SetupError("checkout has local changes; commit or stash them first");
+  const target = await pickTarget(ctx, options);
+  const current = (await git(ctx, ["describe", "--tags", "--always"])).out || "unknown";
+  ctx.out(`pi-setup: ${current} \u2192 ${target}`);
+  await releaseNotes(ctx, target);
+  if (options.dryRun) {
+    ctx.out(`would check out ${target} and run install`);
+    return 0;
+  }
+  if (prompter) {
+    const answer = await prompter.confirm({ message: `Check out ${target} and install?`, initial: true });
+    if (prompter.isCancel(answer) || answer !== true) {
+      ctx.err("Cancelled; nothing changed.");
+      return 1;
+    }
+  }
+  const checkout = await git(ctx, ["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", target], 6e4);
+  if (!checkout.ok) throw new SetupError(`git checkout ${target} failed: ${checkout.err}`);
+  ctx.out(`checkout is detached at ${target}; \`git switch main\` to go back`);
+  const args = [join46(ctx.repoDir, "installer", "dist", "pi-setup.mjs"), "install"];
+  if (options.yes || !prompter) args.push("--yes");
+  if (options.skipNpm) args.push("--skip-npm");
+  const result3 = await ctx.run(ctx.nodePath ?? process.execPath, args, { inherit: true });
+  return result3.code ?? 1;
+}
+var TAG;
+var init_update = __esm({
+  "src/update.ts"() {
+    init_types();
+    TAG = /^v\d+(\.\d+)*$/;
+  }
+});
+
+// src/doctor-probes.ts
+import { existsSync as existsSync28, readdirSync as readdirSync16, readFileSync as readFileSync26, writeFileSync as writeFileSync10 } from "node:fs";
+import { join as join47 } from "node:path";
+function pythonVersionCheck(ctx, version2) {
+  const match = /^Python (\d+)\.(\d+)\b/.exec(version2 ?? "");
+  const supported = match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 9);
+  return result2("python", supported ? "ok" : "warn", `${version2 || "Python version unknown"}; pi-phase requires Python >=3.9 on macOS/Linux`, installHint(ctx.platform, "python3"));
+}
+async function python(ctx) {
+  if (!ctx.which("python3")) return pythonVersionCheck(ctx);
+  const r2 = await ctx.run("python3", ["--version"], { timeoutMs: 3e3 });
+  return pythonVersionCheck(ctx, r2.code === 0 && !r2.timedOut ? r2.stdout.trim() || r2.stderr.trim() : void 0);
+}
+function plists(ctx) {
+  const dir = join47(ctx.home, "Library/LaunchAgents");
+  if (ctx.platform !== "darwin" || !existsSync28(dir)) return [];
+  return readdirSync16(dir).filter((f) => f.endsWith(".plist")).flatMap((file) => {
+    const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(readFileSync26(join47(dir, file), "utf8"))?.[1];
+    return label && /\.(docker-guardian|pi-cleanup)$/.test(label) ? [{ file, label }] : [];
+  });
+}
+async function disk(ctx) {
+  const unknown = () => [result2("disk", "warn", "disk not checked", "df -h ~")];
+  const script = join47(ctx.home, ".pi/agent/bin/dev-doctor");
+  if (!existsSync28(script)) return unknown();
+  const r2 = await ctx.run("python3", [script, "--only", "disk", "--json"], { timeoutMs: 6e3, env: { PYTHONDONTWRITEBYTECODE: "1" } });
+  if (r2.timedOut || r2.code !== 0) return unknown();
+  try {
+    const findings = JSON.parse(r2.stdout);
+    if (!Array.isArray(findings)) return unknown();
+    const checks = findings.filter((f) => f?.id === "disk").map((f) => {
+      if (typeof f.evidence !== "string" || f.evidence.startsWith("Skipped:") || !["info", "warn", "high"].includes(f.severity)) return unknown()[0];
+      return result2("disk", f.severity === "high" ? "fail" : f.severity === "warn" ? "warn" : "ok", f.evidence, typeof f.suggest === "string" ? f.suggest : "df -h ~");
+    });
+    return checks.length ? checks : unknown();
+  } catch {
+    return unknown();
+  }
+}
+async function update(ctx, manifest) {
+  const skip = (reason) => result2("update", "ok", `update check skipped (${reason})`);
+  if (!existsSync28(join47(ctx.repoDir, ".git"))) return skip("not a git checkout");
+  const path2 = join47(ctx.home, ".pi/agent/.pi-setup/update-check.json");
+  const cache = readJson(path2);
+  const age = ctx.now().getTime() - Date.parse(String(cache?.checkedAt));
+  let latest;
+  if (age >= 0 && age < 864e5 && typeof cache?.latest === "string") latest = latestTag([cache.latest]);
+  if (!latest) {
+    if (ctx.env.PI_OFFLINE) return skip("offline");
+    try {
+      latest = latestTag(await remoteTags(ctx, 5e3));
+      if (!latest) return skip("no release tags");
+      if (existsSync28(join47(ctx.home, ".pi/agent/.pi-setup"))) writeFileSync10(path2, `${JSON.stringify({ checkedAt: ctx.now().toISOString(), latest })}
+`);
+    } catch {
+      return skip("remote unavailable");
+    }
+  }
+  let current = manifest?.source.release;
+  if (!current) {
+    const r2 = await ctx.run("git", ["-C", ctx.repoDir, "describe", "--tags", "--abbrev=0"], { timeoutMs: 3e3 });
+    if (r2.code !== 0 || r2.timedOut) return skip("installed release unknown");
+    current = r2.stdout.trim();
+  }
+  if (!latestTag([current])) return skip("installed release unknown");
+  return result2("update", compareTags(latest, current) > 0 ? "warn" : "ok", compareTags(latest, current) > 0 ? `${latest} available (installed ${current})` : `up to date (${current})`, `${setupCmd(ctx)} update`);
+}
+async function gatherFacts(baseCtx, manifest) {
+  const ctx = { ...baseCtx, run: (cmd, args, options) => baseCtx.run(cmd, cmd === "git" ? ["--no-optional-locks", ...args] : args, options) };
+  const hasPi = Boolean(ctx.which("pi"));
+  const recorded = new Set(Object.values(manifest?.components ?? {}).flatMap((c2) => c2.service?.kind === "launchd" ? [c2.service.label] : []));
+  const all = plists(ctx);
+  const agents = all.filter((p) => !recorded.has(p.label));
+  const guardian = all.some((p) => p.label.endsWith(".docker-guardian")) || manifest?.components?.["docker-guardian"]?.on === true;
+  const [providers2, models2, version2, gh, head, checkout, disks, launchd, docker, updates, pythonCheck] = await Promise.all([
+    Promise.all(PROVIDER_IDS.map((id) => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" })) : Promise.resolve({ status: "unknown" }))),
+    hasPi ? listModels(ctx) : Promise.resolve({ catalog: null, code: null, stderr: "", timedOut: false }),
+    hasPi ? ctx.run("pi", ["--version"], { timeoutMs: 8e3 }) : Promise.resolve(skippedRun),
+    ctx.which("gh") ? ctx.run("gh", ["auth", "status"], { timeoutMs: 3e3 }) : Promise.resolve(skippedRun),
+    ctx.run("git", ["-C", ctx.repoDir, "rev-parse", "HEAD"], { timeoutMs: 3e3 }),
+    ctx.run("git", ["-C", ctx.repoDir, "status", "--porcelain"], { timeoutMs: 3e3 }),
+    disk(ctx),
+    Promise.all(agents.map(async (p) => {
+      const r2 = await ctx.run("launchctl", ["list", p.label], { timeoutMs: 3e3 });
+      return result2(`launchd:${p.label}`, r2.code === 0 && !r2.timedOut ? "ok" : "warn", `${p.label}: ${r2.code === 0 && !r2.timedOut ? "loaded" : "not loaded"}`, `launchctl load -w ~/Library/LaunchAgents/${p.file}`);
+    })),
+    guardian ? ctx.run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 5e3 }) : Promise.resolve(void 0),
+    update(ctx, manifest),
+    python(ctx)
+  ]);
+  let pi;
+  if (!hasPi) pi = result2("pi", "fail", "not on PATH", installHint(ctx.platform, "pi"));
+  else if (models2.timedOut || version2.timedOut) pi = result2("pi", "warn", "timed out", `${setupCmd(ctx)} doctor`);
+  else if (models2.code !== 0 || version2.code !== 0) pi = result2("pi", "fail", models2.stderr.split("\n")[0] || version2.stderr.split("\n")[0] || "pi did not load", "run `pi` and read the startup errors");
+  else pi = result2("pi", "ok", `pi ${version2.stdout.trim().split("\n")[0]}`);
+  const github = parseAuthStatus(`${gh.stdout}
+${gh.stderr}`);
+  const ghCheck = !ctx.which("gh") ? result2("gh", "warn", "not on PATH", installHint(ctx.platform, "gh")) : !github.host ? result2("gh", "warn", "not logged in", "gh auth login") : result2("gh", "ok", `${github.login}@${github.host}`);
+  return {
+    facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i2) => [id, providers2[i2]])), catalog: models2.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : void 0, checkoutClean: checkout.code === 0 && !checkout.timedOut ? !checkout.stdout.trim() : void 0, github: { ...github, orgs: [] }, summary: false },
+    checks: [pi, ghCheck, pythonCheck, ...disks, ...launchd.length ? launchd : [result2("launchd", "skip", "no managed launch agents")], docker ? result2("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result2("docker", "skip", "no docker guardian"), updates]
+  };
+}
+var result2, skippedRun;
+var init_doctor_probes = __esm({
+  "src/doctor-probes.ts"() {
+    init_detect();
+    init_doctor_checks();
+    init_update();
+    init_types();
+    result2 = (id, status2, detail, fix) => ({ id, title: id, status: status2, detail, ...fix ? { fix } : {} });
+    skippedRun = { code: null, stdout: "", stderr: "", timedOut: false };
+  }
+});
+
 // src/components.ts
-import { existsSync as existsSync24, readdirSync as readdirSync14, readFileSync as readFileSync23, statSync as statSync15 } from "node:fs";
-import { join as join42 } from "node:path";
+import { existsSync as existsSync29, readdirSync as readdirSync17, readFileSync as readFileSync27, statSync as statSync15 } from "node:fs";
+import { join as join48 } from "node:path";
 function available(id, ctx) {
   if (id === "docker-guardian") return ctx.platform === "darwin" ? true : "needs Docker Desktop on macOS";
   if (id === "secret-sweep") return ctx.platform === "darwin" ? true : "its schedule is a macOS launchd job";
@@ -5123,12 +5836,12 @@ function resolveComponents(input) {
   return out;
 }
 function currentState(ctx) {
-  const piDir = join42(ctx.home, ".pi", "agent");
-  const mcp = readJson(join42(piDir, "mcp-adapter.json"));
+  const piDir = join48(ctx.home, ".pi", "agent");
+  const mcp = readJson2(join48(piDir, "mcp-adapter.json"));
   const servers = mcp?.mcpServers;
-  const packages2 = readJson(join42(piDir, "settings.json"))?.packages;
+  const packages2 = readJson2(join48(piDir, "settings.json"))?.packages;
   return {
-    cratis: existsSync24(join42(piDir, "extensions", "cratis-cli-guard.ts")),
+    cratis: existsSync29(join48(piDir, "extensions", "cratis-cli-guard.ts")),
     codescene: typeof servers === "object" && servers !== null && "codescene" in servers,
     web: Array.isArray(packages2) && packages2.some((p) => WEB_PACKAGES.includes(p))
   };
@@ -5143,21 +5856,21 @@ function isDir(path2) {
 function hasCratisDir(root) {
   const entries = (dir) => {
     try {
-      return readdirSync14(dir).slice(0, LIMIT);
+      return readdirSync17(dir).slice(0, LIMIT);
     } catch {
       return [];
     }
   };
   for (const a2 of entries(root)) {
     if (a2 === ".cratis") return true;
-    const one = join42(root, a2);
+    const one = join48(root, a2);
     if (!isDir(one)) continue;
-    if (entries(one).some((b) => b === ".cratis" && isDir(join42(one, b)))) return true;
+    if (entries(one).some((b) => b === ".cratis" && isDir(join48(one, b)))) return true;
   }
   return false;
 }
 function detectDefaults(ctx, detection, reposRoot) {
-  const cratis = detection.github.orgs.some((o) => o.toLowerCase() === "cratis") || isDir(join42(reposRoot, "cratis")) || isDir(join42(reposRoot, "Cratis")) || hasCratisDir(reposRoot);
+  const cratis = detection.github.orgs.some((o) => o.toLowerCase() === "cratis") || isDir(join48(reposRoot, "cratis")) || isDir(join48(reposRoot, "Cratis")) || hasCratisDir(reposRoot);
   return {
     "docker-guardian": ctx.platform === "darwin" && Boolean(ctx.which("docker")),
     cleanup: ctx.platform === "darwin" || Boolean(ctx.which("systemctl")),
@@ -5215,7 +5928,7 @@ function codesceneNotes(ctx) {
     `CodeScene skills are not bundled: copy ${CS_SKILLS.join(", ")} from ${CS_REPO}/tree/main/skills to ~/.agents/skills/`
   ];
 }
-var COMPONENT_IDS, COMPONENTS, isComponentId, readJson, WEB_PACKAGES, LIMIT, markerRe, CS_REPO, CS_SKILLS;
+var COMPONENT_IDS, COMPONENTS, isComponentId, readJson2, WEB_PACKAGES, LIMIT, markerRe, CS_REPO, CS_SKILLS;
 var init_components = __esm({
   "src/components.ts"() {
     COMPONENT_IDS = ["docker-guardian", "cleanup", "secret-sweep", "codescene", "cratis", "web", "lanes"];
@@ -5229,9 +5942,9 @@ var init_components = __esm({
       { id: "web", label: "browser and web tools", explain: "pi-web-access and pi-browser-use (the browser may download on first use)", service: false }
     ];
     isComponentId = (id) => COMPONENT_IDS.includes(id);
-    readJson = (path2) => {
+    readJson2 = (path2) => {
       try {
-        const data = JSON.parse(readFileSync23(path2, "utf8"));
+        const data = JSON.parse(readFileSync27(path2, "utf8"));
         return typeof data === "object" && data !== null && !Array.isArray(data) ? data : void 0;
       } catch {
         return void 0;
@@ -5250,6 +5963,990 @@ var init_components = __esm({
       "routing-work-with-code-ownership",
       "safeguarding-ai-generated-code"
     ];
+  }
+});
+
+// src/services.ts
+import { existsSync as existsSync30, mkdirSync as mkdirSync15, readFileSync as readFileSync28, statSync as statSync16 } from "node:fs";
+import { join as join49, resolve as resolve14 } from "node:path";
+import { userInfo } from "node:os";
+function serviceUser(env) {
+  return (env.USER ?? "").replace(/[^A-Za-z0-9-]/g, "") || "pi-setup";
+}
+function systemdUnits(home) {
+  const dir = join49(home, ".config/systemd/user");
+  return [
+    {
+      path: join49(dir, "pi-cleanup.service"),
+      content: Buffer.from(
+        "[Unit]\nDescription=pi-setup scheduled cleanup\n\n[Service]\nType=oneshot\nEnvironment=PYTHONDONTWRITEBYTECODE=1\nExecStart=%h/.pi/agent/bin/pi-cleanup --scheduled\n"
+      )
+    },
+    {
+      path: join49(dir, TIMER),
+      content: Buffer.from("[Unit]\nDescription=pi-setup scheduled cleanup (daily)\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
+    }
+  ];
+}
+function launchdUnit(ctx, id) {
+  const name = LAUNCHD_NAME[id];
+  const src = join49(ctx.repoDir, "agent", "launchd", `com.example.${name}.plist`);
+  if (!name || !existsSync30(src)) return void 0;
+  const user = serviceUser(ctx.env);
+  const text4 = readFileSync28(src, "utf8").split("__HOME__").join(xml(ctx.home)).split("com.example.").join(`com.${user}.`);
+  return { unit: { path: join49(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text4) }, label: `com.${user}.${name}` };
+}
+function expectedUnit(ctx, id) {
+  if (ctx.platform === "darwin") {
+    const name = LAUNCHD_NAME[id];
+    const label = `com.${serviceUser(ctx.env)}.${name}`;
+    return name ? { kind: "launchd", label, file: join49(ctx.home, "Library/LaunchAgents", `${label}.plist`) } : void 0;
+  }
+  return id === "cleanup" ? { kind: "systemd", label: TIMER, file: join49(ctx.home, ".config/systemd/user", TIMER) } : void 0;
+}
+function planServices(ctx, manifest, on) {
+  const out = { actions: [], records: {}, notes: [] };
+  for (const def of COMPONENTS.filter((c2) => c2.service)) {
+    if (!on[def.id] || available(def.id, ctx) !== true) {
+      out.records[def.id] = { on: false };
+      continue;
+    }
+    let kind = "launchd";
+    let label = "";
+    let units = [];
+    if (ctx.platform === "darwin") {
+      const l2 = launchdUnit(ctx, def.id);
+      if (l2) {
+        units = [l2.unit];
+        label = l2.label;
+      }
+    } else {
+      kind = "systemd";
+      label = TIMER;
+      units = systemdUnits(ctx.home);
+    }
+    if (!units.length) {
+      out.records[def.id] = { on: false };
+      continue;
+    }
+    let managed = true;
+    const actions = [];
+    for (const u3 of units) {
+      const rel = homeRel(ctx.home, u3.path);
+      const there = existsSync30(u3.path) && statSync16(u3.path).isFile();
+      if (!there) actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: false, decision: "new" });
+      else if (readFileSync28(u3.path).equals(u3.content)) actions.push({ op: "adopt", path: u3.path });
+      else if (manifest?.files[rel] && fileSha(u3.path) === manifest.files[rel].sha256) {
+        actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: true, decision: "update" });
+      } else {
+        managed = false;
+        out.notes.push(`left your ${u3.path.replace(`${ctx.home}/`, "~/")}; pi-setup does not load or remove it`);
+      }
+    }
+    if (managed) out.actions.push(...actions);
+    out.records[def.id] = { on: true, service: { kind, label, files: units.map((u3) => homeRel(ctx.home, u3.path)), managed } };
+  }
+  return out;
+}
+function launchdSkipReason(ctx) {
+  if (ctx.noLaunchd) return "--no-launchd was given";
+  if (resolve14(ctx.home) !== resolve14(ctx.userHome ?? userInfo().homedir)) return "HOME is not the real user home";
+  return void 0;
+}
+function skipLaunchd(ctx) {
+  const reason = launchdSkipReason(ctx);
+  if (reason) ctx.out(`skipping launchd load/unload: ${reason}`);
+  return Boolean(reason);
+}
+async function sh(ctx, cmd, args) {
+  try {
+    const r2 = await ctx.run(cmd, args, { timeoutMs: TIMEOUT });
+    return { ok: r2.code === 0 && !r2.timedOut, text: `${r2.stdout}${r2.stderr}`.trim() };
+  } catch (error) {
+    return { ok: false, text: error.message };
+  }
+}
+async function syncServices(ctx, components, changed, dryRun) {
+  for (const [id, c2] of Object.entries(components)) {
+    const svc = c2.service;
+    if (!c2.on || !svc?.managed) continue;
+    const plist = join49(ctx.home, svc.files[0]);
+    const domain = `gui/${uid()}`;
+    if (svc.kind === "launchd") {
+      if (skipLaunchd(ctx)) continue;
+      if (dryRun) {
+        ctx.out(`would load ${svc.label} (launchctl bootstrap ${domain} ${plist})`);
+        continue;
+      }
+      mkdirSync15(join49(ctx.home, ".pi/agent/logs"), { recursive: true });
+      const loaded = (await sh(ctx, "launchctl", ["print", `${domain}/${svc.label}`])).ok;
+      if (loaded && !svc.files.some((f) => changed.has(join49(ctx.home, f)))) continue;
+      if (loaded) await sh(ctx, "launchctl", ["bootout", `${domain}/${svc.label}`]);
+      const r2 = await sh(ctx, "launchctl", ["bootstrap", domain, plist]);
+      if (!r2.ok) ctx.err(`warning: could not load ${id}: launchctl bootstrap ${domain} ${plist}`);
+      else ctx.out(`loaded ${svc.label}`);
+    } else {
+      if (dryRun) {
+        ctx.out(`would enable ${svc.label} (systemctl --user enable --now ${svc.label})`);
+        continue;
+      }
+      if (!ctx.which("systemctl")) {
+        ctx.out(`note: systemctl not found; start ${id} later with: systemctl --user enable --now ${svc.label}`);
+        continue;
+      }
+      await sh(ctx, "systemctl", ["--user", "daemon-reload"]);
+      const r2 = await sh(ctx, "systemctl", ["--user", "enable", "--now", svc.label]);
+      if (!r2.ok) ctx.err(`warning: could not enable ${id}: systemctl --user enable --now ${svc.label}`);
+      else ctx.out(`enabled ${svc.label}`);
+    }
+  }
+}
+function unloadLine(svc) {
+  return svc.kind === "launchd" ? `boot out ${svc.label} (launchctl bootout gui/${uid()}/${svc.label})` : `disable ${svc.label} (systemctl --user disable --now ${svc.label})`;
+}
+async function unloadService(ctx, svc) {
+  if (!svc.managed) return;
+  if (svc.kind === "launchd" && skipLaunchd(ctx)) return;
+  const [cmd, args] = svc.kind === "launchd" ? ["launchctl", ["bootout", `gui/${uid()}/${svc.label}`]] : ["systemctl", ["--user", "disable", "--now", svc.label]];
+  if (svc.kind === "systemd" && !ctx.which("systemctl")) return;
+  let text4;
+  try {
+    const r2 = await ctx.run(cmd, args, { timeoutMs: TIMEOUT });
+    if (r2.code === 0 && !r2.timedOut) return;
+    text4 = r2.timedOut ? "timed out" : `${r2.stdout}${r2.stderr}`.trim();
+    if (!r2.timedOut && (NOT_LOADED.test(text4) || svc.kind === "launchd" && [3, 113].includes(r2.code))) return;
+  } catch (error) {
+    text4 = error.message;
+  }
+  ctx.err(`warning: could not stop ${svc.label} (${text4.split("\n")[0] || "failed"}); remove it by hand: ${cmd} ${args.join(" ")}`);
+}
+async function reloadSystemd(ctx, svc) {
+  if (svc.managed && svc.kind === "systemd" && ctx.which("systemctl")) await sh(ctx, "systemctl", ["--user", "daemon-reload"]);
+}
+var LAUNCHD_NAME, TIMER, TIMEOUT, xml, isService, uid, NOT_LOADED;
+var init_services = __esm({
+  "src/services.ts"() {
+    init_components();
+    init_manifest();
+    LAUNCHD_NAME = { "docker-guardian": "docker-guardian", cleanup: "pi-cleanup", "secret-sweep": "secret-sweep" };
+    TIMER = "pi-cleanup.timer";
+    TIMEOUT = 5e3;
+    xml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    isService = (id) => COMPONENTS.some((c2) => c2.id === id && c2.service);
+    uid = () => typeof process.getuid === "function" ? process.getuid() : 0;
+    NOT_LOADED = /no such process|could not find service|not loaded|not found|does not exist|no such file|unit .* not loaded/i;
+  }
+});
+
+// src/doctor-components.ts
+import { existsSync as existsSync31, lstatSync as lstatSync8, readlinkSync as readlinkSync3, statSync as statSync17 } from "node:fs";
+import { join as join50 } from "node:path";
+async function isLoaded(ctx, kind, label) {
+  try {
+    const r2 = kind === "launchd" ? await ctx.run("launchctl", ["print", `gui/${uid()}/${label}`], { timeoutMs: 5e3 }) : await ctx.run("systemctl", ["--user", "is-active", label], { timeoutMs: 5e3 });
+    return r2.code === 0 && !r2.timedOut;
+  } catch {
+    return false;
+  }
+}
+function lanesChecks(ctx) {
+  const bin = join50(ctx.home, ".local/bin/lanes");
+  const target = join50(ctx.home, ".local/share/pi-setup/lanes/lanes.mjs");
+  let linked = false;
+  let present2 = false;
+  try {
+    const stat2 = lstatSync8(bin);
+    present2 = true;
+    linked = stat2.isSymbolicLink() && readlinkSync3(bin) === target;
+  } catch {
+  }
+  const good = linked && existsSync31(target);
+  const fix = good ? void 0 : present2 && !linked ? "move ~/.local/bin/lanes away, then pi-setup install --with lanes" : "pi-setup install --with lanes";
+  let config;
+  let configError = "";
+  let root;
+  try {
+    root = findRoot(void 0, ctx.env, ctx.cwd);
+  } catch {
+  }
+  if (root) {
+    try {
+      config = loadConfig(root);
+    } catch (e) {
+      configError = e.message;
+    }
+  }
+  let installedPreapproval = false;
+  try {
+    installedPreapproval = preapprovalDefault(join50(ctx.home, ".local/share/pi-setup/lanes/templates"));
+  } catch (e) {
+    configError ||= e.message;
+  }
+  const enabled = config ? config.launch.preapproveMcp : installedPreapproval;
+  const backend = detectBackend(config?.terminal.backend || "auto", ctx);
+  return [
+    check2("lanes", good ? "ok" : "warn", good ? "lanes is installed" : "lanes link or bundle is missing or points elsewhere", fix),
+    check2("lanes-git", ctx.which("git") ? "ok" : "warn", ctx.which("git") ? "git is on PATH" : "git is missing", ctx.which("git") ? void 0 : "install git"),
+    check2("lanes-terminal", "ok", backend === "print" ? "print (no Terminal.app, iTerm or tmux detected; lanes start will print the command)" : backend),
+    check2("lanes-preapprove-mcp", configError ? "warn" : "ok", configError || `MCP preapproval is ${enabled ? "on (trusts project MCP server definitions)" : "off"}${config ? ` in ${join50(root, "lanes.json")}` : " for new folders (no lanes.json found)"}`)
+  ];
+}
+async function componentChecks(ctx, manifest) {
+  const comps = manifest?.components;
+  if (!comps) return [];
+  const checks = [];
+  for (const def of COMPONENTS.filter((c2) => c2.service)) {
+    const unit = expectedUnit(ctx, def.id);
+    if (!unit) continue;
+    const id = `service:${def.id}`;
+    const rec = comps[def.id];
+    const exists = existsSync31(unit.file);
+    if (rec?.on && rec.service?.managed) {
+      const manual = unit.kind === "launchd" ? `launchctl bootstrap gui/${uid()} ${unit.file}` : `systemctl --user enable --now ${unit.label}`;
+      const skipped = unit.kind === "launchd" ? launchdSkipReason(ctx) : void 0;
+      if (skipped) {
+        checks.push(check2(id, "ok", `launchd load/unload skipped: ${skipped}`));
+        continue;
+      }
+      checks.push(await isLoaded(ctx, unit.kind, unit.label) ? check2(id, "ok", `${unit.label} is loaded`) : check2(id, "warn", `${unit.label} is not loaded`, manual));
+    } else if (rec?.on && !rec.service?.managed) {
+      checks.push(check2(id, "ok", `${unit.file.replace(`${ctx.home}/`, "~/")} is not managed by pi-setup; left alone`));
+    } else if (exists) {
+      checks.push(check2(id, "ok", `${def.id} is turned off but a unit exists at ${unit.file.replace(`${ctx.home}/`, "~/")}; left alone`));
+    }
+  }
+  if (comps.codescene?.on) {
+    const dir = join50(ctx.home, ".agents/skills");
+    const missing = CS_SKILLS.filter((n3) => {
+      try {
+        return !statSync17(join50(dir, n3)).isDirectory();
+      } catch {
+        return true;
+      }
+    });
+    checks.push(
+      ctx.which("cs-mcp") ? check2("codescene-mcp", "ok", "cs-mcp is on PATH") : check2("codescene-mcp", "warn", "cs-mcp not found on PATH", "install cs-mcp: https://github.com/codescene-oss/codescene-mcp-server#readme"),
+      ctx.env.CS_ACCESS_TOKEN ? check2("codescene-token", "ok", "CS_ACCESS_TOKEN is set") : check2("codescene-token", "warn", "CS_ACCESS_TOKEN is not set", "export CS_ACCESS_TOKEN=<your token> in your shell profile (pi-setup never stores it)"),
+      missing.length === 0 ? check2("codescene-skills", "ok", "CodeScene skills are present") : check2("codescene-skills", "warn", `CodeScene skills missing: ${missing.join(", ")}`, "copy skills/<name> from https://github.com/codescene-oss/codescene-mcp-server/tree/main/skills to ~/.agents/skills/")
+    );
+  }
+  if (comps.lanes?.on) checks.push(...lanesChecks(ctx));
+  return checks;
+}
+var check2;
+var init_doctor_components = __esm({
+  "src/doctor-components.ts"() {
+    init_terminal();
+    init_config();
+    init_components();
+    init_services();
+    check2 = (id, status2, detail, fix) => ({ id, title: id, status: status2, detail, ...fix ? { fix } : {} });
+  }
+});
+
+// src/doctor-compact.ts
+function packageLine(checks, skipNpm) {
+  const npm2 = checks.find((c2) => c2.id === "npm" && c2.status !== "ok" && c2.status !== "skip");
+  const named = checks.filter((c2) => c2.id.startsWith("package:"));
+  const count = npm2 ? npm2.items?.length || 1 : named.length;
+  if (!count) return void 0;
+  const why = skipNpm ? "you skipped npm; run ./install.sh" : "run ./install.sh to retry";
+  return `${plural(count, "package")} not installed yet: ${why}`;
+}
+function toolLine(checks) {
+  const tools = checks.filter((c2) => c2.id.startsWith("tool:")).map((c2) => c2.id.slice(5));
+  return tools.length ? `${plural(tools.length, "tool")} not found: ${tools.join(", ")}` : void 0;
+}
+function pathLine(checks) {
+  const path2 = checks.find((c2) => c2.id === "path");
+  return path2 ? `${path2.detail}; add them to your shell profile (./install.sh --edit-shell-profile does it)` : void 0;
+}
+function compactChecks(all, options) {
+  const checks = all.filter((c2) => c2.status === "warn" || c2.status === "fail");
+  const logins2 = loginLabels(checks);
+  const profile3 = checks.find((c2) => c2.id === "profile" && !logins2.length);
+  const lines2 = [
+    packageLine(checks, options.skipNpm),
+    logins2.length ? `Log in to ${logins2.join(", ")} in pi (/login)` : void 0,
+    profile3 ? `profile: ${profile3.detail}` : void 0,
+    options.pathEdited ? void 0 : pathLine(checks),
+    toolLine(checks),
+    ...checks.filter((c2) => !consumed(c2)).map((c2) => `${c2.id}: ${c2.detail}`)
+  ].filter((line) => Boolean(line)).map((line) => line.split(options.home).join("~"));
+  const shown = lines2.length > MAX_HEALTH_LINES ? [...lines2.slice(0, MAX_HEALTH_LINES - 1), `and ${lines2.length - MAX_HEALTH_LINES + 1} more: ./install.sh doctor`] : lines2;
+  return { lines: shown, count: lines2.length, logins: logins2 };
+}
+var MAX_HEALTH_LINES, loginLabels, plural, consumed;
+var init_doctor_compact = __esm({
+  "src/doctor-compact.ts"() {
+    init_types();
+    MAX_HEALTH_LINES = 6;
+    loginLabels = (checks) => {
+      const labels = /* @__PURE__ */ new Set();
+      for (const c2 of checks) {
+        if (c2.id.startsWith("fallback:")) {
+          const provider = c2.id.slice("fallback:".length).split("/")[0];
+          labels.add(PROVIDER_LABELS[provider] ?? provider);
+        } else if (c2.id === "profile") {
+          const match = /^[^:]+: (.+) has no login$/.exec(c2.detail);
+          for (const label of match?.[1].split(", ") ?? []) labels.add(label);
+        }
+      }
+      return [...labels];
+    };
+    plural = (n3, word) => `${n3} ${word}${n3 === 1 ? "" : "s"}`;
+    consumed = (c2) => c2.id === "npm" || c2.id.startsWith("package:") || c2.id.startsWith("tool:") || c2.id === "path" || c2.id.startsWith("path:") || c2.id.startsWith("fallback:") || c2.id === "profile";
+  }
+});
+
+// src/doctor.ts
+import { chmodSync as chmodSync3 } from "node:fs";
+import { join as join51 } from "node:path";
+function doctorExitCode(checks) {
+  return checks.some((c2) => c2.status === "fail") ? 2 : checks.some((c2) => c2.status === "warn") ? 1 : 0;
+}
+function render2(checks) {
+  return checks.filter((c2) => c2.status !== "skip").flatMap((c2) => {
+    const items = c2.items?.length ? ` (${c2.items.slice(0, 3).join(", ")}${c2.items.length > 3 ? ` and ${c2.items.length - 3} more` : ""})` : "";
+    const line = `${c2.status === "ok" ? "\u2714" : c2.status === "warn" ? "\u26A0" : "\u2716"} ${c2.title}: ${c2.detail}${items}`;
+    return c2.status === "ok" ? [line] : [line, `  fix: ${c2.fix}`];
+  });
+}
+async function inspect2(ctx) {
+  let manifest;
+  try {
+    manifest = readManifest(join51(ctx.home, ".pi/agent"));
+    if (manifest) validateManifest(ctx.home, manifest);
+  } catch {
+    manifest = void 0;
+  }
+  const gathered = await gatherFacts(ctx, manifest);
+  const local = localChecks(ctx, gathered.facts);
+  const extras2 = await componentChecks(ctx, local.manifest);
+  return { ...local, facts: gathered.facts, checks: [...local.checks, ...gathered.checks, ...extras2] };
+}
+async function runDoctor(ctx, options, baseCtx) {
+  let report = await inspect2(ctx);
+  const fixed = [];
+  if (options.fix) {
+    const fixable = new Set(report.checks.map((c2) => c2.fixable));
+    if (fixable.has("npm")) {
+      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join51(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
+      if (r2.code === 0 && !r2.timedOut) fixed.push("npm");
+    }
+    if (fixable.has("restore") && report.facts.checkoutClean === true && report.facts.head && report.facts.head === report.manifest?.source.commit) {
+      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join51(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
+      if (r2.code === 0 && !r2.timedOut) fixed.push("restore");
+    }
+    if (fixable.has("chmod") && report.manifest) {
+      let changed = false;
+      for (const rel of report.modePaths) {
+        const path2 = fromHomeRel(ctx.home, rel);
+        const entry2 = report.manifest.files[rel];
+        if (fileSha(path2) !== entry2.sha256) continue;
+        chmodSync3(path2, entry2.mode);
+        changed = true;
+      }
+      if (changed) fixed.push("chmod");
+    }
+    report = await inspect2(ctx);
+  }
+  const exitCode = doctorExitCode(report.checks);
+  if (options.json) baseCtx.out(JSON.stringify({ version: 1, exitCode, checks: report.checks, fixed }));
+  else {
+    const source = report.manifest?.source;
+    ctx.out(`pi-setup doctor \u2014 profile ${report.profile || "none"}, installed ${source?.release || source?.commit?.slice(0, 7) || "unknown"}`);
+    if (fixed.length) ctx.out(`Fixed: ${fixed.join(", ")}`);
+    for (const line of render2(report.checks)) ctx.out(line);
+    const names = [...new Set(report.checks.map((c2) => c2.fixable).filter(Boolean))];
+    ctx.out(`${counts(report.checks)}.${!options.fix && names.length ? ` \`${setupCmd(ctx)} doctor --fix\` can fix: ${names.join(", ")}.` : ""}`);
+  }
+  return exitCode;
+}
+async function installSummary(ctx, detection, _piDir) {
+  const local = localChecks(ctx, { providers: detection.providers, catalog: detection.catalog, github: detection.github.host ? detection.github : void 0, summary: true });
+  const checks = local.checks;
+  if (!doctorExitCode(checks)) return [`Doctor: all ${checks.filter((c2) => c2.status === "ok").length} checks passed (full check: \`${setupCmd(ctx)} doctor\`).`];
+  return [`Doctor: ${counts(checks)}:`, ...render2(checks.filter((c2) => c2.status === "warn" || c2.status === "fail")), `Full check: \`${setupCmd(ctx)} doctor\``];
+}
+function installChecks(ctx, detection) {
+  return localChecks(ctx, { providers: detection.providers, catalog: detection.catalog, github: detection.github.host ? detection.github : void 0, summary: true }).checks;
+}
+var counts;
+var init_doctor = __esm({
+  "src/doctor.ts"() {
+    init_doctor_checks();
+    init_doctor_probes();
+    init_manifest();
+    init_doctor_components();
+    init_doctor_checks();
+    init_doctor_compact();
+    counts = (checks) => {
+      const count = (status2) => checks.filter((c2) => c2.status === status2).length;
+      return `${count("ok")} ok, ${count("warn")} warnings, ${count("fail")} failures`;
+    };
+  }
+});
+
+// src/report.ts
+function countActions(actions) {
+  const installs = actions.filter((a2) => a2.op === "install");
+  return {
+    added: installs.filter((a2) => !a2.existed).length,
+    changed: installs.filter((a2) => a2.existed).length,
+    kept: actions.filter((a2) => a2.op === "keep").length,
+    register: actions.filter((a2) => a2.op === "register").length,
+    links: actions.filter((a2) => a2.op === "symlink").length
+  };
+}
+function detectionLines(detection, probed = true) {
+  const lines2 = [`OS: ${detection.os}`];
+  lines2.push(`Tools: ${detection.tools.map((t2) => `${t2.name} ${t2.path ? "\u2713" : "\u2717"}`).join(", ")}`);
+  const github = detection.github;
+  lines2.push(`GitHub: ${github.login ? `${github.login}${github.host ? ` on ${github.host}` : ""}` : "no login found"}`);
+  if (!probed) lines2.push("Providers: not probed in dry-run (pi probes can write state)");
+  else lines2.push(
+    "Providers: " + PROVIDER_IDS.map((id) => `${PROVIDER_LABELS[id]} ${symbol(detection.providers[id]?.status)}`).join(", ")
+  );
+  return lines2;
+}
+function symbol(status2) {
+  if (status2 === "ready") return "\u2713";
+  return status2 === "not_ready" ? "\u2717" : "?";
+}
+function summaryLines(args) {
+  const { settings: settings2, choice, actions } = args;
+  const counts2 = countActions(actions);
+  const lines2 = [
+    `GitHub login: ${settings2.githubUser} (${USER_SOURCES[settings2.userSource]})`,
+    `Repositories root: ${settings2.reposRoot} (${ROOT_SOURCES[settings2.rootSource]})`,
+    ...args.withDetection === false ? [] : detectionLines(args.detection, args.probed),
+    `Profile: ${choice.name} (${choice.reason})${choice.provisional ? " [provisional]" : ""}`
+  ];
+  if (args.profile?.summary) lines2.push(args.profile.summary);
+  if (args.kimi) lines2.push(args.kimi);
+  lines2.push(
+    `Files: ${counts2.added} new, ${counts2.changed} changed${counts2.kept ? `, ${counts2.kept} kept (changed by you)` : ""}${counts2.register ? ", register pi-questions" : ""}`,
+    `npm install: ${args.skipNpm ? "skipped (--skip-npm)" : args.npm ? "yes" : "up to date"}`
+  );
+  if (args.components) {
+    const word = (id) => `${COMPONENTS.find((c2) => c2.id === id)?.label} ${args.components?.[id]?.on ? "on" : "off"}`;
+    lines2.push(`Extras: ${COMPONENTS.map((c2) => word(c2.id)).join(", ")}`);
+  }
+  const kept = actions.filter((a2) => a2.op === "keep");
+  if (kept.some((a2) => /\/\.pi\/agent\/(agents\/[^/]+\.md|workflows\/[^/]+\.js)$/.test(a2.path))) {
+    lines2.push(KEPT_EDITS);
+  }
+  if (kept.some((a2) => a2.op === "keep" && a2.noMarkers)) {
+    lines2.push("AGENTS.md has no pi-profile routing markers, so it is reconciled as a whole file; the new version is in AGENTS.md.pi-setup-new");
+  }
+  lines2.push(...args.componentNotes ?? []);
+  for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines2.push(`warning: ${warning}`);
+  return lines2;
+}
+function whatsNextLines(next) {
+  const lines2 = [];
+  if (next.pathMissing) {
+    lines2.push(next.pathEdited ? "Open a new terminal so the PATH change takes effect." : "Add ~/.local/bin and ~/.pi/agent/bin to PATH, then open a new terminal.");
+  }
+  lines2.push("Start pi: pi");
+  if (next.logins.length) lines2.push(`Log in: in pi, type /login for ${next.logins.join(", ")}`);
+  lines2.push("Switch profile: pi-profile list, or ./install.sh --profile <name>");
+  lines2.push("Check health any time: ./install.sh doctor");
+  if (next.lanesOffered) lines2.push("Optional: set up a coordinator and lanes (offered next; or later with ./install.sh lanes)");
+  return lines2;
+}
+var USER_SOURCES, ROOT_SOURCES, KEPT_EDITS;
+var init_report = __esm({
+  "src/report.ts"() {
+    init_types();
+    init_components();
+    USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it" };
+    ROOT_SOURCES = { flag: "from --repos-root", saved: "saved in user.json", scan: "best match found", default: "default", prompt: "you typed it" };
+    KEPT_EDITS = "kept your edits; `pi-profile save` to adopt them into the profile";
+  }
+});
+
+// src/uninstall.ts
+import {
+  copyFileSync as copyFileSync4,
+  existsSync as existsSync32,
+  lstatSync as lstatSync9,
+  mkdirSync as mkdirSync16,
+  readFileSync as readFileSync29,
+  readlinkSync as readlinkSync4,
+  renameSync as renameSync6,
+  rmdirSync as rmdirSync2,
+  statSync as statSync18,
+  unlinkSync as unlinkSync5
+} from "node:fs";
+import { dirname as dirname14, join as join52 } from "node:path";
+function restore(from, to) {
+  mkdirSync16(dirname14(to), { recursive: true });
+  try {
+    renameSync6(from, to);
+  } catch (error) {
+    if (error.code !== "EXDEV") throw error;
+    copyFileSync4(from, to);
+    unlinkSync5(from);
+  }
+}
+function undo(data, op) {
+  if (op.op === "set") {
+    if (!(op.key in data) || !deepEqual(data[op.key], op.after)) return false;
+    if (op.before.present) data[op.key] = op.before.value;
+    else delete data[op.key];
+    return true;
+  }
+  return undoArray(data, op);
+}
+function undoArray(data, op) {
+  const list = data[op.key];
+  if (!Array.isArray(list)) return true;
+  if (op.op === "array-replace") {
+    const at2 = list.findIndex((v) => deepEqual(v, op.after));
+    if (at2 >= 0) list.splice(at2, 1, op.before);
+    return true;
+  }
+  const at = list.findIndex((v) => deepEqual(v, op.value));
+  if (at >= 0) list.splice(at, 1);
+  if (op.keyCreated && list.length === 0) delete data[op.key];
+  return true;
+}
+function lstatExists(path2) {
+  try {
+    lstatSync9(path2);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function rmdirIfEmpty(path2) {
+  try {
+    if (lstatSync9(path2).isDirectory()) rmdirSync2(path2);
+  } catch {
+  }
+}
+function retireFiles(ctx, piDir, m2, rels) {
+  const sub = {
+    ...structuredClone(m2),
+    files: {},
+    json: {},
+    symlinks: {},
+    dirs: [],
+    pendingNew: void 0,
+    components: void 0
+  };
+  for (const rel of rels) if (m2.files[rel]) sub.files[rel] = structuredClone(m2.files[rel]);
+  const plan = new Plan(ctx, piDir, sub);
+  const steps = plan.build();
+  for (const rel of rels) {
+    if (!(rel in sub.files)) continue;
+    if (rel in plan.remaining.files) m2.files[rel] = plan.remaining.files[rel];
+    else delete m2.files[rel];
+  }
+  return steps;
+}
+function retireSymlinks(ctx, m2, rels) {
+  const steps = [];
+  for (const rel of rels) {
+    const entry2 = m2.symlinks[rel];
+    if (!entry2) continue;
+    const path2 = fromHomeRel(ctx.home, rel);
+    const target = symlinkTarget(ctx.home, entry2.target);
+    if (sameLink(path2, target) || sameLink(path2, entry2.target)) steps.push({ line: `remove ${path2}`, run: () => unlinkSync5(path2) });
+    else steps.push({ line: `left ${path2}: no longer points at ${target}`, run: () => {
+    } });
+    delete m2.symlinks[rel];
+  }
+  return steps;
+}
+function revertOps(ctx, m2, rel, match, dryRun) {
+  const entry2 = m2.json[rel];
+  const mine = entry2?.ops.filter(match) ?? [];
+  if (!entry2 || mine.length === 0) return [];
+  const path2 = fromHomeRel(ctx.home, rel);
+  const lines2 = [];
+  let data;
+  try {
+    data = JSON.parse(readFileSync29(path2, "utf8"));
+    if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not an object");
+  } catch {
+    if (!existsSync32(path2)) {
+      entry2.ops = entry2.ops.filter((o) => !match(o));
+      if (!entry2.ops.length) delete m2.json[rel];
+      return [];
+    }
+    return [`left (cannot read as JSON): ${path2}`];
+  }
+  const left = [];
+  for (const op of [...mine].reverse()) if (!undo(data, op)) left.push(op);
+  for (const op of left) lines2.push(`left (changed by you): ${op.key} in ${path2}`);
+  const done = mine.length - left.length;
+  if (done > 0) lines2.push(`${dryRun ? "would revert" : "revert"} ${done} change(s) made by pi-setup in ${path2}`);
+  if (dryRun) return lines2;
+  if (done > 0) {
+    const tracked = m2.files[rel];
+    const wasTracked = Boolean(tracked) && fileSha(path2) === tracked.sha256;
+    entry2.edited ||= fileSha(path2) !== entry2.sha256After;
+    atomicWrite(path2, `${JSON.stringify(data, null, 2)}
+`, statSync18(path2).mode & 4095);
+    const sha = sha256(readFileSync29(path2));
+    entry2.sha256After = sha;
+    if (wasTracked) tracked.sha256 = sha;
+  }
+  entry2.ops = entry2.ops.filter((o) => !match(o) || left.includes(o));
+  if (!entry2.ops.length) delete m2.json[rel];
+  return lines2;
+}
+async function runUninstall(ctx, options, prompter) {
+  const piDir = join52(ctx.home, ".pi", "agent");
+  const manifest = readManifest(piDir);
+  if (!manifest) {
+    ctx.out(`No pi-setup manifest at ${manifestPath(piDir)}; nothing is tracked (installs older than this version are adopted by running ./install.sh once).`);
+    return 0;
+  }
+  validateManifest(ctx.home, manifest);
+  const plan = new Plan(ctx, piDir, manifest);
+  const steps = plan.build();
+  for (const step of steps) ctx.out(step.line);
+  if (steps.length === 0) ctx.out("Nothing to remove.");
+  if (options.dryRun) {
+    ctx.out("Nothing was removed (--dry-run).");
+    return 0;
+  }
+  if (prompter) {
+    const answer = await prompter.confirm({ message: "Uninstall?", initial: false });
+    if (prompter.isCancel(answer) || answer !== true) {
+      ctx.err("Cancelled; nothing removed.");
+      return 1;
+    }
+  } else if (!options.yes) {
+    throw new SetupError("uninstall changes files; pass --yes to run it without a prompt (or --dry-run to preview)");
+  }
+  for (const step of steps) await step.run();
+  delete plan.remaining.components;
+  finalize(ctx, piDir, manifest, plan.remaining);
+  return 0;
+}
+function finalize(ctx, piDir, old, left) {
+  const empty = Object.keys(left.files).length + Object.keys(left.json).length + Object.keys(left.symlinks).length === 0;
+  if (empty) {
+    if (existsSync32(manifestPath(piDir))) unlinkSync5(manifestPath(piDir));
+  } else {
+    left.dirs = left.dirs.filter((d) => lstatExists(fromHomeRel(ctx.home, d)));
+    saveIfChanged(piDir, old, left, ctx.now());
+  }
+  const cache = join52(piDir, ".pi-setup/update-check.json");
+  if (existsSync32(cache)) unlinkSync5(cache);
+  tidy(piDir);
+  const rest = listBackups(piDir, pinnedBackups(empty ? void 0 : left));
+  for (const rel of [...left.dirs].sort((a2, b) => b.split("/").length - a2.split("/").length || (a2 < b ? 1 : -1))) {
+    rmdirIfEmpty(fromHomeRel(ctx.home, rel));
+  }
+  if (empty && rest.length > 0) ctx.out(`Left in place (may hold your versions): ${backupsDir(piDir)}; remove with: ./install.sh backups prune --keep 0`);
+  else if (!empty) ctx.out(`Some files were left; their record stays in ${manifestPath(piDir)}.`);
+  ctx.out("Uninstalled.");
+}
+var sameLink, Plan;
+var init_uninstall = __esm({
+  "src/uninstall.ts"() {
+    init_fsx();
+    init_backups();
+    init_manifest();
+    init_settings();
+    init_services();
+    init_types();
+    sameLink = (path2, target) => {
+      try {
+        return lstatSync9(path2).isSymbolicLink() && readlinkSync4(path2) === target;
+      } catch {
+        return false;
+      }
+    };
+    Plan = class {
+      steps = [];
+      /** What is left in the manifest once the steps ran. */
+      remaining;
+      backups;
+      ctx;
+      m;
+      constructor(ctx, piDir, m2) {
+        this.ctx = ctx;
+        this.m = m2;
+        this.remaining = structuredClone(m2);
+        this.backups = backupsDir(piDir);
+      }
+      abs(rel) {
+        return fromHomeRel(this.ctx.home, rel);
+      }
+      backupFile(rel) {
+        if (!rel) return void 0;
+        const path2 = join52(this.backups, rel);
+        return existsSync32(path2) ? path2 : void 0;
+      }
+      add(line, run) {
+        this.steps.push({ line, run });
+      }
+      build() {
+        for (const c2 of Object.values(this.m.components ?? {})) {
+          const svc = c2.service;
+          if (svc?.managed) this.add(unloadLine(svc), () => unloadService(this.ctx, svc));
+        }
+        const deleted = /* @__PURE__ */ new Set();
+        for (const [rel, entry2] of Object.entries(this.m.files)) if (this.file(rel, entry2)) deleted.add(rel);
+        for (const [rel, sha] of Object.entries(this.m.pendingNew ?? {})) {
+          const path2 = this.abs(rel);
+          if (fileSha(path2) === sha) this.add(`remove ${path2}`, () => unlinkSync5(path2));
+          delete this.remaining.pendingNew;
+        }
+        for (const [rel, link] of Object.entries(this.m.symlinks)) this.symlink(rel, link.target);
+        for (const [rel, entry2] of Object.entries(this.m.json)) {
+          if (deleted.has(rel)) delete this.remaining.json[rel];
+          else this.json(rel, entry2);
+        }
+        for (const c2 of Object.values(this.m.components ?? {})) {
+          const svc = c2.service;
+          if (svc?.managed && svc.kind === "systemd") this.add("reload systemd (systemctl --user daemon-reload)", () => reloadSystemd(this.ctx, svc));
+        }
+        return this.steps;
+      }
+      /** Returns whether the file ends up removed or restored. */
+      file(rel, entry2) {
+        const path2 = this.abs(rel);
+        this.pending(rel, entry2);
+        if (!lstatExists(path2)) {
+          delete this.remaining.files[rel];
+          return false;
+        }
+        const backup = this.backupFile(entry2.backup);
+        if (fileSha(path2) !== entry2.sha256) {
+          const note2 = backup ? `; your pre-install version: ${backup}` : "";
+          this.add(`left (changed by you): ${path2}${note2}`, () => {
+          });
+          if (!entry2.backup) delete this.remaining.files[rel];
+          return false;
+        }
+        if (entry2.origin === "replaced" && backup) {
+          this.add(`restore ${path2} (from ${backup})`, () => {
+            unlinkSync5(path2);
+            restore(backup, path2);
+          });
+        } else if (entry2.origin === "replaced") {
+          this.add(`left (pre-install backup is missing): ${path2}`, () => {
+          });
+          delete this.remaining.files[rel];
+          return false;
+        } else {
+          this.add(`remove ${path2}`, () => unlinkSync5(path2));
+        }
+        delete this.remaining.files[rel];
+        return true;
+      }
+      pending(rel, entry2) {
+        if (!entry2.pending) return;
+        const path2 = this.abs(entry2.pending.path);
+        const expected = entry2.pending.sha256;
+        if (fileSha(path2) === expected) this.add(`remove ${path2}`, () => unlinkSync5(path2));
+        if (this.remaining.files[rel]) delete this.remaining.files[rel].pending;
+      }
+      symlink(rel, target) {
+        const path2 = this.abs(rel);
+        const targetPath = symlinkTarget(this.ctx.home, target);
+        if (sameLink(path2, targetPath) || sameLink(path2, target)) this.add(`remove ${path2}`, () => unlinkSync5(path2));
+        delete this.remaining.symlinks[rel];
+      }
+      json(rel, entry2) {
+        const path2 = this.abs(rel);
+        if (!lstatExists(path2)) {
+          delete this.remaining.json[rel];
+          return;
+        }
+        const backup = this.backupFile(entry2.backup);
+        if (!entry2.edited && fileSha(path2) === entry2.sha256After && (entry2.created || backup)) {
+          if (entry2.created) this.add(`remove ${path2}`, () => unlinkSync5(path2));
+          else this.add(`restore ${path2} (from ${backup})`, () => {
+            unlinkSync5(path2);
+            restore(backup, path2);
+          });
+          delete this.remaining.json[rel];
+          return;
+        }
+        this.add(`revert ${path2} (${entry2.ops.length} change(s) made by pi-setup)`, () => this.revert(rel, path2, entry2));
+      }
+      revert(rel, path2, entry2) {
+        const left = [];
+        let data;
+        try {
+          data = JSON.parse(readFileSync29(path2, "utf8"));
+          if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not an object");
+        } catch {
+          this.ctx.err(`left (cannot read as JSON): ${path2}`);
+          return;
+        }
+        for (const op of [...entry2.ops].reverse()) {
+          if (!undo(data, op)) left.push(op);
+        }
+        if (entry2.created && Object.keys(data).length === 0 && left.length === 0) {
+          unlinkSync5(path2);
+          delete this.remaining.json[rel];
+          return;
+        }
+        const mode = statSync18(path2).mode & 4095;
+        atomicWrite(path2, `${JSON.stringify(data, null, 2)}
+`, mode);
+        if (left.length === 0) {
+          delete this.remaining.json[rel];
+        } else {
+          this.remaining.json[rel] = { ...entry2, ops: left.reverse(), sha256After: sha256(readFileSync29(path2)) };
+          for (const op of left) this.ctx.err(`left (changed by you): ${op.key} in ${path2}`);
+        }
+      }
+    };
+  }
+});
+
+// src/retire.ts
+import { existsSync as existsSync33, readFileSync as readFileSync30 } from "node:fs";
+import { join as join53 } from "node:path";
+function wasOn(manifest, current, id) {
+  const saved2 = manifest?.components?.[id];
+  return saved2 ? saved2.on : current[id] === true;
+}
+function leftWebPackages(ctx, manifest) {
+  const path2 = join53(ctx.home, PI, "settings.json");
+  if (!existsSync33(path2)) return [];
+  let packages2;
+  try {
+    packages2 = JSON.parse(readFileSync30(path2, "utf8")).packages;
+  } catch {
+    return [];
+  }
+  const added = new Set((manifest.json[`${PI}settings.json`]?.ops ?? []).filter(WEB_PACKAGE_OP).map((o) => o.value));
+  return Array.isArray(packages2) ? WEB_PACKAGES.filter((p) => packages2.includes(p) && !added.has(p)) : [];
+}
+async function retire(ctx, piDir, manifest, off, dryRun) {
+  if (!manifest || off.length === 0) return manifest;
+  const m2 = structuredClone(manifest);
+  const steps = [];
+  const lines2 = [];
+  const files2 = (rels) => {
+    for (const step of retireFiles(ctx, piDir, m2, rels)) steps.push(step);
+  };
+  for (const id of off) {
+    const svc = m2.components?.[id]?.service;
+    if (svc) {
+      if (svc.managed) steps.push({ line: unloadLine(svc), run: () => unloadService(ctx, svc) });
+      files2(svc.files);
+      if (svc.managed && svc.kind === "systemd") steps.push({ line: "reload systemd (systemctl --user daemon-reload)", run: () => reloadSystemd(ctx, svc) });
+    }
+    if (id === "lanes") {
+      files2(Object.keys(m2.files).filter((rel) => rel.startsWith(".local/share/pi-setup/lanes/")));
+      steps.push(...retireSymlinks(ctx, m2, [".local/bin/lanes"]));
+    }
+    if (id === "cratis") files2(Object.keys(m2.files).filter((rel) => rel.startsWith(PI) && isCratisFile(rel.slice(PI.length))));
+    if (id === "web") {
+      lines2.push(...revertOps(ctx, m2, `${PI}settings.json`, WEB_PACKAGE_OP, dryRun));
+      for (const p of leftWebPackages(ctx, m2)) lines2.push(`left ${p} in settings.json (not added by pi-setup)`);
+    }
+    if (id === "codescene") {
+      lines2.push(...revertOps(ctx, m2, `${PI}mcp-adapter.json`, (op) => op.op === "set" && op.key === "mcpServers", dryRun));
+    }
+    if (m2.components?.[id]) m2.components[id] = { on: false };
+  }
+  for (const step of steps) {
+    ctx.out(dryRun ? `would ${step.line}` : step.line);
+    if (!dryRun) await step.run();
+  }
+  for (const line of lines2) (line.startsWith("left") ? ctx.err : ctx.out)(line);
+  if (dryRun) return manifest;
+  saveIfChanged(piDir, manifest, m2, ctx.now());
+  return m2;
+}
+var PI, WEB_PACKAGE_OP;
+var init_retire = __esm({
+  "src/retire.ts"() {
+    init_components();
+    init_manifest();
+    init_uninstall();
+    init_services();
+    PI = ".pi/agent/";
+    WEB_PACKAGE_OP = (op) => op.op === "array-add" && op.key === "packages" && WEB_PACKAGES.includes(op.value);
+  }
+});
+
+// src/finish.ts
+import { existsSync as existsSync34 } from "node:fs";
+import { join as join54 } from "node:path";
+async function applyPlain({ ctx, options, r: r2, applyOptions, manifest, off, editPath }) {
+  const live = await retire(ctx, join54(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
+  const result3 = await apply(ctx, r2.actions, applyOptions, live);
+  if (result3.code === 0) {
+    await syncServices(ctx, r2.records, installedPaths(r2), options.dryRun);
+    configureShellPath(ctx, editPath, options.dryRun || options.plan);
+  }
+  return result3;
+}
+async function applySteps(run, quiet, spin) {
+  const { ctx, options, r: r2, applyOptions, manifest, off, editPath } = run;
+  const live = await retire(quiet, join54(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
+  const result3 = await apply(quiet, r2.actions, { ...applyOptions, spinner: spin }, live);
+  if (result3.code !== 0) return result3;
+  if (Object.values(r2.records).some((c2) => c2.on && c2.service?.managed)) spin.message?.("Setting up schedules");
+  await syncServices(quiet, r2.records, installedPaths(r2), options.dryRun);
+  if (editPath && missingBinDirs(ctx).length) spin.message?.("Adding PATH entries");
+  configureShellPath(quiet, editPath, options.dryRun, true);
+  return result3;
+}
+async function applyGuided(run, p) {
+  const { ctx } = run;
+  const held = { out: [], err: [] };
+  const quiet = { ...ctx, out: (line) => held.out.push(line), err: (line) => held.err.push(line) };
+  const spin = p.spinner();
+  spin.start("Backing up your current files");
+  let result3;
+  try {
+    result3 = await applySteps(run, quiet, spin);
+  } finally {
+    spin.stop(spinnerEnd(result3, run.options.dryRun));
+    held.out.forEach((line) => ctx.out(line));
+    held.err.forEach((line) => ctx.err(line));
+  }
+  return result3;
+}
+function guidedNotes(p, e) {
+  const pathEdited = e.editPath && e.pathMissing;
+  const compact = compactChecks(installChecks(e.ctx, e.detection), { home: e.ctx.home, skipNpm: e.options.skipNpm, pathEdited });
+  if (compact.lines.length) p.note(compact.lines.join("\n"), "Still to finish");
+  const logins2 = [.../* @__PURE__ */ new Set([...missingLogins(e.profile, e.ready), ...compact.logins])];
+  p.note(whatsNextLines({ pathMissing: e.pathMissing, pathEdited, logins: logins2, lanesOffered: e.offerLanes }).join("\n"), "What's next");
+  return compact.count;
+}
+function lanesOffered(r2, options, ok) {
+  return ok && !options.dryRun && !options.plan && r2.components.lanes.on && !existsSync34(join54(r2.settings.reposRoot, ".lanes/lanes.json"));
+}
+async function offerLanesSetup(ctx, options, p) {
+  const answer = await p.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
+  if (p.isCancel(answer) || answer !== true) return;
+  try {
+    if (await runLanesFlow(ctx, { ...options, dir: "" }, p, true) !== 0) ctx.err("Lanes setup was not completed; run ./install.sh lanes to continue.");
+  } catch (error) {
+    ctx.err(`Lanes setup was not completed: ${error.message}`);
+  }
+}
+var installedPaths, spinnerEnd;
+var init_finish = __esm({
+  "src/finish.ts"() {
+    init_apply();
+    init_doctor();
+    init_lanes_flow();
+    init_profiles();
+    init_report();
+    init_retire();
+    init_services();
+    init_shell_path();
+    installedPaths = (r2) => new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path));
+    spinnerEnd = (result3, dryRun) => result3?.code !== 0 ? "Install did not finish" : dryRun ? "Dry run finished" : "Installed";
   }
 });
 
@@ -5387,270 +7084,24 @@ var init_args = __esm({
   }
 });
 
-// src/detect.ts
-import { existsSync as existsSync25 } from "node:fs";
-import { join as join43 } from "node:path";
-function parseAuthStatus(text4) {
-  const match = /Logged in to (\S+) account (\S+)/.exec(text4);
-  return match ? { host: match[1], login: match[2] } : {};
-}
-function parseProviderCheck(stdout2) {
-  try {
-    const data = JSON.parse(stdout2);
-    if (data.status === "ready" || data.status === "not_ready") {
-      return {
-        status: data.status,
-        authType: typeof data.authType === "string" ? data.authType : void 0,
-        reason: typeof data.reason === "string" ? data.reason : void 0
-      };
-    }
-  } catch {
-  }
-  return { status: "unknown" };
-}
-function parseModelTable(stdout2) {
-  const lines2 = stdout2.split("\n");
-  const header2 = lines2.findIndex((l2) => /^\s*provider\s+model\b/i.test(l2));
-  if (header2 < 0) return null;
-  const ids = /* @__PURE__ */ new Set();
-  for (const line of lines2.slice(header2 + 1)) {
-    const [provider, model] = line.trim().split(/\s+/);
-    if (provider && model) ids.add(`${provider}/${model}`);
-  }
-  return ids.size ? ids : null;
-}
-async function probeTool(ctx, name) {
-  const path2 = ctx.which(name);
-  if (!path2) return { name };
-  const result3 = await ctx.run(name, ["--version"], { timeoutMs: name === "pi" ? PI_MS : SHORT_MS });
-  const first = result3.stdout.trim().split("\n")[0] || result3.stderr.trim().split("\n")[0];
-  return { name, path: path2, version: result3.timedOut || !first ? void 0 : first };
-}
-async function lines(ctx, args) {
-  const result3 = await ctx.run("gh", args, { timeoutMs: SHORT_MS });
-  if (result3.code !== 0) return void 0;
-  return result3.stdout.split("\n").map((l2) => l2.trim()).filter(Boolean);
-}
-async function probeGithub(ctx, request2) {
-  const state2 = { orgs: [] };
-  if (!ctx.which("gh") || !(request2.needLogin || request2.wantGithubDetails || request2.needScan)) return state2;
-  const status2 = request2.wantGithubDetails ? ctx.run("gh", ["auth", "status"], { timeoutMs: SHORT_MS }) : Promise.resolve(void 0);
-  const user = request2.needLogin || request2.wantGithubDetails ? lines(ctx, ["api", "user", "--jq", ".login"]) : void 0;
-  const orgs = request2.needScan && request2.needLogin || request2.wantGithubDetails ? lines(ctx, ["api", "user/orgs", "--jq", ".[].login"]) : void 0;
-  const parsed = parseAuthStatus(`${(await status2)?.stdout ?? ""}
-${(await status2)?.stderr ?? ""}`);
-  state2.host = parsed.host;
-  state2.login = (await user)?.[0] ?? parsed.login;
-  state2.orgs = await orgs ?? [];
-  return state2;
-}
-async function probeProvider(ctx, id) {
-  const result3 = await ctx.run("pi", ["auth", "check", "--provider", id, "--no-refresh", "--json"], { timeoutMs: PI_MS });
-  return result3.timedOut ? { status: "unknown" } : parseProviderCheck(result3.stdout);
-}
-async function listModels(ctx) {
-  const result3 = await ctx.run("pi", ["--offline", "--list-models"], { timeoutMs: PI_MS });
-  const text4 = `${result3.stdout}
-${result3.stderr}`;
-  const catalog = result3.timedOut ? null : /No models available/i.test(text4) ? /* @__PURE__ */ new Set() : parseModelTable(result3.stdout);
-  return { catalog, code: result3.code, timedOut: result3.timedOut, stderr: result3.stderr.split("\n").slice(0, 3).join("\n") };
-}
-async function probeCatalog(ctx) {
-  return (await listModels(ctx)).catalog;
-}
-async function detect(ctx, request2) {
-  const piPresent = Boolean(ctx.which("pi"));
-  const providers2 = {};
-  const probePi = request2.probePi && piPresent;
-  const [tools, github, states, catalog] = await Promise.all([
-    Promise.all(TOOLS.map((t2) => t2 === "pi" && !request2.probePi ? Promise.resolve({ name: t2, path: ctx.which(t2) }) : probeTool(ctx, t2))),
-    probeGithub(ctx, request2),
-    Promise.all(PROVIDER_IDS.map((id) => probePi ? probeProvider(ctx, id) : Promise.resolve({ status: "unknown" }))),
-    probePi ? probeCatalog(ctx) : Promise.resolve(null)
-  ]);
-  PROVIDER_IDS.forEach((id, i2) => {
-    providers2[id] = states[i2];
-  });
-  const warnings = [];
-  if (probePi && catalog?.size === 0) warnings.push("pi reports no models yet; pinned models were not checked.");
-  const candidates = request2.needScan ? scanRoots(await candidateRoots(ctx), [request2.login ?? github.login ?? "", ...github.orgs], {
-    now: () => ctx.now().getTime()
-  }) : [];
-  return {
-    os: ctx.platform,
-    tools: [...tools, { name: "node", path: process.execPath, version: ctx.nodeVersion }],
-    github,
-    providers: providers2,
-    hints: {
-      codexAuthFile: existsSync25(join43(ctx.home, ".codex", "auth.json")),
-      claudeDir: existsSync25(join43(ctx.home, ".claude"))
-    },
-    catalog,
-    candidates,
-    warnings
-  };
-}
-function readyProviders(detection) {
-  return new Set(Object.entries(detection.providers).filter(([, s]) => s.status === "ready").map(([id]) => id));
-}
-function toolPath(detection, name) {
-  return detection.tools.find((t2) => t2.name === name)?.path;
-}
-function installHint(platform, tool) {
-  if (tool === "pi") return "npm i -g @earendil-works/pi-coding-agent";
-  const brewName = tool === "python3" ? "python" : tool;
-  return platform === "darwin" ? `brew install ${brewName}` : `apt install ${tool === "npm" ? "npm" : tool}`;
-}
-var TOOLS, SHORT_MS, PI_MS;
-var init_detect = __esm({
-  "src/detect.ts"() {
-    init_repos_scan();
-    init_types();
-    TOOLS = ["pi", "python3", "jq", "git", "gh", "docker", "dotnet", "rsync", "npm"];
-    SHORT_MS = 3e3;
-    PI_MS = 8e3;
-  }
-});
-
-// src/profiles.ts
-import { existsSync as existsSync26, readdirSync as readdirSync15, readFileSync as readFileSync24 } from "node:fs";
-import { join as join44 } from "node:path";
-function profilesDir(repoDir2) {
-  return join44(repoDir2, "agent", "profiles");
-}
-function profileNames(repoDir2) {
-  const dir = profilesDir(repoDir2);
-  if (!existsSync26(dir)) return [];
-  return readdirSync15(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
-}
-function stringList(value) {
-  return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
-}
-function loadProfiles(repoDir2) {
-  const metas = [];
-  for (const name of profileNames(repoDir2)) {
-    const file = join44(profilesDir(repoDir2), name, "profile.json");
-    if (!existsSync26(file)) continue;
-    const data = JSON.parse(readFileSync24(file, "utf8"));
-    metas.push({
-      name,
-      summary: typeof data.summary === "string" ? data.summary : "",
-      requires: stringList(data.requires),
-      uses: stringList(data.uses),
-      rank: typeof data.rank === "number" ? data.rank : 0
-    });
-  }
-  return metas;
-}
-function chooseProfile(ready3, profiles) {
-  const fit = profiles.filter((p) => p.requires.every((r2) => ready3.has(r2))).sort((a2, b) => b.rank - a2.rank)[0];
-  const name = fit?.name ?? FALLBACK_PROFILE;
-  return { name, reason: reasonFor(ready3, name), provisional: !fit, source: "chooser" };
-}
-function reasonFor(ready3, name) {
-  const claude = ready3.has("anthropic");
-  const gpt = ready3.has("openai-codex");
-  const kimi = ready3.has("kimi-coding");
-  if (claude && gpt && kimi) return "you have Claude, ChatGPT and Kimi: each role goes where it is strongest";
-  if (claude && gpt) return "you have Claude and ChatGPT; Kimi roles (ops, scout) fall back to GPT via provider-fallback";
-  if (gpt && !claude) return `only ChatGPT is logged in: ${name} keeps every role on GPT`;
-  if (claude) return `only Claude is logged in: ${name} keeps every role on Claude`;
-  return "log in with /login in pi, then rerun ./install.sh --profile auto";
-}
-function kimiNote(profile3, ready3) {
-  if (!profile3?.uses.includes("kimi-coding") || ready3.has("kimi-coding")) return void 0;
-  return "Kimi is not logged in: the Kimi roles fall back to GPT.";
-}
-function missingLogins(profile3, ready3) {
-  return (profile3?.requires ?? []).filter((r2) => !ready3.has(r2)).map((r2) => PROVIDER_LABELS[r2] ?? r2);
-}
-function pinnedModels(profileDir) {
-  const pins = /* @__PURE__ */ new Set();
-  for (const file of listFiles(join44(profileDir, "agents")).filter((f) => f.endsWith(".md"))) {
-    const text4 = readFileSync24(join44(profileDir, "agents", file), "utf8");
-    const match = /^model:\s*(\S+)/m.exec(text4);
-    if (match) pins.add(match[1]);
-  }
-  return [...pins].sort();
-}
-function pinWarnings(pins, ready3, catalog) {
-  if (!catalog || catalog.size === 0) return [];
-  return pins.filter((pin) => ready3.has(pin.split("/")[0]) && !catalog.has(pin)).map((pin) => `Pinned model ${pin} is not in this pi's model catalog.`);
-}
-function overlayFor(repoDir2, name, settings2) {
-  const base = join44(profilesDir(repoDir2), name);
-  if (!existsSync26(base)) throw new SetupError(`unknown profile '${name}'. available: ${profileNames(repoDir2).join(", ")}`);
-  const sources = /* @__PURE__ */ new Map();
-  for (const [sub, ext] of [["agents", ".md"], ["workflows", ".js"]]) {
-    for (const file of listFiles(join44(base, sub))) {
-      if (!file.includes("/") && file.endsWith(ext)) sources.set(`${sub}/${file}`, join44(base, sub, file));
-    }
-  }
-  const routingPath = join44(base, "routing.md");
-  return { sources, routing: existsSync26(routingPath) ? render(readFileSync24(routingPath), settings2) : void 0 };
-}
-function markerLines(text4) {
-  const start2 = text4.indexOf(START);
-  const end = text4.indexOf(END);
-  if (start2 < 0 || end < 0 || end < start2) return void 0;
-  const bodyStart = text4.indexOf("\n", start2) + 1;
-  if (bodyStart === 0 || bodyStart > end) return void 0;
-  const nl = text4.indexOf("\n", end);
-  return { start: start2, bodyStart, end, endLineEnd: nl < 0 ? text4.length : nl };
-}
-function hasRoutingMarkers(content) {
-  return markerLines(content.toString("utf8")) !== void 0;
-}
-function spliceRouting(agentsMd2, routing, live) {
-  const text4 = agentsMd2.toString("utf8");
-  const m2 = markerLines(text4);
-  if (!m2) throw new SetupError("routing markers not found in AGENTS.md");
-  const l2 = live ? markerLines(live.toString("utf8")) : void 0;
-  const liveText = live?.toString("utf8") ?? "";
-  const startLine = l2 ? liveText.slice(l2.start, l2.bodyStart) : text4.slice(m2.start, m2.bodyStart);
-  const endLine = l2 ? liveText.slice(l2.end, l2.endLineEnd) : text4.slice(m2.end, m2.endLineEnd);
-  return Buffer.from(text4.slice(0, m2.start) + startLine + routing.toString("utf8") + endLine + text4.slice(m2.endLineEnd), "utf8");
-}
-function profileOption(meta, ready3, recommended, provisional = false) {
-  const optional = meta.uses.filter((id) => !meta.requires.includes(id));
-  const needs = `Needs: ${meta.requires.map(labelOf).join(", ")}${optional.length ? `; optional: ${optional.map(labelOf).join(", ")}` : ""}`;
-  const label = `${meta.name}${recommended ? " (recommended)" : ""} \xB7 ${needs}`;
-  const missing = meta.requires.filter((id) => !ready3.has(id));
-  if (missing.length === 0) return { label, hint: meta.summary, disabled: false };
-  if (provisional) return { label, hint: "installs now; log in later and run ./install.sh --profile auto", disabled: false };
-  return { label, hint: `needs ${missing.map(labelOf).join(" and ")} login`, disabled: true };
-}
-var START, END, FALLBACK_PROFILE, labelOf;
-var init_profiles = __esm({
-  "src/profiles.ts"() {
-    init_settings();
-    init_fsx();
-    init_types();
-    START = "<!-- pi-profile:routing:start";
-    END = "<!-- pi-profile:routing:end -->";
-    FALLBACK_PROFILE = "balanced";
-    labelOf = (id) => PROVIDER_LABELS[id] ?? id;
-  }
-});
-
 // src/plan.ts
-import { existsSync as existsSync27, lstatSync as lstatSync7, readdirSync as readdirSync16, readFileSync as readFileSync25, readlinkSync as readlinkSync2, statSync as statSync16 } from "node:fs";
-import { join as join45 } from "node:path";
+import { existsSync as existsSync35, lstatSync as lstatSync10, readdirSync as readdirSync18, readFileSync as readFileSync31, readlinkSync as readlinkSync5, statSync as statSync19 } from "node:fs";
+import { join as join55 } from "node:path";
 function fromSource(src, settings2) {
-  const raw = readFileSync25(src);
-  const st = statSync16(src);
+  const raw = readFileSync31(src);
+  const st = statSync19(src);
   const mode = st.mode & 4095;
   return hasTokens(raw) ? { content: src.endsWith("/pi-phase/config.json") ? Buffer.from(raw.toString("utf8").split("{{REPOS_ROOT}}").join(JSON.stringify(settings2.reposRoot).slice(1, -1))) : render(raw, settings2), mode } : { content: raw, mode, mtimeMs: st.mtimeMs };
 }
 function sameBytes(dest, content) {
-  return existsSync27(dest) && statSync16(dest).isFile() && readFileSync25(dest).equals(content);
+  return existsSync35(dest) && statSync19(dest).isFile() && readFileSync31(dest).equals(content);
 }
 function put(actions, dest, desired) {
   if (sameBytes(dest, desired.content)) {
     actions.push({ op: "adopt", path: dest });
     return;
   }
-  actions.push({ op: "install", path: dest, existed: existsSync27(dest), ...desired });
+  actions.push({ op: "install", path: dest, existed: existsSync35(dest), ...desired });
 }
 function putSource(actions, src, dest, settings2) {
   put(actions, dest, fromSource(src, settings2));
@@ -5661,17 +7112,17 @@ function putTree(actions, srcDir, destDir, settings2, overlay, prefix = "", filt
   for (const rel of [...files2].sort()) {
     const full = `${treeRel}${rel}`;
     if (filter.skip(full)) continue;
-    const src = overlay?.get(`${prefix}${rel}`) ?? join45(srcDir, rel);
+    const src = overlay?.get(`${prefix}${rel}`) ?? join55(srcDir, rel);
     const desired = fromSource(src, settings2);
     const content = filter.transform(full, desired.content);
-    put(actions, join45(destDir, rel), content === desired.content ? desired : { content, mode: desired.mode });
+    put(actions, join55(destDir, rel), content === desired.content ? desired : { content, mode: desired.mode });
   }
 }
 function userJsonAction(actions, piDir, settings2) {
-  const path2 = join45(piDir, "user.json");
+  const path2 = join55(piDir, "user.json");
   const existing = readSettings(path2);
   const merged = mergeUserJson(existing, settings2);
-  if (existsSync27(path2) && deepEqual(existing, merged)) return;
+  if (existsSync35(path2) && deepEqual(existing, merged)) return;
   const jsonOps = [];
   for (const key of ["githubUser", "reposRoot"]) {
     if (key in existing && deepEqual(existing[key], merged[key])) continue;
@@ -5680,7 +7131,7 @@ function userJsonAction(actions, piDir, settings2) {
   actions.push({
     op: "install",
     path: path2,
-    existed: existsSync27(path2),
+    existed: existsSync35(path2),
     mode: 420,
     merge: "user-json",
     jsonOps,
@@ -5689,7 +7140,7 @@ function userJsonAction(actions, piDir, settings2) {
   });
 }
 function agentsMd(input, live) {
-  const base = fromSource(join45(input.repoDir, "agent", "AGENTS.md"), input.settings);
+  const base = fromSource(join55(input.repoDir, "agent", "AGENTS.md"), input.settings);
   const off = ["cratis", "codescene"].filter((id) => input.components?.[id] === false);
   if (off.length) {
     const stripped = stripSections(base.content, off);
@@ -5697,14 +7148,14 @@ function agentsMd(input, live) {
     delete base.mtimeMs;
     input.notes?.push(...stripped.warnings);
   }
-  const existing = existsSync27(live) && statSync16(live).isFile() ? readFileSync25(live) : void 0;
+  const existing = existsSync35(live) && statSync19(live).isFile() ? readFileSync31(live) : void 0;
   const noMarkers = existing !== void 0 && !hasRoutingMarkers(existing);
   if (!input.overlay.routing) return { ...base, noMarkers };
   return { content: spliceRouting(base.content, input.overlay.routing, noMarkers ? void 0 : existing), mode: base.mode, noMarkers };
 }
 function registerJson(actions, path2, edit) {
   const pending2 = actions.find((a2) => a2.op === "install" && a2.path === path2);
-  const content = pending2 && pending2.op === "install" ? pending2.content : existsSync27(path2) ? readFileSync25(path2) : void 0;
+  const content = pending2 && pending2.op === "install" ? pending2.content : existsSync35(path2) ? readFileSync31(path2) : void 0;
   if (!content) return;
   let data;
   try {
@@ -5715,7 +7166,7 @@ function registerJson(actions, path2, edit) {
   const before = structuredClone(data);
   const jsonOps = edit(data, Boolean(pending2));
   if (jsonOps.length === 0 && deepEqual(before, data)) return;
-  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync16(path2).mode & 4095;
+  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync19(path2).mode & 4095;
   const next = Buffer.from(`${JSON.stringify(data, null, 2)}
 `);
   if (pending2 && pending2.op === "install") {
@@ -5761,11 +7212,11 @@ function mcpEdit(codescene, activate, which) {
   };
 }
 function linkIfFree(actions, notes, path2, target, home) {
-  if (!lstatExists(path2)) {
+  if (!lstatExists2(path2)) {
     actions.push({ op: "symlink", path: path2, target });
     return;
   }
-  const link = lstatSync7(path2).isSymbolicLink() ? readlinkSync2(path2) : void 0;
+  const link = lstatSync10(path2).isSymbolicLink() ? readlinkSync5(path2) : void 0;
   if (link === target) return;
   const shown = (p) => p.startsWith(`${home}/`) ? `~/${p.slice(home.length + 1)}` : p;
   notes?.push(`left ${shown(path2)}: ${link === void 0 ? "a file" : `a link to ${shown(link)}`}; pi-setup does not replace it`);
@@ -5779,51 +7230,51 @@ function buildPlan(input) {
     skip: cratis ? () => false : isCratisFile,
     transform: (rel, content) => dropped.length && /(^|\/)agents\/[^/]+\.md$/.test(rel) ? dropExtensions(content, dropped) : content
   };
-  const agent = join45(repoDir2, "agent");
-  const piDir = join45(home, ".pi", "agent");
+  const agent = join55(repoDir2, "agent");
+  const piDir = join55(home, ".pi", "agent");
   const actions = [];
   userJsonAction(actions, piDir, settings2);
   for (const tree of TREES) {
     const useOverlay = tree === "agents" || tree === "workflows";
-    putTree(actions, join45(agent, tree), join45(piDir, tree), settings2, useOverlay ? overlay.sources : void 0, useOverlay ? `${tree}/` : "", filter, `${tree}/`);
+    putTree(actions, join55(agent, tree), join55(piDir, tree), settings2, useOverlay ? overlay.sources : void 0, useOverlay ? `${tree}/` : "", filter, `${tree}/`);
   }
-  putTree(actions, join45(agent, "local-packages/pi-questions"), join45(piDir, "local-packages/pi-questions"), settings2);
-  actions.push({ op: "chmod-x", path: join45(piDir, "local-packages/pi-questions/dist/cli.js") });
-  const agentsPath = join45(piDir, "AGENTS.md");
+  putTree(actions, join55(agent, "local-packages/pi-questions"), join55(piDir, "local-packages/pi-questions"), settings2);
+  actions.push({ op: "chmod-x", path: join55(piDir, "local-packages/pi-questions/dist/cli.js") });
+  const agentsPath = join55(piDir, "AGENTS.md");
   const { noMarkers, ...agentsDesired } = agentsMd(input, agentsPath);
   put(actions, agentsPath, agentsDesired);
   const last = actions[actions.length - 1];
   if (noMarkers && last.op === "install") last.noMarkers = true;
-  putSource(actions, join45(agent, "AGENTS.subagent.md"), join45(piDir, "AGENTS.subagent.md"), settings2);
+  putSource(actions, join55(agent, "AGENTS.subagent.md"), join55(piDir, "AGENTS.subagent.md"), settings2);
   for (const name of ONLY_IF_ABSENT) {
-    if (!existsSync27(join45(piDir, name))) putSource(actions, join45(agent, name), join45(piDir, name), settings2);
+    if (!existsSync35(join55(piDir, name))) putSource(actions, join55(agent, name), join55(piDir, name), settings2);
   }
-  registerJson(actions, join45(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web")), input.drop ?? [], piDir));
-  registerJson(actions, join45(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => void 0)));
+  registerJson(actions, join55(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web")), input.drop ?? [], piDir));
+  registerJson(actions, join55(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => void 0)));
   const absent = [
     ["docker-guardian/pinned.example.txt", "docker-guardian/pinned.txt"],
     ["dev-doctor.example.json", "dev-doctor.json"],
     ["npm-package.json", "npm/package.json"]
   ];
   for (const [from, to] of absent) {
-    if (!existsSync27(join45(piDir, to))) putSource(actions, join45(agent, from), join45(piDir, to), settings2);
+    if (!existsSync35(join55(piDir, to))) putSource(actions, join55(agent, from), join55(piDir, to), settings2);
   }
   for (const skill of listSkills(repoDir2)) {
-    putTree(actions, join45(repoDir2, "skills", skill), join45(home, ".agents", "skills", skill), settings2);
+    putTree(actions, join55(repoDir2, "skills", skill), join55(home, ".agents", "skills", skill), settings2);
   }
-  const link = join45(piDir, "skills", "ai-work-lifecycle");
-  if (!lstatExists(link)) actions.push({ op: "symlink", path: link, target: join45(home, ".agents", "skills", "ai-work-lifecycle") });
-  putTree(actions, join45(repoDir2, "tools/ai-work-lifecycle"), join45(home, ".local/share/ai-work-lifecycle"), settings2);
-  const bin = join45(repoDir2, "tools/bin/ai-work-lifecycle");
-  putSource(actions, bin, join45(home, ".local/bin/ai-work-lifecycle"), settings2);
+  const link = join55(piDir, "skills", "ai-work-lifecycle");
+  if (!lstatExists2(link)) actions.push({ op: "symlink", path: link, target: join55(home, ".agents", "skills", "ai-work-lifecycle") });
+  putTree(actions, join55(repoDir2, "tools/ai-work-lifecycle"), join55(home, ".local/share/ai-work-lifecycle"), settings2);
+  const bin = join55(repoDir2, "tools/bin/ai-work-lifecycle");
+  putSource(actions, bin, join55(home, ".local/bin/ai-work-lifecycle"), settings2);
   if (input.components?.lanes === true) {
-    const lanesDir = join45(home, ".local/share/pi-setup/lanes");
-    const preapproveMcp = preapprovalDefault(join45(lanesDir, "templates")) || input.preapproveMcp === true;
-    put(actions, join45(lanesDir, "defaults.json"), { content: Buffer.from(`${JSON.stringify({ launch: { preapproveMcp } }, null, 2)}
+    const lanesDir = join55(home, ".local/share/pi-setup/lanes");
+    const preapproveMcp = preapprovalDefault(join55(lanesDir, "templates")) || input.preapproveMcp === true;
+    put(actions, join55(lanesDir, "defaults.json"), { content: Buffer.from(`${JSON.stringify({ launch: { preapproveMcp } }, null, 2)}
 `), mode: 420 });
-    putSource(actions, join45(repoDir2, "installer/dist/lanes.mjs"), join45(lanesDir, "lanes.mjs"), settings2);
-    putTree(actions, join45(repoDir2, "installer/lanes/templates"), join45(lanesDir, "templates"), settings2);
-    linkIfFree(actions, input.notes, join45(home, ".local/bin/lanes"), join45(lanesDir, "lanes.mjs"), home);
+    putSource(actions, join55(repoDir2, "installer/dist/lanes.mjs"), join55(lanesDir, "lanes.mjs"), settings2);
+    putTree(actions, join55(repoDir2, "installer/lanes/templates"), join55(lanesDir, "templates"), settings2);
+    linkIfFree(actions, input.notes, join55(home, ".local/bin/lanes"), join55(lanesDir, "lanes.mjs"), home);
   }
   for (const { path: path2, target } of packageBinLinks(piDir, home)) {
     linkIfFree(actions, input.notes, path2, target, home);
@@ -5831,13 +7282,13 @@ function buildPlan(input) {
   return actions;
 }
 function listSkills(repoDir2) {
-  const dir = join45(repoDir2, "skills");
-  if (!existsSync27(dir)) return [];
-  return readdirSync16(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  const dir = join55(repoDir2, "skills");
+  if (!existsSync35(dir)) return [];
+  return readdirSync18(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 }
-function lstatExists(path2) {
+function lstatExists2(path2) {
   try {
-    lstatSync7(path2);
+    lstatSync10(path2);
     return true;
   } catch {
     return false;
@@ -5861,17 +7312,17 @@ var init_plan = __esm({
 });
 
 // src/reconcile.ts
-import { existsSync as existsSync28, mkdtempSync, readFileSync as readFileSync26, rmSync as rmSync2, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync36, mkdtempSync, readFileSync as readFileSync32, rmSync as rmSync2, writeFileSync as writeFileSync11 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join46 } from "node:path";
+import { join as join56 } from "node:path";
 function newVersionNeedsWrite(newPath, content) {
-  return !(existsSync28(newPath) && readFileSync26(newPath).equals(content));
+  return !(existsSync36(newPath) && readFileSync32(newPath).equals(content));
 }
 function reconcile(actions, manifest, home) {
   const conflicts2 = [];
   const out = actions.map((action) => {
     if (action.op !== "install" || action.merge) return action;
-    if (!action.existed || !existsSync28(action.path)) return { ...action, decision: "new" };
+    if (!action.existed || !existsSync36(action.path)) return { ...action, decision: "new" };
     const entry2 = manifest?.files[homeRel(home, action.path)];
     if (!action.noMarkers) {
       if (!entry2) return { ...action, decision: "replace" };
@@ -5897,10 +7348,10 @@ function applyTakes(actions, takes) {
   return actions.map((a2) => a2.op === "keep" && takes.has(a2.path) ? { op: "install", path: a2.path, content: a2.content, mode: a2.mode, mtimeMs: a2.mtimeMs, existed: true, decision: "take" } : a2);
 }
 async function diffText(ctx, conflict) {
-  const dir = mkdtempSync(join46(tmpdir(), "pisetup-diff."));
+  const dir = mkdtempSync(join56(tmpdir(), "pisetup-diff."));
   try {
-    const tmp = join46(dir, "new");
-    writeFileSync10(tmp, conflict.content);
+    const tmp = join56(dir, "new");
+    writeFileSync11(tmp, conflict.content);
     const result3 = await ctx.run("diff", ["-u", conflict.path, tmp], { timeoutMs: 1e4 });
     if (result3.code === null || result3.code > 1) return `(diff is not available; the new version is in ${conflict.newPath})`;
     const lines2 = result3.stdout.split("\n");
@@ -5916,1382 +7367,6 @@ var init_reconcile = __esm({
   "src/reconcile.ts"() {
     init_manifest();
     DIFF_LINES = 200;
-  }
-});
-
-// src/services.ts
-import { existsSync as existsSync29, mkdirSync as mkdirSync14, readFileSync as readFileSync27, statSync as statSync17 } from "node:fs";
-import { join as join47, resolve as resolve12 } from "node:path";
-import { userInfo } from "node:os";
-function serviceUser(env) {
-  return (env.USER ?? "").replace(/[^A-Za-z0-9-]/g, "") || "pi-setup";
-}
-function systemdUnits(home) {
-  const dir = join47(home, ".config/systemd/user");
-  return [
-    {
-      path: join47(dir, "pi-cleanup.service"),
-      content: Buffer.from(
-        "[Unit]\nDescription=pi-setup scheduled cleanup\n\n[Service]\nType=oneshot\nEnvironment=PYTHONDONTWRITEBYTECODE=1\nExecStart=%h/.pi/agent/bin/pi-cleanup --scheduled\n"
-      )
-    },
-    {
-      path: join47(dir, TIMER),
-      content: Buffer.from("[Unit]\nDescription=pi-setup scheduled cleanup (daily)\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
-    }
-  ];
-}
-function launchdUnit(ctx, id) {
-  const name = LAUNCHD_NAME[id];
-  const src = join47(ctx.repoDir, "agent", "launchd", `com.example.${name}.plist`);
-  if (!name || !existsSync29(src)) return void 0;
-  const user = serviceUser(ctx.env);
-  const text4 = readFileSync27(src, "utf8").split("__HOME__").join(xml(ctx.home)).split("com.example.").join(`com.${user}.`);
-  return { unit: { path: join47(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text4) }, label: `com.${user}.${name}` };
-}
-function expectedUnit(ctx, id) {
-  if (ctx.platform === "darwin") {
-    const name = LAUNCHD_NAME[id];
-    const label = `com.${serviceUser(ctx.env)}.${name}`;
-    return name ? { kind: "launchd", label, file: join47(ctx.home, "Library/LaunchAgents", `${label}.plist`) } : void 0;
-  }
-  return id === "cleanup" ? { kind: "systemd", label: TIMER, file: join47(ctx.home, ".config/systemd/user", TIMER) } : void 0;
-}
-function planServices(ctx, manifest, on) {
-  const out = { actions: [], records: {}, notes: [] };
-  for (const def of COMPONENTS.filter((c2) => c2.service)) {
-    if (!on[def.id] || available(def.id, ctx) !== true) {
-      out.records[def.id] = { on: false };
-      continue;
-    }
-    let kind = "launchd";
-    let label = "";
-    let units = [];
-    if (ctx.platform === "darwin") {
-      const l2 = launchdUnit(ctx, def.id);
-      if (l2) {
-        units = [l2.unit];
-        label = l2.label;
-      }
-    } else {
-      kind = "systemd";
-      label = TIMER;
-      units = systemdUnits(ctx.home);
-    }
-    if (!units.length) {
-      out.records[def.id] = { on: false };
-      continue;
-    }
-    let managed = true;
-    const actions = [];
-    for (const u3 of units) {
-      const rel = homeRel(ctx.home, u3.path);
-      const there = existsSync29(u3.path) && statSync17(u3.path).isFile();
-      if (!there) actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: false, decision: "new" });
-      else if (readFileSync27(u3.path).equals(u3.content)) actions.push({ op: "adopt", path: u3.path });
-      else if (manifest?.files[rel] && fileSha(u3.path) === manifest.files[rel].sha256) {
-        actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: true, decision: "update" });
-      } else {
-        managed = false;
-        out.notes.push(`left your ${u3.path.replace(`${ctx.home}/`, "~/")}; pi-setup does not load or remove it`);
-      }
-    }
-    if (managed) out.actions.push(...actions);
-    out.records[def.id] = { on: true, service: { kind, label, files: units.map((u3) => homeRel(ctx.home, u3.path)), managed } };
-  }
-  return out;
-}
-function launchdSkipReason(ctx) {
-  if (ctx.noLaunchd) return "--no-launchd was given";
-  if (resolve12(ctx.home) !== resolve12(ctx.userHome ?? userInfo().homedir)) return "HOME is not the real user home";
-  return void 0;
-}
-function skipLaunchd(ctx) {
-  const reason = launchdSkipReason(ctx);
-  if (reason) ctx.out(`skipping launchd load/unload: ${reason}`);
-  return Boolean(reason);
-}
-async function sh(ctx, cmd, args) {
-  try {
-    const r2 = await ctx.run(cmd, args, { timeoutMs: TIMEOUT });
-    return { ok: r2.code === 0 && !r2.timedOut, text: `${r2.stdout}${r2.stderr}`.trim() };
-  } catch (error) {
-    return { ok: false, text: error.message };
-  }
-}
-async function syncServices(ctx, components, changed, dryRun) {
-  for (const [id, c2] of Object.entries(components)) {
-    const svc = c2.service;
-    if (!c2.on || !svc?.managed) continue;
-    const plist = join47(ctx.home, svc.files[0]);
-    const domain = `gui/${uid()}`;
-    if (svc.kind === "launchd") {
-      if (skipLaunchd(ctx)) continue;
-      if (dryRun) {
-        ctx.out(`would load ${svc.label} (launchctl bootstrap ${domain} ${plist})`);
-        continue;
-      }
-      mkdirSync14(join47(ctx.home, ".pi/agent/logs"), { recursive: true });
-      const loaded = (await sh(ctx, "launchctl", ["print", `${domain}/${svc.label}`])).ok;
-      if (loaded && !svc.files.some((f) => changed.has(join47(ctx.home, f)))) continue;
-      if (loaded) await sh(ctx, "launchctl", ["bootout", `${domain}/${svc.label}`]);
-      const r2 = await sh(ctx, "launchctl", ["bootstrap", domain, plist]);
-      if (!r2.ok) ctx.err(`warning: could not load ${id}: launchctl bootstrap ${domain} ${plist}`);
-      else ctx.out(`loaded ${svc.label}`);
-    } else {
-      if (dryRun) {
-        ctx.out(`would enable ${svc.label} (systemctl --user enable --now ${svc.label})`);
-        continue;
-      }
-      if (!ctx.which("systemctl")) {
-        ctx.out(`note: systemctl not found; start ${id} later with: systemctl --user enable --now ${svc.label}`);
-        continue;
-      }
-      await sh(ctx, "systemctl", ["--user", "daemon-reload"]);
-      const r2 = await sh(ctx, "systemctl", ["--user", "enable", "--now", svc.label]);
-      if (!r2.ok) ctx.err(`warning: could not enable ${id}: systemctl --user enable --now ${svc.label}`);
-      else ctx.out(`enabled ${svc.label}`);
-    }
-  }
-}
-function unloadLine(svc) {
-  return svc.kind === "launchd" ? `boot out ${svc.label} (launchctl bootout gui/${uid()}/${svc.label})` : `disable ${svc.label} (systemctl --user disable --now ${svc.label})`;
-}
-async function unloadService(ctx, svc) {
-  if (!svc.managed) return;
-  if (svc.kind === "launchd" && skipLaunchd(ctx)) return;
-  const [cmd, args] = svc.kind === "launchd" ? ["launchctl", ["bootout", `gui/${uid()}/${svc.label}`]] : ["systemctl", ["--user", "disable", "--now", svc.label]];
-  if (svc.kind === "systemd" && !ctx.which("systemctl")) return;
-  let text4;
-  try {
-    const r2 = await ctx.run(cmd, args, { timeoutMs: TIMEOUT });
-    if (r2.code === 0 && !r2.timedOut) return;
-    text4 = r2.timedOut ? "timed out" : `${r2.stdout}${r2.stderr}`.trim();
-    if (!r2.timedOut && (NOT_LOADED.test(text4) || svc.kind === "launchd" && [3, 113].includes(r2.code))) return;
-  } catch (error) {
-    text4 = error.message;
-  }
-  ctx.err(`warning: could not stop ${svc.label} (${text4.split("\n")[0] || "failed"}); remove it by hand: ${cmd} ${args.join(" ")}`);
-}
-async function reloadSystemd(ctx, svc) {
-  if (svc.managed && svc.kind === "systemd" && ctx.which("systemctl")) await sh(ctx, "systemctl", ["--user", "daemon-reload"]);
-}
-var LAUNCHD_NAME, TIMER, TIMEOUT, xml, isService, uid, NOT_LOADED;
-var init_services = __esm({
-  "src/services.ts"() {
-    init_components();
-    init_manifest();
-    LAUNCHD_NAME = { "docker-guardian": "docker-guardian", cleanup: "pi-cleanup", "secret-sweep": "secret-sweep" };
-    TIMER = "pi-cleanup.timer";
-    TIMEOUT = 5e3;
-    xml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    isService = (id) => COMPONENTS.some((c2) => c2.id === id && c2.service);
-    uid = () => typeof process.getuid === "function" ? process.getuid() : 0;
-    NOT_LOADED = /no such process|could not find service|not loaded|not found|does not exist|no such file|unit .* not loaded/i;
-  }
-});
-
-// src/uninstall.ts
-import {
-  copyFileSync as copyFileSync4,
-  existsSync as existsSync30,
-  lstatSync as lstatSync8,
-  mkdirSync as mkdirSync15,
-  readFileSync as readFileSync28,
-  readlinkSync as readlinkSync3,
-  renameSync as renameSync6,
-  rmdirSync as rmdirSync2,
-  statSync as statSync18,
-  unlinkSync as unlinkSync5
-} from "node:fs";
-import { dirname as dirname12, join as join48 } from "node:path";
-function restore(from, to) {
-  mkdirSync15(dirname12(to), { recursive: true });
-  try {
-    renameSync6(from, to);
-  } catch (error) {
-    if (error.code !== "EXDEV") throw error;
-    copyFileSync4(from, to);
-    unlinkSync5(from);
-  }
-}
-function undo(data, op) {
-  if (op.op === "set") {
-    if (!(op.key in data) || !deepEqual(data[op.key], op.after)) return false;
-    if (op.before.present) data[op.key] = op.before.value;
-    else delete data[op.key];
-    return true;
-  }
-  return undoArray(data, op);
-}
-function undoArray(data, op) {
-  const list = data[op.key];
-  if (!Array.isArray(list)) return true;
-  if (op.op === "array-replace") {
-    const at2 = list.findIndex((v) => deepEqual(v, op.after));
-    if (at2 >= 0) list.splice(at2, 1, op.before);
-    return true;
-  }
-  const at = list.findIndex((v) => deepEqual(v, op.value));
-  if (at >= 0) list.splice(at, 1);
-  if (op.keyCreated && list.length === 0) delete data[op.key];
-  return true;
-}
-function lstatExists2(path2) {
-  try {
-    lstatSync8(path2);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function rmdirIfEmpty(path2) {
-  try {
-    if (lstatSync8(path2).isDirectory()) rmdirSync2(path2);
-  } catch {
-  }
-}
-function retireFiles(ctx, piDir, m2, rels) {
-  const sub = {
-    ...structuredClone(m2),
-    files: {},
-    json: {},
-    symlinks: {},
-    dirs: [],
-    pendingNew: void 0,
-    components: void 0
-  };
-  for (const rel of rels) if (m2.files[rel]) sub.files[rel] = structuredClone(m2.files[rel]);
-  const plan = new Plan(ctx, piDir, sub);
-  const steps = plan.build();
-  for (const rel of rels) {
-    if (!(rel in sub.files)) continue;
-    if (rel in plan.remaining.files) m2.files[rel] = plan.remaining.files[rel];
-    else delete m2.files[rel];
-  }
-  return steps;
-}
-function retireSymlinks(ctx, m2, rels) {
-  const steps = [];
-  for (const rel of rels) {
-    const entry2 = m2.symlinks[rel];
-    if (!entry2) continue;
-    const path2 = fromHomeRel(ctx.home, rel);
-    const target = symlinkTarget(ctx.home, entry2.target);
-    if (sameLink(path2, target) || sameLink(path2, entry2.target)) steps.push({ line: `remove ${path2}`, run: () => unlinkSync5(path2) });
-    else steps.push({ line: `left ${path2}: no longer points at ${target}`, run: () => {
-    } });
-    delete m2.symlinks[rel];
-  }
-  return steps;
-}
-function revertOps(ctx, m2, rel, match, dryRun) {
-  const entry2 = m2.json[rel];
-  const mine = entry2?.ops.filter(match) ?? [];
-  if (!entry2 || mine.length === 0) return [];
-  const path2 = fromHomeRel(ctx.home, rel);
-  const lines2 = [];
-  let data;
-  try {
-    data = JSON.parse(readFileSync28(path2, "utf8"));
-    if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not an object");
-  } catch {
-    if (!existsSync30(path2)) {
-      entry2.ops = entry2.ops.filter((o) => !match(o));
-      if (!entry2.ops.length) delete m2.json[rel];
-      return [];
-    }
-    return [`left (cannot read as JSON): ${path2}`];
-  }
-  const left = [];
-  for (const op of [...mine].reverse()) if (!undo(data, op)) left.push(op);
-  for (const op of left) lines2.push(`left (changed by you): ${op.key} in ${path2}`);
-  const done = mine.length - left.length;
-  if (done > 0) lines2.push(`${dryRun ? "would revert" : "revert"} ${done} change(s) made by pi-setup in ${path2}`);
-  if (dryRun) return lines2;
-  if (done > 0) {
-    const tracked = m2.files[rel];
-    const wasTracked = Boolean(tracked) && fileSha(path2) === tracked.sha256;
-    entry2.edited ||= fileSha(path2) !== entry2.sha256After;
-    atomicWrite(path2, `${JSON.stringify(data, null, 2)}
-`, statSync18(path2).mode & 4095);
-    const sha = sha256(readFileSync28(path2));
-    entry2.sha256After = sha;
-    if (wasTracked) tracked.sha256 = sha;
-  }
-  entry2.ops = entry2.ops.filter((o) => !match(o) || left.includes(o));
-  if (!entry2.ops.length) delete m2.json[rel];
-  return lines2;
-}
-async function runUninstall(ctx, options, prompter) {
-  const piDir = join48(ctx.home, ".pi", "agent");
-  const manifest = readManifest(piDir);
-  if (!manifest) {
-    ctx.out(`No pi-setup manifest at ${manifestPath(piDir)}; nothing is tracked (installs older than this version are adopted by running ./install.sh once).`);
-    return 0;
-  }
-  validateManifest(ctx.home, manifest);
-  const plan = new Plan(ctx, piDir, manifest);
-  const steps = plan.build();
-  for (const step of steps) ctx.out(step.line);
-  if (steps.length === 0) ctx.out("Nothing to remove.");
-  if (options.dryRun) {
-    ctx.out("Nothing was removed (--dry-run).");
-    return 0;
-  }
-  if (prompter) {
-    const answer = await prompter.confirm({ message: "Uninstall?", initial: false });
-    if (prompter.isCancel(answer) || answer !== true) {
-      ctx.err("Cancelled; nothing removed.");
-      return 1;
-    }
-  } else if (!options.yes) {
-    throw new SetupError("uninstall changes files; pass --yes to run it without a prompt (or --dry-run to preview)");
-  }
-  for (const step of steps) await step.run();
-  delete plan.remaining.components;
-  finalize(ctx, piDir, manifest, plan.remaining);
-  return 0;
-}
-function finalize(ctx, piDir, old, left) {
-  const empty = Object.keys(left.files).length + Object.keys(left.json).length + Object.keys(left.symlinks).length === 0;
-  if (empty) {
-    if (existsSync30(manifestPath(piDir))) unlinkSync5(manifestPath(piDir));
-  } else {
-    left.dirs = left.dirs.filter((d) => lstatExists2(fromHomeRel(ctx.home, d)));
-    saveIfChanged(piDir, old, left, ctx.now());
-  }
-  const cache = join48(piDir, ".pi-setup/update-check.json");
-  if (existsSync30(cache)) unlinkSync5(cache);
-  tidy(piDir);
-  const rest = listBackups(piDir, pinnedBackups(empty ? void 0 : left));
-  for (const rel of [...left.dirs].sort((a2, b) => b.split("/").length - a2.split("/").length || (a2 < b ? 1 : -1))) {
-    rmdirIfEmpty(fromHomeRel(ctx.home, rel));
-  }
-  if (empty && rest.length > 0) ctx.out(`Left in place (may hold your versions): ${backupsDir(piDir)}; remove with: ./install.sh backups prune --keep 0`);
-  else if (!empty) ctx.out(`Some files were left; their record stays in ${manifestPath(piDir)}.`);
-  ctx.out("Uninstalled.");
-}
-var sameLink, Plan;
-var init_uninstall = __esm({
-  "src/uninstall.ts"() {
-    init_fsx();
-    init_backups();
-    init_manifest();
-    init_settings();
-    init_services();
-    init_types();
-    sameLink = (path2, target) => {
-      try {
-        return lstatSync8(path2).isSymbolicLink() && readlinkSync3(path2) === target;
-      } catch {
-        return false;
-      }
-    };
-    Plan = class {
-      steps = [];
-      /** What is left in the manifest once the steps ran. */
-      remaining;
-      backups;
-      ctx;
-      m;
-      constructor(ctx, piDir, m2) {
-        this.ctx = ctx;
-        this.m = m2;
-        this.remaining = structuredClone(m2);
-        this.backups = backupsDir(piDir);
-      }
-      abs(rel) {
-        return fromHomeRel(this.ctx.home, rel);
-      }
-      backupFile(rel) {
-        if (!rel) return void 0;
-        const path2 = join48(this.backups, rel);
-        return existsSync30(path2) ? path2 : void 0;
-      }
-      add(line, run) {
-        this.steps.push({ line, run });
-      }
-      build() {
-        for (const c2 of Object.values(this.m.components ?? {})) {
-          const svc = c2.service;
-          if (svc?.managed) this.add(unloadLine(svc), () => unloadService(this.ctx, svc));
-        }
-        const deleted = /* @__PURE__ */ new Set();
-        for (const [rel, entry2] of Object.entries(this.m.files)) if (this.file(rel, entry2)) deleted.add(rel);
-        for (const [rel, sha] of Object.entries(this.m.pendingNew ?? {})) {
-          const path2 = this.abs(rel);
-          if (fileSha(path2) === sha) this.add(`remove ${path2}`, () => unlinkSync5(path2));
-          delete this.remaining.pendingNew;
-        }
-        for (const [rel, link] of Object.entries(this.m.symlinks)) this.symlink(rel, link.target);
-        for (const [rel, entry2] of Object.entries(this.m.json)) {
-          if (deleted.has(rel)) delete this.remaining.json[rel];
-          else this.json(rel, entry2);
-        }
-        for (const c2 of Object.values(this.m.components ?? {})) {
-          const svc = c2.service;
-          if (svc?.managed && svc.kind === "systemd") this.add("reload systemd (systemctl --user daemon-reload)", () => reloadSystemd(this.ctx, svc));
-        }
-        return this.steps;
-      }
-      /** Returns whether the file ends up removed or restored. */
-      file(rel, entry2) {
-        const path2 = this.abs(rel);
-        this.pending(rel, entry2);
-        if (!lstatExists2(path2)) {
-          delete this.remaining.files[rel];
-          return false;
-        }
-        const backup = this.backupFile(entry2.backup);
-        if (fileSha(path2) !== entry2.sha256) {
-          const note2 = backup ? `; your pre-install version: ${backup}` : "";
-          this.add(`left (changed by you): ${path2}${note2}`, () => {
-          });
-          if (!entry2.backup) delete this.remaining.files[rel];
-          return false;
-        }
-        if (entry2.origin === "replaced" && backup) {
-          this.add(`restore ${path2} (from ${backup})`, () => {
-            unlinkSync5(path2);
-            restore(backup, path2);
-          });
-        } else if (entry2.origin === "replaced") {
-          this.add(`left (pre-install backup is missing): ${path2}`, () => {
-          });
-          delete this.remaining.files[rel];
-          return false;
-        } else {
-          this.add(`remove ${path2}`, () => unlinkSync5(path2));
-        }
-        delete this.remaining.files[rel];
-        return true;
-      }
-      pending(rel, entry2) {
-        if (!entry2.pending) return;
-        const path2 = this.abs(entry2.pending.path);
-        const expected = entry2.pending.sha256;
-        if (fileSha(path2) === expected) this.add(`remove ${path2}`, () => unlinkSync5(path2));
-        if (this.remaining.files[rel]) delete this.remaining.files[rel].pending;
-      }
-      symlink(rel, target) {
-        const path2 = this.abs(rel);
-        const targetPath = symlinkTarget(this.ctx.home, target);
-        if (sameLink(path2, targetPath) || sameLink(path2, target)) this.add(`remove ${path2}`, () => unlinkSync5(path2));
-        delete this.remaining.symlinks[rel];
-      }
-      json(rel, entry2) {
-        const path2 = this.abs(rel);
-        if (!lstatExists2(path2)) {
-          delete this.remaining.json[rel];
-          return;
-        }
-        const backup = this.backupFile(entry2.backup);
-        if (!entry2.edited && fileSha(path2) === entry2.sha256After && (entry2.created || backup)) {
-          if (entry2.created) this.add(`remove ${path2}`, () => unlinkSync5(path2));
-          else this.add(`restore ${path2} (from ${backup})`, () => {
-            unlinkSync5(path2);
-            restore(backup, path2);
-          });
-          delete this.remaining.json[rel];
-          return;
-        }
-        this.add(`revert ${path2} (${entry2.ops.length} change(s) made by pi-setup)`, () => this.revert(rel, path2, entry2));
-      }
-      revert(rel, path2, entry2) {
-        const left = [];
-        let data;
-        try {
-          data = JSON.parse(readFileSync28(path2, "utf8"));
-          if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not an object");
-        } catch {
-          this.ctx.err(`left (cannot read as JSON): ${path2}`);
-          return;
-        }
-        for (const op of [...entry2.ops].reverse()) {
-          if (!undo(data, op)) left.push(op);
-        }
-        if (entry2.created && Object.keys(data).length === 0 && left.length === 0) {
-          unlinkSync5(path2);
-          delete this.remaining.json[rel];
-          return;
-        }
-        const mode = statSync18(path2).mode & 4095;
-        atomicWrite(path2, `${JSON.stringify(data, null, 2)}
-`, mode);
-        if (left.length === 0) {
-          delete this.remaining.json[rel];
-        } else {
-          this.remaining.json[rel] = { ...entry2, ops: left.reverse(), sha256After: sha256(readFileSync28(path2)) };
-          for (const op of left) this.ctx.err(`left (changed by you): ${op.key} in ${path2}`);
-        }
-      }
-    };
-  }
-});
-
-// src/retire.ts
-import { existsSync as existsSync31, readFileSync as readFileSync29 } from "node:fs";
-import { join as join49 } from "node:path";
-function wasOn(manifest, current, id) {
-  const saved2 = manifest?.components?.[id];
-  return saved2 ? saved2.on : current[id] === true;
-}
-function leftWebPackages(ctx, manifest) {
-  const path2 = join49(ctx.home, PI, "settings.json");
-  if (!existsSync31(path2)) return [];
-  let packages2;
-  try {
-    packages2 = JSON.parse(readFileSync29(path2, "utf8")).packages;
-  } catch {
-    return [];
-  }
-  const added = new Set((manifest.json[`${PI}settings.json`]?.ops ?? []).filter(WEB_PACKAGE_OP).map((o) => o.value));
-  return Array.isArray(packages2) ? WEB_PACKAGES.filter((p) => packages2.includes(p) && !added.has(p)) : [];
-}
-async function retire(ctx, piDir, manifest, off, dryRun) {
-  if (!manifest || off.length === 0) return manifest;
-  const m2 = structuredClone(manifest);
-  const steps = [];
-  const lines2 = [];
-  const files2 = (rels) => {
-    for (const step of retireFiles(ctx, piDir, m2, rels)) steps.push(step);
-  };
-  for (const id of off) {
-    const svc = m2.components?.[id]?.service;
-    if (svc) {
-      if (svc.managed) steps.push({ line: unloadLine(svc), run: () => unloadService(ctx, svc) });
-      files2(svc.files);
-      if (svc.managed && svc.kind === "systemd") steps.push({ line: "reload systemd (systemctl --user daemon-reload)", run: () => reloadSystemd(ctx, svc) });
-    }
-    if (id === "lanes") {
-      files2(Object.keys(m2.files).filter((rel) => rel.startsWith(".local/share/pi-setup/lanes/")));
-      steps.push(...retireSymlinks(ctx, m2, [".local/bin/lanes"]));
-    }
-    if (id === "cratis") files2(Object.keys(m2.files).filter((rel) => rel.startsWith(PI) && isCratisFile(rel.slice(PI.length))));
-    if (id === "web") {
-      lines2.push(...revertOps(ctx, m2, `${PI}settings.json`, WEB_PACKAGE_OP, dryRun));
-      for (const p of leftWebPackages(ctx, m2)) lines2.push(`left ${p} in settings.json (not added by pi-setup)`);
-    }
-    if (id === "codescene") {
-      lines2.push(...revertOps(ctx, m2, `${PI}mcp-adapter.json`, (op) => op.op === "set" && op.key === "mcpServers", dryRun));
-    }
-    if (m2.components?.[id]) m2.components[id] = { on: false };
-  }
-  for (const step of steps) {
-    ctx.out(dryRun ? `would ${step.line}` : step.line);
-    if (!dryRun) await step.run();
-  }
-  for (const line of lines2) (line.startsWith("left") ? ctx.err : ctx.out)(line);
-  if (dryRun) return manifest;
-  saveIfChanged(piDir, manifest, m2, ctx.now());
-  return m2;
-}
-var PI, WEB_PACKAGE_OP;
-var init_retire = __esm({
-  "src/retire.ts"() {
-    init_components();
-    init_manifest();
-    init_uninstall();
-    init_services();
-    PI = ".pi/agent/";
-    WEB_PACKAGE_OP = (op) => op.op === "array-add" && op.key === "packages" && WEB_PACKAGES.includes(op.value);
-  }
-});
-
-// src/shell-path.ts
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync16, readFileSync as readFileSync30 } from "node:fs";
-import { basename as basename5, delimiter as delimiter2, dirname as dirname13, join as join50, resolve as resolve13 } from "node:path";
-function missingBinDirs(ctx) {
-  const paths = (ctx.env.PATH ?? "").split(delimiter2).map((p) => resolve13(ctx.cwd, p));
-  return [".local/bin", ".pi/agent/bin"].filter((p) => !paths.includes(join50(ctx.home, p)));
-}
-function shellPath(ctx) {
-  const shell = basename5(ctx.env.SHELL ?? "sh");
-  if (shell === "fish") return { file: join50(ctx.home, ".config/fish/config.fish"), snippet: 'fish_add_path "$HOME/.local/bin" "$HOME/.pi/agent/bin"' };
-  const rc = shell === "zsh" ? ".zshrc" : shell === "bash" ? ctx.platform === "darwin" ? ".bash_profile" : ".bashrc" : ".profile";
-  return { file: join50(ctx.home, rc), snippet: 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"' };
-}
-function pathEditLine(ctx) {
-  if (!missingBinDirs(ctx).length) return void 0;
-  return `Add ~/.local/bin and ~/.pi/agent/bin to PATH in ${shellPath(ctx).file.replace(ctx.home, "~")}`;
-}
-function configureShellPath(ctx, edit, dryRun, guided = false) {
-  if (!missingBinDirs(ctx).length) return;
-  const { file, snippet } = shellPath(ctx);
-  if (guided && !edit) return;
-  if (!guided) ctx.out(`PATH: add this to ${file}, then restart your shell:
-${snippet}`);
-  if (!edit) {
-    ctx.out("Shell profile unchanged (opt in with --edit-shell-profile).");
-    return;
-  }
-  if (dryRun) {
-    ctx.out(`would append PATH snippet to ${file}`);
-    return;
-  }
-  let text4 = "";
-  try {
-    text4 = readFileSync30(file, "utf8");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  if (text4.split("\n").includes(snippet)) return;
-  mkdirSync16(dirname13(file), { recursive: true });
-  appendFileSync2(file, `
-# pi-setup tools
-${snippet}
-`);
-  if (!guided) ctx.out(`Appended PATH snippet to ${file}`);
-}
-var PATH_EDIT_DEFAULT;
-var init_shell_path = __esm({
-  "src/shell-path.ts"() {
-    PATH_EDIT_DEFAULT = true;
-  }
-});
-
-// src/doctor-checks.ts
-import { existsSync as existsSync32, lstatSync as lstatSync9, readdirSync as readdirSync17, readFileSync as readFileSync31, readlinkSync as readlinkSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname14, join as join51, resolve as resolve14 } from "node:path";
-function setupCmd(ctx) {
-  if (ctx.which("pi-setup")) return "pi-setup";
-  const path2 = join51(ctx.repoDir, "install.sh");
-  return path2.startsWith(`${ctx.home}/`) ? `~/${path2.slice(ctx.home.length + 1)}` : path2;
-}
-function readJson2(path2) {
-  try {
-    const value = JSON.parse(readFileSync31(path2, "utf8"));
-    return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
-  } catch {
-    return void 0;
-  }
-}
-function livePins(piDir, settings2) {
-  const pins = /* @__PURE__ */ new Map();
-  const dir = join51(piDir, "agents");
-  if (existsSync32(dir)) for (const file of readdirSync17(dir).filter((f) => f.endsWith(".md"))) {
-    const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text2(join51(dir, file)))?.[1] ?? "";
-    const model = /^model:\s*(\S+)/m.exec(front)?.[1];
-    if (!model) continue;
-    const extensions = /^extensions:\s*([^\n]*(?:\n[ \t]+[^\n]*)*)/m.exec(front)?.[1] ?? "";
-    const agents = pins.get(model) ?? [];
-    agents.push({ name: basename6(file, ".md"), fallback: /\bprovider-fallback\b/.test(extensions) });
-    pins.set(model, agents);
-  }
-  if (typeof settings2.defaultProvider === "string" && typeof settings2.defaultModel === "string") {
-    const model = `${settings2.defaultProvider}/${settings2.defaultModel}`;
-    pins.set(model, [...pins.get(model) ?? [], { name: "settings.json", fallback: true }]);
-  }
-  return [...pins].map(([model, agents]) => ({ model, agents }));
-}
-function state(ctx, facts) {
-  const piDir = join51(ctx.home, ".pi", "agent");
-  const s = { ctx, facts, piDir, setup: setupCmd(ctx), profile: text2(join51(piDir, "profiles/ACTIVE")), settings: readJson2(join51(piDir, "settings.json")) ?? {}, pins: [], missing: [], changed: [], modes: [] };
-  try {
-    s.manifest = readManifest(piDir);
-    if (s.manifest) validateManifest(ctx.home, s.manifest);
-  } catch (error) {
-    s.manifest = void 0;
-    s.manifestError = error.message;
-  }
-  s.pins = livePins(piDir, s.settings);
-  for (const [rel, entry2] of Object.entries(s.manifest?.files ?? {})) {
-    const path2 = fromHomeRel(ctx.home, rel);
-    if (!present(path2)) s.missing.push(rel);
-    else if (fileSha(path2) !== entry2.sha256) s.changed.push(rel);
-    else if ((lstatSync9(path2).mode & 4095) !== entry2.mode) s.modes.push(rel);
-  }
-  for (const [rel, link] of Object.entries(s.manifest?.symlinks ?? {})) {
-    const path2 = fromHomeRel(ctx.home, rel);
-    try {
-      if (!lstatSync9(path2).isSymbolicLink() || resolve14(dirname14(path2), readlinkSync4(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
-    } catch {
-      s.missing.push(rel);
-    }
-  }
-  return s;
-}
-function files(s) {
-  if (!existsSync32(s.piDir)) return check("files", "fail", "not installed", s.setup);
-  if (s.manifestError) return check("files", "fail", s.manifestError, s.setup);
-  if (!s.manifest) return check("files", "warn", "no install manifest", s.setup);
-  const moved = s.manifest.source.commit && s.facts.head && s.manifest.source.commit !== s.facts.head;
-  let detail = `${s.missing.length} missing, ${s.changed.length} changed by you`;
-  if (moved) detail += `; checkout is at ${s.facts.head.slice(0, 7)}, installed ${s.manifest.source.commit.slice(0, 7)}; the checkout moved since the install; this would also update`;
-  const restorable = s.missing.length > 0 && s.facts.checkoutClean === true && Boolean(s.facts.head) && s.facts.head === s.manifest.source.commit;
-  return { ...check("files", s.missing.length ? "fail" : moved ? "warn" : "ok", detail, s.missing.length && s.facts.checkoutClean === false ? "commit or stash local changes, then rerun" : s.setup, s.missing.length ? s.missing : s.changed), ...restorable ? { fixable: "restore" } : {} };
-}
-function pending(s) {
-  const paths = [.../* @__PURE__ */ new Set([...Object.values(s.manifest?.files ?? {}).flatMap((e) => e.pending ? [e.pending.path] : []), ...Object.keys(s.manifest?.pendingNew ?? {})])].filter((p) => existsSync32(fromHomeRel(s.ctx.home, p)));
-  const first = paths[0] && fromHomeRel(s.ctx.home, paths[0]);
-  return check("pending", paths.length ? "warn" : "ok", `${paths.length} pending .pi-setup-new files`, first ? `diff ${first.replace(/\.pi-setup-new$/, "")} ${first}` : void 0, paths);
-}
-function modes(s) {
-  return { ...check("modes", s.modes.length ? "warn" : "skip", `${s.modes.length} unchanged files have mode drift`, `${s.setup} doctor --fix`, s.modes), ...s.modes.length ? { fixable: "chmod" } : {} };
-}
-function npm(s) {
-  const pkg = readJson2(join51(s.piDir, "npm/package.json"));
-  const deps = pkg?.dependencies && typeof pkg.dependencies === "object" ? Object.keys(pkg.dependencies) : [];
-  const installed = (name) => existsSync32(join51(s.piDir, "npm/node_modules", name, "package.json"));
-  const missing = deps.filter((n3) => !installed(n3));
-  const result3 = [{ ...check("npm", missing.length ? "fail" : "ok", missing.length ? `${missing.length} missing dependencies` : "dependencies present", "(cd ~/.pi/agent/npm && npm install --legacy-peer-deps)", missing), ...missing.length ? { fixable: "npm" } : {} }];
-  for (const spec of packages(s)) {
-    if (spec.startsWith("npm:")) {
-      const finding = npmPackageCheck(spec, s.piDir);
-      if (finding) result3.push(finding);
-    } else if (spec.startsWith(".") && !existsSync32(resolve14(s.piDir, spec))) result3.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
-  }
-  return result3;
-}
-function profile(s) {
-  if (!s.profile) return check("profile", "warn", "no ACTIVE profile", `${s.setup} --profile auto`);
-  const meta = loadProfiles(s.ctx.repoDir).find((p) => p.name === s.profile);
-  if (!meta) return check("profile", "warn", `unknown profile ${s.profile}`, `${s.setup} --profile auto`);
-  const missing = meta.requires.filter((p) => s.facts.providers[p]?.status === "not_ready");
-  if (missing.length) return check("profile", "fail", `${s.profile}: ${missing.map((p) => PROVIDER_LABELS[p] ?? p).join(", ")} has no login`, `run \`pi\`, type /login and choose ${PROVIDER_LABELS[missing[0]] ?? missing[0]}`);
-  const unknown = meta.requires.filter((p) => s.facts.providers[p]?.status !== "ready");
-  if (unknown.length) return check("profile", "warn", `${unknown.map((p) => PROVIDER_LABELS[p] ?? p).join(", ")}: could not check (pi auth check timed out)`, `${s.setup} doctor`);
-  return check("profile", "ok", `${s.profile}; ready: ${Object.keys(s.facts.providers).filter((p) => ready2(s, `${p}/`)).map((p) => PROVIDER_LABELS[p] ?? p).join(", ")}`);
-}
-function providers(s) {
-  return Object.entries(s.facts.providers).filter(([, provider]) => provider.status === "unknown").map(([id]) => check(`provider:${id}`, "warn", `${PROVIDER_LABELS[id] ?? id}: could not determine`, `${s.setup} doctor`));
-}
-function models(s) {
-  if (!s.facts.catalog?.size) {
-    if (s.facts.summary || !Object.values(s.facts.providers).some((p) => p.status === "ready")) return check("models", "skip", "catalog not checked");
-    return check("models", "fail", "pi lists no models", "pi update");
-  }
-  const missing = s.pins.filter((p) => ready2(s, p.model) && !s.facts.catalog.has(p.model)).map((p) => p.model);
-  return check("models", missing.length ? "fail" : "ok", missing.length ? "pins missing from catalog" : "available pins are in the catalog", "pi update", missing);
-}
-function fallback(s) {
-  const config = readJson2(join51(s.piDir, "provider-fallback.json")) ?? {};
-  const pairs = Array.isArray(config.pairs) ? config.pairs.filter((p) => Array.isArray(p) && p.length === 2 && p.every((v) => typeof v === "string")) : [];
-  const chains = config.chains && typeof config.chains === "object" ? config.chains : {};
-  const targets = (pin) => Array.isArray(chains[pin]) ? chains[pin].filter((v) => typeof v === "string") : pairs.filter((p) => p.includes(pin)).map((p) => p[0] === pin ? p[1] : p[0]);
-  const available2 = (pin) => ready2(s, pin) && (!s.facts.catalog?.size || s.facts.catalog.has(pin));
-  const result3 = [];
-  for (const pin of s.pins.filter((p) => providerStatus(s, p.model) === "not_ready")) {
-    const target = targets(pin.model).find(available2);
-    const safe = config.enabled === true && target && pin.agents.every((a2) => a2.fallback);
-    const label = PROVIDER_LABELS[pin.model.split("/")[0]] ?? pin.model.split("/")[0];
-    const choice = chooseProfile(new Set(Object.keys(s.facts.providers).filter((p) => ready2(s, `${p}/`))), loadProfiles(s.ctx.repoDir));
-    result3.push(check(`fallback:${pin.model}`, safe ? "warn" : "fail", `${pin.agents.map((a2) => a2.name).join(", ")} pin ${pin.model} but ${label} has no login: subagents may run on the parent model or fail before fallback switches${target ? ` to ${target}` : "; no ready target"}${!safe ? " (fallback unavailable)" : ""}`, `run \`pi\`, type /login and choose ${label}; or \`${s.setup} --profile auto\` (would pick ${choice.name})`));
-  }
-  const sources = /* @__PURE__ */ new Set([...Object.keys(chains), ...pairs.flat()]);
-  const unavailable = [...sources].filter((p) => ready2(s, p) && !targets(p).some(available2));
-  if (config.enabled === true && unavailable.length) result3.push(check("fallback-targets", "warn", "fallback sources have no ready target", "edit ~/.pi/agent/provider-fallback.json", unavailable));
-  if (!result3.length) result3.push(check("fallback", "ok", "fallback targets ready"));
-  return result3;
-}
-function guards(s) {
-  const path2 = join51(s.piDir, "guards.json");
-  const config = readJson2(path2);
-  let detail = "all on";
-  if (existsSync32(path2)) {
-    const off = config?.off;
-    if (!off || typeof off !== "object" || Array.isArray(off) || Object.values(off).some((v) => typeof v !== "boolean")) return check("guards", "warn", "invalid guards.json shape", "/guards in pi (guards default to on)");
-    const names = Object.entries(off).filter(([, v]) => v).map(([n3]) => n3);
-    if (names.length) detail = `on, except ${names.join(", ")} (persisted off)`;
-  }
-  if (s.ctx.env.PI_GUARDS_OFF) detail += `; PI_GUARDS_OFF=${s.ctx.env.PI_GUARDS_OFF}`;
-  return check("guards", "ok", detail);
-}
-function path(s) {
-  const missing = missingBinDirs(s.ctx);
-  const { file, snippet } = shellPath(s.ctx);
-  const result3 = [check("path", missing.length ? "warn" : "ok", missing.length ? `${missing.map((p) => `~/${p}`).join(", ")} not on PATH` : "~/.local/bin and ~/.pi/agent/bin are on PATH", `add ${snippet} to ${file}`)];
-  for (const [pkg, cmd] of PACKAGE_BINS) {
-    if (!packages(s).some((p) => p.includes(pkg))) continue;
-    const target = `~/.pi/agent/npm/node_modules/@woksin/${pkg}/bin/${cmd}`;
-    const fix = existsSync32(join51(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
-    const link = join51(s.ctx.home, ".local/bin", cmd);
-    if (s.ctx.which(cmd)) result3.push(check(`path:${cmd}`, "ok", `${cmd} found`, fix));
-    else if (present(link) && missing.includes(".local/bin")) result3.push(check(`path:${cmd}`, "warn", `${cmd} is installed at ~/.local/bin/${cmd}, but ~/.local/bin is not on PATH`, `add ${snippet} to ${file} (or reinstall with --edit-shell-profile)`));
-    else result3.push(check(`path:${cmd}`, "warn", `${cmd} is missing`, fix));
-  }
-  return result3;
-}
-function prerequisites(s) {
-  const required = ["git", "gh", "jq", "rg", "fd", "python3", "npm", "pi", "node"];
-  const optional = {
-    gitleaks: "secret-sweep cannot scan without it; https://github.com/gitleaks/gitleaks#installing",
-    rtk: "optional output compression unavailable; https://github.com/rtk-ai/rtk#installation",
-    docker: "Docker tooling and docker-guardian require Docker Desktop/Engine",
-    tmux: "optional lanes terminal backend unavailable; macOS Terminal remains an alternative"
-  };
-  const tools = [...required, ...Object.keys(optional)];
-  const brew = { rg: "ripgrep", python3: "python", npm: "node" };
-  const apt = { rg: "ripgrep", fd: "fd-find" };
-  return tools.map((tool) => {
-    const found = s.ctx.which(tool);
-    const fix = tool === "pi" ? "npm install -g @earendil-works/pi-coding-agent" : s.ctx.platform === "darwin" ? `brew install ${brew[tool] ?? tool}` : `sudo apt install ${apt[tool] ?? tool}${tool === "fd" ? "; expose fdfind as fd on PATH" : ""}`;
-    const missingStatus = required.includes(tool) ? "fail" : "warn";
-    return check(`tool:${tool}`, found ? "ok" : missingStatus, found ? `${tool} is on PATH` : `${tool} is missing`, found ? void 0 : optional[tool] ?? fix);
-  });
-}
-function localChecks(ctx, facts) {
-  const s = state(ctx, facts);
-  return { checks: [files(s), pending(s), modes(s), ...npm(s), profile(s), ...providers(s), models(s), ...fallback(s), guards(s), ...prerequisites(s), ...path(s)], manifest: s.manifest, profile: s.profile, modePaths: s.modes };
-}
-var text2, present, providerStatus, ready2, check, packages;
-var init_doctor_checks = __esm({
-  "src/doctor-checks.ts"() {
-    init_packages();
-    init_shell_path();
-    init_manifest();
-    init_profiles();
-    init_types();
-    text2 = (path2) => {
-      try {
-        return readFileSync31(path2, "utf8").trim();
-      } catch {
-        return "";
-      }
-    };
-    present = (path2) => {
-      try {
-        lstatSync9(path2);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    providerStatus = (s, model) => s.facts.providers[model.split("/")[0]]?.status;
-    ready2 = (s, model) => providerStatus(s, model) === "ready";
-    check = (id, status2, detail, fix, items) => ({ id, title: id, status: status2, detail, ...fix ? { fix } : {}, ...items?.length ? { items } : {} });
-    packages = (s) => Array.isArray(s.settings.packages) ? s.settings.packages.filter((p) => typeof p === "string") : [];
-  }
-});
-
-// src/update.ts
-import { existsSync as existsSync33 } from "node:fs";
-import { join as join52 } from "node:path";
-function compareTags(a2, b) {
-  const x = a2.slice(1).split(".").map(Number);
-  const y2 = b.slice(1).split(".").map(Number);
-  for (let i2 = 0; i2 < Math.max(x.length, y2.length); i2++) {
-    const d = (x[i2] ?? 0) - (y2[i2] ?? 0);
-    if (d !== 0) return d;
-  }
-  return 0;
-}
-function latestTag(tags) {
-  return tags.filter((t2) => TAG.test(t2)).sort(compareTags).at(-1);
-}
-async function git(ctx, args, timeoutMs = 3e4) {
-  const r2 = await ctx.run("git", ["-C", ctx.repoDir, ...args], { timeoutMs });
-  return { ok: r2.code === 0, out: r2.stdout.trim(), err: (r2.stderr || r2.stdout).trim() };
-}
-async function remoteTags(ctx, timeoutMs = 3e4) {
-  const r2 = await git(ctx, ["ls-remote", "--tags", "--refs", "origin", "v*"], timeoutMs);
-  if (!r2.ok) throw new SetupError(`git ls-remote failed: ${r2.err}`);
-  return r2.out.split("\n").map((l2) => l2.split("	refs/tags/")[1]).filter((t2) => Boolean(t2));
-}
-async function pickTarget(ctx, options) {
-  if (options.dryRun) {
-    if (options.ref) return options.ref;
-    const tag = latestTag(await remoteTags(ctx));
-    if (!tag) throw new SetupError("no v* release tags found on origin");
-    return tag;
-  }
-  const fetched = await git(ctx, ["fetch", "--tags", "--quiet", "origin"], 6e4);
-  if (!fetched.ok) throw new SetupError(`git fetch failed: ${fetched.err}`);
-  let target = options.ref;
-  if (!target) {
-    const listed = await git(ctx, ["tag", "--list", "v*"]);
-    target = latestTag(listed.out.split("\n").filter(Boolean)) ?? "";
-    if (!target) throw new SetupError("no v* release tags found");
-  }
-  if (!(await git(ctx, ["rev-parse", "--verify", "--quiet", `${target}^{commit}`])).ok) {
-    throw new SetupError(`unknown ref '${target}'`);
-  }
-  return target;
-}
-async function releaseNotes(ctx, tag) {
-  if (!TAG.test(tag) || !ctx.which("gh")) return;
-  const r2 = await ctx.run("gh", ["release", "view", tag, "--json", "name,body", "--jq", '.name + "\n\n" + .body'], { cwd: ctx.repoDir, timeoutMs: 15e3 });
-  if (r2.code === 0 && r2.stdout.trim()) ctx.out(r2.stdout.trim());
-}
-async function runUpdate(ctx, options, prompter) {
-  if (!existsSync33(join52(ctx.repoDir, ".git"))) throw new SetupError("update needs a git checkout of pi-setup");
-  const status2 = await git(ctx, ["status", "--porcelain"]);
-  if (!status2.ok) throw new SetupError(`git status failed: ${status2.err}`);
-  if (status2.out) throw new SetupError("checkout has local changes; commit or stash them first");
-  const target = await pickTarget(ctx, options);
-  const current = (await git(ctx, ["describe", "--tags", "--always"])).out || "unknown";
-  ctx.out(`pi-setup: ${current} \u2192 ${target}`);
-  await releaseNotes(ctx, target);
-  if (options.dryRun) {
-    ctx.out(`would check out ${target} and run install`);
-    return 0;
-  }
-  if (prompter) {
-    const answer = await prompter.confirm({ message: `Check out ${target} and install?`, initial: true });
-    if (prompter.isCancel(answer) || answer !== true) {
-      ctx.err("Cancelled; nothing changed.");
-      return 1;
-    }
-  }
-  const checkout = await git(ctx, ["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", target], 6e4);
-  if (!checkout.ok) throw new SetupError(`git checkout ${target} failed: ${checkout.err}`);
-  ctx.out(`checkout is detached at ${target}; \`git switch main\` to go back`);
-  const args = [join52(ctx.repoDir, "installer", "dist", "pi-setup.mjs"), "install"];
-  if (options.yes || !prompter) args.push("--yes");
-  if (options.skipNpm) args.push("--skip-npm");
-  const result3 = await ctx.run(ctx.nodePath ?? process.execPath, args, { inherit: true });
-  return result3.code ?? 1;
-}
-var TAG;
-var init_update = __esm({
-  "src/update.ts"() {
-    init_types();
-    TAG = /^v\d+(\.\d+)*$/;
-  }
-});
-
-// src/doctor-probes.ts
-import { existsSync as existsSync34, readdirSync as readdirSync18, readFileSync as readFileSync32, writeFileSync as writeFileSync11 } from "node:fs";
-import { join as join53 } from "node:path";
-function pythonVersionCheck(ctx, version2) {
-  const match = /^Python (\d+)\.(\d+)\b/.exec(version2 ?? "");
-  const supported = match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 9);
-  return result2("python", supported ? "ok" : "warn", `${version2 || "Python version unknown"}; pi-phase requires Python >=3.9 on macOS/Linux`, installHint(ctx.platform, "python3"));
-}
-async function python(ctx) {
-  if (!ctx.which("python3")) return pythonVersionCheck(ctx);
-  const r2 = await ctx.run("python3", ["--version"], { timeoutMs: 3e3 });
-  return pythonVersionCheck(ctx, r2.code === 0 && !r2.timedOut ? r2.stdout.trim() || r2.stderr.trim() : void 0);
-}
-function plists(ctx) {
-  const dir = join53(ctx.home, "Library/LaunchAgents");
-  if (ctx.platform !== "darwin" || !existsSync34(dir)) return [];
-  return readdirSync18(dir).filter((f) => f.endsWith(".plist")).flatMap((file) => {
-    const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(readFileSync32(join53(dir, file), "utf8"))?.[1];
-    return label && /\.(docker-guardian|pi-cleanup)$/.test(label) ? [{ file, label }] : [];
-  });
-}
-async function disk(ctx) {
-  const unknown = () => [result2("disk", "warn", "disk not checked", "df -h ~")];
-  const script = join53(ctx.home, ".pi/agent/bin/dev-doctor");
-  if (!existsSync34(script)) return unknown();
-  const r2 = await ctx.run("python3", [script, "--only", "disk", "--json"], { timeoutMs: 6e3, env: { PYTHONDONTWRITEBYTECODE: "1" } });
-  if (r2.timedOut || r2.code !== 0) return unknown();
-  try {
-    const findings = JSON.parse(r2.stdout);
-    if (!Array.isArray(findings)) return unknown();
-    const checks = findings.filter((f) => f?.id === "disk").map((f) => {
-      if (typeof f.evidence !== "string" || f.evidence.startsWith("Skipped:") || !["info", "warn", "high"].includes(f.severity)) return unknown()[0];
-      return result2("disk", f.severity === "high" ? "fail" : f.severity === "warn" ? "warn" : "ok", f.evidence, typeof f.suggest === "string" ? f.suggest : "df -h ~");
-    });
-    return checks.length ? checks : unknown();
-  } catch {
-    return unknown();
-  }
-}
-async function update(ctx, manifest) {
-  const skip = (reason) => result2("update", "ok", `update check skipped (${reason})`);
-  if (!existsSync34(join53(ctx.repoDir, ".git"))) return skip("not a git checkout");
-  const path2 = join53(ctx.home, ".pi/agent/.pi-setup/update-check.json");
-  const cache = readJson2(path2);
-  const age = ctx.now().getTime() - Date.parse(String(cache?.checkedAt));
-  let latest;
-  if (age >= 0 && age < 864e5 && typeof cache?.latest === "string") latest = latestTag([cache.latest]);
-  if (!latest) {
-    if (ctx.env.PI_OFFLINE) return skip("offline");
-    try {
-      latest = latestTag(await remoteTags(ctx, 5e3));
-      if (!latest) return skip("no release tags");
-      if (existsSync34(join53(ctx.home, ".pi/agent/.pi-setup"))) writeFileSync11(path2, `${JSON.stringify({ checkedAt: ctx.now().toISOString(), latest })}
-`);
-    } catch {
-      return skip("remote unavailable");
-    }
-  }
-  let current = manifest?.source.release;
-  if (!current) {
-    const r2 = await ctx.run("git", ["-C", ctx.repoDir, "describe", "--tags", "--abbrev=0"], { timeoutMs: 3e3 });
-    if (r2.code !== 0 || r2.timedOut) return skip("installed release unknown");
-    current = r2.stdout.trim();
-  }
-  if (!latestTag([current])) return skip("installed release unknown");
-  return result2("update", compareTags(latest, current) > 0 ? "warn" : "ok", compareTags(latest, current) > 0 ? `${latest} available (installed ${current})` : `up to date (${current})`, `${setupCmd(ctx)} update`);
-}
-async function gatherFacts(baseCtx, manifest) {
-  const ctx = { ...baseCtx, run: (cmd, args, options) => baseCtx.run(cmd, cmd === "git" ? ["--no-optional-locks", ...args] : args, options) };
-  const hasPi = Boolean(ctx.which("pi"));
-  const recorded = new Set(Object.values(manifest?.components ?? {}).flatMap((c2) => c2.service?.kind === "launchd" ? [c2.service.label] : []));
-  const all = plists(ctx);
-  const agents = all.filter((p) => !recorded.has(p.label));
-  const guardian = all.some((p) => p.label.endsWith(".docker-guardian")) || manifest?.components?.["docker-guardian"]?.on === true;
-  const [providers2, models2, version2, gh, head, checkout, disks, launchd, docker, updates, pythonCheck] = await Promise.all([
-    Promise.all(PROVIDER_IDS.map((id) => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" })) : Promise.resolve({ status: "unknown" }))),
-    hasPi ? listModels(ctx) : Promise.resolve({ catalog: null, code: null, stderr: "", timedOut: false }),
-    hasPi ? ctx.run("pi", ["--version"], { timeoutMs: 8e3 }) : Promise.resolve(skippedRun),
-    ctx.which("gh") ? ctx.run("gh", ["auth", "status"], { timeoutMs: 3e3 }) : Promise.resolve(skippedRun),
-    ctx.run("git", ["-C", ctx.repoDir, "rev-parse", "HEAD"], { timeoutMs: 3e3 }),
-    ctx.run("git", ["-C", ctx.repoDir, "status", "--porcelain"], { timeoutMs: 3e3 }),
-    disk(ctx),
-    Promise.all(agents.map(async (p) => {
-      const r2 = await ctx.run("launchctl", ["list", p.label], { timeoutMs: 3e3 });
-      return result2(`launchd:${p.label}`, r2.code === 0 && !r2.timedOut ? "ok" : "warn", `${p.label}: ${r2.code === 0 && !r2.timedOut ? "loaded" : "not loaded"}`, `launchctl load -w ~/Library/LaunchAgents/${p.file}`);
-    })),
-    guardian ? ctx.run("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 5e3 }) : Promise.resolve(void 0),
-    update(ctx, manifest),
-    python(ctx)
-  ]);
-  let pi;
-  if (!hasPi) pi = result2("pi", "fail", "not on PATH", installHint(ctx.platform, "pi"));
-  else if (models2.timedOut || version2.timedOut) pi = result2("pi", "warn", "timed out", `${setupCmd(ctx)} doctor`);
-  else if (models2.code !== 0 || version2.code !== 0) pi = result2("pi", "fail", models2.stderr.split("\n")[0] || version2.stderr.split("\n")[0] || "pi did not load", "run `pi` and read the startup errors");
-  else pi = result2("pi", "ok", `pi ${version2.stdout.trim().split("\n")[0]}`);
-  const github = parseAuthStatus(`${gh.stdout}
-${gh.stderr}`);
-  const ghCheck = !ctx.which("gh") ? result2("gh", "warn", "not on PATH", installHint(ctx.platform, "gh")) : !github.host ? result2("gh", "warn", "not logged in", "gh auth login") : result2("gh", "ok", `${github.login}@${github.host}`);
-  return {
-    facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i2) => [id, providers2[i2]])), catalog: models2.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : void 0, checkoutClean: checkout.code === 0 && !checkout.timedOut ? !checkout.stdout.trim() : void 0, github: { ...github, orgs: [] }, summary: false },
-    checks: [pi, ghCheck, pythonCheck, ...disks, ...launchd.length ? launchd : [result2("launchd", "skip", "no managed launch agents")], docker ? result2("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result2("docker", "skip", "no docker guardian"), updates]
-  };
-}
-var result2, skippedRun;
-var init_doctor_probes = __esm({
-  "src/doctor-probes.ts"() {
-    init_detect();
-    init_doctor_checks();
-    init_update();
-    init_types();
-    result2 = (id, status2, detail, fix) => ({ id, title: id, status: status2, detail, ...fix ? { fix } : {} });
-    skippedRun = { code: null, stdout: "", stderr: "", timedOut: false };
-  }
-});
-
-// src/doctor-components.ts
-import { existsSync as existsSync35, lstatSync as lstatSync10, readlinkSync as readlinkSync5, statSync as statSync19 } from "node:fs";
-import { join as join54 } from "node:path";
-async function isLoaded(ctx, kind, label) {
-  try {
-    const r2 = kind === "launchd" ? await ctx.run("launchctl", ["print", `gui/${uid()}/${label}`], { timeoutMs: 5e3 }) : await ctx.run("systemctl", ["--user", "is-active", label], { timeoutMs: 5e3 });
-    return r2.code === 0 && !r2.timedOut;
-  } catch {
-    return false;
-  }
-}
-function lanesChecks(ctx) {
-  const bin = join54(ctx.home, ".local/bin/lanes");
-  const target = join54(ctx.home, ".local/share/pi-setup/lanes/lanes.mjs");
-  let linked = false;
-  let present2 = false;
-  try {
-    const stat2 = lstatSync10(bin);
-    present2 = true;
-    linked = stat2.isSymbolicLink() && readlinkSync5(bin) === target;
-  } catch {
-  }
-  const good = linked && existsSync35(target);
-  const fix = good ? void 0 : present2 && !linked ? "move ~/.local/bin/lanes away, then pi-setup install --with lanes" : "pi-setup install --with lanes";
-  let config;
-  let configError = "";
-  let root;
-  try {
-    root = findRoot(void 0, ctx.env, ctx.cwd);
-  } catch {
-  }
-  if (root) {
-    try {
-      config = loadConfig(root);
-    } catch (e) {
-      configError = e.message;
-    }
-  }
-  let installedPreapproval = false;
-  try {
-    installedPreapproval = preapprovalDefault(join54(ctx.home, ".local/share/pi-setup/lanes/templates"));
-  } catch (e) {
-    configError ||= e.message;
-  }
-  const enabled = config ? config.launch.preapproveMcp : installedPreapproval;
-  const backend = detectBackend(config?.terminal.backend || "auto", ctx);
-  return [
-    check2("lanes", good ? "ok" : "warn", good ? "lanes is installed" : "lanes link or bundle is missing or points elsewhere", fix),
-    check2("lanes-git", ctx.which("git") ? "ok" : "warn", ctx.which("git") ? "git is on PATH" : "git is missing", ctx.which("git") ? void 0 : "install git"),
-    check2("lanes-terminal", "ok", backend === "print" ? "print (no Terminal.app, iTerm or tmux detected; lanes start will print the command)" : backend),
-    check2("lanes-preapprove-mcp", configError ? "warn" : "ok", configError || `MCP preapproval is ${enabled ? "on (trusts project MCP server definitions)" : "off"}${config ? ` in ${join54(root, "lanes.json")}` : " for new folders (no lanes.json found)"}`)
-  ];
-}
-async function componentChecks(ctx, manifest) {
-  const comps = manifest?.components;
-  if (!comps) return [];
-  const checks = [];
-  for (const def of COMPONENTS.filter((c2) => c2.service)) {
-    const unit = expectedUnit(ctx, def.id);
-    if (!unit) continue;
-    const id = `service:${def.id}`;
-    const rec = comps[def.id];
-    const exists = existsSync35(unit.file);
-    if (rec?.on && rec.service?.managed) {
-      const manual = unit.kind === "launchd" ? `launchctl bootstrap gui/${uid()} ${unit.file}` : `systemctl --user enable --now ${unit.label}`;
-      const skipped = unit.kind === "launchd" ? launchdSkipReason(ctx) : void 0;
-      if (skipped) {
-        checks.push(check2(id, "ok", `launchd load/unload skipped: ${skipped}`));
-        continue;
-      }
-      checks.push(await isLoaded(ctx, unit.kind, unit.label) ? check2(id, "ok", `${unit.label} is loaded`) : check2(id, "warn", `${unit.label} is not loaded`, manual));
-    } else if (rec?.on && !rec.service?.managed) {
-      checks.push(check2(id, "ok", `${unit.file.replace(`${ctx.home}/`, "~/")} is not managed by pi-setup; left alone`));
-    } else if (exists) {
-      checks.push(check2(id, "ok", `${def.id} is turned off but a unit exists at ${unit.file.replace(`${ctx.home}/`, "~/")}; left alone`));
-    }
-  }
-  if (comps.codescene?.on) {
-    const dir = join54(ctx.home, ".agents/skills");
-    const missing = CS_SKILLS.filter((n3) => {
-      try {
-        return !statSync19(join54(dir, n3)).isDirectory();
-      } catch {
-        return true;
-      }
-    });
-    checks.push(
-      ctx.which("cs-mcp") ? check2("codescene-mcp", "ok", "cs-mcp is on PATH") : check2("codescene-mcp", "warn", "cs-mcp not found on PATH", "install cs-mcp: https://github.com/codescene-oss/codescene-mcp-server#readme"),
-      ctx.env.CS_ACCESS_TOKEN ? check2("codescene-token", "ok", "CS_ACCESS_TOKEN is set") : check2("codescene-token", "warn", "CS_ACCESS_TOKEN is not set", "export CS_ACCESS_TOKEN=<your token> in your shell profile (pi-setup never stores it)"),
-      missing.length === 0 ? check2("codescene-skills", "ok", "CodeScene skills are present") : check2("codescene-skills", "warn", `CodeScene skills missing: ${missing.join(", ")}`, "copy skills/<name> from https://github.com/codescene-oss/codescene-mcp-server/tree/main/skills to ~/.agents/skills/")
-    );
-  }
-  if (comps.lanes?.on) checks.push(...lanesChecks(ctx));
-  return checks;
-}
-var check2;
-var init_doctor_components = __esm({
-  "src/doctor-components.ts"() {
-    init_terminal();
-    init_config();
-    init_components();
-    init_services();
-    check2 = (id, status2, detail, fix) => ({ id, title: id, status: status2, detail, ...fix ? { fix } : {} });
-  }
-});
-
-// src/doctor-compact.ts
-function packageLine(checks, skipNpm) {
-  const npm2 = checks.find((c2) => c2.id === "npm" && c2.status !== "ok" && c2.status !== "skip");
-  const named = checks.filter((c2) => c2.id.startsWith("package:"));
-  const count = npm2 ? npm2.items?.length || 1 : named.length;
-  if (!count) return void 0;
-  const why = skipNpm ? "you skipped npm; run ./install.sh" : "run ./install.sh to retry";
-  return `${plural(count, "package")} not installed yet: ${why}`;
-}
-function toolLine(checks) {
-  const tools = checks.filter((c2) => c2.id.startsWith("tool:")).map((c2) => c2.id.slice(5));
-  return tools.length ? `${plural(tools.length, "tool")} not found: ${tools.join(", ")}` : void 0;
-}
-function pathLine(checks) {
-  const path2 = checks.find((c2) => c2.id === "path");
-  return path2 ? `${path2.detail}; add them to your shell profile (./install.sh --edit-shell-profile does it)` : void 0;
-}
-function compactChecks(all, options) {
-  const checks = all.filter((c2) => c2.status === "warn" || c2.status === "fail");
-  const logins2 = loginLabels(checks);
-  const profile3 = checks.find((c2) => c2.id === "profile" && !logins2.length);
-  const lines2 = [
-    packageLine(checks, options.skipNpm),
-    logins2.length ? `Log in to ${logins2.join(", ")} in pi (/login)` : void 0,
-    profile3 ? `profile: ${profile3.detail}` : void 0,
-    options.pathEdited ? void 0 : pathLine(checks),
-    toolLine(checks),
-    ...checks.filter((c2) => !consumed(c2)).map((c2) => `${c2.id}: ${c2.detail}`)
-  ].filter((line) => Boolean(line)).map((line) => line.split(options.home).join("~"));
-  const shown = lines2.length > MAX_HEALTH_LINES ? [...lines2.slice(0, MAX_HEALTH_LINES - 1), `and ${lines2.length - MAX_HEALTH_LINES + 1} more: ./install.sh doctor`] : lines2;
-  return { lines: shown, count: lines2.length, logins: logins2 };
-}
-var MAX_HEALTH_LINES, loginLabels, plural, consumed;
-var init_doctor_compact = __esm({
-  "src/doctor-compact.ts"() {
-    init_types();
-    MAX_HEALTH_LINES = 6;
-    loginLabels = (checks) => {
-      const labels = /* @__PURE__ */ new Set();
-      for (const c2 of checks) {
-        if (c2.id.startsWith("fallback:")) {
-          const provider = c2.id.slice("fallback:".length).split("/")[0];
-          labels.add(PROVIDER_LABELS[provider] ?? provider);
-        } else if (c2.id === "profile") {
-          const match = /^[^:]+: (.+) has no login$/.exec(c2.detail);
-          for (const label of match?.[1].split(", ") ?? []) labels.add(label);
-        }
-      }
-      return [...labels];
-    };
-    plural = (n3, word) => `${n3} ${word}${n3 === 1 ? "" : "s"}`;
-    consumed = (c2) => c2.id === "npm" || c2.id.startsWith("package:") || c2.id.startsWith("tool:") || c2.id === "path" || c2.id.startsWith("path:") || c2.id.startsWith("fallback:") || c2.id === "profile";
-  }
-});
-
-// src/doctor.ts
-import { chmodSync as chmodSync3 } from "node:fs";
-import { join as join55 } from "node:path";
-function doctorExitCode(checks) {
-  return checks.some((c2) => c2.status === "fail") ? 2 : checks.some((c2) => c2.status === "warn") ? 1 : 0;
-}
-function render2(checks) {
-  return checks.filter((c2) => c2.status !== "skip").flatMap((c2) => {
-    const items = c2.items?.length ? ` (${c2.items.slice(0, 3).join(", ")}${c2.items.length > 3 ? ` and ${c2.items.length - 3} more` : ""})` : "";
-    const line = `${c2.status === "ok" ? "\u2714" : c2.status === "warn" ? "\u26A0" : "\u2716"} ${c2.title}: ${c2.detail}${items}`;
-    return c2.status === "ok" ? [line] : [line, `  fix: ${c2.fix}`];
-  });
-}
-async function inspect2(ctx) {
-  let manifest;
-  try {
-    manifest = readManifest(join55(ctx.home, ".pi/agent"));
-    if (manifest) validateManifest(ctx.home, manifest);
-  } catch {
-    manifest = void 0;
-  }
-  const gathered = await gatherFacts(ctx, manifest);
-  const local = localChecks(ctx, gathered.facts);
-  const extras2 = await componentChecks(ctx, local.manifest);
-  return { ...local, facts: gathered.facts, checks: [...local.checks, ...gathered.checks, ...extras2] };
-}
-async function runDoctor(ctx, options, baseCtx) {
-  let report = await inspect2(ctx);
-  const fixed = [];
-  if (options.fix) {
-    const fixable = new Set(report.checks.map((c2) => c2.fixable));
-    if (fixable.has("npm")) {
-      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join55(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
-      if (r2.code === 0 && !r2.timedOut) fixed.push("npm");
-    }
-    if (fixable.has("restore") && report.facts.checkoutClean === true && report.facts.head && report.facts.head === report.manifest?.source.commit) {
-      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join55(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
-      if (r2.code === 0 && !r2.timedOut) fixed.push("restore");
-    }
-    if (fixable.has("chmod") && report.manifest) {
-      let changed = false;
-      for (const rel of report.modePaths) {
-        const path2 = fromHomeRel(ctx.home, rel);
-        const entry2 = report.manifest.files[rel];
-        if (fileSha(path2) !== entry2.sha256) continue;
-        chmodSync3(path2, entry2.mode);
-        changed = true;
-      }
-      if (changed) fixed.push("chmod");
-    }
-    report = await inspect2(ctx);
-  }
-  const exitCode = doctorExitCode(report.checks);
-  if (options.json) baseCtx.out(JSON.stringify({ version: 1, exitCode, checks: report.checks, fixed }));
-  else {
-    const source = report.manifest?.source;
-    ctx.out(`pi-setup doctor \u2014 profile ${report.profile || "none"}, installed ${source?.release || source?.commit?.slice(0, 7) || "unknown"}`);
-    if (fixed.length) ctx.out(`Fixed: ${fixed.join(", ")}`);
-    for (const line of render2(report.checks)) ctx.out(line);
-    const names = [...new Set(report.checks.map((c2) => c2.fixable).filter(Boolean))];
-    ctx.out(`${counts(report.checks)}.${!options.fix && names.length ? ` \`${setupCmd(ctx)} doctor --fix\` can fix: ${names.join(", ")}.` : ""}`);
-  }
-  return exitCode;
-}
-async function installSummary(ctx, detection, _piDir) {
-  const local = localChecks(ctx, { providers: detection.providers, catalog: detection.catalog, github: detection.github.host ? detection.github : void 0, summary: true });
-  const checks = local.checks;
-  if (!doctorExitCode(checks)) return [`Doctor: all ${checks.filter((c2) => c2.status === "ok").length} checks passed (full check: \`${setupCmd(ctx)} doctor\`).`];
-  return [`Doctor: ${counts(checks)}:`, ...render2(checks.filter((c2) => c2.status === "warn" || c2.status === "fail")), `Full check: \`${setupCmd(ctx)} doctor\``];
-}
-function installChecks(ctx, detection) {
-  return localChecks(ctx, { providers: detection.providers, catalog: detection.catalog, github: detection.github.host ? detection.github : void 0, summary: true }).checks;
-}
-var counts;
-var init_doctor = __esm({
-  "src/doctor.ts"() {
-    init_doctor_checks();
-    init_doctor_probes();
-    init_manifest();
-    init_doctor_components();
-    init_doctor_checks();
-    init_doctor_compact();
-    counts = (checks) => {
-      const count = (status2) => checks.filter((c2) => c2.status === status2).length;
-      return `${count("ok")} ok, ${count("warn")} warnings, ${count("fail")} failures`;
-    };
-  }
-});
-
-// src/report.ts
-function countActions(actions) {
-  const installs = actions.filter((a2) => a2.op === "install");
-  return {
-    added: installs.filter((a2) => !a2.existed).length,
-    changed: installs.filter((a2) => a2.existed).length,
-    kept: actions.filter((a2) => a2.op === "keep").length,
-    register: actions.filter((a2) => a2.op === "register").length,
-    links: actions.filter((a2) => a2.op === "symlink").length
-  };
-}
-function detectionLines(detection, probed = true) {
-  const lines2 = [`OS: ${detection.os}`];
-  lines2.push(`Tools: ${detection.tools.map((t2) => `${t2.name} ${t2.path ? "\u2713" : "\u2717"}`).join(", ")}`);
-  const github = detection.github;
-  lines2.push(`GitHub: ${github.login ? `${github.login}${github.host ? ` on ${github.host}` : ""}` : "no login found"}`);
-  if (!probed) lines2.push("Providers: not probed in dry-run (pi probes can write state)");
-  else lines2.push(
-    "Providers: " + PROVIDER_IDS.map((id) => `${PROVIDER_LABELS[id]} ${symbol(detection.providers[id]?.status)}`).join(", ")
-  );
-  return lines2;
-}
-function symbol(status2) {
-  if (status2 === "ready") return "\u2713";
-  return status2 === "not_ready" ? "\u2717" : "?";
-}
-function summaryLines(args) {
-  const { settings: settings2, choice, actions } = args;
-  const counts2 = countActions(actions);
-  const lines2 = [
-    `GitHub login: ${settings2.githubUser} (${USER_SOURCES[settings2.userSource]})`,
-    `Repositories root: ${settings2.reposRoot} (${ROOT_SOURCES[settings2.rootSource]})`,
-    ...args.withDetection === false ? [] : detectionLines(args.detection, args.probed),
-    `Profile: ${choice.name} (${choice.reason})${choice.provisional ? " [provisional]" : ""}`
-  ];
-  if (args.profile?.summary) lines2.push(args.profile.summary);
-  if (args.kimi) lines2.push(args.kimi);
-  lines2.push(
-    `Files: ${counts2.added} new, ${counts2.changed} changed${counts2.kept ? `, ${counts2.kept} kept (changed by you)` : ""}${counts2.register ? ", register pi-questions" : ""}`,
-    `npm install: ${args.skipNpm ? "skipped (--skip-npm)" : args.npm ? "yes" : "up to date"}`
-  );
-  if (args.components) {
-    const word = (id) => `${COMPONENTS.find((c2) => c2.id === id)?.label} ${args.components?.[id]?.on ? "on" : "off"}`;
-    lines2.push(`Extras: ${COMPONENTS.map((c2) => word(c2.id)).join(", ")}`);
-  }
-  const kept = actions.filter((a2) => a2.op === "keep");
-  if (kept.some((a2) => /\/\.pi\/agent\/(agents\/[^/]+\.md|workflows\/[^/]+\.js)$/.test(a2.path))) {
-    lines2.push(KEPT_EDITS);
-  }
-  if (kept.some((a2) => a2.op === "keep" && a2.noMarkers)) {
-    lines2.push("AGENTS.md has no pi-profile routing markers, so it is reconciled as a whole file; the new version is in AGENTS.md.pi-setup-new");
-  }
-  lines2.push(...args.componentNotes ?? []);
-  for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines2.push(`warning: ${warning}`);
-  return lines2;
-}
-function whatsNextLines(next) {
-  const lines2 = [];
-  if (next.pathMissing) {
-    lines2.push(next.pathEdited ? "Open a new terminal so the PATH change takes effect." : "Add ~/.local/bin and ~/.pi/agent/bin to PATH, then open a new terminal.");
-  }
-  lines2.push("Start pi: pi");
-  if (next.logins.length) lines2.push(`Log in: in pi, type /login for ${next.logins.join(", ")}`);
-  lines2.push("Switch profile: pi-profile list, or ./install.sh --profile <name>");
-  lines2.push("Check health any time: ./install.sh doctor");
-  if (next.lanesOffered) lines2.push("Optional: set up a coordinator and lanes (offered next; or later with ./install.sh lanes)");
-  return lines2;
-}
-var USER_SOURCES, ROOT_SOURCES, KEPT_EDITS;
-var init_report = __esm({
-  "src/report.ts"() {
-    init_types();
-    init_components();
-    USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it" };
-    ROOT_SOURCES = { flag: "from --repos-root", saved: "saved in user.json", scan: "best match found", default: "default", prompt: "you typed it" };
-    KEPT_EDITS = "kept your edits; `pi-profile save` to adopt them into the profile";
   }
 });
 
@@ -9170,8 +9245,7 @@ var run_exports = {};
 __export(run_exports, {
   main: () => main2
 });
-import { join as join56 } from "node:path";
-import { existsSync as existsSync36 } from "node:fs";
+import { join as join57 } from "node:path";
 function pickProfile(options, activeBefore, ready3, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
     if (!names.includes(options.profile)) {
@@ -9216,10 +9290,10 @@ function extraRows(ctx, options, saved2, detection, manifest) {
   };
 }
 function savedPreapproval(ctx) {
-  return preapprovalDefault(join56(ctx.home, ".local/share/pi-setup/lanes/templates"));
+  return preapprovalDefault(join57(ctx.home, ".local/share/pi-setup/lanes/templates"));
 }
 function resolveAll(ctx, options, detection, saved2, answers, manifest, prompted = false) {
-  const piDir = join56(ctx.home, ".pi", "agent");
+  const piDir = join57(ctx.home, ".pi", "agent");
   const settings2 = resolveSettings({
     flagUser: answers.user ?? options.user,
     flagRoot: answers.root ?? options.reposRoot,
@@ -9285,7 +9359,7 @@ function resolveAll(ctx, options, detection, saved2, answers, manifest, prompted
     ...settings2.warnings,
     ...componentNotes.filter((n3) => n3.startsWith("warning:")).map((n3) => n3.slice(9)),
     ...detection.warnings,
-    ...pinWarnings(pinnedModels(join56(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
+    ...pinWarnings(pinnedModels(join57(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
     ...kimi ? [kimi] : []
   ];
   return { settings: settings2, choice, actions, warnings, profile: profile3, ready: ready3, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts: conflicts2, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
@@ -9347,7 +9421,7 @@ function addToolWarnings(r2, detection, toolErrors, ctx) {
 }
 async function guidedResolution({ ctx, options, detection, saved: saved2, manifest, p, toolErrors }) {
   const profiles = loadProfiles(ctx.repoDir);
-  const activeBefore = readActive(join56(ctx.home, ".pi/agent"));
+  const activeBefore = readActive(join57(ctx.home, ".pi/agent"));
   const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, profileNames(ctx.repoDir));
   let resolved;
   const result3 = await runRails(p, {
@@ -9388,8 +9462,8 @@ async function guidedResolution({ ctx, options, detection, saved: saved2, manife
   return result3 === CANCEL ? CANCEL : { r: resolved, editPath: result3.editPath };
 }
 async function execute(ctx, options, prompter, baseCtx) {
-  const piDir = join56(ctx.home, ".pi", "agent");
-  const saved2 = readSettings(join56(piDir, "user.json"));
+  const piDir = join57(ctx.home, ".pi", "agent");
+  const saved2 = readSettings(join57(piDir, "user.json"));
   const manifest = readManifest(piDir);
   const readOnly = options.dryRun || options.plan;
   const names = profileNames(ctx.repoDir);
@@ -9423,7 +9497,7 @@ async function execute(ctx, options, prompter, baseCtx) {
   const summary2 = summarize(r2, detection, options, Boolean(prompter));
   if (options.plan) {
     configureShellPath(ctx, options.editShellProfile, true);
-    return finish(ctx, baseCtx, options, r2, detection, summary2, 0);
+    return finish({ ctx, baseCtx, options, r: r2, detection, lines: summary2, code: 0 });
   }
   const off = offComponents(ctx, r2, manifest);
   const applyOptions = {
@@ -9437,64 +9511,23 @@ async function execute(ctx, options, prompter, baseCtx) {
     quiet: Boolean(prompter)
   };
   const pathMissing = missingBinDirs(ctx).length > 0;
-  const live = prompter ? void 0 : await retire(ctx, piDir, manifest, off, options.dryRun);
-  const result3 = prompter ? await applyGuided({ ctx, options, r: r2, applyOptions, manifest, off, editPath, p: prompter }) : await applyPlain(ctx, options, r2, applyOptions, live, editPath);
+  const run = { ctx, options, r: r2, applyOptions, manifest, off, editPath };
+  const result3 = prompter ? await applyGuided(run, prompter) : await applyPlain(run);
   const shown = prompter || options.json ? [] : summary2.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:") || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no") || r2.componentNotes.includes(l2));
   if (result3.code === 0 && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...await installSummary(ctx, detection, piDir));
-  const offerLanes = Boolean(prompter) && result3.code === 0 && !options.dryRun && !options.plan && r2.components.lanes.on && !existsSync36(join56(r2.settings.reposRoot, ".lanes/lanes.json"));
+  const offer = lanesOffered(r2, options, result3.code === 0);
   let pending2 = 0;
   if (prompter && result3.code === 0 && !options.dryRun) {
-    const compact = compactChecks(installChecks(ctx, detection), { home: ctx.home, skipNpm: options.skipNpm, pathEdited: editPath && pathMissing });
-    pending2 = compact.count;
-    if (compact.lines.length) prompter.note(compact.lines.join("\n"), "Still to finish");
-    const logins2 = [.../* @__PURE__ */ new Set([...missingLogins(r2.profile, r2.ready), ...compact.logins])];
-    prompter.note(whatsNextLines({ pathMissing, pathEdited: editPath && pathMissing, logins: logins2, lanesOffered: offerLanes }).join("\n"), "What's next");
+    pending2 = guidedNotes(prompter, { ctx, options, detection, profile: r2.profile, ready: r2.ready, pathMissing, editPath, offerLanes: offer });
   }
-  if (offerLanes && prompter) {
-    const answer = await prompter.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
-    if (!prompter.isCancel(answer) && answer === true) {
-      try {
-        if (await runLanesFlow(ctx, { ...options, dir: "" }, prompter, true) !== 0) ctx.err("Lanes setup was not completed; run ./install.sh lanes to continue.");
-      } catch (error) {
-        ctx.err(`Lanes setup was not completed: ${error.message}`);
-      }
-    }
-  }
-  return finish(ctx, baseCtx, options, r2, detection, shown, result3.code, prompter, result3.wrote, pending2);
-}
-async function applyPlain(ctx, options, r2, applyOptions, live, editPath) {
-  const result3 = await apply(ctx, r2.actions, applyOptions, live);
-  if (result3.code === 0) await syncServices(ctx, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);
-  if (result3.code === 0) configureShellPath(ctx, editPath, options.dryRun || options.plan);
-  return result3;
-}
-async function applyGuided({ ctx, options, r: r2, applyOptions, manifest, off, editPath, p }) {
-  const held = { out: [], err: [] };
-  const quiet = { ...ctx, out: (line) => held.out.push(line), err: (line) => held.err.push(line) };
-  const spin = p.spinner();
-  spin.start("Backing up your current files");
-  let result3;
-  try {
-    const live = await retire(quiet, join56(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
-    result3 = await apply(quiet, r2.actions, { ...applyOptions, spinner: spin }, live);
-    if (result3.code === 0) {
-      if (Object.values(r2.records).some((c2) => c2.on && c2.service?.managed)) spin.message?.("Setting up schedules");
-      await syncServices(quiet, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);
-      if (editPath && missingBinDirs(ctx).length) spin.message?.("Adding PATH entries");
-      configureShellPath(quiet, editPath, options.dryRun, true);
-    }
-  } finally {
-    spin.stop(result3?.code === 0 ? options.dryRun ? "Dry run finished" : "Installed" : "Install did not finish");
-    held.out.forEach((line) => ctx.out(line));
-    held.err.forEach((line) => ctx.err(line));
-  }
-  return result3;
+  if (prompter && offer) await offerLanesSetup(ctx, options, prompter);
+  return finish({ ctx, baseCtx, options, r: r2, detection, lines: shown, code: result3.code, prompter, wrote: result3.wrote, pending: pending2 });
 }
 function cancelled(ctx) {
   ctx.err("Cancelled; nothing written.");
   return 1;
 }
-function finish(ctx, baseCtx, options, r2, detection, lines2, code, prompter, wrote = true, pending2 = 0) {
+function finish({ ctx, baseCtx, options, r: r2, detection, lines: lines2, code, prompter, wrote = true, pending: pending2 = 0 }) {
   if (options.json) {
     baseCtx.out(jsonReport(r2, detection, code));
     return code;
@@ -9516,6 +9549,7 @@ var savedString2, flagMap;
 var init_run = __esm({
   "src/run.ts"() {
     init_lanes_flow();
+    init_finish();
     init_config();
     init_apply();
     init_args();
@@ -9532,7 +9566,6 @@ var init_run = __esm({
     init_doctor_probes();
     init_update();
     init_profiles();
-    init_profiles();
     init_report();
     init_settings();
     init_types();
@@ -9548,7 +9581,7 @@ var init_run = __esm({
 });
 
 // src/cli.ts
-import { dirname as dirname15, join as join57 } from "node:path";
+import { dirname as dirname15, join as join58 } from "node:path";
 import { fileURLToPath } from "node:url";
 var MIN = [22, 19, 0];
 function nodeTooOld(version2) {
@@ -9563,7 +9596,7 @@ if (nodeTooOld(process.version)) {
 `);
   process.exit(1);
 }
-var repoDir = join57(dirname15(fileURLToPath(import.meta.url)), "..", "..");
+var repoDir = join58(dirname15(fileURLToPath(import.meta.url)), "..", "..");
 var { realContext: realContext2 } = await Promise.resolve().then(() => (init_context(), context_exports));
 var { main: main3 } = await Promise.resolve().then(() => (init_run(), run_exports));
 process.exitCode = await main3(process.argv.slice(2), realContext2(repoDir));

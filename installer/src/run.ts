@@ -1,8 +1,9 @@
 import { join } from "node:path";
-import { existsSync } from "node:fs";
 import { runLanesFlow } from "./lanes-flow.ts";
+import { applyGuided, applyPlain, guidedNotes, lanesOffered, offerLanesSetup } from "./finish.ts";
+import type { ApplyRun } from "./finish.ts";
 import { preapprovalDefault } from "./lanes/config.ts";
-import { apply, describe, needsNpm, readActive } from "./apply.ts";
+import { describe, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
 import { isInteractive, parseArgs, USAGE } from "./args.ts";
 import type { Options } from "./args.ts";
@@ -16,24 +17,23 @@ import type { KeepAction } from "./reconcile.ts";
 import { runUninstall } from "./uninstall.ts";
 import { available, codesceneNotes, COMPONENTS, currentState, WEB_PACKAGES, detectDefaults, hintFor, resolveComponents } from "./components.ts";
 import type { ComponentChoice } from "./components.ts";
-import { retire, wasOn } from "./retire.ts";
-import { isService, planServices, syncServices } from "./services.ts";
+import { wasOn } from "./retire.ts";
+import { isService, planServices } from "./services.ts";
 import type { ComponentRecord } from "./manifest.ts";
 import type { ExtraRow } from "./wizard.ts";
-import { compactChecks, installChecks, installSummary, runDoctor } from "./doctor.ts";
+import { installSummary, runDoctor } from "./doctor.ts";
 import { pythonVersionCheck } from "./doctor-probes.ts";
 import { runUpdate } from "./update.ts";
 import {
   chooseProfile, kimiNote, loadProfiles, overlayFor, pinnedModels, pinWarnings, profileNames, profilesDir,
 } from "./profiles.ts";
 import type { Choice } from "./profiles.ts";
-import { missingLogins } from "./profiles.ts";
-import { KEPT_EDITS, summaryLines, whatsNextLines } from "./report.ts";
+import { KEPT_EDITS, summaryLines } from "./report.ts";
 import { readSettings, resolveSettings } from "./settings.ts";
 import type { ResolvedSettings } from "./settings.ts";
 import { CANCEL, SetupError } from "./types.ts";
 import type { Action, Ctx, Detection, ProfileMeta, Prompter } from "./types.ts";
-import type { ApplyResult } from "./apply.ts";
+
 import { resolveConflicts } from "./wizard.ts";
 import { runRails } from "./rails.ts";
 import { configureShellPath, missingBinDirs, pathEditLine, PATH_EDIT_DEFAULT } from "./shell-path.ts";
@@ -318,7 +318,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const summary = summarize(r, detection, options, Boolean(prompter));
   if (options.plan) {
     configureShellPath(ctx, options.editShellProfile, true);
-    return finish(ctx, baseCtx, options, r, detection, summary, 0);
+    return finish({ ctx, baseCtx, options, r, detection, lines: summary, code: 0 });
   }
   const off = offComponents(ctx, r, manifest);
 
@@ -333,66 +333,17 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     quiet: Boolean(prompter),
   };
   const pathMissing = missingBinDirs(ctx).length > 0;
-  const live = prompter ? undefined : await retire(ctx, piDir, manifest, off, options.dryRun);
-  const result = prompter
-    ? await applyGuided({ ctx, options, r, applyOptions, manifest, off, editPath, p: prompter })
-    : await applyPlain(ctx, options, r, applyOptions, live, editPath);
+  const run: ApplyRun = { ctx, options, r, applyOptions, manifest, off, editPath };
+  const result = prompter ? await applyGuided(run, prompter) : await applyPlain(run);
   const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l));
   if (result.code === 0 && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...await installSummary(ctx, detection, piDir));
-  const offerLanes = Boolean(prompter) && result.code === 0 && !options.dryRun && !options.plan && r.components.lanes.on && !existsSync(join(r.settings.reposRoot, ".lanes/lanes.json"));
+  const offer = lanesOffered(r, options, result.code === 0);
   let pending = 0;
   if (prompter && result.code === 0 && !options.dryRun) {
-    const compact = compactChecks(installChecks(ctx, detection), { home: ctx.home, skipNpm: options.skipNpm, pathEdited: editPath && pathMissing });
-    pending = compact.count;
-    if (compact.lines.length) prompter.note(compact.lines.join("\n"), "Still to finish");
-    const logins = [...new Set([...missingLogins(r.profile, r.ready), ...compact.logins])];
-    prompter.note(whatsNextLines({ pathMissing, pathEdited: editPath && pathMissing, logins, lanesOffered: offerLanes }).join("\n"), "What's next");
+    pending = guidedNotes(prompter, { ctx, options, detection, profile: r.profile, ready: r.ready, pathMissing, editPath, offerLanes: offer });
   }
-  if (offerLanes && prompter) {
-    const answer = await prompter.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
-    if (!prompter.isCancel(answer) && answer === true) {
-      try {
-        if (await runLanesFlow(ctx, { ...options, dir: "" }, prompter, true) !== 0) ctx.err("Lanes setup was not completed; run ./install.sh lanes to continue.");
-      } catch (error) { ctx.err(`Lanes setup was not completed: ${(error as Error).message}`); }
-    }
-  }
-  return finish(ctx, baseCtx, options, r, detection, shown, result.code, prompter, result.wrote, pending);
-}
-
-async function applyPlain(ctx: Ctx, options: Options, r: Resolved, applyOptions: ApplyOptions, live: Manifest | undefined, editPath: boolean): Promise<ApplyResult> {
-  const result = await apply(ctx, r.actions, applyOptions, live);
-  if (result.code === 0) await syncServices(ctx, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
-  if (result.code === 0) configureShellPath(ctx, editPath, options.dryRun || options.plan);
-  return result;
-}
-
-interface GuidedApply {
-  ctx: Ctx; options: Options; r: Resolved; applyOptions: ApplyOptions; manifest: Manifest | undefined; off: string[];
-  editPath: boolean; p: Prompter;
-}
-
-/** Apply behind one spinner; anything the steps print is held until the spinner stops so the screen stays clean. */
-async function applyGuided({ ctx, options, r, applyOptions, manifest, off, editPath, p }: GuidedApply): Promise<ApplyResult> {
-  const held: { out: string[]; err: string[] } = { out: [], err: [] };
-  const quiet: Ctx = { ...ctx, out: (line) => held.out.push(line), err: (line) => held.err.push(line) };
-  const spin = p.spinner();
-  spin.start("Backing up your current files");
-  let result: ApplyResult | undefined;
-  try {
-    const live = await retire(quiet, join(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
-    result = await apply(quiet, r.actions, { ...applyOptions, spinner: spin }, live);
-    if (result.code === 0) {
-      if (Object.values(r.records).some((c) => c.on && c.service?.managed)) spin.message?.("Setting up schedules");
-      await syncServices(quiet, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
-      if (editPath && missingBinDirs(ctx).length) spin.message?.("Adding PATH entries");
-      configureShellPath(quiet, editPath, options.dryRun, true);
-    }
-  } finally {
-    spin.stop(result?.code === 0 ? (options.dryRun ? "Dry run finished" : "Installed") : "Install did not finish");
-    held.out.forEach((line) => ctx.out(line));
-    held.err.forEach((line) => ctx.err(line));
-  }
-  return result;
+  if (prompter && offer) await offerLanesSetup(ctx, options, prompter);
+  return finish({ ctx, baseCtx, options, r, detection, lines: shown, code: result.code, prompter, wrote: result.wrote, pending });
 }
 
 function cancelled(ctx: Ctx): number {
@@ -400,10 +351,12 @@ function cancelled(ctx: Ctx): number {
   return 1;
 }
 
-function finish(
-  ctx: Ctx, baseCtx: Ctx, options: Options, r: Resolved, detection: Detection, lines: string[], code: number,
-  prompter?: Prompter, wrote = true, pending = 0,
-): number {
+interface FinishInput {
+  ctx: Ctx; baseCtx: Ctx; options: Options; r: Resolved; detection: Detection; lines: string[]; code: number;
+  prompter?: Prompter; wrote?: boolean; pending?: number;
+}
+
+function finish({ ctx, baseCtx, options, r, detection, lines, code, prompter, wrote = true, pending = 0 }: FinishInput): number {
   if (options.json) {
     baseCtx.out(jsonReport(r, detection, code));
     return code;
