@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { parseArgs } from "../src/args.ts";
-import { available, detectDefaults, dropGuardExtension, resolveComponents, stripSections } from "../src/components.ts";
+import { available, detectDefaults, dropExtensions, dropGuardExtension, resolveComponents, stripSections } from "../src/components.ts";
 
 const roots: string[] = [];
 after(() => roots.forEach((r) => rmSync(r, { recursive: true, force: true })));
@@ -70,6 +70,11 @@ test("stripSections removes a marked block with one blank line and warns when ma
 test("dropGuardExtension edits only the frontmatter list", () => {
   const md = "---\nname: x\nextensions: [cratis-cli-guard, provider-fallback]\n---\nextensions: [cratis-cli-guard]\n";
   assert.equal(dropGuardExtension(Buffer.from(md)).toString(), "---\nname: x\nextensions: [provider-fallback]\n---\nextensions: [cratis-cli-guard]\n");
+});
+
+test("dropExtensions drops several names and leaves the rest", () => {
+  const md = "---\nname: x\nextensions: [a, pi-mcp-adapter, pi-browser-use]\n---\n";
+  assert.equal(dropExtensions(Buffer.from(md), ["pi-browser-use"]).toString(), "---\nname: x\nextensions: [a, pi-mcp-adapter]\n---\n");
 });
 
 test("--with and --without parse for install, validate ids and reject both at once", () => {

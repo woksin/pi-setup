@@ -181,7 +181,10 @@ function path(s: State): DoctorCheck[] {
     if (!packages(s).some(p => p.includes(pkg))) continue;
     const target = `~/.pi/agent/npm/node_modules/@woksin/${pkg}/bin/${cmd}`;
     const fix = existsSync(join(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
-    result.push(check(`path:${cmd}`, s.ctx.which(cmd) ? "ok" : "warn", s.ctx.which(cmd) ? `${cmd} found` : `${cmd} is missing`, fix));
+    const link = join(s.ctx.home, ".local/bin", cmd);
+    if (s.ctx.which(cmd)) result.push(check(`path:${cmd}`, "ok", `${cmd} found`, fix));
+    else if (present(link) && missing.includes(".local/bin")) result.push(check(`path:${cmd}`, "warn", `${cmd} is installed at ~/.local/bin/${cmd}, but ~/.local/bin is not on PATH`, `add ${snippet} to ${file} (or reinstall with --edit-shell-profile)`));
+    else result.push(check(`path:${cmd}`, "warn", `${cmd} is missing`, fix));
   }
   return result;
 }

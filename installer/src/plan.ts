@@ -4,7 +4,7 @@ import { deepEqual, hasTokens, mergeUserJson, readSettings, render } from "./set
 import { listFiles } from "./fsx.ts";
 import { hasRoutingMarkers, spliceRouting } from "./profiles.ts";
 import type { Overlay } from "./profiles.ts";
-import { dropGuardExtension, isCratisFile, stripSections, WEB_PACKAGES } from "./components.ts";
+import { dropExtensions, isCratisFile, stripSections, WEB_PACKAGES } from "./components.ts";
 import { preapprovalDefault } from "./lanes/config.ts";
 import { SetupError } from "./types.ts";
 import { packageBinLinks, pinPackages } from "./packages.ts";
@@ -199,9 +199,11 @@ function linkIfFree(actions: Action[], notes: string[] | undefined, path: string
 export function buildPlan(input: PlanInput): Action[] {
   const { repoDir, home, settings, overlay } = input;
   const cratis = input.components?.cratis !== false;
-  const filter: Filter = cratis ? NO_FILTER : {
-    skip: isCratisFile,
-    transform: (rel, content) => (/(^|\/)agents\/[^/]+\.md$/.test(rel) ? dropGuardExtension(content) : content),
+  const web = input.components?.web !== false;
+  const dropped = [...(cratis ? [] : ["cratis-cli-guard"]), ...(web ? [] : ["pi-browser-use"])];
+  const filter: Filter = cratis && web ? NO_FILTER : {
+    skip: cratis ? () => false : isCratisFile,
+    transform: (rel, content) => (dropped.length && /(^|\/)agents\/[^/]+\.md$/.test(rel) ? dropExtensions(content, dropped) : content),
   };
   const agent = join(repoDir, "agent");
   const piDir = join(home, ".pi", "agent");

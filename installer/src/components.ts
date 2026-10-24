@@ -159,15 +159,18 @@ export function isCratisFile(rel: string): boolean {
     rel === "bin/cratis-local-run" || /^profiles\/[^/]+\/agents\/cratis-cli\.md$/.test(rel);
 }
 
-/** Drop `cratis-cli-guard` from the `extensions:` frontmatter list of an agent definition. */
-export function dropGuardExtension(content: Buffer): Buffer {
+/** Drop the named extensions from the `extensions:` frontmatter list of an agent definition. */
+export function dropExtensions(content: Buffer, names: string[]): Buffer {
   const text = content.toString("utf8");
   const fm = /^---\n[\s\S]*?\n---/.exec(text);
   if (!fm) return content;
   const head = fm[0].replace(/^(extensions:\s*\[)([^\]\n]*)(\])/m, (_m, a: string, list: string, b: string) =>
-    `${a}${list.split(",").map((s) => s.trim()).filter((s) => s && s !== "cratis-cli-guard").join(", ")}${b}`);
+    `${a}${list.split(",").map((s) => s.trim()).filter((s) => s && !names.includes(s)).join(", ")}${b}`);
   return head === fm[0] ? content : Buffer.from(head + text.slice(fm[0].length), "utf8");
 }
+
+/** Drop `cratis-cli-guard` from the `extensions:` frontmatter list of an agent definition. */
+export const dropGuardExtension = (content: Buffer): Buffer => dropExtensions(content, ["cratis-cli-guard"]);
 
 const markerRe = (id: string, which: "start" | "end") => new RegExp(`^<!-- pi-setup:${id}:${which}\\b[^\\n]*-->[ \\t]*$`, "m");
 

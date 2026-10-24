@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: c708b93ec8f6292440f129a7b7b2b8b4633ff26154a3b1c6cd701680e8d3066f
+// pi-setup-source-sha256: 439804840b073a84bf9e87a98f43b89a7ceebda31bf99ab430ed639cc7e0f2db
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5175,11 +5175,11 @@ function hintFor(def, on) {
 function isCratisFile(rel) {
   return rel === "extensions/cratis-cli-guard.ts" || rel === "lib/cratis-cli-guard.test.ts" || rel === "agents/cratis-cli.md" || rel === "bin/cratis-local-run" || /^profiles\/[^/]+\/agents\/cratis-cli\.md$/.test(rel);
 }
-function dropGuardExtension(content) {
+function dropExtensions(content, names) {
   const text4 = content.toString("utf8");
   const fm = /^---\n[\s\S]*?\n---/.exec(text4);
   if (!fm) return content;
-  const head = fm[0].replace(/^(extensions:\s*\[)([^\]\n]*)(\])/m, (_m, a2, list, b) => `${a2}${list.split(",").map((s) => s.trim()).filter((s) => s && s !== "cratis-cli-guard").join(", ")}${b}`);
+  const head = fm[0].replace(/^(extensions:\s*\[)([^\]\n]*)(\])/m, (_m, a2, list, b) => `${a2}${list.split(",").map((s) => s.trim()).filter((s) => s && !names.includes(s)).join(", ")}${b}`);
   return head === fm[0] ? content : Buffer.from(head + text4.slice(fm[0].length), "utf8");
 }
 function stripSections(buf, offIds) {
@@ -5751,9 +5751,11 @@ function linkIfFree(actions, notes, path2, target, home) {
 function buildPlan(input) {
   const { repoDir: repoDir2, home, settings: settings2, overlay } = input;
   const cratis = input.components?.cratis !== false;
-  const filter = cratis ? NO_FILTER : {
-    skip: isCratisFile,
-    transform: (rel, content) => /(^|\/)agents\/[^/]+\.md$/.test(rel) ? dropGuardExtension(content) : content
+  const web = input.components?.web !== false;
+  const dropped = [...cratis ? [] : ["cratis-cli-guard"], ...web ? [] : ["pi-browser-use"]];
+  const filter = cratis && web ? NO_FILTER : {
+    skip: cratis ? () => false : isCratisFile,
+    transform: (rel, content) => dropped.length && /(^|\/)agents\/[^/]+\.md$/.test(rel) ? dropExtensions(content, dropped) : content
   };
   const agent = join45(repoDir2, "agent");
   const piDir = join45(home, ".pi", "agent");
@@ -6675,7 +6677,10 @@ function path(s) {
     if (!packages(s).some((p) => p.includes(pkg))) continue;
     const target = `~/.pi/agent/npm/node_modules/@woksin/${pkg}/bin/${cmd}`;
     const fix = existsSync32(join51(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
-    result3.push(check(`path:${cmd}`, s.ctx.which(cmd) ? "ok" : "warn", s.ctx.which(cmd) ? `${cmd} found` : `${cmd} is missing`, fix));
+    const link = join51(s.ctx.home, ".local/bin", cmd);
+    if (s.ctx.which(cmd)) result3.push(check(`path:${cmd}`, "ok", `${cmd} found`, fix));
+    else if (present(link) && missing.includes(".local/bin")) result3.push(check(`path:${cmd}`, "warn", `${cmd} is installed at ~/.local/bin/${cmd}, but ~/.local/bin is not on PATH`, `add ${snippet} to ${file} (or reinstall with --edit-shell-profile)`));
+    else result3.push(check(`path:${cmd}`, "warn", `${cmd} is missing`, fix));
   }
   return result3;
 }

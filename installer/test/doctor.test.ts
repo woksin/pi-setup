@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { main } from "../src/run.ts";
 import { emptyManifest, sha256 } from "../src/manifest.ts";
@@ -371,6 +371,21 @@ test("optional command suggestions prefer links only when the package script exi
   assert.match(f.checks().find(c => c.id === "path:orch")!.fix!, /https:/);
   f.put("npm/node_modules/@woksin/pi-orch/bin/orch", "script");
   assert.match(f.checks().find(c => c.id === "path:orch")!.fix!, /^ln -s/);
+});
+
+test("path:<cmd> says installed-but-not-on-PATH when the link exists, missing only when absent", () => {
+  const f = fixture();
+  f.put("settings.json", '{"packages":["npm:@woksin/pi-orch"]}');
+  f.ctx.which = () => undefined;
+  f.ctx.env = { ...f.ctx.env, PATH: "/usr/bin" };
+  const none = f.checks().find(c => c.id === "path:orch")!;
+  assert.equal(none.status, "warn"); assert.match(none.detail, /is missing/);
+  mkdirSync(join(f.ctx.home, ".local/bin"), { recursive: true });
+  symlinkSync("/nowhere", join(f.ctx.home, ".local/bin/orch"));
+  const c = f.checks().find(c => c.id === "path:orch")!;
+  assert.equal(c.status, "warn");
+  assert.match(c.detail, /installed at ~\/\.local\/bin\/orch, but ~\/\.local\/bin is not on PATH/);
+  assert.match(c.fix!, /--edit-shell-profile/);
 });
 
 test("F3 revalidates content after npm rather than changing a newly edited file", async () => {
