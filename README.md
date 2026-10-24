@@ -211,6 +211,16 @@ Open build files, running phase cwds, writes within 60 min or tracked bin files
 keep the worktree; unknown probes fail closed. Each worktree logs a reason and
 bytes freed. Doctor's disk check samples a bounded reclaimable-bin estimate.
 
+Dry runs have one 60-second planning budget (`--budget SECONDS`, `0` for unlimited).
+Text sections stream as they finish; `--json` emits one complete document instead.
+Unfinished sections/items say `not measured (budget)` and are never marked removable.
+Sizes are optional; `--apply` ignores this budget and retains its full safety checks.
+`PI_CLEANUP_TIMING=1` prints planning milestones to stderr even without a terminal.
+The caches step also lists stale, user-owned `pisync.*` and `gr-stage-ui*` directories
+under `/tmp` and `/private/tmp`, deduplicating their aliases. `--apply` removes only
+real directories older than two hours, after fresh open-file/cwd and fixture-lock
+checks; symlinks, busy directories and unknown process state are kept.
+
 `dev-doctor --only package-cache-volume` compares NuGet/pnpm/yarn caches with the
 source filesystem. `--apply --only package-cache-volume` only creates/appends an
 outside-checkout `Directory.Build.rsp` (backing up an existing file); rare in-place

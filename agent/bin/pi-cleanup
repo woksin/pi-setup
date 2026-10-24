@@ -4,10 +4,13 @@
 Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-days N]
                   [--image-age-days N]
                   [--nuget-age-days N] [--session-age-days N] [--if-free-below GIB|config]
-                  [--roots PATH ...] [--json] [--scheduled]
+                  [--roots PATH ...] [--json] [--scheduled] [--budget SECONDS]
 
   (default)          dry run: print the plan, change nothing (see note on fetch below)
   --apply            execute the plan
+  --budget SECONDS   overall dry-run deadline (default 60; 0 unlimited). Unfinished
+                     sections are not measured (budget), never removable. Ignored by --apply.
+                     Text sections stream immediately; --json remains one complete document.
   --only STEPS       comma list of build,worktrees,docker,caches,bins (default: all five)
   --idle-days N      a repo/worktree modified within N days is ACTIVE (default 3; when
                      --scheduled and not given, only the build step uses 0.25)
@@ -84,6 +87,8 @@ import fcntl
 import gzip
 import json
 import math
+import multiprocessing
+import signal
 import os
 from pathlib import Path
 import re
@@ -112,6 +117,10 @@ LOG_MAX = 900_000  # bytes; truncate oldest lines above this (limit is 1 MB)
 LOG_KEEP = 600_000
 POOL = 8
 SIZE_BUDGET_S = 30  # total wall-clock budget for worktree `du` measurements
+DRY_WORKER = False
+TMP_ROOTS = ("/tmp", "/private/tmp")
+TMP_PREFIXES = ("pisync.", "gr-stage-ui")
+TMP_MIN_AGE = 2 * 3600
 
 BUILD_DIRS = {
     "bin", "obj", "node_modules", "dist", "TestResults", "coverage", "coverage-results",
@@ -149,7 +158,7 @@ _progress_t0 = time.time()
 
 
 def progress(msg: str) -> None:
-    if sys.stderr.isatty():
+    if sys.stderr.isatty() or os.environ.get("PI_CLEANUP_TIMING") == "1":
         print(f"[{time.time() - _progress_t0:6.1f}s] {msg}", file=sys.stderr, flush=True)
 
 
@@ -157,7 +166,7 @@ def run(args, cwd=None, timeout=60, detach=False, env=None):
     """Run a command; returns (rc, stdout, stderr). 124 timeout, 127 missing, 126 OS error."""
     try:
         r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, errors="replace",
-                           timeout=timeout, stdin=subprocess.DEVNULL, env=env or ENV, start_new_session=detach)
+                           timeout=timeout, stdin=subprocess.DEVNULL, env=env or ENV, start_new_session=detach and not DRY_WORKER)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
@@ -1048,9 +1057,83 @@ def plan_session_gzip(ctx: Ctx):
     return cands, open_skipped
 
 
-def plan_caches(ctx: Ctx, checkouts):
+def tmp_state(path, now):
+    """Only old, user-owned real directories with an explicitly known prefix."""
+    try:
+        st = os.lstat(path)
+        if not os.path.basename(path).startswith(TMP_PREFIXES):
+            return None, "unknown prefix"
+        if not statmod.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            return None, "not a user-owned directory"
+        if now - st.st_mtime < TMP_MIN_AGE:
+            return None, "younger than 2 hours"
+        return (st.st_dev, st.st_ino, st.st_mtime_ns), None
+    except OSError as error:
+        return None, str(error)
+
+
+def tmp_locked(path):
+    """A test fixture may be idle without open files except its lifetime lock."""
+    try:
+        with open(os.path.join(path, ".pisync.lock"), "rb") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def plan_tmp(ctx):
+    items, seen = [], set()
+    for raw in TMP_ROOTS:
+        root = os.path.realpath(raw)
+        if root in seen:
+            continue
+        seen.add(root)
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for name in names:
+            if not name.startswith(TMP_PREFIXES):
+                continue
+            path = os.path.join(root, name)
+            identity, reason = tmp_state(path, ctx.now)
+            if not reason and (ctx.snap is None or ctx.snap.first_inside(path) or tmp_locked(path)):
+                reason = "process holds directory (or process snapshot unavailable)"
+            size = du_bytes(path, 2) if not reason else None
+            items.append({"name": "temporary directory " + path, "tmp_path": path,
+                          "identity": identity, "size": size, "action": "skip" if reason else "run",
+                          "reason": reason})
+    return items
+
+
+def apply_tmp(ctx, item):
+    path = item["tmp_path"]
+    # Fresh global snapshot is mandatory for EACH removal, not only the cache plan.
+    try:
+        snapshot = take_snapshot()
+    except SnapshotError:
+        item.update(action="skip", reason="process snapshot unavailable")
+        return
+    identity, reason = tmp_state(path, time.time())
+    allowed_roots = {os.path.realpath(root) for root in TMP_ROOTS}
+    if reason or identity != item["identity"] or os.path.dirname(path) not in allowed_roots:
+        item.update(action="skip", reason=reason or "directory identity changed")
+    elif snapshot.first_inside(path) or tmp_locked(path):
+        item.update(action="skip", reason="process holds directory")
+    else:
+        try:
+            shutil.rmtree(path)
+            item["result"] = "removed"
+        except OSError as error:
+            item["result"] = f"failed: {error}"
+
+
+def plan_caches(ctx: Ctx, checkouts, include_tmp=True):
     """Plan items: {name, action: run|skip, reason, ...}."""
-    items = []
+    items = plan_tmp(ctx) if include_tmp else []
 
     def item(name, action, reason=None, **kw):
         d = {"name": name, "action": action, "reason": reason, **kw}
@@ -1227,7 +1310,9 @@ def apply_caches(ctx: Ctx, plan):
             if busy:
                 it.update(action="skip", reason="running: " + ",".join(busy))
                 continue
-        if "cmd" in it:
+        if "tmp_path" in it:
+            apply_tmp(ctx, it)
+        elif "cmd" in it:
             if n == "go build cache":
                 busy = procs_running(["go", "compile", "golangci-lint", "gopls"])
                 if busy:
@@ -1310,7 +1395,10 @@ def render_caches(plan, apply, out):
             rows.append([it["name"], "skip", it["reason"] or ""])
             continue
         r = it.get("result")
-        if "cmd" in it:
+        if "tmp_path" in it:
+            rows.append([it["name"], (r or "remove") if apply else "would remove",
+                         human(it["size"]) if it["size"] is not None else "not measured (budget)"])
+        elif "cmd" in it:
             act = (r or "ok") if apply else "would run"
             rows.append([it["name"], act, " ".join(it["cmd"]) + (f"  [{it['note']}]" if it.get("note") else "")
                          + (f"  (cache {human(it['size'])})" if it.get("size") else "")])
@@ -1586,7 +1674,8 @@ def render_text(rep):
     if sg.get("kept_worktrees") is not None:
         k = sg["kept_worktrees"]
         out.append(f"  remaining kept worktrees: {k['count']} totalling {human(k['bytes'])}"
-                   + (f" (+{k['unmeasured']} not measured within {SIZE_BUDGET_S}s)" if k["unmeasured"] else ""))
+                   + ((f" (+{k['unmeasured']} not measured within {SIZE_BUDGET_S}s)" if rep["apply"] else
+                       f" (+{k['unmeasured']} not measured (budget))") if k["unmeasured"] else ""))
     if sg.get("guards_off"):
         out.append("  guards off >" + str(GUARDS_STALE_DAYS) + " days: " + ", ".join(
             f"{g['name']} ({str(g['days']) + 'd' if g['days'] is not None else 'date unknown'})" for g in sg["guards_off"])
@@ -1634,6 +1723,220 @@ def trim_log():
 # ----------------------------------------------------------------------------
 # main
 # ----------------------------------------------------------------------------
+def dry_worker(send, operation):
+    """Own a process group so a deadline also stops git/du and worker threads."""
+    global DRY_WORKER
+    DRY_WORKER = True
+    os.setsid()
+    try:
+        send.send((True, operation()))
+    except Exception as error:
+        send.send((False, f"{type(error).__name__}: {error}"))
+    finally:
+        send.close()
+        # Keep the session leader alive until the parent has received the result.
+        signal.pause()
+
+
+class DryBudget:
+    """One monotonic deadline, divided among sections; unused shares roll forward."""
+
+    def __init__(self, seconds, notes, started=None):
+        reserve = min(1, seconds * 0.05)
+        start = started if started is not None else time.monotonic()
+        self.deadline = start + seconds - reserve if seconds else None
+        self.weight = 60
+        self.notes = notes
+
+    def measure(self, label, weight, operation, fallback):
+        remaining = max(0, self.deadline - time.monotonic()) if self.deadline else None
+        allowance = remaining * weight / self.weight if remaining is not None else None
+        self.weight -= weight
+        progress(f"{label}: starting")
+        if allowance is not None and allowance <= 0:
+            self.notes.append(f"{label}: not measured (budget)")
+            return fallback
+        context = multiprocessing.get_context("fork")
+        receive, send = context.Pipe(duplex=False)
+        worker = context.Process(target=dry_worker, args=(send, operation))
+        worker.start()
+        send.close()
+        try:
+            if receive.poll(allowance):
+                ok, value = receive.recv()
+                if ok:
+                    return value
+                self.notes.append(f"{label}: not measured ({value})")
+            else:
+                self.notes.append(f"{label}: not measured (budget)")
+            return fallback
+        except EOFError:
+            self.notes.append(f"{label}: not measured (worker exited)")
+            return fallback
+        finally:
+            # Kill the group even if its leader finished: no lingering probes or threads.
+            try:
+                os.killpg(worker.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                if worker.is_alive():
+                    worker.kill()
+            worker.join()
+            receive.close()
+            progress(f"{label}: done")
+
+
+def dry_discover(roots):
+    notes = []
+    return [vars(checkout) for checkout in discover(roots, notes)], notes
+
+
+def dry_worktrees(ctx, checkouts):
+    notes = []
+    return plan_worktrees(ctx, checkouts, notes), notes
+
+
+def unmeasured_worktrees(checkouts):
+    return [{"path": c.path, "name": os.path.basename(c.path), "parent": c.parent,
+             "head": c.head, "branch": c.branch, "blockers": ["not measured (budget)"],
+             "basis": None, "note": None, "size": None, "planned_newest": None,
+             "ai_work": False, "action": "keep"} for c in checkouts if c.kind == "linked"]
+
+
+def worktree_report(rows):
+    blockers = {}
+    for row in rows:
+        for blocker in row["blockers"]:
+            key = "ACTIVE" if blocker.startswith("ACTIVE") else re.sub(r"[:(].*", "", blocker).strip()
+            blockers[key] = blockers.get(key, 0) + 1
+    removable = [row for row in rows if row["action"] == "remove"]
+    return {"rows": rows, "summary": {
+        "total": len(rows), "removable": len(removable), "removed": 0,
+        "kept": len(rows) - len(removable), "failed": 0,
+        "on_default": sum((row["basis"] or "").startswith("on-default") for row in removable),
+        "merged_pr": sum(row["basis"] == "merged-pr" for row in removable), "blockers": blockers}}
+
+
+def stream_step(args, name, plan):
+    if args.json:
+        return
+    out = ["", f"== {name} =="]
+    renderers = {"build": render_build, "worktrees": render_worktrees,
+                 "docker": render_docker, "caches": render_caches}
+    if name == "bins":
+        table(["path", "action", "reason"],
+              [[row["path"], row["action"], row["reason"]] for row in plan["rows"]], out)
+    else:
+        data = plan["rows"] if name in ("build", "worktrees") else plan
+        renderers[name](data, False, out)
+    print("\n".join(out), flush=True)
+
+
+def dry_bins(checkouts):
+    def probe(cmd, timeout=10):
+        rc, out, _ = run(cmd, timeout=timeout)
+        return out if rc == 0 else None
+    return BIN_SWEEP["sweep"]([c.path for c in checkouts if c.exists], probe, False)
+
+
+def dry_suggestions(ctx, rows):
+    measure_sizes(rows)
+    suggestions = {"guards_off": stale_guards_off()}
+    nuget = os.path.expanduser("~/.nuget/packages")
+    if os.path.isdir(nuget):
+        suggestions["nuget_bytes"] = du_bytes(nuget, 3)
+    if ctx.docker_up:
+        rc, out, _ = run(["docker", "volume", "ls", "-q", "-f", "dangling=true"], timeout=3)
+        suggestions["dangling_volumes"] = out.split() if rc == 0 else None
+    return suggestions, rows
+
+
+def dry_plan_steps(ctx, checkouts, budget, rep):
+    args = ctx.args
+    safe_fs = ctx.snap is not None and ctx.mounts is not None
+    wt_rows = []
+    if "worktrees" in args.steps:
+        fallback = (unmeasured_worktrees(checkouts), [])
+        wt_rows, notes = budget.measure("worktrees", 12, lambda: dry_worktrees(ctx, checkouts), fallback) if safe_fs else fallback
+        rep["notes"].extend(notes)
+    queued = {row["path"] for row in wt_rows if row["action"] == "remove"}
+    for name in args.steps:
+        if name == "build":
+            skipped = [{"path": c.path, "kind": c.kind, "skip": "not measured (budget)", "dirs": []}
+                       for c in checkouts]
+            rows = budget.measure(name, 7, lambda: plan_build(ctx, checkouts, queued), skipped) if safe_fs else skipped
+            plan = {"rows": rows, "summary": summarize_build(rows, False)}
+        elif name == "worktrees":
+            plan = worktree_report(wt_rows)
+        elif name == "docker":
+            plan = budget.measure(name, 5, lambda: plan_docker(ctx),
+                                  {"skip": "not measured (budget)", "prunes": [], "rmi": []})
+        elif name == "caches":
+            tmp = budget.measure("temporary directories", 3, lambda: plan_tmp(ctx),
+                                 [{"name": "temporary directories", "action": "skip", "reason": "not measured (budget)"}])
+            plan = budget.measure(name, 6, lambda: plan_caches(ctx, checkouts, include_tmp=False),
+                                  {"items": [{"name": "caches", "action": "skip", "reason": "not measured (budget)"}]}) if safe_fs else {
+                                      "items": [{"name": "caches", "action": "skip", "reason": "process/mount snapshot unavailable"}]}
+            plan["items"] = tmp + plan["items"]
+        else:
+            skipped = [{"path": c.path, "action": "skipped", "reason": "not measured (budget)",
+                        "bytes": 0, "bytes_freed": 0} for c in checkouts if c.exists]
+            plan = {"rows": budget.measure(name, 8, lambda: dry_bins(checkouts), skipped)}
+        rep["steps"][name] = plan
+        stream_step(args, name, plan)
+    return wt_rows
+
+
+def dry_run(args, rep, t0, budget):
+    roots = [os.path.realpath(os.path.expanduser(root)) for root in (args.roots or DEFAULT_ROOTS)]
+    rep["roots"] = [root for root in roots if os.path.isdir(root)]
+    for root in roots:
+        if root not in rep["roots"]:
+            rep["notes"].append(f"root not available, skipped: {root}")
+    if args.roots and not rep["roots"]:
+        rep["errors"].append("none of the given --roots exist")
+        rep["exit"] = 1
+    if not args.json:
+        print(render_text(rep).split("\n\n", 1)[0], flush=True)
+    ctx = Ctx(args)
+    extend_path()
+    ctx.docker_up = budget.measure("docker state", 2, docker_running, None)
+    snapshot = budget.measure("process snapshot", 4, lambda: list(take_snapshot()._orig.values()), None)
+    ctx.snap = PathSet(snapshot) if snapshot is not None else None
+    checkout_data, notes = budget.measure("discovery", 9, lambda: dry_discover(rep["roots"]), ([], []))
+    checkouts = []
+    for data in checkout_data:
+        checkout = Checkout.__new__(Checkout)
+        checkout.__dict__.update(data)
+        checkouts.append(checkout)
+    rep["notes"].extend(notes)
+    rep["discovered"] = {"total": len(checkouts), "main": sum(c.kind == "main" for c in checkouts),
+                         "linked": sum(c.kind == "linked" for c in checkouts)}
+    ctx.roots = PathSet([c.path for c in checkouts])
+    ctx.mounts = None
+    if ctx.docker_up is False:
+        ctx.mounts = PathSet([])
+    elif ctx.docker_up:
+        mounts = budget.measure("container mounts", 1, docker_mounts_all, None)
+        ctx.mounts = PathSet(mounts) if mounts is not None else None
+    if not args.json:
+        print(f"checkouts discovered: {len(checkouts)} ({rep['discovered']['main']} main, "
+              f"{rep['discovered']['linked']} linked)", flush=True)
+    rows = dry_plan_steps(ctx, checkouts, budget, rep)
+    suggestions, measured = budget.measure("suggestions", 3, lambda: dry_suggestions(ctx, rows), ({}, rows))
+    kept = [row for row in measured if row["action"] == "keep"]
+    if kept:
+        suggestions["kept_worktrees"] = {"count": len(kept), "bytes": sum(row["size"] or 0 for row in kept),
+                                         "unmeasured": sum(row["size"] is None for row in kept)}
+    rep["suggestions"] = suggestions
+    rep["runtime_s"] = time.time() - t0
+    if args.json:
+        print(json.dumps(rep, indent=1, default=str), flush=True)
+    else:
+        text = render_text(rep)
+        print("\n" + text[text.index("== suggestions"):], flush=True)
+    return rep["exit"]
+
+
 def nonneg_float(v):
     x = float(v)  # ValueError -> argparse "invalid value"
     if not math.isfinite(x) or x < 0:
@@ -1657,6 +1960,13 @@ def free_below_arg(value):
     return cleanup_trigger_gib() if value == 'config' else nonneg_float(value)
 
 
+def budget_seconds(value):
+    seconds = nonneg_float(value)
+    if not math.isfinite(seconds):
+        raise argparse.ArgumentTypeError("must be a finite number >= 0")
+    return seconds
+
+
 def parse_args(argv):
     ap = argparse.ArgumentParser(prog="pi-cleanup", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1664,6 +1974,8 @@ def parse_args(argv):
     ap.error = lambda msg: (ap.print_usage(sys.stderr), print(f"pi-cleanup: error: {msg}", file=sys.stderr),
                             sys.exit(1))  # exit 2 is reserved for "partial"
     ap.add_argument("--apply", action="store_true", help="execute (default is a dry run)")
+    ap.add_argument("--budget", type=budget_seconds, default=60, metavar="SECONDS",
+                    help="overall dry-run budget (default 60 seconds; 0 unlimited; ignored by --apply)")
     ap.add_argument("--only", default=",".join(STEPS_ALL), help="comma list of " + ",".join(STEPS_ALL))
     ap.add_argument("--idle-days", type=nonneg_float, default=None)
     ap.add_argument("--worktree-min-idle-days", type=nonneg_float, default=1)
@@ -1690,7 +2002,29 @@ def parse_args(argv):
     return a
 
 
+def free_space_probes(args):
+    need = args.if_free_below * 1024 ** 3
+    probes, low, failed = [], [], []
+    paths = [os.path.expanduser("~")] + list(args.roots or DEFAULT_ROOTS)
+    for pth in paths:
+        pth = os.path.realpath(os.path.expanduser(pth))
+        if pth != os.path.realpath(os.path.expanduser("~")) and not os.path.isdir(pth):
+            probes.append({"path": pth, "skipped": "not available"})
+            continue
+        try:
+            free = shutil.disk_usage(pth).free
+        except OSError as e:
+            probes.append({"path": pth, "error": str(e)})
+            failed.append(f"{pth}: {e}")
+            continue
+        probes.append({"path": pth, "free": free})
+        if free < need:
+            low.append(f"{pth}: {human(free)}")
+    return probes, low, failed
+
+
 def main(argv=None):
+    started = time.monotonic()
     t0 = time.time()
     args = parse_args(sys.argv[1:] if argv is None else argv)
     notes, errors = [], []
@@ -1701,24 +2035,17 @@ def main(argv=None):
     if args.scheduled:
         notes.append("--scheduled: forced --only build,docker,caches,worktrees,bins and --apply")
 
+    budget = None if args.apply else DryBudget(args.budget, notes, started)
+    if budget:
+        weights = {"build": 7, "worktrees": 12, "docker": 5, "caches": 9, "bins": 8}
+        budget.weight = 19 + sum(weights[step] for step in args.steps)
     if args.if_free_below is not None:
-        need = args.if_free_below * 1024 ** 3
-        probes, low, failed = [], [], []
-        paths = [os.path.expanduser("~")] + list(args.roots or DEFAULT_ROOTS)
-        for pth in paths:
-            pth = os.path.realpath(os.path.expanduser(pth))
-            if pth != os.path.realpath(os.path.expanduser("~")) and not os.path.isdir(pth):
-                probes.append({"path": pth, "skipped": "not available"})
-                continue
-            try:
-                free = shutil.disk_usage(pth).free
-            except OSError as e:
-                probes.append({"path": pth, "error": str(e)})
-                failed.append(f"{pth}: {e}")
-                continue
-            probes.append({"path": pth, "free": free})
-            if free < need:
-                low.append(f"{pth}: {human(free)}")
+        if args.apply:
+            probes, low, failed = free_space_probes(args)
+        else:
+            budget.weight += 3
+            probes, low, failed = budget.measure("free space", 3, lambda: free_space_probes(args),
+                                                ([], [], ["not measured (budget)"]))
         bins_due = ("bins" in args.steps and any(p.get("free", float("inf")) <
                     BIN_SWEEP['threshold']() * 1024 ** 3 for p in probes))
         if not low and not failed and bins_due:
@@ -1737,6 +2064,9 @@ def main(argv=None):
             notes.append("low free space: " + "; ".join(low))
         if failed:
             notes.append("free-space probe failed, proceeding with cleanup: " + "; ".join(failed))
+
+    if not args.apply:
+        return dry_run(args, rep, t0, budget)
 
     lock_fh = None
     if args.apply:
@@ -1798,7 +2128,9 @@ def main(argv=None):
             def bin_probe(cmd, timeout=10):
                 rc, out, _ = run(cmd, timeout=timeout)
                 return out if rc == 0 else None
+            progress("bins: scanning")
             rows = BIN_SWEEP['sweep']([c.path for c in checkouts if c.exists], bin_probe, args.apply)
+            progress("bins: planned")
             rep["steps"]["bins"] = {"rows": rows}
             failures += sum(r['action'] == 'failed' for r in rows)
 
@@ -1825,7 +2157,9 @@ def main(argv=None):
             caches_plan = plan_caches(ctx, checkouts)
             progress("caches planned")
         if wt_rows:
+            progress("worktree sizes: measuring")
             measure_sizes(wt_rows)
+            progress("worktree sizes: done")
 
         # df before, for every filesystem that any planned action touches
         touched = {os.path.expanduser("~")} if docker_plan and not docker_plan.get("skip") else set()
@@ -1885,6 +2219,7 @@ def main(argv=None):
 
         # suggestions
         sg = rep["suggestions"]
+        progress("suggestions: gathering")
         if ctx.docker_up:
             rc, out, _ = run(["docker", "volume", "ls", "-q", "-f", "dangling=true"], timeout=30)
             sg["dangling_volumes"] = out.split() if rc == 0 else None
@@ -1896,6 +2231,7 @@ def main(argv=None):
                                     "unmeasured": sum(1 for r in left if r["size"] is None)}
 
         sg["guards_off"] = stale_guards_off()
+        progress("suggestions: done")
 
         # failures → exit code
         failures += sum(1 for r in build_rows for d in r["dirs"] if d.get("result", "").startswith("failed"))

@@ -1,10 +1,13 @@
 """sync.sh stages, checks and only then writes the checkout (woksin/pi-setup#11)."""
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import stat
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,17 +57,66 @@ class ConfigBudgetTests(unittest.TestCase):
                 self.assertTrue(list(self.scanner.config_key_findings(filename, node)))
 
 
+def sweep_stale_sync_dirs(root="/tmp", now=None):
+    """Only test-owned, old pisync fixtures; a lifetime flock protects live tests."""
+    now = time.time() if now is None else now
+    for path in Path(root).glob("pisync.*"):
+        try:
+            entry = path.lstat()
+            if not stat.S_ISDIR(entry.st_mode):
+                continue
+            if entry.st_uid != os.getuid():
+                continue
+            if now - entry.st_mtime <= 2 * 3600:
+                continue
+            fd = os.open(path / ".pisync.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                shutil.rmtree(path)
+        except OSError:
+            pass  # Locked, changed, inaccessible: keep it.
+
+
+class SyncFixtureSweepTests(unittest.TestCase):
+    def test_sweep_keeps_recent_locked_unrelated_and_symlinked_dirs(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            old = root / "pisync.old"
+            locked = root / "pisync.locked"
+            for name in (old, locked, root / "pisync.recent", root / "other.old"):
+                name.mkdir()
+            with (locked / ".pisync.lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                (root / "pisync.link").symlink_to(old, target_is_directory=True)
+                for path in (old, locked, root / "other.old"):
+                    os.utime(path, (1, 1))
+                sweep_stale_sync_dirs(root, now=10000)
+                self.assertFalse(old.exists())
+                self.assertTrue(locked.exists())
+                self.assertTrue((root / "pisync.recent").exists())
+                self.assertTrue((root / "other.old").exists())
+                self.assertTrue((root / "pisync.link").is_symlink())
+
+
 class SyncPublishTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sweep_stale_sync_dirs()
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="pisync.", dir="/tmp")
         self.addCleanup(self.directory.cleanup)
+        lock = (Path(self.directory.name) / ".pisync.lock").open("w")
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(lock.close)
         self.home = Path(self.directory.name) / "home"
         self.home.mkdir()
-        self.env = dict(os.environ, HOME=str(self.home), TMPDIR=self.directory.name, PYTHONDONTWRITEBYTECODE="1")
-        self.run_command("./install.sh", "--repos-root", "/tmp/x/repos", "--user", "tester", "--with", "cratis", "--with", "codescene", cwd=REPO)
+        self.env = dict(os.environ, HOME=str(self.home), TMPDIR=self.directory.name, PYTHONDONTWRITEBYTECODE="1",
+                        NODE_DISABLE_COMPILE_CACHE="1", NODE_COMPILE_CACHE=str(Path(self.directory.name) / "node-compile-cache"))
+        self.run_command("./install.sh", "--skip-npm", "--repos-root", "/tmp/x/repos", "--user", "tester", "--with", "cratis", "--with", "codescene", cwd=REPO)
         self.pi = self.home / ".pi/agent"
         self.scratch = Path(self.directory.name) / "repo"
-        shutil.copytree(REPO, self.scratch, ignore=shutil.ignore_patterns(".git", ".ai-work", "__pycache__", "node_modules"))
+        shutil.copytree(REPO, self.scratch, ignore=shutil.ignore_patterns(".git", ".ai-work", "__pycache__", "node_modules", "node-compile-cache*"))
         self.run_command("git", "init", "-q", cwd=self.scratch)
         launchd = self.home / "Library/LaunchAgents"
         launchd.mkdir(parents=True)
