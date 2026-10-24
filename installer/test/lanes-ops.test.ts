@@ -122,7 +122,7 @@ test("green PR filters fail closed and ack/new state changes only on ack", async
   const prs = [pr(1, [{ conclusion: "SUCCESS" }, { conclusion: "NEUTRAL" }, { conclusion: "SKIPPED" }]), pr(2, []), pr(3, [{ conclusion: "FAILURE" }]), pr(4, [{ state: "PENDING" }]), pr(5, [{ conclusion: "SUCCESS" }], { isDraft: true }), pr(6, [{ conclusion: "SUCCESS" }], { labels: [{ name: "hold" }] }), pr(7, [{ state: "SUCCESS" }])];
   f.c.github!.excludeLabels = ["hold"]; saveConfig(f.root, f.c);
   f.ctx.run = async (cmd, args) => { f.calls.push({ cmd, args }); return f.result(JSON.stringify(prs)); };
-  assert.equal(await f.invoke("green-prs", "--new"), 0); assert.equal(f.out.pop(), "example/alpha#1\nexample/alpha#7");
+  assert.equal(await f.invoke("green-prs", "--new"), 0); assert.equal(f.out.pop(), "example/alpha#1 — staleness unknown: CI/main comparison unavailable or incomplete; verify before merging\nexample/alpha#7 — staleness unknown: CI/main comparison unavailable or incomplete; verify before merging");
   assert.equal(existsSync(join(f.root, ".state/green-ack")), false);
   assert.equal(await f.invoke("green-prs", "--ack"), 0); assert.equal(f.out.pop(), "acked 2");
   assert.equal(await f.invoke("green-prs", "--new"), 1);

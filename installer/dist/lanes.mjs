@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 030500ba26c02081c28dc72c93e8c53d23b50b32f1175e8397192248dc23658d
+// pi-setup-source-sha256: 7f690c5c83bbead4a7a225306e116955f688eee12c62cacadffbcba556548854
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -458,7 +458,7 @@ function treeDigest(input) {
 }
 function commitList(text2) {
   const commits = text2.trim().split(/\s+/).filter(Boolean);
-  if (!commits.every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) throw new Error("unpushed commits unknown");
+  if (!commits.every((sha2) => /^[a-f0-9]{40,64}$/.test(sha2))) throw new Error("unpushed commits unknown");
   return commits;
 }
 
@@ -3196,8 +3196,77 @@ async function resumeCheck(c, root, ctx) {
 // src/lanes/commands/green-prs.ts
 import { existsSync as existsSync14, mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync8 } from "node:fs";
 import { join as join34 } from "node:path";
+
+// src/lanes/stale-check.ts
+var completedCheck = (check) => check.status === "completed" && ["success", "skipped", "neutral"].includes(check.conclusion);
+function usableChecks(checks, head) {
+  if (!checks.check_runs.length) return false;
+  if (checks.total_count > checks.check_runs.length) return false;
+  return checks.check_runs.every(completedCheck) && checks.check_runs.every((check) => check.head_sha === head);
+}
+var sha = (value) => typeof value === "string" && /^[a-f0-9]{40,64}$/.test(value);
+async function api(ctx, path, budget) {
+  if (budget.remaining-- <= 0) throw new Error("API budget exhausted");
+  const r = await ctx.run("gh", ["api", path], { timeoutMs: 5e3 });
+  if (r.code !== 0 || r.timedOut) throw new Error("API unavailable");
+  return JSON.parse(r.stdout);
+}
+async function ciHead({ repo, pr }, ctx, budget) {
+  if (!sha(pr.headRefOid)) throw new Error("missing CI head");
+  const checks = await api(ctx, `repos/${repo}/commits/${pr.headRefOid}/check-runs?per_page=100`, budget);
+  if (!usableChecks(checks, pr.headRefOid)) throw new Error("incomplete CI evidence");
+  return pr.headRefOid;
+}
+async function comparisonBase(repo, head, ctx, budget) {
+  const comparison = await api(ctx, `repos/${repo}/compare/main...${head}`, budget);
+  if (!sha(comparison.merge_base_commit.sha)) throw new Error("missing merge base");
+  if (!sha(comparison.base_commit.sha)) throw new Error("missing main head");
+  return comparison;
+}
+var fileNames = (file) => file.previous_filename ? [file.filename, file.previous_filename] : [file.filename];
+async function overlapCount({ repo, pr }, comparison, ctx, budget) {
+  const files = await api(ctx, `repos/${repo}/pulls/${pr.number}/files?per_page=100`, budget);
+  if (files.length >= 100) throw new Error("PR files truncated");
+  const paths = new Set(files.flatMap(fileNames));
+  const main2 = await api(ctx, `repos/${repo}/compare/${comparison.merge_base_commit.sha}...${comparison.base_commit.sha}`, budget);
+  if (!Array.isArray(main2.files)) throw new Error("missing main files");
+  if (main2.files.length >= 300) throw new Error("main files truncated");
+  return main2.files.filter((f) => fileNames(f).some((path) => paths.has(path))).length;
+}
+function freshnessNotice(overlap, head) {
+  const evidence = `CI head ${head.slice(0, 12)}`;
+  return overlap ? `stale: main changed ${overlap} overlapping files since CI (${evidence}); merge main + rerun CI + review before merging` : `fresh: no overlapping main changes since CI (${evidence})`;
+}
+async function staleness({ repo, pr }, ctx, budget) {
+  try {
+    const ref = { repo, pr };
+    const head = await ciHead(ref, ctx, budget);
+    const comparison = await comparisonBase(repo, head, ctx, budget);
+    const overlap = await overlapCount(ref, comparison, ctx, budget);
+    const current = await api(ctx, `repos/${repo}/pulls/${pr.number}`, budget);
+    if (current.head.sha !== head) throw new Error("PR moved during comparison");
+    return freshnessNotice(overlap, head);
+  } catch {
+    return "staleness unknown: CI/main comparison unavailable or incomplete; verify before merging";
+  }
+}
+async function annotatedRefs(refs, details, ctx) {
+  const budget = { remaining: 20 };
+  const lines = [];
+  for (const ref of refs) lines.push(`${ref} \u2014 ${await staleness(details.get(ref), ctx, budget)}`);
+  return lines.join("\n");
+}
+
+// src/lanes/commands/green-prs.ts
 function green(pr, excluded) {
   return !pr.isDraft && !pr.labels.some((l) => excluded.includes(l.name)) && pr.statusCheckRollup.length > 0 && pr.statusCheckRollup.every((s) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(s.conclusion ?? s.state ?? ""));
+}
+function addRefs(refs, details, { repo, prs, excluded }) {
+  for (const pr of prs.filter((p) => green(p, excluded))) {
+    const ref = `${repo}#${pr.number}`;
+    refs.push(ref);
+    details.set(ref, { repo, pr });
+  }
 }
 async function greenPrs(opts, c, root, ctx) {
   if (opts.new && opts.ack) throw new UsageError("--new and --ack are mutually exclusive");
@@ -3211,15 +3280,16 @@ async function greenPrs(opts, c, root, ctx) {
     return 2;
   }
   const refs = [];
+  const details = /* @__PURE__ */ new Map();
   for (const repo of repos) {
-    const r = await ctx.run("gh", ["pr", "list", "--repo", repo, "--author", c.github?.author || "@me", "--state", "open", "--limit", "100", "--json", "number,isDraft,labels,statusCheckRollup"], { timeoutMs: 3e4 });
+    const r = await ctx.run("gh", ["pr", "list", "--repo", repo, "--author", c.github?.author || "@me", "--state", "open", "--limit", "100", "--json", "number,headRefOid,isDraft,labels,statusCheckRollup"], { timeoutMs: 3e4 });
     if (r.code !== 0 || r.timedOut) {
       ctx.err(`gh pr list failed for ${repo}: ${r.stderr.trim()}`);
       return 2;
     }
     try {
       const prs = JSON.parse(r.stdout);
-      refs.push(...prs.filter((p) => green(p, c.github?.excludeLabels || [])).map((p) => `${repo}#${p.number}`));
+      addRefs(refs, details, { repo, prs, excluded: c.github?.excludeLabels || [] });
     } catch {
       ctx.err(`invalid gh pr list response for ${repo}`);
       return 2;
@@ -3236,7 +3306,7 @@ async function greenPrs(opts, c, root, ctx) {
   }
   const previous = opts.new && existsSync14(ack) ? readFileSync17(ack, "utf8").split(/\r?\n/) : [];
   const output = opts.new ? refs.filter((r) => !previous.includes(r)) : refs;
-  if (output.length) ctx.out(output.join("\n"));
+  if (output.length) ctx.out(await annotatedRefs(output, details, ctx));
   return opts.new && !output.length ? 1 : 0;
 }
 

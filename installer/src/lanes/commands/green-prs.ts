@@ -2,10 +2,17 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { UsageError, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
-interface PullRequest { number: number; isDraft: boolean; labels: { name: string }[]; statusCheckRollup: { conclusion?: string; state?: string }[] }
+import { annotatedRefs, type GreenRef } from "../stale-check.ts";
+interface PullRequest { number: number; headRefOid?: string; isDraft: boolean; labels: { name: string }[]; statusCheckRollup: { conclusion?: string; state?: string }[] }
 function green(pr: PullRequest, excluded: string[]): boolean {
   return !pr.isDraft && !pr.labels.some((l) => excluded.includes(l.name)) && pr.statusCheckRollup.length > 0
     && pr.statusCheckRollup.every((s) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(s.conclusion ?? s.state ?? ""));
+}
+function addRefs(refs: string[], details: Map<string, GreenRef>, { repo, prs, excluded }: { repo: string; prs: PullRequest[]; excluded: string[] }): void {
+  for (const pr of prs.filter((p) => green(p, excluded))) {
+    const ref = `${repo}#${pr.number}`;
+    refs.push(ref); details.set(ref, { repo, pr });
+  }
 }
 export async function greenPrs(opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx): Promise<number> {
   if (opts.new && opts.ack) throw new UsageError("--new and --ack are mutually exclusive");
@@ -13,12 +20,13 @@ export async function greenPrs(opts: Record<string, string>, c: Config, root: st
   if (!repos.length) { ctx.err("no repositories configured (lanes.json github.repos)"); return 1; }
   if (!ctx.which("gh")) { ctx.err("gh not found"); return 2; }
   const refs: string[] = [];
+  const details = new Map<string, GreenRef>();
   for (const repo of repos) {
-    const r = await ctx.run("gh", ["pr", "list", "--repo", repo, "--author", c.github?.author || "@me", "--state", "open", "--limit", "100", "--json", "number,isDraft,labels,statusCheckRollup"], { timeoutMs: 30000 });
+    const r = await ctx.run("gh", ["pr", "list", "--repo", repo, "--author", c.github?.author || "@me", "--state", "open", "--limit", "100", "--json", "number,headRefOid,isDraft,labels,statusCheckRollup"], { timeoutMs: 30000 });
     if (r.code !== 0 || r.timedOut) { ctx.err(`gh pr list failed for ${repo}: ${r.stderr.trim()}`); return 2; }
     try {
       const prs: PullRequest[] = JSON.parse(r.stdout);
-      refs.push(...prs.filter((p) => green(p, c.github?.excludeLabels || [])).map((p) => `${repo}#${p.number}`));
+      addRefs(refs, details, { repo, prs, excluded: c.github?.excludeLabels || [] });
     } catch { ctx.err(`invalid gh pr list response for ${repo}`); return 2; }
   }
   refs.sort();
@@ -29,6 +37,6 @@ export async function greenPrs(opts: Record<string, string>, c: Config, root: st
   }
   const previous = opts.new && existsSync(ack) ? readFileSync(ack, "utf8").split(/\r?\n/) : [];
   const output = opts.new ? refs.filter((r) => !previous.includes(r)) : refs;
-  if (output.length) ctx.out(output.join("\n"));
+  if (output.length) ctx.out(await annotatedRefs(output, details, ctx));
   return opts.new && !output.length ? 1 : 0;
 }
