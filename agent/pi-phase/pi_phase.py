@@ -68,7 +68,7 @@ def stack_name(value):
     return value
 
 
-def unwrap_command(command):
+def unwrap_command(command, stop_at_shell=False):
     """Best effort only: strip env/nice/bash -c wrappers, never evaluate shell code.
 
     Returns the inner argv, or None when the invocation cannot be unwrapped safely."""
@@ -106,6 +106,8 @@ def unwrap_command(command):
                 index += 1
             command = command[index:]
         elif name in ("bash", "sh") and len(command) >= 3 and command[1] == "-c":
+            if stop_at_shell:
+                return command
             try:
                 lexer = shlex.shlex(command[2], posix=True, punctuation_chars=";&|<>()")
                 lexer.whitespace_split = True
@@ -1532,8 +1534,39 @@ def dump_warning(message):
         pass
 
 
+def dump_command_segments(command, depth=0):
+    """Inspect literal shell segments only; never expand or execute shell code."""
+    command = unwrap_command(command, stop_at_shell=True) or command
+    if depth >= 20 or len(command) < 3:
+        yield command
+        return
+    if Path(command[0]).name not in ("sh", "bash") or command[1] != "-c":
+        yield command
+        return
+    for segment in dump_shell_segments(command[2]):
+        yield from dump_command_segments(segment, depth + 1)
+
+
+def dump_shell_segments(script):
+    # Consume quoted/escaped text before looking for operators, keeping literal
+    # separators inside arguments intact. This is inspection, not a shell parser.
+    pattern = r'''"(?:[^"\\]|\\.)*"|'[^']*'|\\.|#[^\n]*|[;&|()\n]+'''
+    start = 0
+    for match in re.finditer(pattern, script):
+        if match.group()[0] not in ";&|()\n":
+            continue
+        try:
+            yield shlex.split(script[start:match.start()], comments=True)
+        except ValueError:
+            pass
+        start = match.end()
+    try:
+        yield shlex.split(script[start:], comments=True)
+    except ValueError:
+        pass  # Malformed shell text is best effort, like unwrap_command.
+
+
 def dump_command_options(command):
-    command = unwrap_command(command) or command
     options = {}
     for argument, following in zip(command, command[1:] + [""]):
         name, separator, value = argument.partition("=")
@@ -1543,7 +1576,11 @@ def dump_command_options(command):
 
 def warn_full_dumps(command):
     """Inspect the user's argv, before the no-dump VSTest preset is injected."""
-    options = dump_command_options(command)
+    for segment in dump_command_segments(command):
+        warn_full_dump_options(dump_command_options(segment))
+
+
+def warn_full_dump_options(options):
     reported = set()
     for flag, dump_type, mini in (
             ("--blame-hang", "--blame-hang-dump-type", "mini"),

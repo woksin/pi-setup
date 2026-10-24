@@ -1,6 +1,7 @@
 """Advisory dump checks, using sparse files and synthetic phases only."""
 from contextlib import redirect_stdout
 import io
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -68,6 +69,48 @@ class DumpFlagTests(unittest.TestCase):
 
     def test_simple_shell_wrapper_is_inspected_without_execution(self):
         self.assertIn("--hangdump without", self.warnings(["sh", "-c", "dotnet test --hangdump"]))
+
+    def test_shell_chains_warn_without_execution_or_mutation(self):
+        for separator in ("&&", "||", ";", "|", "&", "\n"):
+            for flag, _, _ in DUMP_FLAGS:
+                with self.subTest(separator=separator, flag=flag):
+                    command = ["sh", "-c", f"cd tests {separator} dotnet test {flag}"]
+                    original = command[:]
+                    with patch.object(pi_phase.subprocess, "Popen") as execute:
+                        self.assertIn(f"{flag} without", self.warnings(command))
+                    execute.assert_not_called()
+                    self.assertEqual(command, original)
+
+    def test_shell_chain_mini_and_none_are_exempt(self):
+        for flag, dump_type, _ in DUMP_FLAGS:
+            for value in ("mini", "Mini", "none", "None"):
+                with self.subTest(flag=flag, value=value):
+                    script = f"cd tests && dotnet test {flag} {dump_type}={value}; echo done"
+                    self.assertEqual(self.warnings(["bash", "-c", script]), "")
+
+    def test_dump_types_do_not_leak_between_shell_segments(self):
+        cases = product(("&&", "||", ";", "|", "&", "\n"), DUMP_FLAGS, ("mini", "none", "full"))
+        for separator, (flag, dump_type, _), value in cases:
+            safe = f"dotnet test {flag} {dump_type} {value}"
+            unsafe = f"dotnet test {flag}"
+            for script in (f"{safe} {separator} {unsafe}", f"{unsafe} {separator} {safe}"):
+                with self.subTest(script=script):
+                    self.assertIn(f"{flag} without", self.warnings(["sh", "-c", script]))
+
+    def test_wrapped_and_nested_shell_chains_are_inspected(self):
+        command = ["env", "MODE=test", "nice", "-n", "5", "bash", "-c",
+                   "cd tests && sh -c 'dotnet test --hangdump; echo done'"]
+        self.assertIn("--hangdump without", self.warnings(command))
+
+    def test_quoted_escaped_and_commented_separators_are_not_boundaries(self):
+        for literal in ("'&&'", '";"', r"\&\&"):
+            script = f"dotnet test --hangdump --filter {literal} --hangdump-type Mini"
+            self.assertEqual(self.warnings(["sh", "-c", script]), "")
+        self.assertEqual(self.warnings(["sh", "-c", "echo ok # ; --hangdump\necho done"]), "")
+
+    def test_shell_full_type_warns(self):
+        output = self.warnings(["sh", "-c", "cd tests && dotnet test --hangdump-type FULL"])
+        self.assertIn("--hangdump-type full writes full dumps", output)
 
     def test_warning_output_failure_is_ignored(self):
         with patch.object(pi_phase, "note", side_effect=BrokenPipeError):
