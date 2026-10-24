@@ -6,7 +6,7 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
                   [--nuget-age-days N] [--session-age-days N] [--if-free-below GIB|config]
                   [--roots PATH ...] [--json] [--scheduled] [--budget SECONDS]
 
-  (default)          dry run: print the plan, change nothing (see note on fetch below)
+  (default)          dry run: print the plan, change nothing; use existing remote refs
   --apply            execute the plan
   --budget SECONDS   overall dry-run deadline (default 60; 0 unlimited). Unfinished
                      sections are not measured (budget), never removable. Ignored by --apply.
@@ -60,7 +60,8 @@ Steps
              <parent>/.ai-work/keep/removed-worktrees/<name>/ first. Right before
              removal: not ACTIVE, still clean, HEAD unchanged. `git worktree remove`
              is never forced; a failure stops worktree processing (exit 2).
-             The fetch runs even in a dry run (it only updates refs/remotes).
+             Dry runs never fetch: existing remote-tracking refs are used and
+             reported as "remote refs not refreshed (dry run)".
   docker     container prune (24h), image prune (dangling), builder prune (72h), and
              rmi of images used by no container (matched by image ID) older than
              --image-age-days. Never touches volumes or networks; never system prune.
@@ -164,9 +165,12 @@ def progress(msg: str) -> None:
 
 def run(args, cwd=None, timeout=60, detach=False, env=None):
     """Run a command; returns (rc, stdout, stderr). 124 timeout, 127 missing, 126 OS error."""
+    command_env = env or ENV
+    if DRY_WORKER and os.path.basename(args[0]) == "git":
+        command_env = {**command_env, "GIT_OPTIONAL_LOCKS": "0"}
     try:
         r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, errors="replace",
-                           timeout=timeout, stdin=subprocess.DEVNULL, env=env or ENV, start_new_session=detach and not DRY_WORKER)
+                           timeout=timeout, stdin=subprocess.DEVNULL, env=command_env, start_new_session=detach)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
@@ -694,18 +698,20 @@ def plan_worktrees(ctx: Ctx, checkouts, notes):
 
     # fetch each parent that still has a candidate, once
     parents = sorted({r["parent"] for r in rows if not r["blockers"]})
-    progress(f"worktrees: fetching {len(parents)} parent repos")
-
     def fetch(parent):
         rc, out, err = git(["fetch", "--prune", "origin"], parent, timeout=120, detach=True)
         return parent, rc, err.strip()[:100]
 
-    fetched = {}
-    with ThreadPoolExecutor(POOL) as ex:
-        for parent, rc, err in ex.map(fetch, parents):
-            fetched[parent] = (rc, err)
-            if rc != 0:
-                notes.append(f"fetch failed for {parent}: {err}")
+    fetched = {parent: (0, "") for parent in parents}
+    if ctx.args.apply:
+        progress(f"worktrees: fetching {len(parents)} parent repos")
+        with ThreadPoolExecutor(POOL) as ex:
+            for parent, rc, err in ex.map(fetch, parents):
+                fetched[parent] = (rc, err)
+                if rc != 0:
+                    notes.append(f"fetch failed for {parent}: {err}")
+    else:
+        notes.append("remote refs not refreshed (dry run)")
     refs = {p: default_ref(p) for p in parents if fetched[p][0] == 0}
 
     def merge(r):
@@ -1724,17 +1730,19 @@ def trim_log():
 # main
 # ----------------------------------------------------------------------------
 def dry_worker(send, operation):
-    """Own a process group so a deadline also stops git/du and worker threads."""
+    """Run a section without propagating its deadline to subprocesses."""
     global DRY_WORKER
     DRY_WORKER = True
-    os.setsid()
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
     try:
         send.send((True, operation()))
+    except SnapshotError as error:
+        send.send((False, {"snapshot_error": str(error)}))
     except Exception as error:
         send.send((False, f"{type(error).__name__}: {error}"))
     finally:
         send.close()
-        # Keep the session leader alive until the parent has received the result.
+        # Wait for the parent to receive the result and terminate only this worker.
         signal.pause()
 
 
@@ -1766,6 +1774,8 @@ class DryBudget:
                 ok, value = receive.recv()
                 if ok:
                     return value
+                if isinstance(value, dict) and "snapshot_error" in value:
+                    raise SnapshotError(value["snapshot_error"])
                 self.notes.append(f"{label}: not measured ({value})")
             else:
                 self.notes.append(f"{label}: not measured (budget)")
@@ -1774,13 +1784,12 @@ class DryBudget:
             self.notes.append(f"{label}: not measured (worker exited)")
             return fallback
         finally:
-            # Kill the group even if its leader finished: no lingering probes or threads.
-            try:
-                os.killpg(worker.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                if worker.is_alive():
-                    worker.kill()
-            worker.join()
+            # Never signal subprocesses: git children may still be finishing I/O.
+            worker.terminate()
+            worker.join(1)
+            if worker.is_alive():
+                worker.kill()
+                worker.join()
             receive.close()
             progress(f"{label}: done")
 
@@ -1855,9 +1864,10 @@ def dry_plan_steps(ctx, checkouts, budget, rep):
     safe_fs = ctx.snap is not None and ctx.mounts is not None
     wt_rows = []
     if "worktrees" in args.steps:
+        rep["notes"].append("remote refs not refreshed (dry run)")
         fallback = (unmeasured_worktrees(checkouts), [])
         wt_rows, notes = budget.measure("worktrees", 12, lambda: dry_worktrees(ctx, checkouts), fallback) if safe_fs else fallback
-        rep["notes"].extend(notes)
+        rep["notes"].extend(note for note in notes if note not in rep["notes"])
     queued = {row["path"] for row in wt_rows if row["action"] == "remove"}
     for name in args.steps:
         if name == "build":
@@ -1928,6 +1938,10 @@ def dry_run(args, rep, t0, budget):
         suggestions["kept_worktrees"] = {"count": len(kept), "bytes": sum(row["size"] or 0 for row in kept),
                                          "unmeasured": sum(row["size"] is None for row in kept)}
     rep["suggestions"] = suggestions
+    return finish_dry_report(args, rep, t0)
+
+
+def finish_dry_report(args, rep, t0):
     rep["runtime_s"] = time.time() - t0
     if args.json:
         print(json.dumps(rep, indent=1, default=str), flush=True)
@@ -2066,7 +2080,12 @@ def main(argv=None):
             notes.append("free-space probe failed, proceeding with cleanup: " + "; ".join(failed))
 
     if not args.apply:
-        return dry_run(args, rep, t0, budget)
+        try:
+            return dry_run(args, rep, t0, budget)
+        except SnapshotError as error:
+            errors.append(f"cannot determine which repos are in use, refusing to continue: {error}")
+            rep["exit"] = 1
+            return finish_dry_report(args, rep, t0)
 
     lock_fh = None
     if args.apply:

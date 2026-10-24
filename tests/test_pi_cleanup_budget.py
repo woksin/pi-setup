@@ -5,11 +5,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
-from test_pi_cleanup import cleanup
+from test_pi_cleanup import cleanup, RepoFixture
 
 
 class FlushBuffer(io.StringIO):
@@ -40,6 +41,57 @@ class DryBudgetTests(unittest.TestCase):
         self.assertLess(time.monotonic() - before, 1.5)
         self.assertEqual(notes, ['slow: not measured (budget)'])
         self.assertEqual(cleanup.multiprocessing.active_children(), [])
+
+    def test_budget_expiry_does_not_signal_git_child(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            child = root / 'git'
+            child.write_text(f'#!{sys.executable}\n' +
+                             'import signal, time\nfrom pathlib import Path\n' +
+                             f'root = Path({str(root)!r})\n' +
+                             'signal.signal(signal.SIGTERM, lambda *args: (root / "signalled").touch())\n' +
+                             '(root / "started").touch()\ntime.sleep(1.4)\n(root / "finished").touch()\n')
+            child.chmod(0o700)
+            budget = cleanup.DryBudget(.8, [])
+            with patch.object(cleanup.os, 'killpg', side_effect=AssertionError('group signal')):
+                self.assertEqual(budget.measure('git', 60, lambda: cleanup.run([str(child)], timeout=5), None), None)
+            deadline = time.monotonic() + 4
+            while not (root / 'finished').exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            self.assertTrue((root / 'started').exists())
+            self.assertTrue((root / 'finished').exists(), 'git child was killed before completing')
+            self.assertFalse((root / 'signalled').exists())
+
+    def test_shutdown_escalates_only_for_worker_after_grace_period(self):
+        context = Mock()
+        receive, send = Mock(), Mock()
+        receive.poll.return_value = False
+        context.Pipe.return_value = (receive, send)
+        worker = context.Process.return_value
+        worker.is_alive.return_value = True
+        with patch.object(cleanup.multiprocessing, 'get_context', return_value=context), \
+                patch.object(cleanup.os, 'killpg') as killpg:
+            cleanup.DryBudget(.1, []).measure('slow', 60, lambda: None, None)
+        self.assertEqual(worker.method_calls,
+                         [call.start(), call.terminate(), call.join(1), call.is_alive(), call.kill(), call.join()])
+        killpg.assert_not_called()
+
+    def test_dry_git_keeps_requested_session_and_disables_optional_writes(self):
+        result = cleanup.subprocess.CompletedProcess([], 0, '', '')
+        with patch.object(cleanup, 'DRY_WORKER', True), \
+                patch.object(cleanup.subprocess, 'run', return_value=result) as run:
+            cleanup.run(['git', 'status'], detach=True)
+        self.assertTrue(run.call_args.kwargs['start_new_session'])
+        self.assertEqual(run.call_args.kwargs['env']['GIT_OPTIONAL_LOCKS'], '0')
+
+    def test_snapshot_failure_keeps_original_error_and_exit_code(self):
+        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out, \
+                patch.object(cleanup, 'docker_running', return_value=False), \
+                patch.object(cleanup, 'take_snapshot', side_effect=cleanup.SnapshotError('lsof failed')):
+            code = cleanup.main(['--only', 'build', '--roots', root, '--json'])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out.getvalue())['errors'],
+                         ['cannot determine which repos are in use, refusing to continue: lsof failed'])
 
     def test_unlimited_waits_for_measurement(self):
         budget = cleanup.DryBudget(0, [])
@@ -110,6 +162,23 @@ class DryBudgetTests(unittest.TestCase):
                 patch.dict(cleanup.BIN_SWEEP, sweep=lambda *args: []), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cleanup.main(['--apply', '--only', 'bins', '--roots', root, '--budget', '.001']), 0)
+
+
+class RemoteRefTests(RepoFixture):
+    def test_dry_run_uses_existing_refs_without_fetch(self):
+        ctx = self.context()
+        notes = []
+        with patch.object(cleanup, 'git', wraps=cleanup.git) as git:
+            rows = cleanup.plan_worktrees(ctx, self.checkouts, notes)
+        self.assertFalse(any(call.args[0][0] == 'fetch' for call in git.call_args_list))
+        self.assertIn('remote refs not refreshed (dry run)', notes)
+        self.assertEqual(rows[0]['action'], 'remove')
+
+    def test_apply_still_fetches(self):
+        ctx = self.context('--apply')
+        with patch.object(cleanup, 'git', wraps=cleanup.git) as git:
+            cleanup.plan_worktrees(ctx, self.checkouts, [])
+        self.assertTrue(any(call.args[0] == ['fetch', '--prune', 'origin'] for call in git.call_args_list))
 
 
 class TemporaryDirectoryTests(unittest.TestCase):
