@@ -44,7 +44,7 @@ type Answer<T> = T | typeof CANCEL;
 const savedString = (saved: Record<string, unknown>, key: string): string =>
   typeof saved[key] === "string" ? (saved[key] as string) : "";
 
-async function askLogin(p: Prompter, input: WizardInput): Promise<Answer<string | undefined>> {
+export async function askLogin(p: Prompter, input: WizardInput): Promise<Answer<string | undefined>> {
   if (input.options.user) return undefined;
   const known = savedString(input.saved, "githubUser") || input.detection.github.login || "";
   if (known) {
@@ -86,7 +86,7 @@ function keepsDefaultRoot(input: WizardInput, picked: string): boolean {
   return picked === initial && (!saved || saved === picked);
 }
 
-async function askRoot(p: Prompter, input: WizardInput): Promise<Answer<string | undefined>> {
+export async function askRoot(p: Prompter, input: WizardInput): Promise<Answer<string | undefined>> {
   if (input.options.reposRoot) return undefined;
   const picked = await p.select<string>({
     message: "Where are your repositories?",
@@ -99,7 +99,7 @@ async function askRoot(p: Prompter, input: WizardInput): Promise<Answer<string |
   return p.isCancel(typed) ? CANCEL : expandHome((typed as string).trim(), input.home);
 }
 
-async function askProfile(p: Prompter, input: WizardInput): Promise<Answer<string | undefined>> {
+export async function askProfile(p: Prompter, input: WizardInput): Promise<Answer<string | undefined>> {
   if (input.options.profile && input.options.profile !== "auto") return undefined;
   const { initial } = input;
   const answer = await p.select<"keep" | "change">({
@@ -117,7 +117,7 @@ async function askProfile(p: Prompter, input: WizardInput): Promise<Answer<strin
   return p.isCancel(chosen) ? CANCEL : chosen;
 }
 
-async function askComponents(p: Prompter, input: WizardInput, root: string): Promise<Answer<Record<string, boolean> | undefined>> {
+export async function askComponents(p: Prompter, input: WizardInput, root: string): Promise<Answer<Record<string, boolean> | undefined>> {
   const rows = input.extras?.(root) ?? [];
   const missing = rows.filter((r) => r.unavailable && !r.fixed);
   if (missing.length) p.note(missing.map((r) => `${r.label}: not available (${r.unavailable})`).join("\n"), "Extras not available here");
@@ -133,6 +133,22 @@ async function askComponents(p: Prompter, input: WizardInput, root: string): Pro
   return Object.fromEntries(asked.map((r) => [r.id, chosen.has(r.id)]));
 }
 
+function lanesEnabled(input: WizardInput, root: string, components?: Record<string, boolean>): boolean {
+  const row = input.extras?.(root).find((r) => r.id === "lanes");
+  if (row?.unavailable) return false;
+  return Boolean(components?.lanes ?? row?.initial);
+}
+
+/** The lanes trust choice belongs to Extras, including when lanes is fixed by a flag. */
+export async function askPreapproval(
+  p: Prompter, input: WizardInput, root: string, components?: Record<string, boolean>,
+): Promise<Answer<boolean | undefined>> {
+  if (!lanesEnabled(input, root, components)) return undefined;
+  if (input.options.preapproveMcp || input.preapproveMcp) return true;
+  const answer = await p.confirm({ message: "Preapprove project MCP servers? This trusts project MCP server definitions in added repositories.", initial: false });
+  return p.isCancel(answer) ? CANCEL : answer === true;
+}
+
 /** Ask only what detection and flags could not settle. Returns CANCEL when the user backs out. */
 export async function collectChoices(p: Prompter, input: WizardInput): Promise<Answer<WizardResult>> {
   p.note(detectionLines(input.detection).join("\n"), "What I found");
@@ -146,16 +162,10 @@ export async function collectChoices(p: Prompter, input: WizardInput): Promise<A
     input.detection.candidates[0]?.path || `${input.home}/repos`;
   const components = await askComponents(p, input, reposRoot);
   if (p.isCancel(components)) return CANCEL;
-  const lanesRow = input.extras?.(reposRoot).find((r) => r.id === "lanes");
-  const lanes = !lanesRow?.unavailable && ((components as Record<string, boolean> | undefined)?.lanes ?? lanesRow?.initial);
-  let preapproveMcp = input.options.preapproveMcp || input.preapproveMcp || false;
-  if (lanes && !preapproveMcp) {
-    const answer = await p.confirm({ message: "Preapprove project MCP servers? This trusts project MCP server definitions in added repositories.", initial: false });
-    if (p.isCancel(answer)) return CANCEL;
-    preapproveMcp = answer === true;
-  }
+  const preapproveMcp = await askPreapproval(p, input, reposRoot, components as Record<string, boolean> | undefined);
+  if (preapproveMcp === CANCEL) return CANCEL;
   return {
-    ...(lanes ? { preapproveMcp } : {}),
+    ...(preapproveMcp === undefined ? {} : { preapproveMcp }),
     user: user as string | undefined, root: root as string | undefined, profile: profile as string | undefined,
     ...(components ? { components: components as Record<string, boolean> } : {}),
   };

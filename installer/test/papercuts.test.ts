@@ -1,52 +1,15 @@
 import { strict as assert } from "node:assert";
 import { appendFileSync, rmSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { realContext, realRun, realWhich } from "../src/context.ts";
 import { COMPONENTS, hintFor } from "../src/components.ts";
 import { main } from "../src/run.ts";
-import { CANCEL } from "../src/types.ts";
-import type { Ctx, Prompter } from "../src/types.ts";
-import { REPO, assertTempHome, install, installLines, sandbox } from "./helpers/home.ts";
+import { install, installLines, sandbox } from "./helpers/home.ts";
+import { ctxFor, scripted } from "./helpers/prompter.ts";
 import type { Sandbox } from "./helpers/home.ts";
 
 const boxes: Sandbox[] = [];
 after(() => boxes.forEach((b) => rmSync(b.root, { recursive: true, force: true })));
-
-function ctxFor(box: Sandbox, lines: string[], errs: string[]): Ctx {
-  assertTempHome(box.home);
-  const env = {
-    HOME: box.home, TMPDIR: box.root, STUB_LOG: box.log, STUB_READY: "anthropic,openai-codex,kimi-coding",
-    PATH: [box.stubs, process.env.PATH ?? "/usr/bin:/bin"].join(delimiter),
-  };
-  return {
-    ...realContext(REPO), env, home: box.home, cwd: REPO, stdinTTY: true, stdoutTTY: true, which: realWhich(env),
-    run: (cmd, args, o) => {
-      assert.equal(o?.env?.HOME ?? env.HOME, box.home);
-      return realRun(cmd, args, { ...o, env: { ...env, ...o?.env } });
-    },
-    out: (l) => lines.push(l), err: (l) => errs.push(l),
-  };
-}
-
-function scripted(answers: Record<string, unknown[]>) {
-  const events: string[] = [];
-  const notes: string[] = [];
-  const answer = (kind: string, message: string, fallback: unknown) => {
-    events.push(`${kind}:${message}`);
-    const queue = Object.entries(answers).find(([key]) => message.includes(key))?.[1];
-    return Promise.resolve(queue?.length ? queue.shift() : fallback);
-  };
-  const p: Prompter = {
-    intro: () => {}, outro: () => {}, note: (body) => notes.push(body), spinner: () => ({ start: () => {}, stop: () => {} }),
-    confirm: (o) => answer("confirm", o.message, o.message === "Set up a coordinator and lanes now?" ? false : true) as never,
-    select: (o) => answer("select", o.message, o.initial) as never,
-    text: (o) => answer("text", o.message, o.initial ?? "") as never,
-    multiselect: (o) => Promise.resolve(o.initial) as never,
-    isCancel: (v) => v === CANCEL,
-  };
-  return { p, events, notes };
-}
 
 function box(): Sandbox {
   const b = sandbox();
@@ -58,7 +21,7 @@ const base = (b: Sandbox, extra: string[] = []) => ["--user", "einari", "--skip-
 
 test("(a) a profile picked through Change… is labelled as picked, not as a flag", async () => {
   const b = box();
-  const s = scripted({ "Profile ": ["change"], "Pick a profile": ["openai-only"] });
+  const s = scripted({ "How do you": ["custom"], "Profile ": ["change"], "Pick a profile": ["openai-only"] });
   assert.equal(await main(base(b), ctxFor(b, [], []), s.p), 0);
   const plan = s.notes.find((n) => n.includes("Profile:")) ?? "";
   assert.match(plan, /Profile: openai-only \(you picked it\)/);
@@ -86,16 +49,18 @@ test("(c) the guided flow prints a count line, not one line per file", async () 
   assert.ok(installLines(out.stdout).length > 100);
 });
 
-test("(d) a rerun with nothing to change does not ask Apply?", async () => {
+test("(d) an unchanged rerun ends up to date without Review; first install reaches Review", async () => {
   const b = box();
   assert.equal(install(b, ["--yes", ...base(b)]).status, 0);
   const s = scripted({});
   assert.equal(await main(base(b), ctxFor(b, [], []), s.p), 0);
-  assert.ok(!s.events.includes("confirm:Apply?"), s.events.join("\n"));
+  assert.ok(!s.events.includes("select:Review"), s.events.join("\n"));
+  assert.match(s.outros.at(-1) ?? "", /Everything is up to date/);
   const first = box();
   const f = scripted({});
   assert.equal(await main(base(first), ctxFor(first, [], []), f.p), 0);
-  assert.ok(f.events.includes("confirm:Apply?"));
+  assert.ok(f.events.includes("select:Review"));
+  assert.equal(f.selects.find((s) => s.message === "Review")?.initial, "install");
 });
 
 test("(e) the Python OK line is printed only without a prompter", async () => {
@@ -115,14 +80,16 @@ test("(f) every extras row has a hint", () => {
   }
 });
 
-test("(g) a rerun after keeping an edited file whose .pi-setup-new is current does not ask Apply?", async () => {
+test("(g) keeping an edit reaches Review once; an unchanged rerun skips Review and is up to date", async () => {
   const b = box();
   assert.equal(install(b, ["--yes", ...base(b)]).status, 0);
   appendFileSync(join(b.home, ".pi/agent/extensions/guards.ts"), "\n// edited by the user\n");
   const first = scripted({ "changed since install": ["keep"] });
   assert.equal(await main(base(b), ctxFor(b, [], []), first.p), 0);
-  assert.ok(first.events.includes("confirm:Apply?"), first.events.join("\n"));
+  assert.ok(first.events.includes("select:Review"), first.events.join("\n"));
+  assert.equal(first.selects.find((s) => s.message === "Review")?.initial, "install");
   const again = scripted({ "changed since install": ["keep"] });
   assert.equal(await main(base(b), ctxFor(b, [], []), again.p), 0);
-  assert.ok(!again.events.includes("confirm:Apply?"), again.events.join("\n"));
+  assert.ok(!again.events.includes("select:Review"), again.events.join("\n"));
+  assert.match(again.outros.at(-1) ?? "", /Everything is up to date/);
 });

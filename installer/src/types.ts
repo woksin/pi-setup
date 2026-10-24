@@ -117,11 +117,12 @@ export interface Prompter {
   intro(title: string): void;
   outro(message: string): void;
   note(body: string, title?: string): void;
+  step?(index: number, total: number, title: string): void;
   spinner(): { start(message: string): void; stop(message: string): void };
   confirm(options: { message: string; initial?: boolean }): Promise<boolean | typeof CANCEL>;
   select<T extends string>(options: {
     message: string;
-    options: { value: T; label: string; hint?: string }[];
+    options: { value: T; label: string; hint?: string; disabled?: boolean }[];
     initial?: T;
   }): Promise<T | typeof CANCEL>;
   text(options: {

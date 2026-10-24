@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 802acf5175bfeae8a0b3acbfe4c6945d11692415c117504900dfc5112c925d5f
+// pi-setup-source-sha256: 82c467051bd1be0d347ac089c9ef99fa584e440c09f7003c203c57f78ed6a8c8
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -245,15 +245,15 @@ async function collectLanes(p, input) {
       dir = expandHome(path2, input.home);
     } else dir = answer;
   }
-  const repos = await p.multiselect({ message: "Repositories for lanes", initial: [], options: input.checkouts.map((c2) => ({ value: c2.path, label: c2.repo, hint: c2.path })) });
-  if (p.isCancel(repos)) return CANCEL;
-  if (!repos.length) {
+  const repos2 = await p.multiselect({ message: "Repositories for lanes", initial: [], options: input.checkouts.map((c2) => ({ value: c2.path, label: c2.repo, hint: c2.path })) });
+  if (p.isCancel(repos2)) return CANCEL;
+  if (!repos2.length) {
     p.note("No repositories selected.");
     return CANCEL;
   }
   const ids = new Set(input.existingIdsFor?.(dir) ?? input.existingIds);
   const lanes = [];
-  for (const path2 of repos) {
+  for (const path2 of repos2) {
     const checkout = input.checkouts.find((c2) => c2.path === path2);
     const issues = await input.issues(checkout.repo);
     let issue;
@@ -582,8 +582,8 @@ function validStateFile(value) {
 function validateHierarchy(c2, root, home) {
   const active = c2.lanes.filter((l2) => !l2.retired);
   requireField(new Set(active.map((l2) => laneDir(l2, c2, root, { home }))).size === active.length, "duplicate worktree");
-  const repos = active.flatMap(orchestratedRepos).map((repo) => repo.toLowerCase());
-  requireField(new Set(repos).size === repos.length, "duplicate repo-orch");
+  const repos2 = active.flatMap(orchestratedRepos).map((repo) => repo.toLowerCase());
+  requireField(new Set(repos2).size === repos2.length, "duplicate repo-orch");
   for (const lane of active) validateParentChain(lane, c2);
 }
 function validateParentChain(lane, c2) {
@@ -1243,13 +1243,13 @@ function resolveAdoptSession(s, ctx) {
   checkFile(s, dir, ctx);
 }
 function sessionHeader(file, cwd, ctx) {
-  const header = JSON.parse(readFileSync7(file, "utf8").split("\n")[0]);
-  if (!validHeader(header)) throw new Error("session identity unknown");
-  if (header.cwd && absolute(ctx, header.cwd) !== cwd) throw new Error("signals disagree: session cwd");
-  return header.id;
+  const header2 = JSON.parse(readFileSync7(file, "utf8").split("\n")[0]);
+  if (!validHeader(header2)) throw new Error("session identity unknown");
+  if (header2.cwd && absolute(ctx, header2.cwd) !== cwd) throw new Error("signals disagree: session cwd");
+  return header2.id;
 }
-function validHeader(header) {
-  return header.type === "session" && typeof header.id === "string" && !!header.id;
+function validHeader(header2) {
+  return header2.type === "session" && typeof header2.id === "string" && !!header2.id;
 }
 function newestSession(dir) {
   const files2 = readdirSync3(dir).filter((n3) => n3.endsWith(".jsonl")).map((n3) => join8(dir, n3));
@@ -2783,13 +2783,13 @@ function inventory(path2) {
   if (!path2) return [];
   const rows = readFileSync14(path2, "utf8").split("\n").filter((l2) => l2.trim().startsWith("|"));
   const cells = (line) => line.split("|").slice(1, -1).map((s) => s.trim().replace(/^`|`$/g, ""));
-  const header = rows.findIndex((l2) => {
+  const header2 = rows.findIndex((l2) => {
     const c2 = cells(l2);
     return c2.includes("tty") && c2.includes("worktree") && c2.includes("lane");
   });
-  if (header < 0) throw new Error("inventory must have tty / worktree / lane columns");
-  const keys = cells(rows[header]);
-  return rows.slice(header + 1).map((line) => entry(cells(line), keys)).filter((e) => e !== void 0);
+  if (header2 < 0) throw new Error("inventory must have tty / worktree / lane columns");
+  const keys = cells(rows[header2]);
+  return rows.slice(header2 + 1).map((line) => entry(cells(line), keys)).filter((e) => e !== void 0);
 }
 function entry(c2, keys) {
   const tty = c2[keys.indexOf("tty")];
@@ -2816,11 +2816,11 @@ function requestedRoles(value, coordinatorId) {
 function requestedOrchestrates(value, coordinatorId) {
   const result3 = /* @__PURE__ */ new Map();
   for (const assignment of value?.split(";") ?? []) {
-    const [id, repos, extra] = assignment.split("=");
-    if (!validId(id) || id === coordinatorId || !repos || extra !== void 0 || !repos.split(",").every(validRepo)) {
+    const [id, repos2, extra] = assignment.split("=");
+    if (!validId(id) || id === coordinatorId || !repos2 || extra !== void 0 || !repos2.split(",").every(validRepo)) {
       throw new UsageError("invalid --orchestrates; expected ID=owner/repo,owner/repo for a repo-orch");
     }
-    result3.set(id, [.../* @__PURE__ */ new Set([...result3.get(id) ?? [], ...repos.split(",")])]);
+    result3.set(id, [.../* @__PURE__ */ new Set([...result3.get(id) ?? [], ...repos2.split(",")])]);
   }
   return result3;
 }
@@ -2902,9 +2902,9 @@ function discoveredRole(row, env) {
   return env.roles.get(row.id) ?? (row.id.startsWith("R-") ? "repo-orch" : "lane");
 }
 function orchestratorConflict(row, env) {
-  const repos = orchestratedRepos(adoptedLane(row, env)).map((repo) => repo.toLowerCase());
+  const repos2 = orchestratedRepos(adoptedLane(row, env)).map((repo) => repo.toLowerCase());
   const others = env.c.lanes.filter((l2) => !l2.retired && l2.id !== row.id);
-  return others.some((l2) => orchestratedRepos(l2).some((repo) => repos.includes(repo.toLowerCase())));
+  return others.some((l2) => orchestratedRepos(l2).some((repo) => repos2.includes(repo.toLowerCase())));
 }
 function adoptedLane(row, env) {
   const { c: c2, root, ctx } = env;
@@ -2974,9 +2974,9 @@ async function adopt(opts, ctx) {
   const rows = await discover(ctx, entries, excluded, c2.coordinator.id);
   const orchestrates = requestedOrchestrates(opts.orchestrates, c2.coordinator.id);
   mergeDiscovered(c2, rows, { root, ctx, existingConfig: exists, roles, orchestrates });
-  for (const [id, repos] of orchestrates) {
+  for (const [id, repos2] of orchestrates) {
     const lane = c2.lanes.find((l2) => l2.id === id);
-    if (lane?.role !== "repo-orch" || JSON.stringify(lane.orchestrates) !== JSON.stringify(repos)) {
+    if (lane?.role !== "repo-orch" || JSON.stringify(lane.orchestrates) !== JSON.stringify(repos2)) {
       throw new UsageError(`--orchestrates requires a mapped repo-orch: ${id}`);
     }
   }
@@ -3218,15 +3218,15 @@ async function createWorktree(lane, opts, env) {
 }
 async function findClone(lane, opts, { c: c2, root, ctx }, git2) {
   const [owner, name] = lane.repo.split("/");
-  const repos = expand(c2.reposRoot, c2, root, ctx.home);
+  const repos2 = expand(c2.reposRoot, c2, root, ctx.home);
   const candidates = [
     opts.path ? resolve8(ctx.cwd, opts.path) : void 0,
     c2.repos[lane.repo] ? expand(c2.repos[lane.repo], c2, root, ctx.home) : void 0,
-    join29(repos, name),
-    join29(repos, owner, name)
+    join29(repos2, name),
+    join29(repos2, owner, name)
   ].filter((p) => Boolean(p));
   for (const path2 of candidates) if ((await git2(path2, ["rev-parse", "--git-dir"])).code === 0) return path2;
-  throw new Error(`clone it first: gh repo clone ${lane.repo} ${join29(repos, name)}`);
+  throw new Error(`clone it first: gh repo clone ${lane.repo} ${join29(repos2, name)}`);
 }
 async function prepareBase(input, git2) {
   const { clone, lane, opts, env: { c: c2, ctx } } = input;
@@ -3822,8 +3822,8 @@ function green(pr, excluded) {
 }
 async function greenPrs(opts, c2, root, ctx) {
   if (opts.new && opts.ack) throw new UsageError("--new and --ack are mutually exclusive");
-  const repos = c2.github?.repos.length ? c2.github.repos : [.../* @__PURE__ */ new Set([...c2.lanes.map((l2) => l2.repo).filter((repo) => typeof repo === "string"), ...Object.keys(c2.repos)])];
-  if (!repos.length) {
+  const repos2 = c2.github?.repos.length ? c2.github.repos : [.../* @__PURE__ */ new Set([...c2.lanes.map((l2) => l2.repo).filter((repo) => typeof repo === "string"), ...Object.keys(c2.repos)])];
+  if (!repos2.length) {
     ctx.err("no repositories configured (lanes.json github.repos)");
     return 1;
   }
@@ -3832,7 +3832,7 @@ async function greenPrs(opts, c2, root, ctx) {
     return 2;
   }
   const refs = [];
-  for (const repo of repos) {
+  for (const repo of repos2) {
     const r2 = await ctx.run("gh", ["pr", "list", "--repo", repo, "--author", c2.github?.author || "@me", "--state", "open", "--limit", "100", "--json", "number,isDraft,labels,statusCheckRollup"], { timeoutMs: 3e4 });
     if (r2.code !== 0 || r2.timedOut) {
       ctx.err(`gh pr list failed for ${repo}: ${r2.stderr.trim()}`);
@@ -5410,10 +5410,10 @@ function parseProviderCheck(stdout2) {
 }
 function parseModelTable(stdout2) {
   const lines2 = stdout2.split("\n");
-  const header = lines2.findIndex((l2) => /^\s*provider\s+model\b/i.test(l2));
-  if (header < 0) return null;
+  const header2 = lines2.findIndex((l2) => /^\s*provider\s+model\b/i.test(l2));
+  if (header2 < 0) return null;
   const ids = /* @__PURE__ */ new Set();
-  for (const line of lines2.slice(header + 1)) {
+  for (const line of lines2.slice(header2 + 1)) {
     const [provider, model] = line.trim().split(/\s+/);
     if (provider && model) ids.add(`${provider}/${model}`);
   }
@@ -5557,8 +5557,8 @@ function reasonFor(ready3, name) {
   if (claude) return `only Claude is logged in: ${name} keeps every role on Claude`;
   return "log in with /login in pi, then rerun ./install.sh --profile auto";
 }
-function kimiNote(profile2, ready3) {
-  if (!profile2?.uses.includes("kimi-coding") || ready3.has("kimi-coding")) return void 0;
+function kimiNote(profile3, ready3) {
+  if (!profile3?.uses.includes("kimi-coding") || ready3.has("kimi-coding")) return void 0;
   return "Kimi is not logged in: the Kimi roles fall back to GPT.";
 }
 function pinnedModels(profileDir) {
@@ -5855,7 +5855,7 @@ function newVersionNeedsWrite(newPath, content) {
   return !(existsSync28(newPath) && readFileSync26(newPath).equals(content));
 }
 function reconcile(actions, manifest, home) {
-  const conflicts = [];
+  const conflicts2 = [];
   const out = actions.map((action) => {
     if (action.op !== "install" || action.merge) return action;
     if (!action.existed || !existsSync28(action.path)) return { ...action, decision: "new" };
@@ -5875,10 +5875,10 @@ function reconcile(actions, manifest, home) {
       write: newVersionNeedsWrite(newPath, action.content),
       ...action.noMarkers ? { noMarkers: true } : {}
     };
-    conflicts.push(keep2);
+    conflicts2.push(keep2);
     return keep2;
   });
-  return { actions: out, conflicts };
+  return { actions: out, conflicts: conflicts2 };
 }
 function applyTakes(actions, takes) {
   return actions.map((a2) => a2.op === "keep" && takes.has(a2.path) ? { op: "install", path: a2.path, content: a2.content, mode: a2.mode, mtimeMs: a2.mtimeMs, existed: true, decision: "take" } : a2);
@@ -6421,8 +6421,8 @@ var init_uninstall = __esm({
 import { existsSync as existsSync31, readFileSync as readFileSync29 } from "node:fs";
 import { join as join49 } from "node:path";
 function wasOn(manifest, current, id) {
-  const saved = manifest?.components?.[id];
-  return saved ? saved.on : current[id] === true;
+  const saved2 = manifest?.components?.[id];
+  return saved2 ? saved2.on : current[id] === true;
 }
 function leftWebPackages(ctx, manifest) {
   const path2 = join49(ctx.home, PI, "settings.json");
@@ -7075,8 +7075,8 @@ async function inspect2(ctx) {
   }
   const gathered = await gatherFacts(ctx, manifest);
   const local = localChecks(ctx, gathered.facts);
-  const extras = await componentChecks(ctx, local.manifest);
-  return { ...local, facts: gathered.facts, checks: [...local.checks, ...gathered.checks, ...extras] };
+  const extras2 = await componentChecks(ctx, local.manifest);
+  return { ...local, facts: gathered.facts, checks: [...local.checks, ...gathered.checks, ...extras2] };
 }
 async function runDoctor(ctx, options, baseCtx) {
   let report = await inspect2(ctx);
@@ -7221,9 +7221,9 @@ async function askLogin(p, input) {
   return p.isCancel(typed) ? CANCEL : typed.trim();
 }
 function rootOptions(input) {
-  const saved = savedString(input.saved, "reposRoot");
+  const saved2 = savedString(input.saved, "reposRoot");
   const list = input.detection.candidates.map((c2) => ({ value: c2.path, label: c2.path, hint: `${c2.score} repositories` }));
-  if (saved && !list.some((c2) => c2.value === saved)) list.push({ value: saved, label: saved, hint: "saved" });
+  if (saved2 && !list.some((c2) => c2.value === saved2)) list.push({ value: saved2, label: saved2, hint: "saved" });
   list.push({ value: "", label: "Other\u2026", hint: "type a path" });
   return list;
 }
@@ -7238,9 +7238,9 @@ function validateRoot(input) {
   };
 }
 function keepsDefaultRoot(input, picked) {
-  const saved = savedString(input.saved, "reposRoot");
-  const initial = input.detection.candidates[0]?.path ?? saved;
-  return picked === initial && (!saved || saved === picked);
+  const saved2 = savedString(input.saved, "reposRoot");
+  const initial = input.detection.candidates[0]?.path ?? saved2;
+  return picked === initial && (!saved2 || saved2 === picked);
 }
 async function askRoot(p, input) {
   if (input.options.reposRoot) return void 0;
@@ -7286,42 +7286,21 @@ async function askComponents(p, input, root) {
   const chosen = new Set(picked);
   return Object.fromEntries(asked.map((r2) => [r2.id, chosen.has(r2.id)]));
 }
-async function collectChoices(p, input) {
-  p.note(detectionLines(input.detection).join("\n"), "What I found");
-  const user = await askLogin(p, input);
-  if (p.isCancel(user)) return CANCEL;
-  const root = await askRoot(p, input);
-  if (p.isCancel(root)) return CANCEL;
-  const profile2 = await askProfile(p, input);
-  if (p.isCancel(profile2)) return CANCEL;
-  const reposRoot = root || input.options.reposRoot || savedString(input.saved, "reposRoot") || input.detection.candidates[0]?.path || `${input.home}/repos`;
-  const components = await askComponents(p, input, reposRoot);
-  if (p.isCancel(components)) return CANCEL;
-  const lanesRow = input.extras?.(reposRoot).find((r2) => r2.id === "lanes");
-  const lanes = !lanesRow?.unavailable && (components?.lanes ?? lanesRow?.initial);
-  let preapproveMcp = input.options.preapproveMcp || input.preapproveMcp || false;
-  if (lanes && !preapproveMcp) {
-    const answer = await p.confirm({ message: "Preapprove project MCP servers? This trusts project MCP server definitions in added repositories.", initial: false });
-    if (p.isCancel(answer)) return CANCEL;
-    preapproveMcp = answer === true;
-  }
-  return {
-    ...lanes ? { preapproveMcp } : {},
-    user,
-    root,
-    profile: profile2,
-    ...components ? { components } : {}
-  };
+function lanesEnabled(input, root, components) {
+  const row = input.extras?.(root).find((r2) => r2.id === "lanes");
+  if (row?.unavailable) return false;
+  return Boolean(components?.lanes ?? row?.initial);
 }
-async function confirmApply(p, summary2) {
-  p.note(summary2.join("\n"), "Plan");
-  const answer = await p.confirm({ message: "Apply?", initial: true });
-  return !p.isCancel(answer) && answer === true;
+async function askPreapproval(p, input, root, components) {
+  if (!lanesEnabled(input, root, components)) return void 0;
+  if (input.options.preapproveMcp || input.preapproveMcp) return true;
+  const answer = await p.confirm({ message: "Preapprove project MCP servers? This trusts project MCP server definitions in added repositories.", initial: false });
+  return p.isCancel(answer) ? CANCEL : answer === true;
 }
-async function resolveConflicts(p, conflicts, showDiff) {
+async function resolveConflicts(p, conflicts2, showDiff) {
   const takes = /* @__PURE__ */ new Set();
   let keepRest = false;
-  for (const conflict of conflicts) {
+  for (const conflict of conflicts2) {
     if (keepRest) break;
     let withDiff = true;
     for (; ; ) {
@@ -7351,8 +7330,170 @@ var init_wizard = __esm({
     init_report();
     init_settings();
     init_types();
-    savedString = (saved, key) => typeof saved[key] === "string" ? saved[key] : "";
+    savedString = (saved2, key) => typeof saved2[key] === "string" ? saved2[key] : "";
     TAKE = "take";
+  }
+});
+
+// src/rails.ts
+function currentInput(input, state2) {
+  const rows = input.extras;
+  return {
+    ...input,
+    saved: { ...input.saved, ...state2.user ? { githubUser: state2.user } : {}, ...state2.root ? { reposRoot: state2.root } : {} },
+    detection: state2.root ? { ...input.detection, candidates: [{ path: state2.root, score: 0 }, ...input.detection.candidates.filter((c2) => c2.path !== state2.root)] } : input.detection,
+    initial: state2.profile ? { name: state2.profile, reason: "you picked it", provisional: false, source: "prompt" } : input.initial,
+    extras: rows ? (root) => rows(root).map((row) => ({ ...row, initial: state2.components?.[row.id] ?? row.initial })) : void 0,
+    preapproveMcp: state2.preapproveMcp ?? input.preapproveMcp
+  };
+}
+async function you(p, input, state2) {
+  const login = saved(input, "githubUser") || input.detection.github.login || "not found";
+  p.note(`GitHub login: ${login} \u2014 used for your scheduled-job names and to find your repos`, "You");
+  const answer = await askLogin(p, input);
+  if (answer === CANCEL) return false;
+  if (answer !== void 0) state2.user = answer;
+  return true;
+}
+async function repos(p, input, state2) {
+  p.note(`${rootFor(input)} \u2014 where lanes and Cratis checks look`, "Repositories");
+  const answer = await askRoot(p, input);
+  if (answer === CANCEL) return false;
+  if (answer !== void 0) state2.root = answer;
+  return true;
+}
+async function logins(p, input) {
+  p.note(detectionLines(input.detection).filter((line) => line.startsWith("Providers:")).join("\n"), "AI logins");
+  return true;
+}
+async function profile2(p, input, state2) {
+  const answer = await askProfile(p, input);
+  if (answer === CANCEL) return false;
+  if (answer !== void 0) state2.profile = answer;
+  return true;
+}
+async function extras(p, input, state2, customise) {
+  const root = rootFor(input, state2);
+  const components = customise ? await askComponents(p, input, root) : void 0;
+  if (components === CANCEL) return false;
+  if (components) state2.components = { ...state2.components, ...components };
+  const trust = await askPreapproval(p, input, root, state2.components);
+  if (trust === CANCEL) return false;
+  state2.preapproveMcp = trust;
+  return true;
+}
+function needsTrust(input) {
+  const row = input.extras?.(rootFor(input)).find((r2) => r2.id === "lanes");
+  return Boolean(row?.initial && !row.unavailable && !input.options.preapproveMcp && !input.preapproveMcp);
+}
+function header(p, index, total, title) {
+  if (p.step) p.step(index, total, title);
+  else p.note(`Step ${index} of ${total} \xB7 ${title}`);
+}
+async function conflicts(p, review) {
+  if (!review.conflicts) return true;
+  const answer = await p.select({
+    message: `${review.conflicts} files you edited`,
+    options: [{ value: "keep", label: "Keep yours (recommended)" }, { value: "decide", label: "Decide per file" }],
+    initial: "keep"
+  });
+  if (p.isCancel(answer)) return false;
+  return answer !== "decide" || await review.decideConflicts();
+}
+async function changeStep(p, input, state2, steps) {
+  const editable = STEPS.filter((step2) => step2.needed("custom", input));
+  const answer = await p.select({
+    message: "Change which step?",
+    options: [...editable.map((step2) => ({ value: step2.id, label: step2.title })), { value: "review", label: "Back to Review" }],
+    initial: editable[0]?.id ?? "review"
+  });
+  if (p.isCancel(answer)) return false;
+  const step = editable.find((s) => s.id === answer);
+  if (!step) return true;
+  const index = steps.findIndex((s) => s.id === step.id);
+  if (index >= 0) header(p, index + 1, steps.length + 1, step.title);
+  else p.note(step.title, "Change a step");
+  return step.run(p, currentInput(input, state2), state2, true);
+}
+async function prepareReview({ p, input, state: state2 }) {
+  const review = input.review(state2);
+  if (input.installed && !review.changes) return null;
+  return await conflicts(p, review) ? review : CANCEL;
+}
+async function editReview(session) {
+  const { p, input, state: state2, steps } = session;
+  if (!await changeStep(p, input, state2, steps)) return CANCEL;
+  return prepareReview(session);
+}
+async function reviewChoice({ p, steps }, review) {
+  header(p, steps.length + 1, steps.length + 1, "Review");
+  p.note(review.summary().join("\n"), "Review");
+  return p.select({
+    message: "Review",
+    options: [
+      { value: "install", label: "Install (recommended)" },
+      { value: "change", label: "Change a step\u2026" },
+      { value: "files", label: "Show every file" },
+      { value: "cancel", label: "Cancel" }
+    ],
+    initial: "install"
+  });
+}
+async function reviewLoop(session) {
+  const { p } = session;
+  let review = await prepareReview(session);
+  while (review && review !== CANCEL) {
+    const answer = await reviewChoice(session, review);
+    if (p.isCancel(answer) || answer === "cancel") return false;
+    if (answer === "install") return true;
+    if (answer === "files") {
+      p.note(review.files().join("\n"), "Every file");
+      continue;
+    }
+    review = await editReview(session);
+  }
+  return review !== CANCEL;
+}
+async function runRails(p, input) {
+  const installed = input.installed ? `pi-setup is installed (profile ${input.activeProfile ?? input.initial.name}). This updates it.` : "pi-setup sets up pi with our agents, profiles and tools.";
+  p.note(`${installed}
+Nothing is written until you confirm.
+Ctrl-C quits at any time.`, "Welcome");
+  const mode = await p.select({
+    message: "How do you want to set up?",
+    options: [
+      { value: "recommended", label: input.installed ? "Update with your current choices (recommended)" : "Use our recommended setup", hint: "detects everything, asks only what it must" },
+      { value: "custom", label: input.installed ? "Change settings step by step" : "Customise step by step" }
+    ],
+    initial: "recommended"
+  });
+  if (p.isCancel(mode)) return CANCEL;
+  const selected = mode;
+  const steps = STEPS.filter((step) => step.needed(selected, input));
+  const state2 = {};
+  for (const [index, step] of steps.entries()) {
+    header(p, index + 1, steps.length + 1, step.title);
+    if (!await step.run(p, currentInput(input, state2), state2, selected === "custom")) return CANCEL;
+  }
+  if (!await reviewLoop({ p, input, state: state2, steps })) return CANCEL;
+  return { ...state2, mode: selected };
+}
+var saved, rootFor, STEPS;
+var init_rails = __esm({
+  "src/rails.ts"() {
+    init_detect();
+    init_report();
+    init_types();
+    init_wizard();
+    saved = (input, key) => typeof input.saved[key] === "string" ? input.saved[key] : "";
+    rootFor = (input, state2 = {}) => state2.root || input.options.reposRoot || saved(input, "reposRoot") || input.detection.candidates[0]?.path || `${input.home}/repos`;
+    STEPS = [
+      { id: "you", title: "You", needed: (mode, i2) => !i2.options.user && (mode === "custom" || !(saved(i2, "githubUser") || i2.detection.github.login)), run: you },
+      { id: "repos", title: "Repositories", needed: (mode, i2) => mode === "custom" && !i2.options.reposRoot, run: repos },
+      { id: "logins", title: "AI logins", needed: (mode, i2) => mode === "custom" || readyProviders(i2.detection).size === 0, run: logins },
+      { id: "profile", title: "Profile", needed: (mode, i2) => mode === "custom" && !i2.options.profile, run: profile2 },
+      { id: "extras", title: "Extras", needed: (mode, i2) => needsTrust(i2) || mode === "custom" && Boolean(i2.extras?.(rootFor(i2)).some((r2) => !r2.fixed && !r2.unavailable)), run: extras }
+    ];
   }
 });
 
@@ -8232,7 +8373,7 @@ function formatInstructionFooter(o, e) {
   const r2 = [`${e ? `${styleText2("cyan", S_BAR)}  ` : ""}${o.join(" \u2022 ")}`];
   return e && r2.push(styleText2("cyan", S_BAR_END)), r2;
 }
-var import_sisteransi2, unicode, isCI, unicodeOr, S_STEP_ACTIVE, S_STEP_CANCEL, S_STEP_ERROR, S_STEP_SUBMIT, S_BAR_START, S_BAR, S_BAR_END, S_BAR_START_RIGHT, S_BAR_END_RIGHT, S_RADIO_ACTIVE, S_RADIO_INACTIVE, S_CHECKBOX_ACTIVE, S_CHECKBOX_SELECTED, S_CHECKBOX_INACTIVE, S_PASSWORD_MASK, S_BAR_H, S_CORNER_TOP_RIGHT, S_CONNECT_LEFT, S_CORNER_BOTTOM_RIGHT, S_CORNER_BOTTOM_LEFT, S_CORNER_TOP_LEFT, S_INFO, S_SUCCESS, S_WARN, S_ERROR, symbol2, symbolBar, I, limitOptions, confirm, MULTISELECT_INSTRUCTIONS, m, multiselect, intro, outro, W$1, C, note, W, spinner, u2, SELECT_INSTRUCTIONS, c, select, i, text3;
+var import_sisteransi2, unicode, isCI, unicodeOr, S_STEP_ACTIVE, S_STEP_CANCEL, S_STEP_ERROR, S_STEP_SUBMIT, S_BAR_START, S_BAR, S_BAR_END, S_BAR_START_RIGHT, S_BAR_END_RIGHT, S_RADIO_ACTIVE, S_RADIO_INACTIVE, S_CHECKBOX_ACTIVE, S_CHECKBOX_SELECTED, S_CHECKBOX_INACTIVE, S_PASSWORD_MASK, S_BAR_H, S_CORNER_TOP_RIGHT, S_CONNECT_LEFT, S_CORNER_BOTTOM_RIGHT, S_CORNER_BOTTOM_LEFT, S_CORNER_TOP_LEFT, S_INFO, S_SUCCESS, S_WARN, S_ERROR, symbol2, symbolBar, I, limitOptions, confirm, MULTISELECT_INSTRUCTIONS, m, multiselect, log, intro, outro, W$1, C, note, W, spinner, u2, SELECT_INSTRUCTIONS, c, select, i, text3;
 var init_dist4 = __esm({
   "node_modules/@clack/prompts/dist/index.mjs"() {
     init_dist3();
@@ -8514,6 +8655,49 @@ ${h2}
         }
       }).prompt();
     };
+    log = {
+      message: (s = [], {
+        symbol: e = styleText2("gray", S_BAR),
+        secondarySymbol: r2 = styleText2("gray", S_BAR),
+        output: m2 = process.stdout,
+        spacing: l2 = 1,
+        withGuide: c2
+      } = {}) => {
+        const t2 = [], o = c2 ?? settings.withGuide, f = o ? r2 : "", O = o ? `${e}  ` : "", u3 = o ? `${r2}  ` : "";
+        for (let i2 = 0; i2 < l2; i2++)
+          t2.push(f);
+        const g = Array.isArray(s) ? s : s.split(`
+`);
+        if (g.length > 0) {
+          const [i2, ...y2] = g;
+          i2.length > 0 ? t2.push(`${O}${i2}`) : t2.push(o ? e : "");
+          for (const p of y2)
+            p.length > 0 ? t2.push(`${u3}${p}`) : t2.push(o ? r2 : "");
+        }
+        m2.write(`${t2.join(`
+`)}
+`);
+      },
+      info: (s, e) => {
+        log.message(s, { ...e, symbol: styleText2("blue", S_INFO) });
+      },
+      success: (s, e) => {
+        log.message(s, { ...e, symbol: styleText2("green", S_SUCCESS) });
+      },
+      step: (s, e) => {
+        log.message(s, { ...e, symbol: styleText2("green", S_STEP_SUBMIT) });
+      },
+      warn: (s, e) => {
+        log.message(s, { ...e, symbol: styleText2("yellow", S_WARN) });
+      },
+      /** alias for `log.warn()`. */
+      warning: (s, e) => {
+        log.warn(s, e);
+      },
+      error: (s, e) => {
+        log.message(s, { ...e, symbol: styleText2("red", S_ERROR) });
+      }
+    };
     intro = (o = "", t2) => {
       const i2 = t2?.output ?? process.stdout, e = t2?.withGuide ?? settings.withGuide ? `${styleText2("gray", S_BAR_START)}  ` : "";
       i2.write(`${e}${o}
@@ -8787,6 +8971,7 @@ function clackPrompter() {
     intro: (title) => intro(title),
     outro: (message) => outro(message),
     note: (body, title) => note(body, title),
+    step: (i2, n3, title) => log.step(`Step ${i2} of ${n3} \xB7 ${title}`),
     spinner: () => spinner(),
     confirm: async (o) => wrap(await confirm({ message: o.message, initialValue: o.initial })),
     select: async (o) => wrap(
@@ -8847,7 +9032,7 @@ function requiredToolErrors(ctx, detection, options, guided) {
   if (check3.status === "ok" && !options.json && !guided) ctx.out(check3.detail);
   return errors;
 }
-function extraRows(ctx, options, saved, detection, manifest) {
+function extraRows(ctx, options, saved2, detection, manifest) {
   const flags = flagMap(options);
   return (root) => {
     const detected = detectDefaults(ctx, detection, root);
@@ -8868,18 +9053,18 @@ function extraRows(ctx, options, saved, detection, manifest) {
 function savedPreapproval(ctx) {
   return preapprovalDefault(join56(ctx.home, ".local/share/pi-setup/lanes/templates"));
 }
-function resolveAll(ctx, options, detection, saved, answers, manifest, prompted = false) {
+function resolveAll(ctx, options, detection, saved2, answers, manifest, prompted = false) {
   const piDir = join56(ctx.home, ".pi", "agent");
   const settings2 = resolveSettings({
     flagUser: answers.user ?? options.user,
     flagRoot: answers.root ?? options.reposRoot,
-    saved,
+    saved: saved2,
     detectedUser: detection.github.login,
     scanRoot: prompted ? detection.candidates[0]?.path : void 0,
     home: ctx.home,
     repoDir: ctx.repoDir
   });
-  if (answers.user) settings2.userSource = answers.user === savedString2(saved, "githubUser") ? "saved" : "prompt";
+  if (answers.user) settings2.userSource = answers.user === savedString2(saved2, "githubUser") ? "saved" : "prompt";
   if (answers.root) settings2.rootSource = "prompt";
   const names = profileNames(ctx.repoDir);
   const profiles = loadProfiles(ctx.repoDir);
@@ -8888,7 +9073,7 @@ function resolveAll(ctx, options, detection, saved, answers, manifest, prompted 
   const asked = answers.profile ? { ...options, profile: answers.profile } : options;
   const picked = pickProfile(asked, activeBefore, ready3, profiles, names, options.dryRun || options.plan);
   const choice = answers.profile ? { name: picked.name, reason: "you picked it", provisional: false, source: "prompt" } : picked;
-  const profile2 = profiles.find((p) => p.name === choice.name);
+  const profile3 = profiles.find((p) => p.name === choice.name);
   const components = resolveComponents({
     flags: flagMap(options),
     answers: answers.components,
@@ -8922,7 +9107,7 @@ function resolveAll(ctx, options, detection, saved, answers, manifest, prompted 
     manifest,
     ctx.home
   );
-  const { conflicts } = built;
+  const { conflicts: conflicts2 } = built;
   const serviceOn = Object.fromEntries(Object.entries(on).filter(([id]) => isService(id)));
   const services = planServices(ctx, manifest, serviceOn);
   const actions = [...built.actions, ...services.actions];
@@ -8930,7 +9115,7 @@ function resolveAll(ctx, options, detection, saved, answers, manifest, prompted 
   for (const def of COMPONENTS.filter((c2) => !c2.service)) records[def.id] = { on: on[def.id] };
   componentNotes.push(...notes, ...services.notes);
   if (on.codescene) componentNotes.push(...codesceneNotes(ctx));
-  const kimi = options.dryRun || options.plan ? void 0 : kimiNote(profile2, ready3);
+  const kimi = options.dryRun || options.plan ? void 0 : kimiNote(profile3, ready3);
   const warnings = [
     ...settings2.warnings,
     ...componentNotes.filter((n3) => n3.startsWith("warning:")).map((n3) => n3.slice(9)),
@@ -8938,7 +9123,7 @@ function resolveAll(ctx, options, detection, saved, answers, manifest, prompted 
     ...pinWarnings(pinnedModels(join56(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
     ...kimi ? [kimi] : []
   ];
-  return { settings: settings2, choice, actions, warnings, profile: profile2, ready: ready3, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
+  return { settings: settings2, choice, actions, warnings, profile: profile3, ready: ready3, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts: conflicts2, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
 }
 function jsonReport(r2, detection, exitCode) {
   return JSON.stringify({
@@ -8981,9 +9166,60 @@ async function runCommand(ctx, options, prompter, baseCtx) {
   if (options.command === "update") return runUpdate(ctx, options, prompter);
   return backupsCommand(ctx, options.sub, options.keep, options.dryRun);
 }
+function offComponents(ctx, r2, manifest) {
+  return COMPONENTS.map((c2) => c2.id).filter((id) => !r2.components[id].on && wasOn(manifest, currentState(ctx), id));
+}
+function hasChanges(ctx, options, r2, manifest) {
+  return r2.actions.some((a2) => a2.op === "keep" ? a2.write : a2.op !== "adopt" && a2.op !== "chmod-x") || offComponents(ctx, r2, manifest).length > 0 || r2.npm && !options.skipNpm;
+}
+function summarize(r2, detection, options, guided) {
+  const readOnly = options.dryRun || options.plan;
+  return summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly, withDetection: !guided, components: r2.components, componentNotes: r2.componentNotes });
+}
+function addToolWarnings(r2, detection, toolErrors, ctx) {
+  r2.warnings.push(...toolErrors);
+  if (!toolPath(detection, "pi")) r2.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
+}
+async function guidedResolution({ ctx, options, detection, saved: saved2, manifest, p, toolErrors }) {
+  const profiles = loadProfiles(ctx.repoDir);
+  const activeBefore = readActive(join56(ctx.home, ".pi/agent"));
+  const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, profileNames(ctx.repoDir));
+  let resolved;
+  const result3 = await runRails(p, {
+    options,
+    saved: saved2,
+    detection,
+    profiles,
+    initial,
+    home: ctx.home,
+    repoDir: ctx.repoDir,
+    installed: Boolean(manifest),
+    activeProfile: activeBefore,
+    extras: extraRows(ctx, options, saved2, detection, manifest),
+    preapproveMcp: savedPreapproval(ctx),
+    review: (answers) => {
+      const r2 = resolveAll(ctx, options, detection, saved2, answers, manifest, true);
+      addToolWarnings(r2, detection, toolErrors, ctx);
+      resolved = r2;
+      return {
+        summary: () => summarize(r2, detection, options, true),
+        files: () => r2.actions.map(describe).filter((line) => line !== void 0),
+        changes: hasChanges(ctx, options, r2, manifest),
+        conflicts: r2.conflicts.length,
+        decideConflicts: async () => {
+          const takes = await resolveConflicts(p, r2.conflicts, (c2) => diffText(ctx, c2));
+          if (takes === CANCEL) return false;
+          r2.actions = applyTakes(r2.actions, takes);
+          return true;
+        }
+      };
+    }
+  });
+  return result3 === CANCEL ? CANCEL : resolved;
+}
 async function execute(ctx, options, prompter, baseCtx) {
   const piDir = join56(ctx.home, ".pi", "agent");
-  const saved = readSettings(join56(piDir, "user.json"));
+  const saved2 = readSettings(join56(piDir, "user.json"));
   const manifest = readManifest(piDir);
   const readOnly = options.dryRun || options.plan;
   const names = profileNames(ctx.repoDir);
@@ -8993,57 +9229,31 @@ async function execute(ctx, options, prompter, baseCtx) {
   prompter?.intro("pi-setup");
   const spin = prompter?.spinner();
   spin?.start("Looking around\u2026");
-  const known = Boolean(options.user || savedString2(saved, "githubUser"));
-  const knownRoot = Boolean(options.reposRoot || savedString2(saved, "reposRoot"));
+  const known = Boolean(options.user || savedString2(saved2, "githubUser"));
+  const knownRoot = Boolean(options.reposRoot || savedString2(saved2, "reposRoot"));
   const detection = await detect(ctx, {
     needLogin: !known,
     wantGithubDetails: Boolean(prompter),
     needScan: Boolean(prompter) || !knownRoot,
     probePi: !readOnly,
-    login: options.user || savedString2(saved, "githubUser") || void 0
+    login: options.user || savedString2(saved2, "githubUser") || void 0
   });
   spin?.stop("Looked around");
   const toolErrors = requiredToolErrors(ctx, detection, options, Boolean(prompter));
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
-  let answers = {};
-  if (prompter) {
-    const profiles = loadProfiles(ctx.repoDir);
-    const activeBefore = readActive(piDir);
-    const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, names);
-    const result4 = await collectChoices(prompter, {
-      options,
-      saved,
-      detection,
-      profiles,
-      initial,
-      home: ctx.home,
-      repoDir: ctx.repoDir,
-      extras: extraRows(ctx, options, saved, detection, manifest),
-      preapproveMcp: savedPreapproval(ctx)
-    });
-    if (result4 === CANCEL) return cancelled(ctx);
-    answers = result4;
-  }
-  const r2 = resolveAll(ctx, options, detection, saved, answers, manifest, Boolean(prompter));
-  if (prompter && r2.conflicts.length) {
-    const takes = await resolveConflicts(prompter, r2.conflicts, (c2) => diffText(ctx, c2));
-    if (takes === CANCEL) return cancelled(ctx);
-    r2.actions = applyTakes(r2.actions, takes);
-  }
+  const r2 = prompter ? await guidedResolution({ ctx, options, detection, saved: saved2, manifest, p: prompter, toolErrors }) : resolveAll(ctx, options, detection, saved2, {}, manifest);
+  if (r2 === CANCEL) return cancelled(ctx);
   const better = detection.candidates[0]?.path;
   if (!prompter && r2.settings.rootSource === "default" && better && better !== r2.settings.reposRoot) {
     ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
   }
-  r2.warnings.push(...toolErrors.map((e) => e));
-  if (!toolPath(detection, "pi")) r2.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
-  const summary2 = summaryLines({ ...r2, detection, kimi: readOnly ? void 0 : kimiNote(r2.profile, r2.ready), skipNpm: options.skipNpm, probed: !readOnly, withDetection: !prompter, components: r2.components, componentNotes: r2.componentNotes });
+  if (!prompter) addToolWarnings(r2, detection, toolErrors, ctx);
+  const summary2 = summarize(r2, detection, options, Boolean(prompter));
   if (options.plan) {
     configureShellPath(ctx, options.editShellProfile, true);
     return finish(ctx, baseCtx, options, r2, detection, summary2, 0);
   }
-  const off = COMPONENTS.map((c2) => c2.id).filter((id) => !r2.components[id].on && wasOn(manifest, currentState(ctx), id));
-  const changes = r2.actions.some((a2) => a2.op === "keep" ? a2.write : a2.op !== "adopt" && a2.op !== "chmod-x") || off.length > 0 || r2.npm && !options.skipNpm;
-  if (prompter && changes && !await confirmApply(prompter, summary2)) return cancelled(ctx);
+  const off = offComponents(ctx, r2, manifest);
   const applyOptions = {
     dryRun: options.dryRun,
     skipNpm: options.skipNpm || options.dryRun,
@@ -9086,7 +9296,7 @@ function finish(ctx, baseCtx, options, r2, detection, lines2, code, prompter, wr
   if (code === 0) {
     const readOnly = options.plan || options.dryRun;
     const kept = r2.actions.filter((a2) => a2.op === "keep").length;
-    const upToDate = `Everything up to date.${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
+    const upToDate = `${prompter ? "Everything is up to date." : "Everything up to date."}${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
     const done = readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate;
     const hint = r2.choice.provisional && !readOnly && wrote ? ` ${r2.choice.reason}.` : "";
     if (prompter) prompter.outro(`${done}${hint}`);
@@ -9118,8 +9328,9 @@ var init_run = __esm({
     init_settings();
     init_types();
     init_wizard();
+    init_rails();
     init_shell_path();
-    savedString2 = (saved, key) => typeof saved[key] === "string" ? saved[key] : "";
+    savedString2 = (saved2, key) => typeof saved2[key] === "string" ? saved2[key] : "";
     flagMap = (options) => ({
       ...Object.fromEntries(options.with.map((id) => [id, true])),
       ...Object.fromEntries(options.without.map((id) => [id, false]))
