@@ -8,6 +8,7 @@ import { main } from "../src/run.ts";
 import { listCheckouts } from "../src/repos-scan.ts";
 import { CANCEL, type Ctx, type Prompter } from "../src/types.ts";
 import { assertTempHome, REPO, tempDir, testCtx } from "./helpers/home.ts";
+import { installationChoice } from "./helpers/prompter.ts";
 function scripted(answers: unknown[]) {
   const questions: string[] = []; const selects: string[][] = []; const notes: string[] = [];
   const next = (message: string) => { questions.push(message); assert.ok(answers.length, `missing answer: ${message}`); return Promise.resolve(answers.shift() as never); };
@@ -76,7 +77,8 @@ test("post-install lanes offer is separate, default-no and gated on a real inter
     if (mode === "existing") { mkdirSync(join(repos, ".lanes"), { recursive: true }); writeFileSync(join(repos, ".lanes/lanes.json"), "{}"); }
     const ctx = testCtx(home, { stdinTTY: true, stdoutTTY: true, which: (name) => ["python3", "git"].includes(name) ? `/stub/${name}` : undefined });
     const p: Prompter = { intro: () => {}, outro: () => {}, note: () => {}, spinner: () => ({ start: () => {}, stop: () => {} }),
-      text: async () => { throw new Error("unexpected text"); }, select: async () => CANCEL,
+      text: async () => { throw new Error("unexpected text"); },
+      select: async (o) => installationChoice(o) as never,
       multiselect: async (o) => o.initial as never, isCancel: (v) => v === CANCEL,
       confirm: async (o) => { questions.push({ message: o.message, initial: o.initial }); return o.message === "Set up a coordinator and lanes now?" ? mode === "cancel" ? CANCEL : mode === "accept-cancel" : true; } };
     const args = ["--user", "tester", "--repos-root", repos, "--profile", "balanced", "--skip-npm", ...(mode === "without" ? ["--without", "lanes"] : ["--with", "lanes"]),

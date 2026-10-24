@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { install, piPath, REPO, sandbox, snapshot, tempDir, testCtx } from "./helpers/home.ts";
+import { installationChoice } from "./helpers/prompter.ts";
 import { available, detectDefaults, hintFor, COMPONENTS } from "../src/components.ts";
 import { buildPlan } from "../src/plan.ts";
 import { overlayFor } from "../src/profiles.ts";
@@ -181,7 +182,12 @@ test("wizard trust consent reaches installed defaults; declining and cancellatio
     const questions: string[] = [];
     const p: Prompter = {
       intro: () => {}, outro: () => {}, note: () => {}, spinner: () => ({ start: () => {}, stop: () => {} }),
-      text: async () => { throw new Error("unexpected text"); }, select: async () => { throw new Error("unexpected select"); },
+      text: async () => { throw new Error("unexpected text"); },
+      select: async (o) => {
+        const answer = installationChoice(o);
+        assert.notEqual(answer, CANCEL, `unexpected select: ${o.message}`);
+        return answer as never;
+      },
       multiselect: async (o) => o.initial as never,
       confirm: async (o) => { questions.push(o.message); return o.message === "Set up a coordinator and lanes now?" ? false : o.message.startsWith("Preapprove") ? consent : true; }, isCancel: (v) => v === CANCEL,
     };

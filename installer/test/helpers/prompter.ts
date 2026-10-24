@@ -2,8 +2,8 @@ import { strict as assert } from "node:assert";
 import { delimiter } from "node:path";
 import { realContext, realRun, realWhich } from "../../src/context.ts";
 import { CANCEL } from "../../src/types.ts";
-import type { Ctx, Prompter } from "../../src/types.ts";
-import { REPO, assertTempHome } from "./home.ts";
+import type { Ctx, Prompter, RunResult } from "../../src/types.ts";
+import { REPO, assertTempHome, testCtx } from "./home.ts";
 import type { Sandbox } from "./home.ts";
 
 /** Every child and writable path stays inside the throwaway HOME. */
@@ -21,6 +21,66 @@ export function ctxFor(box: Sandbox, lines: string[] = [], errs: string[] = []):
     },
     out: (l) => lines.push(l), err: (l) => errs.push(l),
   };
+}
+
+const result = (value: Partial<RunResult>): RunResult => ({ code: 0, stdout: "", stderr: "", timedOut: false, ...value });
+
+interface Probe { ctx: Ctx; cmd: string; args: string[] }
+
+function githubProbe({ ctx, args }: Probe): RunResult {
+  const login = ctx.env.STUB_LOGIN;
+  if (!login) return result({ code: 1 });
+  const responses: Record<string, string> = {
+    "auth status": `Logged in to github.com account ${login}`,
+    "api user --jq .login": login,
+    "api user/orgs --jq .[].login": "Cratis",
+  };
+  assert.ok(args.join(" ") in responses, `unexpected gh probe: ${args}`);
+  return result({ stdout: responses[args.join(" ")] });
+}
+
+function piProbe({ ctx, args }: Probe): RunResult {
+  if (args.join(" ") === "--offline --list-models") return result({ stdout: "No models available." });
+  assert.deepEqual(args, ["auth", "check", "--provider", args[3], "--no-refresh", "--json"]);
+  const status = ctx.env.STUB_READY?.split(",").includes(args[3]) ? "ready" : "not_ready";
+  return result({ stdout: JSON.stringify({ status, authType: "oauth" }), code: status === "ready" ? 0 : 1 });
+}
+
+function gitProbe({ ctx, args }: Probe): RunResult {
+  if (args.join(" ") === "rev-parse --path-format=absolute --git-common-dir") return result({ code: 1 });
+  assert.equal(args[0], "-C");
+  assert.equal(args[1], ctx.repoDir);
+  const command = args.slice(2).join(" ");
+  if (command === "describe --tags --exact-match HEAD") return result({ code: 1 });
+  assert.equal(command, "rev-parse HEAD");
+  return result({ stdout: "0123456789012345678901234567890123456789" });
+}
+
+function runProbe(probe: Probe): RunResult {
+  const { cmd, args } = probe;
+  if (args.length === 1 && args[0] === "--version") return result({ stdout: cmd === "python3" ? "Python 3.12.0" : "1.4.0" });
+  if (cmd === "gh") return githubProbe(probe);
+  if (cmd === "pi") return piProbe(probe);
+  if (cmd === "git") return gitProbe(probe);
+  throw new Error(`unexpected rails command: ${cmd} ${args.join(" ")}`);
+}
+
+/** Rails unit tests exercise the real filesystem flow, not host process-startup deadlines. */
+export function railsCtxFor(box: Sandbox, output: { lines?: string[]; errors?: string[] } = {}): Ctx {
+  const tools = new Set(["pi", "python3", "jq", "git", "gh", "docker", "dotnet", "rsync", "npm"]);
+  const ctx = testCtx(box.home, {
+    cwd: box.home, stdinTTY: true, stdoutTTY: true,
+    env: { HOME: box.home, STUB_LOGIN: "einari", STUB_READY: "anthropic,openai-codex,kimi-coding" },
+    which: (name) => tools.has(name) ? `${box.stubs}/${name}` : undefined,
+  }, output.lines, output.errors);
+  ctx.run = async (cmd, args) => runProbe({ ctx, cmd, args });
+  return ctx;
+}
+
+/** Accept the rails shell without changing a caller's other interactive choices. */
+export function installationChoice({ message }: { message: string }): string | typeof CANCEL {
+  const answers = new Map([["How do you want to set up?", "recommended"], ["Review", "install"]]);
+  return answers.get(message) ?? CANCEL;
 }
 
 /** Answers are queued by message substring; unspecified answers accept the initial value. */
