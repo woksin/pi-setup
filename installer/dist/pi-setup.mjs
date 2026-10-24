@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 8dc8b349770d5ad210f8f7763d9f1551f18a3aadc3d445caf26be695c85d7bc0
+// pi-setup-source-sha256: 802acf5175bfeae8a0b3acbfe4c6945d11692415c117504900dfc5112c925d5f
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -9042,7 +9042,7 @@ async function execute(ctx, options, prompter, baseCtx) {
     return finish(ctx, baseCtx, options, r2, detection, summary2, 0);
   }
   const off = COMPONENTS.map((c2) => c2.id).filter((id) => !r2.components[id].on && wasOn(manifest, currentState(ctx), id));
-  const changes = r2.actions.some((a2) => a2.op !== "adopt" && a2.op !== "chmod-x") || off.length > 0 || r2.npm && !options.skipNpm;
+  const changes = r2.actions.some((a2) => a2.op === "keep" ? a2.write : a2.op !== "adopt" && a2.op !== "chmod-x") || off.length > 0 || r2.npm && !options.skipNpm;
   if (prompter && changes && !await confirmApply(prompter, summary2)) return cancelled(ctx);
   const applyOptions = {
     dryRun: options.dryRun,

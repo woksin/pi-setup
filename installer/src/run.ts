@@ -276,7 +276,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     return finish(ctx, baseCtx, options, r, detection, summary, 0);
   }
   const off = COMPONENTS.map((c) => c.id).filter((id) => !r.components[id].on && wasOn(manifest, currentState(ctx), id));
-  const changes = r.actions.some((a) => a.op !== "adopt" && a.op !== "chmod-x") || off.length > 0 || (r.npm && !options.skipNpm);
+  const changes = r.actions.some((a) => a.op === "keep" ? a.write : a.op !== "adopt" && a.op !== "chmod-x") || off.length > 0 || (r.npm && !options.skipNpm);
   if (prompter && changes && !(await confirmApply(prompter, summary))) return cancelled(ctx);
 
   const applyOptions: ApplyOptions = {

@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { rmSync } from "node:fs";
+import { appendFileSync, rmSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { after, test } from "node:test";
 import { realContext, realRun, realWhich } from "../src/context.ts";
@@ -113,4 +113,16 @@ test("(f) every extras row has a hint", () => {
   for (const def of COMPONENTS) {
     for (const on of [true, false]) assert.ok(hintFor(def, on).trim().length > 0, def.id);
   }
+});
+
+test("(g) a rerun after keeping an edited file whose .pi-setup-new is current does not ask Apply?", async () => {
+  const b = box();
+  assert.equal(install(b, ["--yes", ...base(b)]).status, 0);
+  appendFileSync(join(b.home, ".pi/agent/extensions/guards.ts"), "\n// edited by the user\n");
+  const first = scripted({ "changed since install": ["keep"] });
+  assert.equal(await main(base(b), ctxFor(b, [], []), first.p), 0);
+  assert.ok(first.events.includes("confirm:Apply?"), first.events.join("\n"));
+  const again = scripted({ "changed since install": ["keep"] });
+  assert.equal(await main(base(b), ctxFor(b, [], []), again.p), 0);
+  assert.ok(!again.events.includes("confirm:Apply?"), again.events.join("\n"));
 });
