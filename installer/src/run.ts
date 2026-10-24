@@ -256,7 +256,7 @@ async function guidedResolution({ ctx, options, detection, saved, manifest, p, t
   const result = await runRails(p, {
     options, saved, detection, profiles, initial, home: ctx.home, repoDir: ctx.repoDir,
     installed: Boolean(manifest), activeProfile: activeBefore,
-    probe: (id) => probeProvider(ctx, id), hasPi: () => Boolean(ctx.which("pi")), readOnly: options.dryRun || options.plan,
+    probe: (id) => probeProvider(ctx, id), which: ctx.which, readOnly: options.dryRun || options.plan,
     extras: extraRows(ctx, options, saved, detection, manifest), preapproveMcp: savedPreapproval(ctx),
     review: (answers) => {
       const r = resolveAll(ctx, options, detection, saved, answers, manifest, true);

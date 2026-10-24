@@ -176,16 +176,25 @@ test("Log in now re-probes through the injected probe and flips ChatGPT to ready
   assert.match(s.notes.at(-1) ?? "", /Profile: openai-only/);
 });
 
-test("a missing pi shows the install command and offers to check again", async () => {
-  const b = box(); const ctx = ctxFor(b); ctx.env.STUB_READY = "";
+test("a missing pi shows the install command; after installing it, Check again re-detects pi and probes providers", async () => {
+  const b = box(); const ctx = ctxFor(b); ctx.env.STUB_READY = "anthropic";
   const which = ctx.which; let installed = false;
   ctx.which = (name) => name === "pi" && !installed ? undefined : which(name);
-  const s = scripted({ "How do you": ["custom"], "Install pi first": ["login"], "Log in to your": ["continue"] });
-  selectHook(s.p, (message) => { if (message === "Install pi first") installed = true; });
+  let probes = 0;
+  const run = ctx.run;
+  ctx.run = (cmd, args, o) => { if (cmd === "pi" && args[0] === "auth") probes++; return run(cmd, args, o); };
+  const s = scripted({ "How do you": ["custom"], "Install pi first": ["login"] });
+  selectHook(s.p, (message, answer) => { if (message === "Install pi first" && answer === "login") installed = true; });
   assert.equal(await main(flags(b), ctx, s.p), 0);
-  assert.match(s.notes.join("\n"), /npm install -g @earendil-works\/pi-coding-agent/);
+  const asked = s.selects.filter((x) => /^(Install pi first|Log in to your)/.test(x.message)).map((x) => x.message);
+  assert.deepEqual(asked, ["Install pi first", "Log in to your AI providers"]);
   assert.ok(s.selects.some((x) => x.labels.includes("Check again")));
-  assert.ok(s.selects.some((x) => x.message === "Log in to your AI providers"));
+  const stepNotes = s.notes.filter((n) => n.includes("Kimi "));
+  assert.match(stepNotes[0], /npm install -g @earendil-works\/pi-coding-agent/);
+  assert.doesNotMatch(stepNotes[1], /pi is not installed/);
+  assert.match(stepNotes[1], /Claude ✓/);
+  assert.equal(probes, 3);
+  assert.doesNotMatch(s.notes.join("\n"), /pi was not found on PATH/);
 });
 
 test("customise skips Profile only for an explicit profile name", async () => {

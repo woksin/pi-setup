@@ -20,8 +20,8 @@ export interface RailsInput extends WizardInput {
   review(answers: WizardResult): RailsReview;
   /** Re-check one login (through ctx.run in production, injected in tests). Omitted: the logins step is status only. */
   probe?(id: string): Promise<ProviderState>;
-  /** Whether the pi command can be found right now. */
-  hasPi?(): boolean;
+  /** Find a command on PATH right now (ctx.which); used to notice pi installed while the step is open. */
+  which?(name: string): string | undefined;
   /** Dry-run and plan never run pi probes. */
   readOnly?: boolean;
 }
@@ -87,11 +87,22 @@ function loginLines(input: RailsInput): string {
     const mark = status === "ready" ? "✓" : status === "not_ready" ? "✗" : "?";
     return `${PROVIDER_LABELS[id]} ${mark} (${ROLES[id]})`;
   });
-  if (input.hasPi && !input.hasPi()) lines.push("", `pi is not installed yet. Install it with: ${PI_INSTALL}`);
+  if (input.which && piMissing(input)) lines.push("", `pi is not installed yet. Install it with: ${PI_INSTALL}`);
   return lines.join("\n");
 }
 
+const piMissing = (input: RailsInput): boolean => !input.detection.tools.find((t) => t.name === "pi")?.path;
+
+function refreshPi(input: RailsInput): void {
+  const path = input.which?.("pi");
+  const tools = input.detection.tools;
+  const known = tools.find((t) => t.name === "pi");
+  if (known) known.path = path;
+  else tools.push({ name: "pi", path });
+}
+
 async function recheck(input: RailsInput): Promise<void> {
+  refreshPi(input);
   const probed = await Promise.all(PROVIDER_IDS.map(async (id) => [id, await input.probe!(id)] as const));
   for (const [id, state] of probed) input.detection.providers[id] = state;
 }
@@ -115,7 +126,7 @@ async function logins(p: Prompter, input: RailsInput): Promise<boolean> {
     return true;
   }
   for (;;) {
-    const missingPi = Boolean(input.hasPi && !input.hasPi());
+    const missingPi = Boolean(input.which && piMissing(input));
     p.note(loginLines(input), "AI logins");
     const answer = await p.select(loginChoice(input, missingPi));
     if (p.isCancel(answer)) return false;

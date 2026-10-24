@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 245b2e2d181dadbafdfe73102df8ba63313704282358f14e23e53805a5e5a392
+// pi-setup-source-sha256: 3f9ef3fa34fbf9ff19c1aa919c1c098fba49867ccff91e7f3f2eeb0677108d1f
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -7393,10 +7393,18 @@ function loginLines(input) {
     const mark = status2 === "ready" ? "\u2713" : status2 === "not_ready" ? "\u2717" : "?";
     return `${PROVIDER_LABELS[id]} ${mark} (${ROLES[id]})`;
   });
-  if (input.hasPi && !input.hasPi()) lines2.push("", `pi is not installed yet. Install it with: ${PI_INSTALL}`);
+  if (input.which && piMissing(input)) lines2.push("", `pi is not installed yet. Install it with: ${PI_INSTALL}`);
   return lines2.join("\n");
 }
+function refreshPi(input) {
+  const path2 = input.which?.("pi");
+  const tools = input.detection.tools;
+  const known = tools.find((t2) => t2.name === "pi");
+  if (known) known.path = path2;
+  else tools.push({ name: "pi", path: path2 });
+}
 async function recheck(input) {
+  refreshPi(input);
   const probed = await Promise.all(PROVIDER_IDS.map(async (id) => [id, await input.probe(id)]));
   for (const [id, state2] of probed) input.detection.providers[id] = state2;
 }
@@ -7417,7 +7425,7 @@ async function logins(p, input) {
     return true;
   }
   for (; ; ) {
-    const missingPi = Boolean(input.hasPi && !input.hasPi());
+    const missingPi = Boolean(input.which && piMissing(input));
     p.note(loginLines(input), "AI logins");
     const answer = await p.select(loginChoice(input, missingPi));
     if (p.isCancel(answer)) return false;
@@ -7538,7 +7546,7 @@ Ctrl-C quits at any time.`, "Welcome");
   if (!await reviewLoop({ p, input, state: state2, steps })) return CANCEL;
   return { ...state2, mode: selected };
 }
-var saved, rootFor, ROLES, PI_INSTALL, LOGIN_HOWTO, STEPS;
+var saved, rootFor, ROLES, PI_INSTALL, LOGIN_HOWTO, piMissing, STEPS;
 var init_rails = __esm({
   "src/rails.ts"() {
     init_detect();
@@ -7554,6 +7562,7 @@ var init_rails = __esm({
     };
     PI_INSTALL = "npm install -g @earendil-works/pi-coding-agent";
     LOGIN_HOWTO = "Open another terminal, run pi, type /login and pick the providers you have. Then come back here.";
+    piMissing = (input) => !input.detection.tools.find((t2) => t2.name === "pi")?.path;
     STEPS = [
       { id: "you", title: "You", needed: (mode, i2) => !i2.options.user && (mode === "custom" || !(saved(i2, "githubUser") || i2.detection.github.login)), run: you },
       { id: "repos", title: "Repositories", needed: (mode, i2) => mode === "custom" && !i2.options.reposRoot, run: repos },
@@ -9263,7 +9272,7 @@ async function guidedResolution({ ctx, options, detection, saved: saved2, manife
     installed: Boolean(manifest),
     activeProfile: activeBefore,
     probe: (id) => probeProvider(ctx, id),
-    hasPi: () => Boolean(ctx.which("pi")),
+    which: ctx.which,
     readOnly: options.dryRun || options.plan,
     extras: extraRows(ctx, options, saved2, detection, manifest),
     preapproveMcp: savedPreapproval(ctx),
