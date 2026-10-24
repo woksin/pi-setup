@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { SetupError } from "./types.ts";
 import type { Settings } from "./types.ts";
 
-export type UserSource = "flag" | "saved" | "detected" | "prompt";
+export type UserSource = "flag" | "saved" | "detected" | "prompt" | "placeholder";
 export type RootSource = "flag" | "saved" | "scan" | "default" | "prompt";
 
 export interface ResolvedSettings extends Settings {
@@ -63,16 +63,21 @@ export interface SettingsInput {
   scanRoot?: string;
   home: string;
   repoDir: string;
+  readOnly?: boolean;
 }
+
+export const PLACEHOLDER_LOGIN = "<you>";
 
 export function resolveSettings(input: SettingsInput): ResolvedSettings {
   const savedUser = typeof input.saved.githubUser === "string" ? input.saved.githubUser : "";
   const savedRoot = typeof input.saved.reposRoot === "string" ? input.saved.reposRoot : "";
-  const [githubUser, userSource] = pick<UserSource>([
+  const picked = pick<UserSource>([
     [input.flagUser, "flag"], [savedUser, "saved"], [input.detectedUser ?? "", "detected"],
   ]);
-  if (!githubUser) throw new SetupError("Cannot determine GitHub login; pass --user <login> (or authenticate gh).");
-  if (!validLogin(githubUser)) throw new SetupError("Invalid GitHub login; pass --user <login>.");
+  const placeholder = !picked[0] && input.readOnly === true;
+  const [githubUser, userSource]: [string, UserSource] = placeholder ? [PLACEHOLDER_LOGIN, "placeholder"] : picked;
+  if (!placeholder && !githubUser) throw new SetupError("Cannot determine GitHub login; pass --user <login> (or authenticate gh).");
+  if (!placeholder && !validLogin(githubUser)) throw new SetupError("Invalid GitHub login; pass --user <login>.");
   const [rawRoot, rootSource] = pick<RootSource>([
     [input.flagRoot, "flag"], [savedRoot, "saved"], [input.scanRoot ?? "", "scan"], [`${input.home}/repos`, "default"],
   ]);
@@ -80,6 +85,7 @@ export function resolveSettings(input: SettingsInput): ResolvedSettings {
   const warnings = /\s/.test(reposRoot)
     ? [`Repositories root contains a space (${reposRoot}); shell scripts in bin/ may not quote it.`]
     : [];
+  if (placeholder) warnings.push(`No GitHub login found, so names show ${PLACEHOLDER_LOGIN}; pass --user <login> to see the final names.`);
   return { githubUser, reposRoot, userSource, rootSource, warnings };
 }
 

@@ -5,7 +5,7 @@ import type { ComponentChoice } from "./components.ts";
 import type { Choice } from "./profiles.ts";
 import type { ResolvedSettings } from "./settings.ts";
 
-const USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it" };
+const USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it", placeholder: "placeholder, pass --user" };
 const ROOT_SOURCES = { flag: "from --repos-root", saved: "saved in user.json", scan: "best match found", default: "default", prompt: "you typed it" };
 
 export function countActions(actions: Action[]): { added: number; changed: number; kept: number; register: number; links: number } {

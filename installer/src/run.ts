@@ -129,6 +129,7 @@ function resolveAll(
     scanRoot: prompted ? detection.candidates[0]?.path : undefined,
     home: ctx.home,
     repoDir: ctx.repoDir,
+    readOnly: options.dryRun || options.plan,
   });
   if (answers.user) settings.userSource = answers.user === savedString(saved, "githubUser") ? "saved" : "prompt";
   if (answers.root) settings.rootSource = "prompt";

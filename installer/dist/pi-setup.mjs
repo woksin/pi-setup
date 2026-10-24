@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 7f690c5c83bbead4a7a225306e116955f688eee12c62cacadffbcba556548854
+// pi-setup-source-sha256: 041523e035164876d3f2936034156527112ab2762bfeb492acf30b8baf101812
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -178,13 +178,15 @@ function normalizeRoot(value, home, base) {
 function resolveSettings(input) {
   const savedUser = typeof input.saved.githubUser === "string" ? input.saved.githubUser : "";
   const savedRoot = typeof input.saved.reposRoot === "string" ? input.saved.reposRoot : "";
-  const [githubUser, userSource] = pick([
+  const picked = pick([
     [input.flagUser, "flag"],
     [savedUser, "saved"],
     [input.detectedUser ?? "", "detected"]
   ]);
-  if (!githubUser) throw new SetupError("Cannot determine GitHub login; pass --user <login> (or authenticate gh).");
-  if (!validLogin(githubUser)) throw new SetupError("Invalid GitHub login; pass --user <login>.");
+  const placeholder = !picked[0] && input.readOnly === true;
+  const [githubUser, userSource] = placeholder ? [PLACEHOLDER_LOGIN, "placeholder"] : picked;
+  if (!placeholder && !githubUser) throw new SetupError("Cannot determine GitHub login; pass --user <login> (or authenticate gh).");
+  if (!placeholder && !validLogin(githubUser)) throw new SetupError("Invalid GitHub login; pass --user <login>.");
   const [rawRoot, rootSource] = pick([
     [input.flagRoot, "flag"],
     [savedRoot, "saved"],
@@ -193,6 +195,7 @@ function resolveSettings(input) {
   ]);
   const reposRoot = normalizeRoot(rawRoot, input.home, input.repoDir);
   const warnings = /\s/.test(reposRoot) ? [`Repositories root contains a space (${reposRoot}); shell scripts in bin/ may not quote it.`] : [];
+  if (placeholder) warnings.push(`No GitHub login found, so names show ${PLACEHOLDER_LOGIN}; pass --user <login> to see the final names.`);
   return { githubUser, reposRoot, userSource, rootSource, warnings };
 }
 function pick(choices) {
@@ -218,12 +221,13 @@ function canonical(value) {
   }
   return value;
 }
-var LOGIN, FORBIDDEN_ROOT;
+var LOGIN, FORBIDDEN_ROOT, PLACEHOLDER_LOGIN;
 var init_settings = __esm({
   "src/settings.ts"() {
     init_types();
     LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
     FORBIDDEN_ROOT = /[\n\r\0"'$`\\]/;
+    PLACEHOLDER_LOGIN = "<you>";
   }
 });
 
@@ -6541,7 +6545,7 @@ var init_report = __esm({
   "src/report.ts"() {
     init_types();
     init_components();
-    USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it" };
+    USER_SOURCES = { flag: "from --user", saved: "saved in user.json", detected: "from gh", prompt: "you typed it", placeholder: "placeholder, pass --user" };
     ROOT_SOURCES = { flag: "from --repos-root", saved: "saved in user.json", scan: "best match found", default: "default", prompt: "you typed it" };
     KEPT_EDITS = "kept your edits; `pi-profile save` to adopt them into the profile";
   }
@@ -9381,7 +9385,8 @@ function resolveAll(ctx, options, detection, saved2, answers, manifest, prompted
     detectedUser: detection.github.login,
     scanRoot: prompted ? detection.candidates[0]?.path : void 0,
     home: ctx.home,
-    repoDir: ctx.repoDir
+    repoDir: ctx.repoDir,
+    readOnly: options.dryRun || options.plan
   });
   if (answers.user) settings2.userSource = answers.user === savedString2(saved2, "githubUser") ? "saved" : "prompt";
   if (answers.root) settings2.rootSource = "prompt";
