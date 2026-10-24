@@ -1,12 +1,12 @@
 ---
 name: Plan
 display_name: Plan
-description: Read-only software architect (Claude Opus 5.5, high) for bounded, well-defined architecture or implementation plans and design challenges. Opus orchestrates and shapes ambiguous overall tasks; give Plan a concrete question, constraints and expected output. Returns step-by-step plans, critical files and trade-offs.
+description: Read-only software architect (Claude Opus 5.5, medium) for bounded, well-defined architecture or implementation plans and design challenges. Opus orchestrates and shapes ambiguous overall tasks; give Plan a concrete question, constraints and expected output. Returns step-by-step plans, critical files and trade-offs.
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, pi-context-budget, output-cap, observation-mask]
 skills: false
 model: anthropic/claude-opus-5-5
-thinking: high
+thinking: medium
 prompt_mode: replace
 ---
 # CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS

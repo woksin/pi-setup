@@ -1,12 +1,12 @@
 ---
 name: second-opinion
 display_name: Second opinion
-description: 'Read-only cross-provider reasoner (GPT-6 Astra, high). Use it for hard math, algorithms, proofs and scientific reasoning, where it is strongest, and for stuck hard bugs or contested designs. Expensive: for routine review of Claude-written work use sol-reviewer instead. Cannot edit files.'
+description: 'Read-only deep reasoner (Claude Opus 5.5, high). Use it for hard math, algorithms, proofs and scientific reasoning, and for stuck hard bugs or contested designs. Expensive: for routine review use sol-reviewer instead. Cannot edit files.'
 color: purple
-model: openai-codex/gpt-6-astra
+model: anthropic/claude-opus-5-5
 thinking: high
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, pi-context-budget, output-cap, observation-mask]
 skills: false
 prompt_mode: replace
 ---

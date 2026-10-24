@@ -1,11 +1,11 @@
 ---
 name: opus-implementer
 display_name: Opus implementer
-description: Implementation worker (Claude Opus 5.5, medium) for work where the shape is not settled yet — greenfield code, prototypes, exploratory implementation, ambiguous or cross-cutting design worked out in code, and hard bugs requiring judgment. Once the shape is settled, hand follow-on, well-specified work to `implementer` (Sol). Not for security-related code (Opus 5.5 may refuse in pi; use `implementer`). Give it the goal, constraints, files or area it owns, and the test command.
+description: Implementation worker (Claude Opus 5.5, medium) for work where the shape is not settled yet — greenfield code, prototypes, exploratory implementation, ambiguous or cross-cutting design worked out in code, and hard bugs requiring judgment. Once the shape is settled, hand follow-on, well-specified work to `implementer` (Sonnet). Not for security-related code (Opus 5.5 may refuse in pi; use `implementer`). Give it the goal, constraints, files or area it owns, and the test command.
 color: magenta
 model: anthropic/claude-opus-5-5
 thinking: medium
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
 skills: false
 prompt_mode: replace
 ---

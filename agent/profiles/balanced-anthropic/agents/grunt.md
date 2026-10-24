@@ -5,7 +5,7 @@ description: Worker (Claude Sonnet 5.5, low) for mechanical, well-specified work
 color: gray
 model: anthropic/claude-sonnet-5-5
 thinking: low
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, observation-mask]
 skills: false
 prompt_mode: append
 ---

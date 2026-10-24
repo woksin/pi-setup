@@ -1,13 +1,10 @@
 {
-  "summary": "Balanced, leaning on Claude for more roles.",
+  "summary": "Balanced routing on Anthropic models only (Opus, Sonnet, Haiku); no OpenAI or Kimi.",
   "requires": [
-    "anthropic",
-    "openai-codex"
+    "anthropic"
   ],
   "uses": [
-    "anthropic",
-    "openai-codex",
-    "kimi-coding"
+    "anthropic"
   ],
   "rank": 60
 }

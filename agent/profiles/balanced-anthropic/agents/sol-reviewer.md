@@ -1,12 +1,12 @@
 ---
 name: sol-reviewer
 display_name: Sol reviewer
-description: 'Read-only reviewer (GPT-6.1 Sol, high) for routine checks of a single slice, commit or small diff — including work written by implementer. Cheaper than reviewer (Opus 5.5) and does not draw on Anthropic limits. Default GPT reviewer for Claude-written work, and the GPT side of the review workflow. Not for security sign-off on its own — use the review workflow with deep: true for that. Cannot edit files.'
+description: 'Read-only reviewer (Claude Sonnet 5.5, medium) for routine checks of a single slice, commit or small diff — including work written by implementer. Cheaper than reviewer (Opus 5.5). Sonnet-side reviewer in the review workflow; this profile has no second provider, so diversity comes from different Claude models. Not for security sign-off on its own — use the review workflow with deep: true for that. Cannot edit files.'
 color: orange
-model: openai-codex/gpt-6.1-sol
-thinking: high
+model: anthropic/claude-sonnet-5-5
+thinking: medium
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, cratis-rules, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-rules, pi-context-budget, output-cap, observation-mask]
 skills: false
 prompt_mode: replace
 ---

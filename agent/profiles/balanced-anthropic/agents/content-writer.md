@@ -1,12 +1,12 @@
 ---
 name: content-writer
 display_name: Content writer
-description: 'Content writer (Claude Opus 5.5, medium) for LinkedIn posts, blog posts, announcements and other public-facing prose. Produces two distinct variants, checks facts with web access, and flags claims it could not verify. For important pieces, consider a bounded independent critique by second-opinion (GPT-6 Astra); do not automatically add another full drafting pass. Independent evidence on which model writes better marketing prose is weak.'
+description: 'Content writer (Claude Opus 5.5, medium) for LinkedIn posts, blog posts, announcements and other public-facing prose. Produces two distinct variants, checks facts with web access, and flags claims it could not verify. For important pieces, consider a bounded independent critique by second-opinion (Claude Opus 5.5, high); do not automatically add another full drafting pass. Independent evidence on which model writes better marketing prose is weak.'
 color: pink
 model: anthropic/claude-opus-5-5
 thinking: medium
 tools: read, write, edit, grep, find, ls, ext:dist
-extensions: [dist, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, observation-mask]
+extensions: [dist, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, observation-mask]
 # pi-web-access declares its entry as "./dist", so pi-subagents names it "dist" (not "pi-web-access").
 skills: true
 prompt_mode: append
