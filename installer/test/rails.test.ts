@@ -86,9 +86,10 @@ test("Cancel at Review writes nothing", async () => {
 });
 
 test("rerun defaults to current choices, names active profile and skips Review when unchanged", async () => {
-  const b = box(); assert.equal(await main(flags(b), ctxFor(b), scripted().p), 0);
+  const b = box(); const bins = (c: ReturnType<typeof ctxFor>) => { c.env.PATH = [join(b.home, ".local/bin"), join(b.home, ".pi/agent/bin")].join(":"); return c; };
+  assert.equal(await main(flags(b), bins(ctxFor(b)), scripted().p), 0);
   const s = scripted();
-  assert.equal(await main(flags(b), ctxFor(b), s.p), 0);
+  assert.equal(await main(flags(b), bins(ctxFor(b)), s.p), 0);
   assert.equal(s.selects[0].initial, "recommended");
   assert.equal(s.selects[0].labels[0], "Update with your current choices (recommended)");
   assert.match(s.notes[0], /installed.*balanced/);
