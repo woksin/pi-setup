@@ -24,6 +24,10 @@ export interface RailsInput extends WizardInput {
   which?(name: string): string | undefined;
   /** Dry-run and plan never run pi probes. */
   readOnly?: boolean;
+  /** Review line for the PATH edit; omitted when PATH already has both directories. */
+  pathLine?: string;
+  /** Whether the PATH edit starts ticked (PATH_EDIT_DEFAULT, or --edit-shell-profile). */
+  pathDefault?: boolean;
 }
 interface Step {
   id: string;
@@ -199,7 +203,7 @@ async function changeStep(p: Prompter, input: RailsInput, state: WizardResult, s
   return step.run(p, currentInput(input, state), state, true);
 }
 
-interface Session { p: Prompter; input: RailsInput; state: WizardResult; steps: Step[] }
+interface Session { p: Prompter; input: RailsInput; state: WizardResult; steps: Step[]; path: { on: boolean } }
 
 async function prepareReview({ p, input, state }: Session): Promise<RailsReview | typeof CANCEL | null> {
   const review = input.review(state);
@@ -213,13 +217,15 @@ async function editReview(session: Session): Promise<RailsReview | typeof CANCEL
   return prepareReview(session);
 }
 
-async function reviewChoice({ p, steps }: Session, review: RailsReview): Promise<unknown> {
+async function reviewChoice({ p, steps, input, path }: Session, review: RailsReview): Promise<unknown> {
   header(p, steps.length + 1, steps.length + 1, "Review");
-  p.note(review.summary().join("\n"), "Review");
+  const pathRow = input.pathLine ? ["", `[${path.on ? "x" : " "}] ${input.pathLine}`] : [];
+  p.note([...review.summary(), ...pathRow].join("\n"), "Review");
   return p.select({
     message: "Review",
     options: [
       { value: "install", label: "Install (recommended)" }, { value: "change", label: "Change a step…" },
+      ...(input.pathLine ? [{ value: "path", label: path.on ? "Don't change my shell profile" : "Add the PATH entries after all" }] : []),
       { value: "files", label: "Show every file" }, { value: "cancel", label: "Cancel" },
     ],
     initial: "install",
@@ -229,10 +235,15 @@ async function reviewChoice({ p, steps }: Session, review: RailsReview): Promise
 async function reviewLoop(session: Session): Promise<boolean> {
   const { p } = session;
   let review = await prepareReview(session);
+  if (review === null) session.path.on = false; // Review was skipped, so nothing was shown to opt in to.
   while (review && review !== CANCEL) {
     const answer = await reviewChoice(session, review);
     if (p.isCancel(answer) || answer === "cancel") return false;
     if (answer === "install") return true;
+    if (answer === "path") {
+      session.path.on = !session.path.on;
+      continue;
+    }
     if (answer === "files") {
       p.note(review.files().join("\n"), "Every file");
       continue;
@@ -243,7 +254,7 @@ async function reviewLoop(session: Session): Promise<boolean> {
 }
 
 /** The interactive engine: gather choices, review without writing, then let run.ts apply. */
-export async function runRails(p: Prompter, input: RailsInput): Promise<(WizardResult & { mode: RailsMode }) | typeof CANCEL> {
+export async function runRails(p: Prompter, input: RailsInput): Promise<(WizardResult & { mode: RailsMode; editPath: boolean }) | typeof CANCEL> {
   const installed = input.installed ? `pi-setup is installed (profile ${input.activeProfile ?? input.initial.name}). This updates it.` : "pi-setup sets up pi with our agents, profiles and tools.";
   p.note(`${installed}\nNothing is written until you confirm.\nCtrl-C quits at any time.`, "Welcome");
   const mode = await p.select<RailsMode>({
@@ -262,6 +273,7 @@ export async function runRails(p: Prompter, input: RailsInput): Promise<(WizardR
     header(p, index + 1, steps.length + 1, step.title);
     if (!await step.run(p, currentInput(input, state), state, selected === "custom")) return CANCEL;
   }
-  if (!await reviewLoop({ p, input, state, steps })) return CANCEL;
-  return { ...state, mode: selected };
+  const path = { on: Boolean(input.pathLine) && input.pathDefault === true };
+  if (!await reviewLoop({ p, input, state, steps, path })) return CANCEL;
+  return { ...state, mode: selected, editPath: path.on };
 }

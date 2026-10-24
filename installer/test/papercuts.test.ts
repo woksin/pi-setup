@@ -55,7 +55,7 @@ test("(d) an unchanged rerun ends up to date without Review; first install reach
   const s = scripted({});
   assert.equal(await main(base(b), ctxFor(b, [], []), s.p), 0);
   assert.ok(!s.events.includes("select:Review"), s.events.join("\n"));
-  assert.match(s.outros.at(-1) ?? "", /Everything is up to date/);
+  assert.match(s.outros.at(-1) ?? "", /Installed, with \d+ things? to finish/);
   const first = box();
   const f = scripted({});
   assert.equal(await main(base(first), ctxFor(first, [], []), f.p), 0);
@@ -91,5 +91,5 @@ test("(g) keeping an edit reaches Review once; an unchanged rerun skips Review a
   const again = scripted({ "changed since install": ["keep"] });
   assert.equal(await main(base(b), ctxFor(b, [], []), again.p), 0);
   assert.ok(!again.events.includes("select:Review"), again.events.join("\n"));
-  assert.match(again.outros.at(-1) ?? "", /Everything is up to date/);
+  assert.match(again.outros.at(-1) ?? "", /Installed, with \d+ things? to finish/);
 });

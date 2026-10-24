@@ -20,21 +20,23 @@ import { retire, wasOn } from "./retire.ts";
 import { isService, planServices, syncServices } from "./services.ts";
 import type { ComponentRecord } from "./manifest.ts";
 import type { ExtraRow } from "./wizard.ts";
-import { installSummary, runDoctor } from "./doctor.ts";
+import { compactChecks, installChecks, installSummary, runDoctor } from "./doctor.ts";
 import { pythonVersionCheck } from "./doctor-probes.ts";
 import { runUpdate } from "./update.ts";
 import {
   chooseProfile, kimiNote, loadProfiles, overlayFor, pinnedModels, pinWarnings, profileNames, profilesDir,
 } from "./profiles.ts";
 import type { Choice } from "./profiles.ts";
-import { KEPT_EDITS, summaryLines } from "./report.ts";
+import { missingLogins } from "./profiles.ts";
+import { KEPT_EDITS, summaryLines, whatsNextLines } from "./report.ts";
 import { readSettings, resolveSettings } from "./settings.ts";
 import type { ResolvedSettings } from "./settings.ts";
 import { CANCEL, SetupError } from "./types.ts";
 import type { Action, Ctx, Detection, ProfileMeta, Prompter } from "./types.ts";
+import type { ApplyResult } from "./apply.ts";
 import { resolveConflicts } from "./wizard.ts";
 import { runRails } from "./rails.ts";
-import { configureShellPath } from "./shell-path.ts";
+import { configureShellPath, missingBinDirs, pathEditLine, PATH_EDIT_DEFAULT } from "./shell-path.ts";
 
 const savedString = (saved: Record<string, unknown>, key: string): string =>
   typeof saved[key] === "string" ? (saved[key] as string) : "";
@@ -248,7 +250,7 @@ function addToolWarnings(r: Resolved, detection: Detection, toolErrors: string[]
   if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
 }
 
-async function guidedResolution({ ctx, options, detection, saved, manifest, p, toolErrors }: GuidedInput): Promise<Resolved | typeof CANCEL> {
+async function guidedResolution({ ctx, options, detection, saved, manifest, p, toolErrors }: GuidedInput): Promise<{ r: Resolved; editPath: boolean } | typeof CANCEL> {
   const profiles = loadProfiles(ctx.repoDir);
   const activeBefore = readActive(join(ctx.home, ".pi/agent"));
   const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, profileNames(ctx.repoDir));
@@ -258,6 +260,7 @@ async function guidedResolution({ ctx, options, detection, saved, manifest, p, t
     installed: Boolean(manifest), activeProfile: activeBefore,
     probe: (id) => probeProvider(ctx, id), which: ctx.which, readOnly: options.dryRun || options.plan,
     extras: extraRows(ctx, options, saved, detection, manifest), preapproveMcp: savedPreapproval(ctx),
+    pathLine: pathEditLine(ctx), pathDefault: PATH_EDIT_DEFAULT || options.editShellProfile,
     review: (answers) => {
       const r = resolveAll(ctx, options, detection, saved, answers, manifest, true);
       addToolWarnings(r, detection, toolErrors, ctx);
@@ -275,7 +278,7 @@ async function guidedResolution({ ctx, options, detection, saved, manifest, p, t
       };
     },
   });
-  return result === CANCEL ? CANCEL : resolved!;
+  return result === CANCEL ? CANCEL : { r: resolved!, editPath: result.editPath };
 }
 
 async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefined, baseCtx: Ctx): Promise<number> {
@@ -303,10 +306,10 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const toolErrors = requiredToolErrors(ctx, detection, options, Boolean(prompter));
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
 
-  const r = prompter
-    ? await guidedResolution({ ctx, options, detection, saved, manifest, p: prompter, toolErrors })
-    : resolveAll(ctx, options, detection, saved, {}, manifest);
-  if (r === CANCEL) return cancelled(ctx);
+  const guided = prompter ? await guidedResolution({ ctx, options, detection, saved, manifest, p: prompter, toolErrors }) : undefined;
+  if (guided === CANCEL) return cancelled(ctx);
+  const r = guided?.r ?? resolveAll(ctx, options, detection, saved, {}, manifest);
+  const editPath = guided ? guided.editPath : options.editShellProfile;
   const better = detection.candidates[0]?.path;
   if (!prompter && r.settings.rootSource === "default" && better && better !== r.settings.reposRoot) {
     ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
@@ -326,17 +329,26 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     inheritNpm: !prompter && !options.json,
     profile: r.choice.name,
     activeBefore: r.activeBefore,
-    spinner: prompter?.spinner(),
     components: r.records,
     quiet: Boolean(prompter),
   };
-  const live = await retire(ctx, piDir, manifest, off, options.dryRun);
-  const result = await apply(ctx, r.actions, applyOptions, live);
-  if (result.code === 0) await syncServices(ctx, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
-  if (result.code === 0) configureShellPath(ctx, options.editShellProfile, readOnly);
+  const pathMissing = missingBinDirs(ctx).length > 0;
+  const live = prompter ? undefined : await retire(ctx, piDir, manifest, off, options.dryRun);
+  const result = prompter
+    ? await applyGuided({ ctx, options, r, applyOptions, manifest, off, editPath, p: prompter })
+    : await applyPlain(ctx, options, r, applyOptions, live, editPath);
   const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l));
-  if (result.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
-  if (prompter && result.code === 0 && !options.dryRun && !options.plan && r.components.lanes.on && !existsSync(join(r.settings.reposRoot, ".lanes/lanes.json"))) {
+  if (result.code === 0 && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...await installSummary(ctx, detection, piDir));
+  const offerLanes = Boolean(prompter) && result.code === 0 && !options.dryRun && !options.plan && r.components.lanes.on && !existsSync(join(r.settings.reposRoot, ".lanes/lanes.json"));
+  let pending = 0;
+  if (prompter && result.code === 0 && !options.dryRun) {
+    const compact = compactChecks(installChecks(ctx, detection), { home: ctx.home, skipNpm: options.skipNpm, pathEdited: editPath && pathMissing });
+    pending = compact.count;
+    if (compact.lines.length) prompter.note(compact.lines.join("\n"), "Still to finish");
+    const logins = [...new Set([...missingLogins(r.profile, r.ready), ...compact.logins])];
+    prompter.note(whatsNextLines({ pathMissing, pathEdited: editPath && pathMissing, logins, lanesOffered: offerLanes }).join("\n"), "What's next");
+  }
+  if (offerLanes && prompter) {
     const answer = await prompter.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
     if (!prompter.isCancel(answer) && answer === true) {
       try {
@@ -344,7 +356,43 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
       } catch (error) { ctx.err(`Lanes setup was not completed: ${(error as Error).message}`); }
     }
   }
-  return finish(ctx, baseCtx, options, r, detection, shown, result.code, prompter, result.wrote);
+  return finish(ctx, baseCtx, options, r, detection, shown, result.code, prompter, result.wrote, pending);
+}
+
+async function applyPlain(ctx: Ctx, options: Options, r: Resolved, applyOptions: ApplyOptions, live: Manifest | undefined, editPath: boolean): Promise<ApplyResult> {
+  const result = await apply(ctx, r.actions, applyOptions, live);
+  if (result.code === 0) await syncServices(ctx, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
+  if (result.code === 0) configureShellPath(ctx, editPath, options.dryRun || options.plan);
+  return result;
+}
+
+interface GuidedApply {
+  ctx: Ctx; options: Options; r: Resolved; applyOptions: ApplyOptions; manifest: Manifest | undefined; off: string[];
+  editPath: boolean; p: Prompter;
+}
+
+/** Apply behind one spinner; anything the steps print is held until the spinner stops so the screen stays clean. */
+async function applyGuided({ ctx, options, r, applyOptions, manifest, off, editPath, p }: GuidedApply): Promise<ApplyResult> {
+  const held: { out: string[]; err: string[] } = { out: [], err: [] };
+  const quiet: Ctx = { ...ctx, out: (line) => held.out.push(line), err: (line) => held.err.push(line) };
+  const spin = p.spinner();
+  spin.start("Backing up your current files");
+  let result: ApplyResult | undefined;
+  try {
+    const live = await retire(quiet, join(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
+    result = await apply(quiet, r.actions, { ...applyOptions, spinner: spin }, live);
+    if (result.code === 0) {
+      if (Object.values(r.records).some((c) => c.on && c.service?.managed)) spin.message?.("Setting up schedules");
+      await syncServices(quiet, r.records, new Set(r.actions.filter((a) => a.op === "install").map((a) => a.path)), options.dryRun);
+      if (editPath && missingBinDirs(ctx).length) spin.message?.("Adding PATH entries");
+      configureShellPath(quiet, editPath, options.dryRun, true);
+    }
+  } finally {
+    spin.stop(result?.code === 0 ? (options.dryRun ? "Dry run finished" : "Installed") : "Install did not finish");
+    held.out.forEach((line) => ctx.out(line));
+    held.err.forEach((line) => ctx.err(line));
+  }
+  return result;
 }
 
 function cancelled(ctx: Ctx): number {
@@ -354,7 +402,7 @@ function cancelled(ctx: Ctx): number {
 
 function finish(
   ctx: Ctx, baseCtx: Ctx, options: Options, r: Resolved, detection: Detection, lines: string[], code: number,
-  prompter?: Prompter, wrote = true,
+  prompter?: Prompter, wrote = true, pending = 0,
 ): number {
   if (options.json) {
     baseCtx.out(jsonReport(r, detection, code));
@@ -367,7 +415,8 @@ function finish(
     const upToDate = `${prompter ? "Everything is up to date." : "Everything up to date."}${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
     const done = readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate;
     const hint = r.choice.provisional && !readOnly && wrote ? ` ${r.choice.reason}.` : "";
-    if (prompter) prompter.outro(`${done}${hint}`);
+    if (prompter && pending && !readOnly) prompter.outro(`Installed, with ${pending} ${pending === 1 ? "thing" : "things"} to finish: see "Still to finish" above.`);
+    else if (prompter) prompter.outro(`${done}${hint}`);
     else ctx.out(`${done}${hint}`);
   }
   return code;

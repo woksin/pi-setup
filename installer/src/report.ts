@@ -84,3 +84,25 @@ export function summaryLines(args: {
   for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines.push(`warning: ${warning}`);
   return lines;
 }
+
+export interface NextSteps {
+  /** ~/.local/bin or ~/.pi/agent/bin was not on PATH before this run. */
+  pathMissing: boolean;
+  pathEdited: boolean;
+  logins: string[];
+  lanesOffered: boolean;
+}
+
+/** The guided flow's "What's next" note, one action per line. */
+export function whatsNextLines(next: NextSteps): string[] {
+  const lines: string[] = [];
+  if (next.pathMissing) {
+    lines.push(next.pathEdited ? "Open a new terminal so the PATH change takes effect." : "Add ~/.local/bin and ~/.pi/agent/bin to PATH, then open a new terminal.");
+  }
+  lines.push("Start pi: pi");
+  if (next.logins.length) lines.push(`Log in: in pi, type /login for ${next.logins.join(", ")}`);
+  lines.push("Switch profile: pi-profile list, or ./install.sh --profile <name>");
+  lines.push("Check health any time: ./install.sh doctor");
+  if (next.lanesOffered) lines.push("Optional: set up a coordinator and lanes (offered next; or later with ./install.sh lanes)");
+  return lines;
+}

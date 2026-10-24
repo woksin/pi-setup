@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 3f9ef3fa34fbf9ff19c1aa919c1c098fba49867ccff91e7f3f2eeb0677108d1f
+// pi-setup-source-sha256: 83c811455084c6731d0ffff236869fdf31c89d2179d077b31418ab130e82ae0d
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -4860,6 +4860,7 @@ async function apply(ctx, actions, options, manifest) {
   let code = 0;
   try {
     run.source = await sourceOf(ctx);
+    options.spinner?.message?.("Writing files");
     for (const action of actions) run.execute(action);
     applyProfile(options, piDir, run);
     if (options.quiet) {
@@ -4899,9 +4900,8 @@ async function runNpm(ctx, actions, options, piDir, manifest) {
   }
   const args = ["install", ...selected.map(npmSpec), "--save-exact", "--legacy-peer-deps"];
   const cwd = join41(piDir, "npm");
-  options.spinner?.start("Installing npm packages");
+  options.spinner?.message?.("Installing npm packages");
   const result3 = await installPinnedNpm(ctx, args, cwd, { inherit: options.inheritNpm, selected });
-  options.spinner?.stop(result3.code === 0 ? "npm packages installed" : "npm install failed");
   if (result3.code === 0) return { code: 0, ran: true };
   if (!options.inheritNpm) ctx.err((result3.stdout + result3.stderr).trim().split("\n").slice(-15).join("\n"));
   ctx.err("Files installed; npm install failed: (cd ~/.pi/agent/npm && npm install --legacy-peer-deps)");
@@ -5560,6 +5560,9 @@ function reasonFor(ready3, name) {
 function kimiNote(profile3, ready3) {
   if (!profile3?.uses.includes("kimi-coding") || ready3.has("kimi-coding")) return void 0;
   return "Kimi is not logged in: the Kimi roles fall back to GPT.";
+}
+function missingLogins(profile3, ready3) {
+  return (profile3?.requires ?? []).filter((r2) => !ready3.has(r2)).map((r2) => PROVIDER_LABELS[r2] ?? r2);
 }
 function pinnedModels(profileDir) {
   const pins = /* @__PURE__ */ new Set();
@@ -6509,10 +6512,15 @@ function shellPath(ctx) {
   const rc = shell === "zsh" ? ".zshrc" : shell === "bash" ? ctx.platform === "darwin" ? ".bash_profile" : ".bashrc" : ".profile";
   return { file: join50(ctx.home, rc), snippet: 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"' };
 }
-function configureShellPath(ctx, edit, dryRun) {
+function pathEditLine(ctx) {
+  if (!missingBinDirs(ctx).length) return void 0;
+  return `Add ~/.local/bin and ~/.pi/agent/bin to PATH in ${shellPath(ctx).file.replace(ctx.home, "~")}`;
+}
+function configureShellPath(ctx, edit, dryRun, guided = false) {
   if (!missingBinDirs(ctx).length) return;
   const { file, snippet } = shellPath(ctx);
-  ctx.out(`PATH: add this to ${file}, then restart your shell:
+  if (guided && !edit) return;
+  if (!guided) ctx.out(`PATH: add this to ${file}, then restart your shell:
 ${snippet}`);
   if (!edit) {
     ctx.out("Shell profile unchanged (opt in with --edit-shell-profile).");
@@ -6534,10 +6542,12 @@ ${snippet}`);
 # pi-setup tools
 ${snippet}
 `);
-  ctx.out(`Appended PATH snippet to ${file}`);
+  if (!guided) ctx.out(`Appended PATH snippet to ${file}`);
 }
+var PATH_EDIT_DEFAULT;
 var init_shell_path = __esm({
   "src/shell-path.ts"() {
+    PATH_EDIT_DEFAULT = true;
   }
 });
 
@@ -7062,6 +7072,61 @@ var init_doctor_components = __esm({
   }
 });
 
+// src/doctor-compact.ts
+function packageLine(checks, skipNpm) {
+  const npm2 = checks.find((c2) => c2.id === "npm" && c2.status !== "ok" && c2.status !== "skip");
+  const named = checks.filter((c2) => c2.id.startsWith("package:"));
+  const count = npm2 ? npm2.items?.length || 1 : named.length;
+  if (!count) return void 0;
+  const why = skipNpm ? "you skipped npm; run ./install.sh" : "run ./install.sh to retry";
+  return `${plural(count, "package")} not installed yet: ${why}`;
+}
+function toolLine(checks) {
+  const tools = checks.filter((c2) => c2.id.startsWith("tool:")).map((c2) => c2.id.slice(5));
+  return tools.length ? `${plural(tools.length, "tool")} not found: ${tools.join(", ")}` : void 0;
+}
+function pathLine(checks) {
+  const path2 = checks.find((c2) => c2.id === "path");
+  return path2 ? `${path2.detail}; add them to your shell profile (./install.sh --edit-shell-profile does it)` : void 0;
+}
+function compactChecks(all, options) {
+  const checks = all.filter((c2) => c2.status === "warn" || c2.status === "fail");
+  const logins2 = loginLabels(checks);
+  const profile3 = checks.find((c2) => c2.id === "profile" && !logins2.length);
+  const lines2 = [
+    packageLine(checks, options.skipNpm),
+    logins2.length ? `Log in to ${logins2.join(", ")} in pi (/login)` : void 0,
+    profile3 ? `profile: ${profile3.detail}` : void 0,
+    options.pathEdited ? void 0 : pathLine(checks),
+    toolLine(checks),
+    ...checks.filter((c2) => !consumed(c2)).map((c2) => `${c2.id}: ${c2.detail}`)
+  ].filter((line) => Boolean(line)).map((line) => line.split(options.home).join("~"));
+  const shown = lines2.length > MAX_HEALTH_LINES ? [...lines2.slice(0, MAX_HEALTH_LINES - 1), `and ${lines2.length - MAX_HEALTH_LINES + 1} more: ./install.sh doctor`] : lines2;
+  return { lines: shown, count: lines2.length, logins: logins2 };
+}
+var MAX_HEALTH_LINES, loginLabels, plural, consumed;
+var init_doctor_compact = __esm({
+  "src/doctor-compact.ts"() {
+    init_types();
+    MAX_HEALTH_LINES = 6;
+    loginLabels = (checks) => {
+      const labels = /* @__PURE__ */ new Set();
+      for (const c2 of checks) {
+        if (c2.id.startsWith("fallback:")) {
+          const provider = c2.id.slice("fallback:".length).split("/")[0];
+          labels.add(PROVIDER_LABELS[provider] ?? provider);
+        } else if (c2.id === "profile") {
+          const match = /^[^:]+: (.+) has no login$/.exec(c2.detail);
+          for (const label of match?.[1].split(", ") ?? []) labels.add(label);
+        }
+      }
+      return [...labels];
+    };
+    plural = (n3, word) => `${n3} ${word}${n3 === 1 ? "" : "s"}`;
+    consumed = (c2) => c2.id === "npm" || c2.id.startsWith("package:") || c2.id.startsWith("tool:") || c2.id === "path" || c2.id.startsWith("path:") || c2.id.startsWith("fallback:") || c2.id === "profile";
+  }
+});
+
 // src/doctor.ts
 import { chmodSync as chmodSync3 } from "node:fs";
 import { join as join55 } from "node:path";
@@ -7132,6 +7197,9 @@ async function installSummary(ctx, detection, _piDir) {
   if (!doctorExitCode(checks)) return [`Doctor: all ${checks.filter((c2) => c2.status === "ok").length} checks passed (full check: \`${setupCmd(ctx)} doctor\`).`];
   return [`Doctor: ${counts(checks)}:`, ...render2(checks.filter((c2) => c2.status === "warn" || c2.status === "fail")), `Full check: \`${setupCmd(ctx)} doctor\``];
 }
+function installChecks(ctx, detection) {
+  return localChecks(ctx, { providers: detection.providers, catalog: detection.catalog, github: detection.github.host ? detection.github : void 0, summary: true }).checks;
+}
 var counts;
 var init_doctor = __esm({
   "src/doctor.ts"() {
@@ -7140,6 +7208,7 @@ var init_doctor = __esm({
     init_manifest();
     init_doctor_components();
     init_doctor_checks();
+    init_doctor_compact();
     counts = (checks) => {
       const count = (status2) => checks.filter((c2) => c2.status === status2).length;
       return `${count("ok")} ok, ${count("warn")} warnings, ${count("fail")} failures`;
@@ -7201,6 +7270,18 @@ function summaryLines(args) {
   }
   lines2.push(...args.componentNotes ?? []);
   for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines2.push(`warning: ${warning}`);
+  return lines2;
+}
+function whatsNextLines(next) {
+  const lines2 = [];
+  if (next.pathMissing) {
+    lines2.push(next.pathEdited ? "Open a new terminal so the PATH change takes effect." : "Add ~/.local/bin and ~/.pi/agent/bin to PATH, then open a new terminal.");
+  }
+  lines2.push("Start pi: pi");
+  if (next.logins.length) lines2.push(`Log in: in pi, type /login for ${next.logins.join(", ")}`);
+  lines2.push("Switch profile: pi-profile list, or ./install.sh --profile <name>");
+  lines2.push("Check health any time: ./install.sh doctor");
+  if (next.lanesOffered) lines2.push("Optional: set up a coordinator and lanes (offered next; or later with ./install.sh lanes)");
   return lines2;
 }
 var USER_SOURCES, ROOT_SOURCES, KEPT_EDITS;
@@ -7493,14 +7574,16 @@ async function editReview(session) {
   if (!await changeStep(p, input, state2, steps)) return CANCEL;
   return prepareReview(session);
 }
-async function reviewChoice({ p, steps }, review) {
+async function reviewChoice({ p, steps, input, path: path2 }, review) {
   header(p, steps.length + 1, steps.length + 1, "Review");
-  p.note(review.summary().join("\n"), "Review");
+  const pathRow = input.pathLine ? ["", `[${path2.on ? "x" : " "}] ${input.pathLine}`] : [];
+  p.note([...review.summary(), ...pathRow].join("\n"), "Review");
   return p.select({
     message: "Review",
     options: [
       { value: "install", label: "Install (recommended)" },
       { value: "change", label: "Change a step\u2026" },
+      ...input.pathLine ? [{ value: "path", label: path2.on ? "Don't change my shell profile" : "Add the PATH entries after all" }] : [],
       { value: "files", label: "Show every file" },
       { value: "cancel", label: "Cancel" }
     ],
@@ -7510,10 +7593,15 @@ async function reviewChoice({ p, steps }, review) {
 async function reviewLoop(session) {
   const { p } = session;
   let review = await prepareReview(session);
+  if (review === null) session.path.on = false;
   while (review && review !== CANCEL) {
     const answer = await reviewChoice(session, review);
     if (p.isCancel(answer) || answer === "cancel") return false;
     if (answer === "install") return true;
+    if (answer === "path") {
+      session.path.on = !session.path.on;
+      continue;
+    }
     if (answer === "files") {
       p.note(review.files().join("\n"), "Every file");
       continue;
@@ -7543,8 +7631,9 @@ Ctrl-C quits at any time.`, "Welcome");
     header(p, index + 1, steps.length + 1, step.title);
     if (!await step.run(p, currentInput(input, state2), state2, selected === "custom")) return CANCEL;
   }
-  if (!await reviewLoop({ p, input, state: state2, steps })) return CANCEL;
-  return { ...state2, mode: selected };
+  const path2 = { on: Boolean(input.pathLine) && input.pathDefault === true };
+  if (!await reviewLoop({ p, input, state: state2, steps, path: path2 })) return CANCEL;
+  return { ...state2, mode: selected, editPath: path2.on };
 }
 var saved, rootFor, ROLES, PI_INSTALL, LOGIN_HOWTO, piMissing, STEPS;
 var init_rails = __esm({
@@ -9276,6 +9365,8 @@ async function guidedResolution({ ctx, options, detection, saved: saved2, manife
     readOnly: options.dryRun || options.plan,
     extras: extraRows(ctx, options, saved2, detection, manifest),
     preapproveMcp: savedPreapproval(ctx),
+    pathLine: pathEditLine(ctx),
+    pathDefault: PATH_EDIT_DEFAULT || options.editShellProfile,
     review: (answers) => {
       const r2 = resolveAll(ctx, options, detection, saved2, answers, manifest, true);
       addToolWarnings(r2, detection, toolErrors, ctx);
@@ -9294,7 +9385,7 @@ async function guidedResolution({ ctx, options, detection, saved: saved2, manife
       };
     }
   });
-  return result3 === CANCEL ? CANCEL : resolved;
+  return result3 === CANCEL ? CANCEL : { r: resolved, editPath: result3.editPath };
 }
 async function execute(ctx, options, prompter, baseCtx) {
   const piDir = join56(ctx.home, ".pi", "agent");
@@ -9320,8 +9411,10 @@ async function execute(ctx, options, prompter, baseCtx) {
   spin?.stop("Looked around");
   const toolErrors = requiredToolErrors(ctx, detection, options, Boolean(prompter));
   if (toolErrors.length && !readOnly) throw new SetupError(toolErrors.join("\n"));
-  const r2 = prompter ? await guidedResolution({ ctx, options, detection, saved: saved2, manifest, p: prompter, toolErrors }) : resolveAll(ctx, options, detection, saved2, {}, manifest);
-  if (r2 === CANCEL) return cancelled(ctx);
+  const guided = prompter ? await guidedResolution({ ctx, options, detection, saved: saved2, manifest, p: prompter, toolErrors }) : void 0;
+  if (guided === CANCEL) return cancelled(ctx);
+  const r2 = guided?.r ?? resolveAll(ctx, options, detection, saved2, {}, manifest);
+  const editPath = guided ? guided.editPath : options.editShellProfile;
   const better = detection.candidates[0]?.path;
   if (!prompter && r2.settings.rootSource === "default" && better && better !== r2.settings.reposRoot) {
     ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
@@ -9340,17 +9433,24 @@ async function execute(ctx, options, prompter, baseCtx) {
     inheritNpm: !prompter && !options.json,
     profile: r2.choice.name,
     activeBefore: r2.activeBefore,
-    spinner: prompter?.spinner(),
     components: r2.records,
     quiet: Boolean(prompter)
   };
-  const live = await retire(ctx, piDir, manifest, off, options.dryRun);
-  const result3 = await apply(ctx, r2.actions, applyOptions, live);
-  if (result3.code === 0) await syncServices(ctx, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);
-  if (result3.code === 0) configureShellPath(ctx, options.editShellProfile, readOnly);
+  const pathMissing = missingBinDirs(ctx).length > 0;
+  const live = prompter ? void 0 : await retire(ctx, piDir, manifest, off, options.dryRun);
+  const result3 = prompter ? await applyGuided({ ctx, options, r: r2, applyOptions, manifest, off, editPath, p: prompter }) : await applyPlain(ctx, options, r2, applyOptions, live, editPath);
   const shown = prompter || options.json ? [] : summary2.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:") || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no") || r2.componentNotes.includes(l2));
-  if (result3.code === 0 && !options.dryRun && !options.plan && !options.json) shown.push(...await installSummary(ctx, detection, piDir));
-  if (prompter && result3.code === 0 && !options.dryRun && !options.plan && r2.components.lanes.on && !existsSync36(join56(r2.settings.reposRoot, ".lanes/lanes.json"))) {
+  if (result3.code === 0 && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...await installSummary(ctx, detection, piDir));
+  const offerLanes = Boolean(prompter) && result3.code === 0 && !options.dryRun && !options.plan && r2.components.lanes.on && !existsSync36(join56(r2.settings.reposRoot, ".lanes/lanes.json"));
+  let pending2 = 0;
+  if (prompter && result3.code === 0 && !options.dryRun) {
+    const compact = compactChecks(installChecks(ctx, detection), { home: ctx.home, skipNpm: options.skipNpm, pathEdited: editPath && pathMissing });
+    pending2 = compact.count;
+    if (compact.lines.length) prompter.note(compact.lines.join("\n"), "Still to finish");
+    const logins2 = [.../* @__PURE__ */ new Set([...missingLogins(r2.profile, r2.ready), ...compact.logins])];
+    prompter.note(whatsNextLines({ pathMissing, pathEdited: editPath && pathMissing, logins: logins2, lanesOffered: offerLanes }).join("\n"), "What's next");
+  }
+  if (offerLanes && prompter) {
     const answer = await prompter.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
     if (!prompter.isCancel(answer) && answer === true) {
       try {
@@ -9360,13 +9460,41 @@ async function execute(ctx, options, prompter, baseCtx) {
       }
     }
   }
-  return finish(ctx, baseCtx, options, r2, detection, shown, result3.code, prompter, result3.wrote);
+  return finish(ctx, baseCtx, options, r2, detection, shown, result3.code, prompter, result3.wrote, pending2);
+}
+async function applyPlain(ctx, options, r2, applyOptions, live, editPath) {
+  const result3 = await apply(ctx, r2.actions, applyOptions, live);
+  if (result3.code === 0) await syncServices(ctx, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);
+  if (result3.code === 0) configureShellPath(ctx, editPath, options.dryRun || options.plan);
+  return result3;
+}
+async function applyGuided({ ctx, options, r: r2, applyOptions, manifest, off, editPath, p }) {
+  const held = { out: [], err: [] };
+  const quiet = { ...ctx, out: (line) => held.out.push(line), err: (line) => held.err.push(line) };
+  const spin = p.spinner();
+  spin.start("Backing up your current files");
+  let result3;
+  try {
+    const live = await retire(quiet, join56(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
+    result3 = await apply(quiet, r2.actions, { ...applyOptions, spinner: spin }, live);
+    if (result3.code === 0) {
+      if (Object.values(r2.records).some((c2) => c2.on && c2.service?.managed)) spin.message?.("Setting up schedules");
+      await syncServices(quiet, r2.records, new Set(r2.actions.filter((a2) => a2.op === "install").map((a2) => a2.path)), options.dryRun);
+      if (editPath && missingBinDirs(ctx).length) spin.message?.("Adding PATH entries");
+      configureShellPath(quiet, editPath, options.dryRun, true);
+    }
+  } finally {
+    spin.stop(result3?.code === 0 ? options.dryRun ? "Dry run finished" : "Installed" : "Install did not finish");
+    held.out.forEach((line) => ctx.out(line));
+    held.err.forEach((line) => ctx.err(line));
+  }
+  return result3;
 }
 function cancelled(ctx) {
   ctx.err("Cancelled; nothing written.");
   return 1;
 }
-function finish(ctx, baseCtx, options, r2, detection, lines2, code, prompter, wrote = true) {
+function finish(ctx, baseCtx, options, r2, detection, lines2, code, prompter, wrote = true, pending2 = 0) {
   if (options.json) {
     baseCtx.out(jsonReport(r2, detection, code));
     return code;
@@ -9378,7 +9506,8 @@ function finish(ctx, baseCtx, options, r2, detection, lines2, code, prompter, wr
     const upToDate = `${prompter ? "Everything is up to date." : "Everything up to date."}${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
     const done = readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate;
     const hint = r2.choice.provisional && !readOnly && wrote ? ` ${r2.choice.reason}.` : "";
-    if (prompter) prompter.outro(`${done}${hint}`);
+    if (prompter && pending2 && !readOnly) prompter.outro(`Installed, with ${pending2} ${pending2 === 1 ? "thing" : "things"} to finish: see "Still to finish" above.`);
+    else if (prompter) prompter.outro(`${done}${hint}`);
     else ctx.out(`${done}${hint}`);
   }
   return code;
@@ -9402,6 +9531,7 @@ var init_run = __esm({
     init_doctor();
     init_doctor_probes();
     init_update();
+    init_profiles();
     init_profiles();
     init_report();
     init_settings();

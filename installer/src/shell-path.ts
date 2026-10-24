@@ -14,11 +14,21 @@ export function shellPath(ctx: Ctx): { file: string; snippet: string } {
   return { file: join(ctx.home, rc), snippet: 'export PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH"' };
 }
 
+/** In the interactive Review the PATH edit is pre-ticked; confirming Install is the opt-in. Flip this to make it opt-in. */
+export const PATH_EDIT_DEFAULT = true;
+
+/** The Review line for the PATH edit, or undefined when both directories are already on PATH. */
+export function pathEditLine(ctx: Ctx): string | undefined {
+  if (!missingBinDirs(ctx).length) return undefined;
+  return `Add ~/.local/bin and ~/.pi/agent/bin to PATH in ${shellPath(ctx).file.replace(ctx.home, "~")}`;
+}
+
 /** Shell startup files are user-owned: append only on explicit opt-in, never replace them. */
-export function configureShellPath(ctx: Ctx, edit: boolean, dryRun: boolean): void {
+export function configureShellPath(ctx: Ctx, edit: boolean, dryRun: boolean, guided = false): void {
   if (!missingBinDirs(ctx).length) return;
   const { file, snippet } = shellPath(ctx);
-  ctx.out(`PATH: add this to ${file}, then restart your shell:\n${snippet}`);
+  if (guided && !edit) return;
+  if (!guided) ctx.out(`PATH: add this to ${file}, then restart your shell:\n${snippet}`);
   if (!edit) { ctx.out("Shell profile unchanged (opt in with --edit-shell-profile)."); return; }
   if (dryRun) { ctx.out(`would append PATH snippet to ${file}`); return; }
   let text = "";
@@ -27,5 +37,5 @@ export function configureShellPath(ctx: Ctx, edit: boolean, dryRun: boolean): vo
   if (text.split("\n").includes(snippet)) return;
   mkdirSync(dirname(file), { recursive: true });
   appendFileSync(file, `\n# pi-setup tools\n${snippet}\n`);
-  ctx.out(`Appended PATH snippet to ${file}`);
+  if (!guided) ctx.out(`Appended PATH snippet to ${file}`);
 }
