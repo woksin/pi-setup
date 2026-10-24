@@ -25,6 +25,7 @@
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isGuardOff } from "./guards.ts";
@@ -242,7 +243,7 @@ function envAssignments(text: string, out: Candidate[]): void {
 			const value = match[group];
 			if (value.length < 4 || !secretValue(value, group !== 4, false, true)) continue;
 			const [start, end] = match.indices![group]!;
-			out.push({ start, end, kind: "connection-string" });
+			connectionCandidate(text, start, end, out);
 		}
 	}
 	// A whole quoted entry (docker `Env` JSON, list items): the value runs to the closing quote, spaces included.
@@ -252,8 +253,29 @@ function envAssignments(text: string, out: Candidate[]): void {
 		const value = match[3];
 		if (value.length < 4 || !secretValue(value, true, false, true)) continue;
 		const [start, end] = match.indices![3]!;
-		out.push({ start, end, kind: "connection-string" });
+		connectionCandidate(text, start, end, out);
 	}
+}
+
+function loopbackHost(authority: string): boolean {
+	if (authority === "::1") return true;
+	const host = /^(\[[^\]]+\]|[^:]+)(?::\d{1,5})?$/.exec(authority)?.[1].toLowerCase();
+	return host === "localhost" || host === "[::1]" || (!!host && isIP(host) === 4 && host.startsWith("127."));
+}
+
+function loopbackConnection(text: string, start: number, end: number): boolean {
+	// Bare field captures stop at separators (or IPv6 brackets in env forms). Inspect
+	// the rest of that token too, never exempting a local prefix of a remote/secret URL.
+	const suffix = /^[,;&\[\]][^\s"'`|(){}<>\\]*/.exec(text.slice(end))?.[0] ?? "";
+	const uri = /^[a-z][a-z0-9+.-]{0,31}:\/\/([^/?#\s\\]+)([^\s\\]*)$/i.exec(text.slice(start, end) + suffix);
+	if (!uri || !uri[1].split(",").every(loopbackHost)) return false;
+	const query = /\?([^#]*)/.exec(uri[2])?.[1] ?? "";
+	return [...new URLSearchParams(query.replaceAll(";", "&")).keys()]
+		.every(key => !isSecretKey(key) && !/^(?:key|signature|auth|authorization)$/i.test(key));
+}
+
+function connectionCandidate(text: string, start: number, end: number, out: Candidate[]): void {
+	if (!loopbackConnection(text, start, end)) out.push({ start, end, kind: "connection-string" });
 }
 
 function connections(text: string, out: Candidate[]): void {
@@ -269,7 +291,7 @@ function connections(text: string, out: Candidate[]): void {
 		const regexLiteral = !match[3] && value.startsWith("/")
 			&& /\b(?:const|let|var)[ \t]+$/.test(text.slice(text.lastIndexOf("\n", match.index) + 1, match.index));
 		if (value.length < 8 || regexLiteral || !secretValue(value, !!match[3], terminated)) continue;
-		out.push({ start, end, kind: "connection-string" });
+		connectionCandidate(text, start, end, out);
 	}
 }
 

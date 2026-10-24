@@ -122,6 +122,49 @@ for (const text of negatives) test(`leaves negative intact: ${text.slice(0, 65).
 	assert.deepEqual(scan(text), { text, count: 0, kinds: [], skipped: false });
 });
 
+test("bare connection examples retain their existing detector behavior", () => {
+	for (const text of [
+		"mongodb://localhost:27017", "MONGO_URL=mongodb://localhost:27017",
+		"Server=localhost;Database=x", "postgres://127.0.0.1:5432/db",
+		"mongodb://[::1]:27017", "mongodb://::1",
+		"mongodb://localhost:27017,localhost:27018/?replicaSet=rs0",
+		"mongodb://db.example.com:27017", "mongodb://localhost,evil.example.com",
+		"mongodb://user:pw@localhost:27017", "mongodb://localhost:27017/?password=x",
+		"Server=localhost;Password=x",
+	]) assert.deepEqual(scan(text), { text, count: 0, kinds: [], skipped: false });
+});
+test("credential-free loopback URLs are not secret field values", () => {
+	for (const url of [
+		"mongodb://localhost:27017", "postgres://127.0.0.1:5432/db",
+		"postgres://127.12.34.56:5432/db", "mongodb://[::1]:27017", "mongodb://::1",
+		"mongodb://LOCALHOST:27017/db", "https://localhost:8443/?mode=dev&replicaSet=rs0",
+		"mongodb://localhost:27017,localhost:27018/?replicaSet=rs0",
+		"mongodb://localhost:27017,[::1]:27018,127.0.0.2:27019/db",
+	]) {
+		for (const text of [`"ConnectionString": "${url}"`, `CONNECTION_STRING=${url}`, `CONNECTION_STRING="${url}"`]) {
+			assert.deepEqual(scan(text), { text, count: 0, kinds: [], skipped: false }, text);
+		}
+	}
+});
+test("loopback exemption never hides user-info, secret parameters or remote hosts", () => {
+	for (const url of [
+		"mongodb://user:pw@localhost:27017", "mongodb://user@localhost:27017",
+		"mongodb://@localhost:27017", "mongodb://localhost:27017/?password=x",
+		"mongodb://db.example.com:27017", "mongodb://localhost,evil.example.com",
+		"mongodb://evil.example.com,localhost", "mongodb://host.docker.internal:27017",
+		"mongodb://localhost.evil.example.com", "mongodb://127.0.0.1.evil.example.com",
+		"mongodb://128.0.0.1", "mongodb://127.0.0.999", "mongodb://[::2]:27017",
+		... ["pwd", "key", "token", "secret", "sig", "apiKey", "access_token", "pass%77ord", "signature"].map(key => `mongodb://localhost:27017/?replicaSet=rs0&${key}=x`),
+	]) {
+		const quoted = `"ConnectionString": "${url}"`;
+		assert.equal(scan(quoted).text, '"ConnectionString": "[REDACTED:connection-string]"', quoted);
+		// Bare captures stop at commas/ampersands: preserve today's masked prefix too.
+		assert.ok(scan(`CONNECTION_STRING=${url}`).count > 0, url);
+	}
+	assert.equal(scan('"ConnectionString": "Server=localhost;Password=x"').text,
+		'"ConnectionString": "[REDACTED:connection-string]"');
+});
+
 test("URL redaction preserves scheme, username, host and path", () => {
 	assert.equal(scan("mongodb://admin:abc@local/db").text, "mongodb://admin:[REDACTED:url-credentials]@local/db");
 });
