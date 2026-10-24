@@ -692,7 +692,8 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(set(record), {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
                                       "head", "dirty", "argvHash", "stack", "envHash", "verified", "fingerprint", "fast", "policy", "source",
-                                  "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis"})
+                                  "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis",
+                                  "waitV", "waitBreakdown", "waitScans", "waitSamples"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
@@ -2755,8 +2756,8 @@ class PhaseTests(unittest.TestCase):
     def test_cancel_after_admission_never_launches_producer(self):
         patch = ("import os,signal\n"
                  "original = pi_phase.claim\n"
-                 "def cancelled_claim(*args):\n"
-                 "    held = original(*args)\n"
+                 "def cancelled_claim(*args, **kwargs):\n"
+                 "    held = original(*args, **kwargs)\n"
                  "    if held: os.kill(os.getpid(), signal.SIGTERM)\n"
                  "    return held\n"
                  "pi_phase.claim = cancelled_claim")

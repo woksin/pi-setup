@@ -271,6 +271,82 @@ def append_ledger(state, record):
             pass  # Even a full/broken stderr must not change the phase's exit.
 
 
+WAIT_REASONS = ("slots", "order", "memory", "other")
+
+
+class WaitTelemetry:
+    """In-process samples only; optional diagnostics must never affect admission."""
+
+    def __init__(self, start, clock=time.monotonic):
+        self.clock = clock
+        self.seconds = dict.fromkeys(WAIT_REASONS, 0.0)
+        self.scans = dict.fromkeys(WAIT_REASONS, 0)
+        self.current, self.at, self.closed = "other", start, False
+        self.load_sum, self.load_max, self.load_count = 0.0, None, 0
+        self.mem_free_min = None
+        self.busy = {}
+
+    def record(self, scan):
+        try:
+            if self.closed:
+                return
+            reason = scan.get("reason", "other")
+            now = self.clock()
+            self.seconds[self.current] += now - self.at
+            self.current, self.at = reason, now
+            self.scans[reason] += 1
+            self.sample_load()
+            self.sample_memory(scan.get("memFree"))
+            self.sample_pools(scan.get("busy", {}))
+        except Exception:
+            pass  # Optional telemetry must not interrupt a queued phase.
+
+    def sample_load(self):
+        try:
+            load = os.getloadavg()[0]
+            self.load_sum += load
+            self.load_max = load if self.load_max is None else max(self.load_max, load)
+            self.load_count += 1
+        except (OSError, AttributeError):
+            pass
+
+    def sample_memory(self, free):
+        if free is not None:
+            self.mem_free_min = free if self.mem_free_min is None else min(self.mem_free_min, free)
+
+    def sample_pools(self, pools):
+        for pool in ("heavy", "fast", "integration"):
+            if pool not in pools:
+                continue
+            busy, slots = pools[pool]
+            sample = self.busy.setdefault(pool, dict(total=0, max=0, n=0, of=0))
+            sample["total"] += busy
+            sample["max"] = max(sample["max"], busy)
+            sample["n"] += 1
+            sample["of"] = max(sample["of"], slots)
+
+    def close(self, end):
+        try:
+            if not self.closed:
+                self.seconds[self.current] += max(0, end - self.at)
+                self.closed = True
+        except Exception:
+            pass
+
+    def fields(self):
+        try:
+            samples = dict(n=sum(self.scans.values()),
+                           load1Mean=round(self.load_sum / self.load_count, 3) if self.load_count else None,
+                           load1Max=self.load_max, cpus=os.cpu_count(), memFreeMin=self.mem_free_min)
+            samples.update({pool: dict(mean=round(sample["total"] / sample["n"], 3),
+                                       max=sample["max"], of=sample["of"])
+                            for pool, sample in self.busy.items()})
+            return dict(waitV=1, waitBreakdown={key: round(value, 3) for key, value in self.seconds.items()},
+                        waitScans=dict(self.scans), waitSamples=samples)
+        except Exception:
+            return {}
+
+
 class PhaseLedger:
     def __init__(self, args):
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -290,6 +366,7 @@ class PhaseLedger:
         self.queued = time.monotonic()
         self.started = None
         self.enqueued = False
+        self.wait = None
         self.snapshot_thread = None
         self.git_result = (None, None)
         self.snapshot_ready = False
@@ -317,6 +394,7 @@ class PhaseLedger:
         self.record["queuedAt"] = utc_stamp()
         self.queued = time.monotonic()
         self.enqueued = True
+        self.wait = WaitTelemetry(self.queued)
         if self.snapshot_ready:
             return
         self.snapshot_thread = threading.Thread(target=self.snapshot, daemon=True)
@@ -324,6 +402,10 @@ class PhaseLedger:
             self.snapshot_thread.start()
         except RuntimeError:
             self.snapshot_thread = None  # Thread exhaustion is only missing optional metadata.
+
+    def waited(self, scan):
+        if self.wait:
+            self.wait.record(scan)
 
     def snapshot(self):
         try:
@@ -336,9 +418,17 @@ class PhaseLedger:
         self.record["startedAt"] = utc_stamp()
         self.started = time.monotonic()
         self.record["waitS"] = max(0, self.started - self.queued)
+        if self.wait:
+            self.wait.close(self.started)
 
     def outcome(self, value):
         self.record["outcome"] = value
+
+    def finish_wait(self):
+        end = time.monotonic()
+        self.record["waitS"] = max(0, end - self.queued)
+        if self.wait:
+            self.wait.close(end)
 
     def finish(self, state, code):
         self.record["ts"] = self.record["endedAt"] = utc_stamp()
@@ -346,7 +436,7 @@ class PhaseLedger:
         if self.record["outcome"] == "skipped":
             self.record["waitS"] = self.record["runS"] = 0
         elif self.started is None:
-            self.record["waitS"] = max(0, time.monotonic() - self.queued)
+            self.finish_wait()
         else:
             self.record["runS"] = max(0, time.monotonic() - self.started)
             if self.record["outcome"] == "failed" and code == 0:
@@ -363,6 +453,8 @@ class PhaseLedger:
                                            and end == self.git_result and env_hash() == self.record["envHash"])
             except Exception:
                 pass  # Failed verification never changes the producer's result.
+        if self.wait and self.record["outcome"] != "skipped":
+            self.record.update(self.wait.fields())
         append_ledger(state, self.record)
 
 
@@ -1804,13 +1896,21 @@ def waiter_resources(waiter, pools):
     return [pools[key][0] for key in needed]
 
 
-def ordered_candidate(state, available, token, cancelled):
+def record_order(scan, waiter, free):
+    if scan is not None:
+        scan["reason"] = "order" if waiter_resources(waiter, free) else "slots"
+
+
+def ordered_candidate(state, available, token, cancelled, scan=None):
     """Reserve satisfiable earlier waiters virtually; blocked ones take nothing."""
     pools = {key: sorted(p for p in available if p.name.startswith(key + "-"))
              for key in ("heavy", "integration", "fast")}
+    free = {key: list(paths) for key, paths in pools.items()}
     for waiter in all_waiters(state, cancelled):
         candidate = waiter_resources(waiter, pools)
         if waiter.get("token") == token:
+            if not candidate:
+                record_order(scan, waiter, free)
             return candidate
         for path in candidate:
             pools[path.name.split("-", 1)[0]].pop(0)
@@ -1827,8 +1927,19 @@ def claim_paths(state, candidates, waiter, limits):
     return paths
 
 
+def record_admission(scan, paths, available, admission):
+    if scan is None:
+        return
+    totals = {pool: sum(path.name.startswith(pool + "-") for path in paths)
+              for pool in ("heavy", "fast", "integration")}
+    scan["busy"] = {pool: (total - sum(path.name.startswith(pool + "-") for path in available), total)
+                    for pool, total in totals.items() if total > 0}
+    if admission and admission.sample:
+        scan["memFree"] = admission.sample[0]
+
+
 def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None,
-          integration_ceiling=None):
+          integration_ceiling=None, *, scan=None):
     """One bounded admission scan; kernel locks and metadata identity are checked atomically."""
     paths = claim_paths(state, candidates, waiter, limits)
     reason = admission.reason(deadline) if admission and any(
@@ -1868,16 +1979,21 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
                 unlock(fd)
                 continue
             available[path] = fd
+        record_admission(scan, paths, available, admission)
         if reason and phases_running(state, available, prior, live):
             memory_held = True
+            if scan is not None:
+                scan["reason"] = "memory"
             return None
         eligible = (burst_available(state, available, prior, live, integration_ceiling)
                     if integration_ceiling is not None else available)
         if waiter is not None:
             candidate = ordered_candidate(state, eligible, waiter,
-                                          lambda: cancelled() or time.monotonic() >= deadline)
+                                          lambda: cancelled() or time.monotonic() >= deadline, scan)
         else:
             candidate = next((c for c in candidates if all(p in eligible for p in c)), [])
+            if scan is not None and not candidate:
+                scan["reason"] = "slots"
         if candidate and not cancelled() and time.monotonic() < deadline:
             if waiter is not None:
                 queued_path = waiter_path(state, waiter)
@@ -1922,7 +2038,8 @@ def remove_lease(path):
 
 
 def status(state, configuration=CONFIG):
-    options = config(configuration).options
+    settings = config(configuration)
+    options = settings.options
     cap = options["max_high"]
     fast_slots = options["fast_lane"]["slots"] if options["fast_lane"] else 0
     if not state.exists():
@@ -1949,10 +2066,13 @@ def status(state, configuration=CONFIG):
     live = live_groups(2) if any(not busy and data.get("pgid") for _, data, busy in owners) else set()
     seen = set()
     fast_running = 0
+    used = dict(heavy=0, integration=0)
     for path, data, busy in owners:
         orphan = (data.get("unreadable") or live is None or data.get("pgid") in live) if not busy else False
         if not busy and not orphan:
             continue
+        for pool in used:
+            used[pool] += path.name.startswith(pool + "-")
         token = data.get("token", path.name)
         if token in seen:
             continue
@@ -1982,6 +2102,8 @@ def status(state, configuration=CONFIG):
         seconds = max(0, math.ceil(grant["expires"] - time.time()))
         expiry = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(grant["expires"]))
         note(f"high priority grant: {remaining}; expires in {seconds}s at {expiry}")
+    if waiters:
+        note(f"slots heavy={used['heavy']}/{settings[0]} integration={used['integration']}/{settings[1]}")
     return 0
 
 
@@ -2258,10 +2380,11 @@ def run(args, state, configuration, output=None):
             heavy, integration = settings
             if burst and admission_args.kind == "integration":
                 integration = burst.effective(integration, deadline)
+            scan = {}
             held = claim(state, phase_candidates(state, admission_args, (heavy, integration, ci_key, token)),
                          deadline, lambda: bool(cancelled[0]),
                          token if waiter_fd is not None else None, PhaseConfig(heavy, integration, settings.options), admission,
-                         integration if burst and admission_args.kind == "integration" else None)
+                         integration if burst and admission_args.kind == "integration" else None, scan=scan)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
                 if ledger:
@@ -2276,6 +2399,8 @@ def run(args, state, configuration, output=None):
                         ledger.outcome("queue-timeout")
                     return 75
                 break
+            if ledger:
+                ledger.waited(scan)
             if args.kind == "ci":
                 if ledger:
                     ledger.outcome("rejected")
