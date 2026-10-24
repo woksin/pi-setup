@@ -10,6 +10,7 @@ import errno
 import fcntl
 import fnmatch
 import hashlib
+from itertools import chain
 import json
 import math
 import os
@@ -68,7 +69,7 @@ def stack_name(value):
     return value
 
 
-def unwrap_command(command):
+def unwrap_command(command, stop_at_shell=False):
     """Best effort only: strip env/nice/bash -c wrappers, never evaluate shell code.
 
     Returns the inner argv, or None when the invocation cannot be unwrapped safely."""
@@ -106,6 +107,8 @@ def unwrap_command(command):
                 index += 1
             command = command[index:]
         elif name in ("bash", "sh") and len(command) >= 3 and command[1] == "-c":
+            if stop_at_shell:
+                return command
             try:
                 lexer = shlex.shlex(command[2], posix=True, punctuation_chars=";&|<>()")
                 lexer.whitespace_split = True
@@ -1524,6 +1527,188 @@ def container_test_poller(state, fingerprint, started, stopped, attribution=None
             return
 
 
+def dump_warning(message):
+    """Advisory output must never turn a producer's exit into a wrapper failure."""
+    try:
+        note(f"warning: {message}")
+    except (OSError, ValueError):
+        pass
+
+
+def dump_command_segments(command, depth=0):
+    """Inspect literal shell segments only; never expand or execute shell code."""
+    command = unwrap_command(command, stop_at_shell=True) or command
+    if depth >= 20 or len(command) < 3:
+        yield command
+        return
+    if Path(command[0]).name not in ("sh", "bash") or command[1] != "-c":
+        yield command
+        return
+    for segment in dump_shell_segments(command[2]):
+        yield from dump_command_segments(segment, depth + 1)
+
+
+def dump_shell_escape(characters):
+    following = next(characters, "")
+    return "" if following == "\n" else "\\" + following
+
+
+def dump_shell_quoted(characters, quote):
+    literal = [quote]
+    for character in characters:
+        if character == "\\" and quote == '"':
+            literal.append(dump_shell_escape(characters))
+            continue
+        literal.append(character)
+        if character == quote:
+            break
+    return "".join(literal)
+
+
+def dump_shell_fragments(script):
+    """Keep quoted/escaped literals atomic; remove only shell continuations."""
+    characters = iter(script)
+    word_start = True
+    for character in characters:
+        if character == "#" and word_start:
+            yield next((item for item in characters if item == "\n"), "")
+            word_start = True
+            continue
+        if character in ("'", '"'):
+            fragment = dump_shell_quoted(characters, character)
+        elif character == "\\":
+            fragment = dump_shell_escape(characters)
+        else:
+            fragment = character
+        if fragment:
+            yield fragment
+            word_start = fragment.isspace() or fragment in ";&|()"
+
+
+def dump_shell_segments(script):
+    # Inspect literal words only: no expansion, substitution or execution.
+    segment = []
+    for fragment in chain(dump_shell_fragments(script), ("\n",)):
+        if fragment not in (";", "&", "|", "(", ")", "\n"):
+            segment.append(fragment)
+            continue
+        try:
+            yield shlex.split("".join(segment))
+        except ValueError:
+            pass  # Malformed shell text is best effort, like unwrap_command.
+        segment = []
+
+
+def dump_command_options(command):
+    options = {}
+    for argument, following in zip(command, command[1:] + [""]):
+        name, separator, value = argument.partition("=")
+        options[name] = value if separator else following
+    return options
+
+
+def warn_full_dumps(command):
+    """Inspect the user's argv, before the no-dump VSTest preset is injected."""
+    for segment in dump_command_segments(command):
+        warn_full_dump_options(dump_command_options(segment))
+
+
+def warn_full_dump_options(options):
+    reported = set()
+    for flag, dump_type, mini in (
+            ("--blame-hang", "--blame-hang-dump-type", "mini"),
+            ("--blame-crash", "--blame-crash-dump-type", "mini"),
+            ("--blame", "--blame-crash-dump-type", "mini"),
+            ("--hangdump", "--hangdump-type", "Mini"),
+            ("--crashdump", "--crashdump-type", "Mini")):
+        if flag in options and dump_type not in options:
+            dump_warning(f"{flag} without {dump_type} {mini} writes full dumps (GBs); "
+                         f"add {dump_type} {mini}")
+        elif options.get(dump_type, "").lower() == "full" and dump_type not in reported:
+            # --blame and --blame-crash share a dump type; report it only once.
+            dump_warning(f"{dump_type} full writes full dumps (GBs); add {dump_type} {mini}")
+            reported.add(dump_type)
+
+
+def dump_scan_active(remaining, deadline):
+    return remaining[0] > 0 and time.monotonic() < deadline
+
+
+def dump_directory_entries(directory, deadline, remaining):
+    """Share one entry budget across directories, including skipped entries."""
+    try:
+        with os.scandir(directory) as entries:
+            while dump_scan_active(remaining, deadline):
+                entry = next(entries, None)
+                if entry is None:
+                    return
+                remaining[0] -= 1
+                if entry.name not in ("node_modules", ".git", "obj", "bin"):
+                    yield entry
+    except OSError:
+        pass
+
+
+def dump_scan_entries(cwd, deadline):
+    """Traverse to depth six without symlinks, for at most 20,000 entries / 2 s."""
+    pending = [(Path(cwd), 0)]
+    remaining = [20000]
+    while pending and dump_scan_active(remaining, deadline):
+        directory, depth = pending.pop()
+        for entry in dump_directory_entries(directory, deadline, remaining):
+            yield entry
+            try:
+                if depth < 5 and entry.is_dir(follow_symlinks=False):
+                    pending.append((Path(entry.path), depth + 1))
+            except OSError:
+                pass
+
+
+def large_dump_files(cwd, deadline):
+    """Yield at most five regular dumps of at least 1 GiB within the scan budget."""
+    found = 0
+    for entry in dump_scan_entries(cwd, deadline):
+        try:
+            if not entry.name.endswith(".dmp") or not entry.is_file(follow_symlinks=False):
+                continue
+            size = entry.stat(follow_symlinks=False).st_size
+            if time.monotonic() >= deadline:
+                return
+            if size < 1 << 30:
+                continue
+            yield f"{os.path.relpath(entry.path, cwd)} ({size / (1 << 30):.2f} GiB)"
+            found += 1
+            if found == 5:
+                return
+        except OSError:
+            pass
+
+
+def warn_large_dumps(cwd):
+    # A stalled filesystem call must not hold up phase completion beyond the scan budget.
+    found = []
+    deadline = time.monotonic() + 2
+
+    def scan():
+        try:
+            found.extend(large_dump_files(cwd, deadline))
+        except (OSError, ValueError):
+            pass
+
+    try:
+        worker = threading.Thread(target=scan, daemon=True)
+        worker.start()
+        worker.join(max(0, deadline - time.monotonic()))
+        if found:
+            dump_warning("dump file(s) over 1 GiB left behind: " + " ... ".join(found[:5]))
+            try:
+                note("hint: delete them once you have the stack (dotnet-dump analyze → clrstack -all)")
+            except (OSError, ValueError):
+                pass
+    except (OSError, RuntimeError, ValueError):
+        pass  # Best effort, including unavailable threads or a closed output stream.
+
+
 def cold_worktree(cwd):
     """At most 1000 entries, three levels, no symlink traversal or git subprocess."""
     cwd = Path(cwd).resolve()
@@ -2404,11 +2589,14 @@ def run(args, state, configuration, output=None):
             raise ValueError("ci requires --repo, --pr, and --commit (explicit watcher identity)")
     elif any((args.repo, args.pr, args.commit)):
         raise ValueError("--repo/--pr/--commit only apply to ci")
+    phase_cwd = os.getcwd()
     command = args.command
     if command and command[0] == "--":
         command = command[1:]
     if not command:
         raise ValueError("missing command after --")
+    if args.kind in ("test", "integration"):
+        warn_full_dumps(command)
     if args.vstest_hang_minutes is not None:
         if not args.vstest_confirmed or args.kind not in ("test", "integration"):
             raise ValueError("VSTest preset requires --vstest-confirmed and kind test/integration")
@@ -2660,6 +2848,8 @@ def run(args, state, configuration, output=None):
         if return_code == 125:
             producer_outcome(proc, producer_exit)
         note(f"finished kind={args.kind} label={args.label} exit={return_code}")
+        if args.kind in ("test", "integration"):
+            warn_large_dumps(phase_cwd)
         return return_code
     except BaseException as exc:
         primary = exc
