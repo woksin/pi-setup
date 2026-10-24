@@ -37,7 +37,8 @@ function input(args: string[] = [], saved: Record<string, unknown> = {}): Wizard
 
 test("accepting every default asks login, root and profile once each", async () => {
   const { p, asked } = scripted([true, "/h/code", "keep"]);
-  assert.deepEqual(await collectChoices(p, input()), { user: "einari", root: "/h/code", profile: undefined });
+  // Keeping the detected root leaves it to detection, so the plan keeps its scan source (S1).
+  assert.deepEqual(await collectChoices(p, input()), { user: "einari", root: undefined, profile: undefined });
   assert.equal(asked.length, 3);
 });
 
