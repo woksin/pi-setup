@@ -61,7 +61,7 @@
  */
 export const meta = {
   name: 'review',
-  description: 'Cross-provider code/work review (Opus 5.5 + GPT-6.1 Sol; GPT-6 Astra with deep: true); only blocking findings gate, verified by the other provider',
+  description: 'Two-model code/work review on Anthropic models (Opus 5.5 + Sonnet 5.5; Opus 5.5 high with deep: true); only blocking findings gate, verified by the other model',
   whenToUse: 'Reviewing a diff, change set, document or plan before it is merged or published; pass author, round and full SHAs.',
   phases: [
     { title: 'Review', detail: 'Opus 5.5 and GPT-6.1 Sol (Astra in deep mode) review independently' },
