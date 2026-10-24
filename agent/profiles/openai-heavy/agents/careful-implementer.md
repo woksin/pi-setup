@@ -5,7 +5,7 @@ description: Behaviour-preserving implementation worker for existing-code change
 color: cyan
 model: openai-codex/gpt-6-astra
 thinking: medium
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
 skills: false
 prompt_mode: replace
 ---

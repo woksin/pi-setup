@@ -14,7 +14,7 @@
   },
   "mcpServers": {
     "codescene": {
-      "command": "/opt/homebrew/bin/cs-mcp",
+      "command": "cs-mcp",
       "args": [],
       "lifecycle": "lazy-keep-alive"
     }

@@ -47,11 +47,21 @@ describe("non-service components", () => {
     assert.ok(!read(b, "AGENTS.md").includes("## Cratis repositories"));
     assert.ok(!read(b, "AGENTS.md").includes("## CodeScene Code Health"));
     assert.ok(!read(b, "agents/Explore.md").includes("cratis-cli-guard"));
+    assert.match(read(b, "agents/general-purpose.md"), /^extensions:.*pi-mcp-adapter\b(?!.*pi-browser-use).*$/m);
+    assert.ok(!read(b, "agents/general-purpose.md").includes("pi-browser-use"));
     assert.ok(!read(b, "mcp-adapter.json").includes("codescene"));
     assert.ok(!read(b, "settings.json").includes("pi-web-access"));
     assert.ok(read(b, "settings.json").includes("pi-questions"));
     const m = readManifest(b.pi);
     assert.equal(m?.components?.cratis.on, false);
+  });
+
+  test("web on (default): agents list pi-mcp-adapter and pi-browser-use", async () => {
+    const b = box();
+    assert.equal(await run(b), 0, b.err.join("\n"));
+    for (const n of ["general-purpose", "careful-implementer", "implementer", "opus-implementer"]) {
+      assert.match(read(b, `agents/${n}.md`), /^extensions:.*pi-mcp-adapter, pi-browser-use\]/m, n);
+    }
   });
 
   test("on: files and entries exist, cs-mcp comes from PATH, the token is never written", async () => {

@@ -5,7 +5,7 @@ description: Implementation worker (Claude Opus 5.5, medium) for work where the 
 color: magenta
 model: anthropic/claude-opus-5-5
 thinking: medium
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
 skills: false
 prompt_mode: replace
 ---

@@ -4,7 +4,7 @@ display_name: Agent
 description: Claude Sonnet 5.5 agent (medium effort) for bounded multi-step tasks with a clear outcome. Give it ownership, constraints, checks and when to stop or escalate; leave ambiguous task shaping with the Opus orchestrator. For open-ended code search, use Explore instead.
 model: anthropic/claude-sonnet-5-5
 thinking: medium
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
 skills: false
 prompt_mode: replace
 ---

@@ -4,7 +4,7 @@ display_name: Agent
 description: GPT-6.1 Sol agent (high effort) for bounded multi-step tasks with a clear outcome. Give it ownership, constraints, checks and stop conditions; leave overall task shaping with the parent. For open-ended code search, use Explore instead.
 model: openai-codex/gpt-6.1-sol
 thinking: high
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
 skills: false
 prompt_mode: replace
 ---

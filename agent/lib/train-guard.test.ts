@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -197,7 +197,7 @@ for (const args of [['--delete', 'origin', 'fix/folded'], ['origin', ':fix/folde
 test('non-executable original hook is preserved but not chained, with a warning', async t => {
   const f = await fixture(t), hook = join(f.repo, '.git/hooks/pre-push'), receipt = join(f.root, 'unexpected-hook');
   const original = `#!/bin/sh\ntouch '${receipt}'\nexit 1\n`;
-  await writeFile(hook, original, { mode: 0o644 });
+  await writeFile(hook, original, { mode: 0o644 }); await chmod(hook, 0o644); // writeFile's mode is masked by the umask
   assert.equal(await f.invoke('hook', 'install'), 0);
   assert.match(f.errors.join('\n'), /not executable.*not.*chain/i);
   const result = native({ cwd: f.repo, args: ['push', 'origin', 'HEAD:cleanup'], env: f.env });

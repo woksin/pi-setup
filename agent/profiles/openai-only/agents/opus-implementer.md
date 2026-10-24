@@ -5,7 +5,7 @@ description: Implementation worker (GPT-6 Astra, high) for work where the shape 
 color: magenta
 model: openai-codex/gpt-6-astra
 thinking: high
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
 skills: false
 prompt_mode: replace
 ---
