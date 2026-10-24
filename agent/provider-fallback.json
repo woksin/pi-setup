@@ -2,7 +2,8 @@
   "enabled": true,
   "defaultLimitMinutes": 60,
   "maxFallbacksPerPrompt": 2,
-  "maxContextTokensForFallback": 150000,
+  "maxContextTokensForFallback": "auto",
+  "fallbackContextRatio": 0.5,
   "restoreWhenExpired": true,
   "limitPatterns": {
     "anthropic": [

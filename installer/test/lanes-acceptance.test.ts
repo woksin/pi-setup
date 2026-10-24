@@ -56,7 +56,7 @@ esac`);
     lanes(0, "status"); lanes(0, "send", "L1", "hello", "-m", "hi", "--from", "L0");
     const original = readdirSync(join(root, "messages")).find((n) => n.includes("hello"))!;
     const path = join(root, "messages", original); const before = readFileSync(path, "utf8");
-    assert.equal(lanes(0, "green-prs").stdout.trim(), "example/alpha#7");
+    assert.equal(lanes(0, "green-prs").stdout.trim(), "example/alpha#7 — staleness unknown: CI/main comparison unavailable or incomplete; verify before merging");
     lanes(0, "green-prs", "--new"); assert.equal(lanes(0, "green-prs", "--ack").stdout.trim(), "acked 1"); lanes(1, "green-prs", "--new");
     lanes(1, "idle-check"); assert.match(lanes(1, "resume-check").stdout, /MISSING watch:/);
     const configBefore = readFileSync(join(root, "lanes.json"), "utf8");

@@ -68,6 +68,15 @@ def key_findings(node, trail="", credential=False):
         yield trail
 
 
+def config_key_findings(filename, node):
+    for field in key_findings(node):
+        # Only this root budget field has a string enum; credential strings elsewhere still fail.
+        if (filename, field) == ("provider-fallback.json", "maxContextTokensForFallback"):
+            if node[field] == "auto":
+                continue
+        yield field
+
+
 def text_of(path):
     data = path.read_bytes()
     return None if b"\0" in data else data.decode("utf-8", "replace")
@@ -115,7 +124,7 @@ def main():
             continue
         if path.name in CONFIGS:
             try:
-                problems += [f"{rel}: secret-like field {key}" for key in key_findings(json.loads(content))]
+                problems += [f"{rel}: secret-like field {key}" for key in config_key_findings(path.name, json.loads(content))]
             except ValueError as error:
                 problems.append(f"{rel}: invalid JSON ({error})")
         if fixture(rel):

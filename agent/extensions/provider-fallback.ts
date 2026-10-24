@@ -39,8 +39,10 @@ interface FallbackConfig {
 	/** Used when neither the error text nor the response headers carry a reset time. */
 	defaultLimitMinutes?: number;
 	maxFallbacksPerPrompt?: number;
-	/** Main (UI) sessions whose context exceeds this many tokens are not switched to the fallback (default 150000; 0 disables). */
-	maxContextTokensForFallback?: number;
+	/** Auto uses session handoff budget and the target model's input allowance; a number overrides it (0 disables). */
+	maxContextTokensForFallback?: number | "auto";
+	/** Share of target (contextWindow - maxTokens) usable before handing off (default 0.5). */
+	fallbackContextRatio?: number;
 	/** Switch back to the original model once its provider's limit mark has expired. */
 	restoreWhenExpired?: boolean;
 	/** provider id -> regex sources (case-insensitive) that identify a usage/rate-limit error. */
@@ -111,6 +113,29 @@ function markLimited(provider: string, entry: LimitEntry): void {
 	const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
 	writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 	renameSync(tmp, path);
+}
+
+function restorePath(): string {
+	return join(dirname(statePath()), ".provider-restore.json");
+}
+
+function writeJson(path: string, value: object): void {
+	mkdirSync(dirname(path), { recursive: true });
+	const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+	writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+	renameSync(tmp, path);
+}
+
+/** Operator-requested restore; the signal never overrides a subsequent live limit mark. */
+function clearLimits(provider: string | undefined, broadcast: boolean): void {
+	const state = readState();
+	if (provider) delete state[provider];
+	writeJson(statePath(), provider ? state : {});
+	if (!broadcast) return;
+	const signals = readJson<Record<string, number>>(restorePath()) ?? {};
+	const epoch = Math.max(Date.now(), ...Object.values(signals).filter(Number.isFinite)) + 1;
+	signals[provider ?? "*"] = epoch;
+	writeJson(restorePath(), signals);
 }
 
 function limitedUntil(provider: string): number | undefined {
@@ -216,21 +241,82 @@ function untilClock(until: number): string {
 	return new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export const DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK = 150_000;
+export const DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK = "auto";
+export const DEFAULT_FALLBACK_CONTEXT_RATIO = 0.5;
 
-/**
- * Policy: do not move a large-context MAIN session onto the fallback provider (it re-reads the whole context
- * at the fallback's cost). Unknown context (null/undefined tokens) or a headless session (subagent) is allowed.
- */
-export function fallbackContextVeto(
-	config: { maxContextTokensForFallback?: number },
-	isMainSession: boolean,
-	tokens: number | null | undefined,
-): string | undefined {
-	const max = config.maxContextTokensForFallback ?? DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK;
-	if (!isMainSession || !(max > 0) || typeof tokens !== "number" || tokens <= max) return undefined;
-	const k = (n: number) => `${Math.round(n / 1000)}k`;
-	return `fallback skipped: context ${k(tokens)} > ${k(max)}; compact or hand off first`;
+/** Auto policy uses the target input allowance and this session's handoff budget. Unknown usage remains allowed. */
+type BudgetConfig = { main?: { handoff?: number }; subagent?: { handoff?: number }; models?: Record<string, Omit<BudgetConfig, "models">> };
+type TargetContext = { provider: string; id: string; contextWindow?: number; maxTokens?: number };
+const kTokens = (n: number) => `${Math.round(n / 1000)}k`;
+const positive = (n: number | undefined, fallback: number) => typeof n === "number" && Number.isFinite(n) && n > 0 ? n : fallback;
+
+export function fallbackContextLimit(config: Pick<FallbackConfig, "maxContextTokensForFallback" | "fallbackContextRatio">, main: boolean, target?: TargetContext, handoff = main ? 400_000 : 200_000): number {
+	if (typeof config.maxContextTokensForFallback === "number") return config.maxContextTokensForFallback;
+	const ratio = positive(config.fallbackContextRatio, DEFAULT_FALLBACK_CONTEXT_RATIO);
+	const window = positive(target?.contextWindow, Infinity);
+	const output = Math.max(0, target?.maxTokens ?? 0);
+	return Math.min(handoff, ratio * Math.max(0, window - output));
+}
+
+export function fallbackContextVeto(config: Pick<FallbackConfig, "maxContextTokensForFallback" | "fallbackContextRatio">, main: boolean, tokens: number | null | undefined, context: { target?: TargetContext; handoff?: number } = {}): string | undefined {
+	const { target, handoff } = context;
+	const max = fallbackContextLimit(config, main, target, handoff);
+	if (config.maxContextTokensForFallback === 0) return;
+	if (typeof tokens !== "number" || tokens <= max) return;
+	const ref = target ? `${target.provider}/${target.id}` : "target";
+	return `fallback deferred: context ${kTokens(tokens)} > ${fallbackLimitLabel(config, max, ref)}; call context_handoff now (or /compact), then end this turn; switch to ${ref} at the next prompt after context recovery`;
+}
+
+function budgetStatus(ctx: ExtensionContext): { pid: number; role: string } | undefined {
+	const id = ctx.sessionManager?.getSessionId?.();
+	if (!id) return;
+	const dir = process.env.PI_CONTEXT_BUDGET_STATE_DIR || join(getAgentDir(), "context-budget");
+	return readJson(join(dir, "status", `${id}.json`));
+}
+
+function budgetRole(ctx: ExtensionContext): "main" | "subagent" {
+	const status = budgetStatus(ctx);
+	if (status?.pid === process.pid) return status.role === "subagent" ? "subagent" : "main";
+	return ctx.hasUI ? "main" : "subagent";
+}
+
+function modelHandoff(config: BudgetConfig | undefined, model: string, kind: "main" | "subagent"): number | undefined {
+	return config?.models?.[model]?.[kind]?.handoff;
+}
+
+/** Prefer the budget extension's current session role; config also supports per-current-model handoff thresholds. */
+function sessionHandoff(ctx: ExtensionContext): { main: boolean; handoff: number } {
+	const kind = budgetRole(ctx);
+	const main = kind === "main";
+	const config = readJson<BudgetConfig>(process.env.PI_CONTEXT_BUDGET_CONFIG || join(getAgentDir(), "context-budget.json"));
+	const base = positive(config?.[kind]?.handoff, main ? 400_000 : 200_000);
+	return { main, handoff: positive(modelHandoff(config, refOf(ctx.model) ?? "", kind), base) };
+}
+
+function restoreArgs(args: string): { provider?: string; broadcast: boolean } | undefined {
+	const words = args.trim().split(/\s+/).filter(Boolean);
+	const providers = words.filter(word => !word.startsWith("--"));
+	if (providers.length > 1) return;
+	if (words.some(word => word.startsWith("--") && word !== "--all")) return;
+	return { provider: providers[0], broadcast: words.includes("--all") };
+}
+function fallbackLimitLabel(config: FallbackConfig, max: number, ref: string): string {
+	const mode = typeof config.maxContextTokensForFallback === "number" ? "override" : "auto";
+	return `${mode}: ${kTokens(max)} for ${ref}`;
+}
+
+function contextLimitLabel(ctx: ExtensionContext, config: FallbackConfig, targetRef: string): string {
+	const ref = splitRef(targetRef);
+	const target = ctx.modelRegistry.find(ref.provider, ref.id) ?? ref;
+	const budget = sessionHandoff(ctx);
+	return fallbackLimitLabel(config, fallbackContextLimit(config, budget.main, target, budget.handoff), targetRef);
+}
+
+const restoreEnabled = (config: FallbackConfig, requested: boolean) => requested || config.restoreWhenExpired !== false;
+const restoreReason = (requested: boolean) => requested ? "restore requested" : "limit expired";
+
+function fallbackNote(text: string, from: string, entries: readonly object[]) {
+	return { entries: [...entries, { type: "custom_message" as const, customType: CUSTOM_TYPE, content: text, display: true, details: { from } }] };
 }
 
 function refOf(model: { provider: string; id: string } | undefined): string | undefined {
@@ -238,6 +324,7 @@ function refOf(model: { provider: string; id: string } | undefined): string | un
 }
 
 export default function (pi: ExtensionAPI) {
+	let seenRestore = readJson<Record<string, number>>(restorePath()) ?? {};
 	let fallbacksThisPrompt = 0;
 	let pendingContinue = false;
 	/** The model this extension moved the session away from (cleared on a manual model change). */
@@ -323,7 +410,7 @@ export default function (pi: ExtensionAPI) {
 	let unknownContextLogged = false;
 
 	/** Veto text when this session's context is too large to move to the fallback; undefined = allowed. */
-	function contextVeto(ctx: ExtensionContext, config: FallbackConfig): string | undefined {
+	function contextVeto(ctx: ExtensionContext, config: FallbackConfig, targetRef: string): string | undefined {
 		let tokens: number | null | undefined;
 		try {
 			tokens = ctx.getContextUsage()?.tokens;
@@ -334,11 +421,14 @@ export default function (pi: ExtensionAPI) {
 			unknownContextLogged = true;
 			console.error("provider-fallback: context size unknown; allowing fallback (logged once).");
 		}
-		return fallbackContextVeto(config, ctx.hasUI, tokens);
+		const ref = splitRef(targetRef);
+		const target = ctx.modelRegistry.find(ref.provider, ref.id) ?? ref;
+		const budget = sessionHandoff(ctx);
+		return fallbackContextVeto(config, budget.main, tokens, { target, handoff: budget.handoff });
 	}
 
 	/** Pre-emptive switch away from a marked provider, or back once the mark has expired. */
-	async function preempt(ctx: ExtensionContext): Promise<void> {
+	async function preempt(ctx: ExtensionContext, requested = false): Promise<void> {
 		const config = loadConfig();
 		const current = refOf(ctx.model);
 		if (!config || !current) return;
@@ -347,7 +437,7 @@ export default function (pi: ExtensionAPI) {
 			// Stale record (e.g. restored from an entry after a /model change on another branch): never override the active model.
 			forgetOriginal(ctx);
 		}
-		if (originalRef && originalRef !== current && config.restoreWhenExpired === false) {
+		if (originalRef && originalRef !== current && !restoreEnabled(config, requested)) {
 			restoreNote = "restoreWhenExpired is disabled";
 			publishState();
 		} else if (originalRef && originalRef !== current) {
@@ -355,7 +445,7 @@ export default function (pi: ExtensionAPI) {
 			if (limitedUntil(original.provider) === undefined) {
 				const failure = await switchTo(ctx, originalRef);
 				if (!failure) {
-					notify(ctx, `provider-fallback: ${original.provider} limit expired; back on ${originalRef}.`, "info");
+					notify(ctx, `provider-fallback: ${original.provider} ${restoreReason(requested)}; back on ${originalRef}.`, "info");
 					forgetOriginal(ctx);
 					return;
 				}
@@ -369,20 +459,48 @@ export default function (pi: ExtensionAPI) {
 		if (until === undefined) return;
 		const { target } = selectFallback(config, current, originalRef, isLimited);
 		if (!target) return; // no equivalent, or every candidate limited: nothing to gain
-		const veto = contextVeto(ctx, config);
+		const veto = contextVeto(ctx, config, target);
 		if (veto) {
 			notify(ctx, `provider-fallback: ${currentProvider} is limited (${formatUntil(until)} left); ${veto}.`, "warning");
 			return;
 		}
 		const reason = `${currentProvider} limited until ${untilClock(until)}`;
+		const allowance = contextLimitLabel(ctx, config, target);
 		const failure = await switchTo(ctx, target, { ref: originalRef ?? current, reason });
 		if (failure) {
 			notify(ctx, `provider-fallback: ${currentProvider} is limited but switching to ${target} failed: ${failure}`, "warning");
 			return;
 		}
 		rememberOriginal(ctx, originalRef ?? current, reason, target);
-		notify(ctx, `provider-fallback: ${currentProvider} limited (${formatUntil(until)} left); using ${target} instead of ${current}.`, "warning");
+		notify(ctx, `provider-fallback: ${currentProvider} limited (${formatUntil(until)} left); using ${target} instead of ${current} (${allowance}).`, "warning");
 	}
+
+	async function checkRestore(ctx: ExtensionContext): Promise<void> {
+		const signals = readJson<Record<string, number>>(restorePath()) ?? {};
+		const provider = originalRef && splitRef(originalRef).provider;
+		const newer = (key: string) => Number.isFinite(signals[key]) && signals[key] > (seenRestore[key] ?? 0);
+		const requested = !!provider && (newer("*") || newer(provider));
+		seenRestore = signals;
+		if (requested) await preempt(ctx, true);
+	}
+
+	pi.registerCommand?.("provider-restore", {
+		description: "Clear provider limits and restore this session: [provider] [--all (broadcast)]",
+		handler: async (args, ctx) => {
+			const parsed = restoreArgs(args);
+			if (!parsed) {
+				notify(ctx, "Usage: /provider-restore [provider] [--all]", "warning");
+				return;
+			}
+			const { provider, broadcast } = parsed;
+			clearLimits(provider, broadcast);
+			const affectsOriginal = !provider || splitRef(originalRef ?? "").provider === provider;
+			if (affectsOriginal) await preempt(ctx, true);
+			notify(ctx, `provider-fallback: cleared ${provider ?? "all provider"} limits${broadcast ? "; restore broadcast sent" : ""}.`, "info");
+		},
+	});
+
+	pi.on("turn_start", async (_event, ctx) => { await checkRestore(ctx); });
 
 	pi.on("session_start", async (_event, ctx) => {
 		fallbacksThisPrompt = 0;
@@ -420,6 +538,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (_event, ctx) => {
 		fallbacksThisPrompt = 0;
 		pendingContinue = false;
+		await checkRestore(ctx);
 		await preempt(ctx);
 	});
 
@@ -461,12 +580,7 @@ export default function (pi: ExtensionAPI) {
 
 		const note = (text: string, type: "info" | "warning" | "error") => {
 			notify(ctx, text, type);
-			return {
-				entries: [
-					...event.entries,
-					{ type: "custom_message" as const, customType: CUSTOM_TYPE, content: text, display: true, details: { from } },
-				],
-			};
+			return fallbackNote(text, from, event.entries);
 		};
 
 		const selection = selectFallback(config, from, originalRef, isLimited);
@@ -490,16 +604,17 @@ export default function (pi: ExtensionAPI) {
 		if (fallbacksThisPrompt >= (config.maxFallbacksPerPrompt ?? 2)) {
 			return note(`provider-fallback: ${from} hit a limit, but the per-prompt fallback cap was reached. Not switching.`, "error");
 		}
-		const veto = contextVeto(ctx, config);
-		if (veto) return note(`provider-fallback: ${from} ${what} (${formatUntil(until)}); ${veto}. Not switching.`, "error");
+		const veto = contextVeto(ctx, config, target);
+		if (veto) return note(`provider-fallback: ${from} ${what} (${formatUntil(until)}); ${veto}.`, "error");
 		const reason = `${message.provider} ${kind === "limit" ? "limited" : "unavailable"} until ${untilClock(until)}`;
+		const allowance = contextLimitLabel(ctx, config, target);
 		const failure = await switchTo(ctx, target, { ref: originalRef ?? from, reason });
 		if (failure) return note(`provider-fallback: ${from} hit a limit; switching to ${target} failed: ${failure}`, "error");
 
 		fallbacksThisPrompt++;
 		pendingContinue = true;
 		rememberOriginal(ctx, originalRef ?? from, reason, target);
-		const text = `provider-fallback: ${from} ${what} (${formatUntil(until)}); continuing on ${target}.`;
+		const text = `provider-fallback: ${from} ${what} (${formatUntil(until)}); continuing on ${target} (${allowance}).`;
 		notify(ctx, text, "warning");
 		return {
 			entries: [

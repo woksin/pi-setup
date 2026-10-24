@@ -2333,6 +2333,23 @@ def record_withdrawal(ledger, marker):
                                           reason=withdrawal_text(marker.get("reason")))
 
 
+def critical_path_guidance(waiters):
+    """One advisory for repeated chains or heavy work deep in the queue; no admission changes."""
+    groups = {}
+    for rank, waiter in enumerate(waiters, 1):
+        if waiter.get("kind") not in ("build", "test", "integration"):
+            continue
+        label = waiter.get("label", "?")
+        groups.setdefault(label, []).append(rank)
+    candidates = [(label, ranks) for label, ranks in groups.items() if len(ranks) >= 2 or max(ranks) >= 4]
+    if not candidates:
+        return
+    label, ranks = max(candidates, key=lambda item: (len(item[1]), max(item[1])))
+    note(f"critical path: label={label} queued={len(ranks)} deepest_rank={max(ranks)}; "
+         "with user approval, the orchestrator may time-box high priority for this one critical-path chain "
+         "(pi-phase grant-priority --minutes 5); do not promote the whole queue")
+
+
 def status(state, configuration=CONFIG):
     settings = config(configuration)
     options = settings.options
@@ -2399,6 +2416,7 @@ def status(state, configuration=CONFIG):
         seconds = max(0, math.ceil(grant["expires"] - time.time()))
         expiry = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(grant["expires"]))
         note(f"high priority grant: {remaining}; expires in {seconds}s at {expiry}")
+    critical_path_guidance(waiters)
     if waiters:
         note(f"slots heavy={used['heavy']}/{settings[0]} integration={used['integration']}/{settings[1]}")
     return 0

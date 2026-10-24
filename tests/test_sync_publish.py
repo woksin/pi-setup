@@ -1,5 +1,6 @@
 """sync.sh stages, checks and only then writes the checkout (woksin/pi-setup#11)."""
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -25,6 +26,33 @@ def snapshot(root):
 
 # Built at runtime so the fixture itself never looks like a committed key.
 FAKE_KEY = "abc123" + "def456"
+
+class ConfigBudgetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("publish_check", REPO / "tools/publish-check.py")
+        cls.scanner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.scanner)
+
+    def test_fallback_context_auto_and_number_are_non_secret_budgets(self):
+        for value in ("auto", 150000):
+            with self.subTest(value=value):
+                node = {"maxContextTokensForFallback": value}
+                self.assertEqual(list(self.scanner.config_key_findings("provider-fallback.json", node)), [])
+
+    def test_fallback_context_real_credential_strings_and_containers_still_fail(self):
+        for value in (FAKE_KEY, "auto-token-value", ["auto"], {"value": "auto"}):
+            with self.subTest(value=value):
+                node = {"maxContextTokensForFallback": value}
+                self.assertTrue(list(self.scanner.config_key_findings("provider-fallback.json", node)))
+
+    def test_exception_does_not_apply_to_other_files_fields_or_nested_budgets(self):
+        for filename, node in (("models.json", {"maxContextTokensForFallback": "auto"}),
+                               ("provider-fallback.json", {"apiKey": "auto"}),
+                               ("provider-fallback.json", {"nested": {"maxContextTokensForFallback": "auto"}})):
+            with self.subTest(filename=filename, node=node):
+                self.assertTrue(list(self.scanner.config_key_findings(filename, node)))
+
 
 class SyncPublishTests(unittest.TestCase):
     def setUp(self):

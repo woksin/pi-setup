@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 439804840b073a84bf9e87a98f43b89a7ceebda31bf99ab430ed639cc7e0f2db
+// pi-setup-source-sha256: 5d46bf37fbb66d70b4d5389cff4e0b8043740b1e7951ff59530312a43d6107c6
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -785,7 +785,7 @@ function treeDigest(input) {
 }
 function commitList(text4) {
   const commits = text4.trim().split(/\s+/).filter(Boolean);
-  if (!commits.every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) throw new Error("unpushed commits unknown");
+  if (!commits.every((sha2) => /^[a-f0-9]{40,64}$/.test(sha2))) throw new Error("unpushed commits unknown");
   return commits;
 }
 var init_tree = __esm({
@@ -3814,11 +3814,83 @@ var init_resume_check = __esm({
   }
 });
 
+// src/lanes/stale-check.ts
+function usableChecks(checks, head) {
+  if (!checks.check_runs.length) return false;
+  if (checks.total_count > checks.check_runs.length) return false;
+  return checks.check_runs.every(completedCheck) && checks.check_runs.every((check3) => check3.head_sha === head);
+}
+async function api(ctx, path2, budget) {
+  if (budget.remaining-- <= 0) throw new Error("API budget exhausted");
+  const r2 = await ctx.run("gh", ["api", path2], { timeoutMs: 5e3 });
+  if (r2.code !== 0 || r2.timedOut) throw new Error("API unavailable");
+  return JSON.parse(r2.stdout);
+}
+async function ciHead({ repo, pr }, ctx, budget) {
+  if (!sha(pr.headRefOid)) throw new Error("missing CI head");
+  const checks = await api(ctx, `repos/${repo}/commits/${pr.headRefOid}/check-runs?per_page=100`, budget);
+  if (!usableChecks(checks, pr.headRefOid)) throw new Error("incomplete CI evidence");
+  return pr.headRefOid;
+}
+async function comparisonBase(repo, head, ctx, budget) {
+  const comparison = await api(ctx, `repos/${repo}/compare/main...${head}`, budget);
+  if (!sha(comparison.merge_base_commit.sha)) throw new Error("missing merge base");
+  if (!sha(comparison.base_commit.sha)) throw new Error("missing main head");
+  return comparison;
+}
+async function overlapCount({ repo, pr }, comparison, ctx, budget) {
+  const files2 = await api(ctx, `repos/${repo}/pulls/${pr.number}/files?per_page=100`, budget);
+  if (files2.length >= 100) throw new Error("PR files truncated");
+  const paths = new Set(files2.flatMap(fileNames));
+  const main4 = await api(ctx, `repos/${repo}/compare/${comparison.merge_base_commit.sha}...${comparison.base_commit.sha}`, budget);
+  if (!Array.isArray(main4.files)) throw new Error("missing main files");
+  if (main4.files.length >= 300) throw new Error("main files truncated");
+  return main4.files.filter((f) => fileNames(f).some((path2) => paths.has(path2))).length;
+}
+function freshnessNotice(overlap, head) {
+  const evidence = `CI head ${head.slice(0, 12)}`;
+  return overlap ? `stale: main changed ${overlap} overlapping files since CI (${evidence}); merge main + rerun CI + review before merging` : `fresh: no overlapping main changes since CI (${evidence})`;
+}
+async function staleness({ repo, pr }, ctx, budget) {
+  try {
+    const ref = { repo, pr };
+    const head = await ciHead(ref, ctx, budget);
+    const comparison = await comparisonBase(repo, head, ctx, budget);
+    const overlap = await overlapCount(ref, comparison, ctx, budget);
+    const current = await api(ctx, `repos/${repo}/pulls/${pr.number}`, budget);
+    if (current.head.sha !== head) throw new Error("PR moved during comparison");
+    return freshnessNotice(overlap, head);
+  } catch {
+    return "staleness unknown: CI/main comparison unavailable or incomplete; verify before merging";
+  }
+}
+async function annotatedRefs(refs, details, ctx) {
+  const budget = { remaining: 20 };
+  const lines2 = [];
+  for (const ref of refs) lines2.push(`${ref} \u2014 ${await staleness(details.get(ref), ctx, budget)}`);
+  return lines2.join("\n");
+}
+var completedCheck, sha, fileNames;
+var init_stale_check = __esm({
+  "src/lanes/stale-check.ts"() {
+    completedCheck = (check3) => check3.status === "completed" && ["success", "skipped", "neutral"].includes(check3.conclusion);
+    sha = (value) => typeof value === "string" && /^[a-f0-9]{40,64}$/.test(value);
+    fileNames = (file) => file.previous_filename ? [file.filename, file.previous_filename] : [file.filename];
+  }
+});
+
 // src/lanes/commands/green-prs.ts
 import { existsSync as existsSync16, mkdirSync as mkdirSync10, readFileSync as readFileSync19, writeFileSync as writeFileSync8 } from "node:fs";
 import { join as join35 } from "node:path";
 function green(pr, excluded) {
   return !pr.isDraft && !pr.labels.some((l2) => excluded.includes(l2.name)) && pr.statusCheckRollup.length > 0 && pr.statusCheckRollup.every((s) => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(s.conclusion ?? s.state ?? ""));
+}
+function addRefs(refs, details, { repo, prs, excluded }) {
+  for (const pr of prs.filter((p) => green(p, excluded))) {
+    const ref = `${repo}#${pr.number}`;
+    refs.push(ref);
+    details.set(ref, { repo, pr });
+  }
 }
 async function greenPrs(opts, c2, root, ctx) {
   if (opts.new && opts.ack) throw new UsageError("--new and --ack are mutually exclusive");
@@ -3832,15 +3904,16 @@ async function greenPrs(opts, c2, root, ctx) {
     return 2;
   }
   const refs = [];
+  const details = /* @__PURE__ */ new Map();
   for (const repo of repos) {
-    const r2 = await ctx.run("gh", ["pr", "list", "--repo", repo, "--author", c2.github?.author || "@me", "--state", "open", "--limit", "100", "--json", "number,isDraft,labels,statusCheckRollup"], { timeoutMs: 3e4 });
+    const r2 = await ctx.run("gh", ["pr", "list", "--repo", repo, "--author", c2.github?.author || "@me", "--state", "open", "--limit", "100", "--json", "number,headRefOid,isDraft,labels,statusCheckRollup"], { timeoutMs: 3e4 });
     if (r2.code !== 0 || r2.timedOut) {
       ctx.err(`gh pr list failed for ${repo}: ${r2.stderr.trim()}`);
       return 2;
     }
     try {
       const prs = JSON.parse(r2.stdout);
-      refs.push(...prs.filter((p) => green(p, c2.github?.excludeLabels || [])).map((p) => `${repo}#${p.number}`));
+      addRefs(refs, details, { repo, prs, excluded: c2.github?.excludeLabels || [] });
     } catch {
       ctx.err(`invalid gh pr list response for ${repo}`);
       return 2;
@@ -3857,12 +3930,13 @@ async function greenPrs(opts, c2, root, ctx) {
   }
   const previous = opts.new && existsSync16(ack) ? readFileSync19(ack, "utf8").split(/\r?\n/) : [];
   const output = opts.new ? refs.filter((r2) => !previous.includes(r2)) : refs;
-  if (output.length) ctx.out(output.join("\n"));
+  if (output.length) ctx.out(await annotatedRefs(output, details, ctx));
   return opts.new && !output.length ? 1 : 0;
 }
 var init_green_prs = __esm({
   "src/lanes/commands/green-prs.ts"() {
     init_config();
+    init_stale_check();
   }
 });
 
@@ -5039,9 +5113,9 @@ var init_apply = __esm({
         if (!entry2) {
           this.next.files[rel] = { sha256: fileSha(path2) ?? "", mode: modeOf(path2), source: this.source, origin: "adopted" };
         } else {
-          const sha = fileSha(path2) ?? "";
-          if (sha !== entry2.sha256) {
-            entry2.sha256 = sha;
+          const sha2 = fileSha(path2) ?? "";
+          if (sha2 !== entry2.sha256) {
+            entry2.sha256 = sha2;
             entry2.source = this.source;
           }
           entry2.mode = modeOf(path2);
@@ -6193,9 +6267,9 @@ function revertOps(ctx, m2, rel, match, dryRun) {
     entry2.edited ||= fileSha(path2) !== entry2.sha256After;
     atomicWrite(path2, `${JSON.stringify(data, null, 2)}
 `, statSync18(path2).mode & 4095);
-    const sha = sha256(readFileSync28(path2));
-    entry2.sha256After = sha;
-    if (wasTracked) tracked.sha256 = sha;
+    const sha2 = sha256(readFileSync28(path2));
+    entry2.sha256After = sha2;
+    if (wasTracked) tracked.sha256 = sha2;
   }
   entry2.ops = entry2.ops.filter((o) => !match(o) || left.includes(o));
   if (!entry2.ops.length) delete m2.json[rel];
@@ -6297,9 +6371,9 @@ var init_uninstall = __esm({
         }
         const deleted = /* @__PURE__ */ new Set();
         for (const [rel, entry2] of Object.entries(this.m.files)) if (this.file(rel, entry2)) deleted.add(rel);
-        for (const [rel, sha] of Object.entries(this.m.pendingNew ?? {})) {
+        for (const [rel, sha2] of Object.entries(this.m.pendingNew ?? {})) {
           const path2 = this.abs(rel);
-          if (fileSha(path2) === sha) this.add(`remove ${path2}`, () => unlinkSync5(path2));
+          if (fileSha(path2) === sha2) this.add(`remove ${path2}`, () => unlinkSync5(path2));
           delete this.remaining.pendingNew;
         }
         for (const [rel, link] of Object.entries(this.m.symlinks)) this.symlink(rel, link.target);
