@@ -47,6 +47,7 @@ SWAP_FLOOR_ENFORCED = sys.platform != "darwin"
 LEVEL_WARN_PERCENT = 15
 # Distinct exit status: a descendant exceeded rss_cap_mb and the phase's process group was killed.
 EXIT_RSS_CAP = 76
+EXIT_WITHDRAWN = 77
 # Consecutive over-cap samples (same pid + start time) before the kill: ~45 s at the 15 s interval, so a
 # transient spike never kills a phase.
 OVER_CAP_SAMPLES = 3
@@ -58,7 +59,7 @@ def note(message):
 
 KINDS = ("build", "test", "integration", "ci")
 POLICIES = ("direct", "fast", "queued")
-OUTCOMES = ("passed", "failed", "queue-timeout", "timeout", "cancelled", "rejected", "error", "skipped")
+OUTCOMES = ("passed", "failed", "queue-timeout", "timeout", "cancelled", "rejected", "error", "skipped", "withdrawn")
 
 
 def stack_name(value):
@@ -550,17 +551,18 @@ def stats(state, days, kind, as_json, stack=None):
         rows.append(dict(day=day, kind=kind, stack=stack, count=len(entries), started=len(started),
                          waitS={f"p{p}": percentile([r["waitS"] for r in entries], p) for p in (50, 90)},
                          runS={f"p{p}": percentile([r["runS"] for r in started], p) for p in (50, 90)},
+                         withdrawn=sum(r["outcome"] == "withdrawn" for r in entries),
                          skipped=sum(r["outcome"] == "skipped" for r in entries),
                          queueTimeouts=sum(r["outcome"] == "queue-timeout" for r in entries),
                          failures=sum(r["outcome"] in ("failed", "timeout", "error") for r in entries)))
     if as_json:
         print(json.dumps(dict(days=days, skipped=skipped, rows=rows)))
     else:
-        print("day kind stack count started waitS.p50 waitS.p90 runS.p50 runS.p90 queue-timeouts failures skipped")
+        print("day kind stack count started waitS.p50 waitS.p90 runS.p50 runS.p90 queue-timeouts failures skipped withdrawn")
         for row in rows:
             print(row["day"], row["kind"], row["stack"], row["count"], row["started"],
                   *("-" if v is None else f"{v:g}" for v in (*row["waitS"].values(), *row["runS"].values())),
-                  row["queueTimeouts"], row["failures"], row["skipped"])
+                  row["queueTimeouts"], row["failures"], row["skipped"], row["withdrawn"])
         print(f"skipped {skipped} malformed ledger lines")
     return 0
 
@@ -1729,6 +1731,12 @@ def slotless_policy(args):
     return args.kind == "ci" or getattr(args, "policy", None) == "direct"
 
 
+def caller_identity():
+    session = os.environ.get("PI_SESSION_ID") or None
+    lane = os.environ.get("PI_ORCH_ID") or os.environ.get("PI_LANE_ID") or None
+    return (session[:200] if session else None, lane[:200] if lane else None)
+
+
 def register_waiter(state, args, token):
     """Nonblocking registration, including atomic grant consumption and FIFO sequence."""
     coordinator = lock_file(state / "coordinator.lock")
@@ -1756,7 +1764,9 @@ def register_waiter(state, args, token):
         fd = lock_file(path)
         if fd is None:
             raise ValueError("cannot lock new waiter")
+        session, lane = caller_identity()
         data = dict(token=token, pid=os.getpid(), priority=args.priority, kind=args.kind,
+                    session=session, lane=lane, withdraw=1,
                     label=args.label, cwd=os.getcwd(), enqueued=time.time(), seq=seq,
                     policy=getattr(args, "policy", "queued"), source=getattr(args, "source", "default"))
         if getattr(args, "fast", False):
@@ -1799,6 +1809,15 @@ def deregister_waiter(state, token, fd):
 def waiter_path(state, token):
     fast = state / "fast-waiters" / f"{token}.json"
     return fast if fast.exists() else state / "waiters" / f"{token}.json"
+
+
+def withdrawal_path(state, token):
+    return state / "withdrawn" / f"{token}.json"
+
+
+def withdrawal(state, token):
+    path = withdrawal_path(state, token)
+    return metadata(path) if path.exists() else None
 
 
 LEGACY_AGE_S = 600
@@ -2043,6 +2062,92 @@ def remove_lease(path):
         path.unlink(missing_ok=True)
 
 
+def waiter_is_mine(waiter, session, lane):
+    return bool((session and session == waiter.get("session")) or (lane and lane == waiter.get("lane")))
+
+
+def prune_withdrawals(state):
+    for path in (state / "withdrawn").glob("*.json"):
+        try:
+            if path.stat().st_mtime < time.time() - 24 * 60 * 60:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def withdraw_matches(waiter, args, identity):
+    if args.id and not waiter.get("token", "").startswith(args.id):
+        return False
+    if args.label is not None and waiter.get("label") != args.label:
+        return False
+    return not args.mine or waiter_is_mine(waiter, *identity)
+
+
+def withdraw_missing(state, token):
+    admitted = token and any(metadata(path).get("token", "").startswith(token)
+                             for path in state.glob("*.json"))
+    if admitted:
+        note(f"id={token} already admitted; withdraw never touches running phases (use cancellation)")
+    else:
+        note("no queued phase matches")
+    return 1
+
+
+def withdraw_refused(waiter, args, identity):
+    if waiter.get("withdraw") != 1:
+        note(f"id={waiter['token'][:12]} uses older pi-phase; cancel its process instead")
+        return True
+    if not waiter_is_mine(waiter, *identity) and not args.force:
+        note(f"id={waiter['token'][:12]} belongs to another session/lane; use --force --reason TEXT")
+        return True
+    return False
+
+
+def withdraw(state, args):
+    if not state.exists():
+        note("no queued phase matches")
+        return 1
+    session, lane = caller_identity()
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        waiters = all_waiters(state, readonly=True)
+        matches = [waiter for waiter in waiters if withdraw_matches(waiter, args, (session, lane))]
+        if not matches:
+            return withdraw_missing(state, args.id)
+        if len(matches) > 1 and not args.all:
+            note(f"{len(matches)} queued phases match; use --all to withdraw all matches")
+            return 2
+        # Evaluate every refusal before any mutation, without short-circuiting diagnostics.
+        refusals = [withdraw_refused(waiter, args, (session, lane)) for waiter in matches]
+        if any(refusals):
+            return 3
+        (state / "withdrawn").mkdir(mode=0o700, exist_ok=True)
+        for waiter in matches:
+            token = waiter["token"]
+            save(withdrawal_path(state, token), dict(token=token, at=time.time(), session=session, lane=lane,
+                                                   forced=bool(args.force), reason=args.reason))
+            waiter_path(state, token).unlink(missing_ok=True)
+        prune_withdrawals(state)
+    for waiter in matches:
+        age = max(0, int(time.time() - waiter["enqueued"]))
+        note(f"withdrawn id={waiter['token'][:12]} kind={waiter['kind']} label={waiter.get('label', '?')} "
+             f"pid={waiter.get('pid', '?')} waited={age}s; waiter exits with 77 within ~3s")
+    return 0
+
+
+def withdrawal_text(value):
+    return value[:200] if isinstance(value, str) else None
+
+
+def record_withdrawal(ledger, marker):
+    if ledger:
+        ledger.outcome("withdrawn")
+        ledger.record["withdrawal"] = dict(session=withdrawal_text(marker.get("session")),
+                                          lane=withdrawal_text(marker.get("lane")),
+                                          forced=bool(marker.get("forced")),
+                                          reason=withdrawal_text(marker.get("reason")))
+
+
 def status(state, configuration=CONFIG):
     settings = config(configuration)
     options = settings.options
@@ -2100,7 +2205,8 @@ def status(state, configuration=CONFIG):
              f"expected={int(waiter.get('expected', LEGACY_EXPECTED_S))}s basis={waiter.get('basis', 'legacy')} "
              f"order={waiter_order(waiter, now)}"
              f"{' fast' if waiter.get('fast') else ''}"
-             f" policy={waiter.get('policy', 'queued')} source={waiter.get('source', 'default')}")
+             f" policy={waiter.get('policy', 'queued')} source={waiter.get('source', 'default')}"
+             f" id={waiter.get('token', '?')[:12]}")
     note(f"fast={fast_running}/{fast_slots} queued={sum(bool(w.get('fast')) for w in waiters)}")
     note(f"high={high}/{cap}")
     if grant:
@@ -2380,6 +2486,12 @@ def run(args, state, configuration, output=None):
                 if ledger:
                     ledger.outcome("cancelled")
                 return 128 + cancelled[0]
+            if waiter_fd is not None:
+                marker = withdrawal(state, token)
+                if marker is not None:
+                    note("withdrawn while queued; command not started")
+                    record_withdrawal(ledger, marker)
+                    return EXIT_WITHDRAWN
             if not long_queue_hint and time.monotonic() - queued > 600:
                 note(f"long queue ({int(time.monotonic() - queued)}s): run dev-doctor to look for contention")
                 long_queue_hint = True
@@ -2432,7 +2544,7 @@ def run(args, state, configuration, output=None):
                     ledger.outcome("queue-timeout")
                 return 75
             if now >= next_heartbeat:
-                note(f"queued kind={args.kind} label={args.label} remaining={max(0, int(deadline-now))}s")
+                note(f"queued kind={args.kind} label={args.label} remaining={max(0, int(deadline-now))}s id={token[:12]}")
                 next_heartbeat = now + HEARTBEAT
             time.sleep(min(QUEUE_TICK + random.uniform(0, 0.5), max(0, deadline-now)))
             settings = config(configuration, notes=config_notes)
@@ -2559,6 +2671,10 @@ def run(args, state, configuration, output=None):
         if waiter_fd is not None:
             cleanup_step(errors, "deregister_waiter", proc,
                          lambda: deregister_waiter(state, token, waiter_fd))
+            try:
+                withdrawal_path(state, token).unlink(missing_ok=True)
+            except OSError:
+                pass
         # Do not reap if signals fail: the leader still reserves its PGID.
         if proc is not None and proc.returncode is None:
             before_stop = len(errors)
@@ -2585,10 +2701,39 @@ def add_policy_arguments(runner):
     runner.add_argument("--policy", choices=POLICIES, help="override admission policy (default: PI_PHASE_POLICY or automatic)")
 
 
+def withdrawal_id(value):
+    if not re.fullmatch(r"[0-9a-fA-F]{6,}", value):
+        raise argparse.ArgumentTypeError("ID must be a hex token prefix of at least 6 characters")
+    return value.lower()
+
+
+def withdrawal_reason(value):
+    try:
+        return safe_label(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def validate_withdraw(parser, args):
+    if not any((args.id, args.label is not None, args.mine)):
+        parser.error("withdraw requires ID, --label or --mine")
+    if args.force and args.reason is None:
+        parser.error("--force requires --reason")
+    if args.mine and caller_identity() == (None, None):
+        parser.error("--mine requires a session or lane identity")
+
+
 def main(argv=None, *, state=None, configuration=None):
     parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner")
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("status", help="show leases, queue and priority grant (never command arguments)")
+    withdrawing = commands.add_parser("withdraw", help="withdraw a queued phase without touching running phases")
+    withdrawing.add_argument("id", nargs="?", type=withdrawal_id, help="hex token prefix (at least 6 characters)")
+    withdrawing.add_argument("--label")
+    withdrawing.add_argument("--mine", action="store_true")
+    withdrawing.add_argument("--all", action="store_true")
+    withdrawing.add_argument("--force", action="store_true")
+    withdrawing.add_argument("--reason", type=withdrawal_reason)
     summary = commands.add_parser("stats", help="summarize phase history by UTC day and kind")
     summary.add_argument("--days", type=int, default=7)
     summary.add_argument("--kind", choices=KINDS)
@@ -2651,6 +2796,9 @@ def main(argv=None, *, state=None, configuration=None):
                 parser.error("--tail requires --log")
             if args.tail < 0:
                 parser.error("--tail must be nonnegative")
+        if args.action == "withdraw":
+            validate_withdraw(parser, args)
+            return withdraw(state, args)
         if args.action == "stats":
             if args.days < 1:
                 parser.error("--days must be positive")

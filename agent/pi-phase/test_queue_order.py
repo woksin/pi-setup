@@ -543,7 +543,7 @@ class OrderTests(Harness):
         self.assertEqual([line.split("label=")[1].split()[0] for line in lines], ["aged", "fifo", "short", "long"])
         self.assertRegex(lines[0], r"waited=\d+s rank=1 expected=800s basis=exact order=aged")
         self.assertRegex(lines[1], r"rank=2 expected=1s basis=default order=fifo")
-        self.assertRegex(lines[2], r"rank=3 expected=5s basis=work order=short policy=queued source=default$")
+        self.assertRegex(lines[2], r"rank=3 expected=5s basis=work order=short policy=queued source=default id=\S+$")
         self.assertRegex(lines[3], r"rank=4 expected=300s basis=family order=short")
         self.assertTrue(all(line.startswith("pi-phase: queued priority=") for line in lines))
 
