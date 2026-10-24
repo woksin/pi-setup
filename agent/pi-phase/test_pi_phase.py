@@ -80,8 +80,9 @@ class PhaseTests(unittest.TestCase):
             stack.enter_context(patch.object(output, "flush",
                                              side_effect=(lambda: fail_diagnostic_flush(output)) if failed_output else None))
             for name, value in (("PhaseLedger", None), ("work_identity", identity),
-                                ("test_fingerprint", "synthetic"), ("group_alive", True)):
+                                ("test_fingerprint", "synthetic")):
                 stack.enter_context(patch.object(pi_phase, name, return_value=value))
+            alive = stack.enter_context(patch.object(pi_phase, "group_alive", return_value=True))
             stack.enter_context(patch.object(pi_phase.subprocess, "Popen", return_value=producer))
             stack.enter_context(patch.object(pi_phase.os, "write", return_value=1))
             waitid = stack.enter_context(patch.object(pi_phase.os, "waitid"))
@@ -101,6 +102,7 @@ class PhaseTests(unittest.TestCase):
         self.assertIs(faults[0], observation if isinstance(observation, Exception) else denied)
         self.assertEqual(handlers, (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)))
         self.assertFalse(release.call_args.args[-1])
+        alive.assert_called_once_with({"pgid": pid}, timeouts=(2, 5, 10))
         producer.wait.assert_not_called()  # Never reap after failed group signals.
         self.assertEqual(kill.call_args_list, [call(pid, signal.SIGTERM)] * (1 + (not isinstance(observation, Exception))))
         self.assertTrue(list(self.state.glob("direct-*.json")))  # Orphan guard retained.
@@ -211,6 +213,130 @@ class PhaseTests(unittest.TestCase):
                 with self.assertRaises(PermissionError):
                     pi_phase.stop_group(99)
                 self.assertIsNone(pi_phase.group_liveness(99))
+
+    @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
+    def test_zombie_only_group_eperm_is_tolerated_real_child(self):
+        child = subprocess.Popen(["sh", "-c", "exit 0"], start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                self.assertLess(time.monotonic(), deadline, "child did not exit within 5s")
+                time.sleep(0.01)
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except PermissionError:
+                pass
+            else:
+                self.skipTest("platform does not return EPERM for a zombie-only group")
+            self.assertIs(pi_phase.group_liveness(child.pid), False)
+            pi_phase.stop_group(child.pid)
+            self.assertEqual(child.wait(timeout=2), 0)
+        finally:
+            child.wait(timeout=2)
+
+    def test_group_liveness_retries_until_success(self):
+        failures = (subprocess.TimeoutExpired("ps", 2), OSError("probe failed"),
+                    subprocess.CalledProcessError(1, "ps"), SimpleNamespace(stdout="12 invalid Z\n"))
+        for failure in failures:
+            for listing, expected in (("12 99 Z+\n", False), ("12 99 S\n", True), ("", False)):
+                with self.subTest(failure=failure, listing=listing), \
+                        patch.object(pi_phase.subprocess, "run", side_effect=[
+                            failure, SimpleNamespace(stdout=listing)]) as probe, \
+                        patch.object(pi_phase.time, "sleep"):
+                    self.assertIs(pi_phase.group_liveness(99, timeouts=(2, 5, 10)), expected)
+                    self.assertEqual([entry.kwargs["timeout"] for entry in probe.call_args_list], [2, 5])
+        with patch.object(pi_phase.subprocess, "run", side_effect=OSError("probe failed")) as probe:
+            self.assertIsNone(pi_phase.group_liveness(99))
+            self.assertEqual(probe.call_count, 1)
+
+    def test_zombie_only_eperm_retries_failed_probe(self):
+        with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")) as kill, \
+                patch.object(pi_phase.subprocess, "run", side_effect=[
+                    subprocess.TimeoutExpired("ps", 2), SimpleNamespace(stdout="12 99 Z\n"),
+                    SimpleNamespace(stdout="12 99 Z+\n")]) as probe, \
+                patch.object(pi_phase.time, "sleep"):
+            pi_phase.stop_group(99)
+        self.assertEqual([entry.kwargs["timeout"] for entry in probe.call_args_list], [2, 5, 2])
+        self.assertEqual(kill.call_args_list, [call(99, signal.SIGTERM), call(99, signal.SIGKILL)])
+
+    def test_eperm_exhausted_probes_fail_closed(self):
+        output = io.StringIO()
+        with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")) as kill, \
+                patch.object(pi_phase.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 2)) as probe, \
+                patch.object(pi_phase.time, "sleep"), redirect_stdout(output):
+            with self.assertRaises(PermissionError):
+                pi_phase.stop_group(99)
+        self.assertEqual([entry.kwargs["timeout"] for entry in probe.call_args_list], [2, 5, 10])
+        kill.assert_called_once_with(99, signal.SIGTERM)
+        self.assertIn("liveness=unknown", output.getvalue())
+        self.assertIn("probe_attempts_failed=3", output.getvalue())
+
+    def test_eperm_live_probe_does_not_retry(self):
+        with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")) as kill, \
+                patch.object(pi_phase.subprocess, "run", return_value=SimpleNamespace(stdout="12 99 S\n")) as probe, \
+                patch.object(pi_phase.time, "sleep"):
+            with self.assertRaises(PermissionError):
+                pi_phase.stop_group(99)
+        self.assertEqual(probe.call_count, 1)
+        kill.assert_called_once_with(99, signal.SIGTERM)
+
+    def test_completion_eperm_retries_probe_and_releases_lease(self):
+        # First signal probe, final group_alive probe, then exhausted final probes.
+        for retry_at, unknown in ((0, False), (2, False), (2, True)):
+            with self.subTest(retry_at=retry_at, unknown=unknown):
+                self.configure(msbuild_max_cpu=0, phase_nice=0, cold_worktree_hint=False,
+                               container_test_detection="off")
+                producer = Mock(pid=2147483647, returncode=None)
+                output = io.StringIO()
+                listings = [SimpleNamespace(stdout="12 2147483647 Z\n") for _ in range(3)]
+                if unknown:
+                    listings[retry_at:] = [subprocess.TimeoutExpired("ps", 2) for _ in range(3)]
+                else:
+                    listings.insert(retry_at, subprocess.TimeoutExpired("ps", 2))
+                identity = pi_phase.work_identity(os.getcwd(), ["synthetic"], "test")
+
+                def reap(timeout):
+                    producer.returncode = 0
+                    return 0
+
+                producer.wait.side_effect = reap
+                with ExitStack() as stack:
+                    stack.enter_context(redirect_stdout(output))
+                    stack.enter_context(patch.object(pi_phase, "PhaseLedger", return_value=None))
+                    stack.enter_context(patch.object(pi_phase, "work_identity", return_value=identity))
+                    stack.enter_context(patch.object(pi_phase, "test_fingerprint", return_value="synthetic"))
+                    stack.enter_context(patch.object(pi_phase.subprocess, "Popen", return_value=producer))
+                    probe = stack.enter_context(patch.object(pi_phase.subprocess, "run", side_effect=listings))
+                    stack.enter_context(patch.object(pi_phase.os, "write", return_value=1))
+                    stack.enter_context(patch.object(pi_phase.os, "waitid", return_value=SimpleNamespace(
+                        si_code=os.CLD_EXITED, si_status=0)))
+                    kill = stack.enter_context(patch.object(pi_phase.os, "killpg",
+                                                           side_effect=PermissionError(1, "denied")))
+                    stack.enter_context(patch.object(pi_phase.time, "sleep"))
+                    release = stack.enter_context(patch.object(pi_phase, "release", wraps=pi_phase.release))
+                    result = pi_phase.main(["run", "--kind", "test", "--label", "retry",
+                                            "--policy", "direct", "--timeout", "2", "--", "synthetic"],
+                                           state=self.state, configuration=self.config)
+                self.assertEqual(result, 125 if unknown else 0, output.getvalue())
+                self.assertEqual(release.call_args.args[-1], not unknown)
+                self.assertEqual(bool(list(self.state.glob("direct-*.json"))), unknown)
+                if unknown:
+                    self.assertIn("liveness=unknown probe_attempts_failed=3", output.getvalue())
+                expected_timeouts = [2, 2, 2, 5, 10] if unknown else ([2, 5, 2, 2] if retry_at == 0 else [2, 2, 2, 5])
+                self.assertEqual([entry.kwargs["timeout"] for entry in probe.call_args_list], expected_timeouts)
+                self.assertEqual(kill.call_args_list, [call(producer.pid, signal.SIGTERM),
+                                                      call(producer.pid, signal.SIGKILL), call(producer.pid, 0)])
+                producer.wait.assert_called_once_with(timeout=2)
+
+    def test_group_alive_cleanup_probe_schedule(self):
+        for kill_error in (None, PermissionError(1, "denied")):
+            with self.subTest(kill_error=kill_error), \
+                    patch.object(pi_phase.os, "killpg", side_effect=kill_error), \
+                    patch.object(pi_phase.subprocess, "run", side_effect=[
+                        subprocess.TimeoutExpired("ps", 2), SimpleNamespace(stdout="12 99 Z\n")]) as probe, \
+                    patch.object(pi_phase.time, "sleep"):
+                self.assertFalse(pi_phase.group_alive({"pgid": 99}, timeouts=(2, 5, 10)))
+                self.assertEqual([entry.kwargs["timeout"] for entry in probe.call_args_list], [2, 5])
 
     @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
     def test_waitid_observation_reserves_leader_and_maps_signal(self):

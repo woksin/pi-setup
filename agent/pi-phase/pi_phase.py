@@ -34,6 +34,8 @@ TICK = 0.2
 # Queued waiters re-scan less often: each scan runs `ps -A`, and dozens of waiters at TICK
 # saturated the CPU with system time (2026-10-19: 45 waiters, 47% sys).
 QUEUE_TICK = 2.0
+# Cleanup must tolerate transient ps failures under load without releasing unknown groups.
+CLEANUP_PROBE_TIMEOUTS = (2, 5, 10)
 # Memory ceilings while a phase runs (woksin/pi-setup#3): sample the whole process tree this often.
 MEMORY_SAMPLE_INTERVAL = 15.0
 SWAP_WARN_INTERVAL = 300.0
@@ -1566,20 +1568,24 @@ def unlock(fd):
     os.close(fd)
 
 
-def group_liveness(pgid):
-    """Return live/empty/unknown without treating a failed probe as empty."""
-    try:
-        listing = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="],
-                                 capture_output=True, text=True, timeout=2, check=True).stdout
-        return any(int(parts[1]) == pgid and not parts[2].startswith("Z")
-                   for line in listing.splitlines() if len(parts := line.split()) >= 3)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
+def group_liveness(pgid, timeouts=(2,)):
+    """Return live/empty/unknown without treating failed probes as empty."""
+    for timeout in timeouts:
+        try:
+            listing = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="],
+                                     capture_output=True, text=True, timeout=timeout, check=True).stdout
+            return any(int(parts[1]) == pgid and not parts[2].startswith("Z")
+                       for line in listing.splitlines() if len(parts := line.split()) >= 3)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    if len(timeouts) > 1:
+        failure_note(f"group probe pgid={pgid} liveness=unknown probe_attempts_failed={len(timeouts)}")
+    return None
 
 
-def live_group_members(pgid):
+def live_group_members(pgid, timeouts=(2,)):
     """macOS can return EPERM for a group containing only an unreaped zombie."""
-    return group_liveness(pgid) is not False  # Unknown is never safe to release.
+    return group_liveness(pgid, timeouts) is not False  # Unknown is never safe to release.
 
 
 def live_groups(timeout):
@@ -1595,17 +1601,17 @@ def live_groups(timeout):
         return None  # Unknown: never admit an orphaned slot on a failed probe.
 
 
-def group_alive(info):
+def group_alive(info, timeouts=(2,)):
     pgid = info.get("pgid")
     if type(pgid) is not int or pgid <= 1:
         return False
     try:
         os.killpg(pgid, 0)
-        return live_group_members(pgid)
+        return live_group_members(pgid, timeouts)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return live_group_members(pgid)
+        return live_group_members(pgid, timeouts)
 
 
 def metadata(path):
@@ -2169,7 +2175,7 @@ def stop_group(pgid):
         except ProcessLookupError:
             pass
         except PermissionError:
-            live = group_liveness(pgid)
+            live = group_liveness(pgid, CLEANUP_PROBE_TIMEOUTS)
             if live is not False:
                 failure_note(f"killpg signal={sig.name} pgid={pgid} liveness={'live' if live else 'unknown'}")
                 raise
@@ -2535,7 +2541,7 @@ def run(args, state, configuration, output=None):
             failure_note("cleanup incomplete; lease retained while group exists")
             return_code = 125
         operation = "group_alive"
-        safe = not group_alive({"pgid": proc.pid})
+        safe = not group_alive({"pgid": proc.pid}, timeouts=CLEANUP_PROBE_TIMEOUTS)
         if not safe:
             failure_note("process group still exists; retaining orphan guard")
             return_code = 125
@@ -2559,7 +2565,8 @@ def run(args, state, configuration, output=None):
             cleanup_step(errors, "stop_group", proc, lambda: stop_group(proc.pid))
             if len(errors) == before_stop:
                 cleanup_step(errors, "wait", proc, lambda: proc.wait(timeout=2))
-            alive = cleanup_step(errors, "group_alive", proc, lambda: group_alive({"pgid": proc.pid}))
+            alive = cleanup_step(errors, "group_alive", proc,
+                                 lambda: group_alive({"pgid": proc.pid}, timeouts=CLEANUP_PROBE_TIMEOUTS))
             safe = alive is False
         if held:
             cleanup_step(errors, "release", proc, lambda: release(state, held, token, safe or proc is None))
