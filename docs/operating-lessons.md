@@ -6,6 +6,12 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 
 ## 2026-10-25
 
+### A disk cleanup cost a release train a cold rebuild
+- **Symptom:** a broadcast at 24 GiB free asked lanes to delete `bin/`/`obj/` in idle worktrees; a release train's worktree lost its build outputs and needed a cold full gate of about 3 hours.
+- **Cause:** the cleanup did not exclude worktrees a train owner was about to gate.
+- **Rule:** cleanups clear Docker, caches and merged worktrees first, and never delete build outputs in release-candidate or train worktrees, or in worktrees with a delivered-but-unmerged SHA, unless the owner agrees.
+- **Enforced:** rule (`agent/AGENTS.md`, "Disk hygiene").
+
 ### An org-wide write workflow reverted a deliberate deletion
 - **Symptom:** merging a workflow change triggered a bootstrap that pushed a config file back into 32 repositories (31 commits with a CI skip token), although it had been removed on purpose and a PR to stop the propagation was still open.
 - **Cause:** the rollout was authorized without checking open PRs on the same files, the list of files and repositories it would write, or recent deletions.

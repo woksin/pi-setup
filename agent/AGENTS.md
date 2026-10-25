@@ -312,6 +312,7 @@ Plans, handovers, session notes, continuation prompts, status boards, scratch an
 - When a task you registered with `ai-work-lifecycle` is genuinely done, run `finish TASK --apply`; use `state TASK paused` for unfinished work instead of leaving it active.
 - When a worktree's branch is merged to `origin/<default>` (pushed is not merged), remove the worktree in the same session using the skill's checks (`git worktree remove` without `--force`, then `git worktree prune`). If the worktree stays, delete its `bin/`, `obj/` and `node_modules/` once nothing tracked is inside and no process holds them; they are the bulk of the disk use.
 - `pi-cleanup` runs daily, and every 30 minutes when free space is below 40 GiB. It is a backstop, not a substitute for cleaning up at the end of the task.
+- **Cleanups under disk pressure** (including broadcasts asking lanes to free space) clear Docker images and containers, caches and merged worktrees first. They never delete build outputs in release-candidate or train worktrees, or in a worktree whose delivered SHA a train owner has yet to gate, unless that owner agrees: a cold rebuild there can cost hours.
 
 ## Maintaining and publishing this setup
 
