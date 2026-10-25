@@ -382,7 +382,7 @@ export default function (pi: ExtensionAPI) {
 	let pendingOriginal: { ref: string; reason: string } | undefined;
 
 	/** Remember (and persist, main sessions only) the model we moved away from, so a reload can restore it. */
-	function rememberOriginal(ctx: ExtensionContext, ref: string, reason: string, destination: string, until?: number): void {
+	function rememberOriginal(ctx: ExtensionContext, { ref, reason, destination, until }: { ref: string; reason: string; destination: string; until?: number }): void {
 		originalRef = ref;
 		originalDestination = destination;
 		originalReason = reason;
@@ -566,32 +566,37 @@ export default function (pi: ExtensionAPI) {
 		return fallbackContextVeto(config, budget.main, tokens, { target, handoff: budget.handoff });
 	}
 
+	/** Switch back to the remembered original (expiry, or an operator request). True when it moved the session. */
+	async function restoreOriginalModel(ctx: ExtensionContext, config: FallbackConfig, current: string, requested: boolean): Promise<boolean> {
+		if (originalRef && originalRef !== current && originalDestination !== current) {
+			// Stale record (e.g. restored from an entry after a /model change on another branch): never override the active model.
+			forgetOriginal(ctx);
+		}
+		if (!originalRef || originalRef === current) return false;
+		if (!restoreEnabled(config, requested)) {
+			restoreNote = "restoreWhenExpired is disabled";
+			publishState();
+			return false;
+		}
+		if (limitedUntil(originalRef) !== undefined) return false;
+		const failure = await switchTo(ctx, originalRef);
+		if (!failure) {
+			notify(ctx, `provider-fallback: ${splitRef(originalRef).provider} ${restoreReason(requested)}; back on ${originalRef}.`, "info");
+			forgetOriginal(ctx);
+			return true;
+		}
+		restoreNote = `${originalRef}: ${failure}`;
+		publishState();
+		return false;
+	}
+
 	/** Pre-emptive switch away from a marked provider, or back once the mark has expired. */
 	async function preempt(ctx: ExtensionContext, requested = false): Promise<void> {
 		const config = loadConfig();
 		const current = refOf(ctx.model);
 		if (!config || !current) return;
 
-		if (originalRef && originalRef !== current && originalDestination !== current) {
-			// Stale record (e.g. restored from an entry after a /model change on another branch): never override the active model.
-			forgetOriginal(ctx);
-		}
-		if (originalRef && originalRef !== current && !restoreEnabled(config, requested)) {
-			restoreNote = "restoreWhenExpired is disabled";
-			publishState();
-		} else if (originalRef && originalRef !== current) {
-			const original = splitRef(originalRef);
-			if (limitedUntil(originalRef) === undefined) {
-				const failure = await switchTo(ctx, originalRef);
-				if (!failure) {
-					notify(ctx, `provider-fallback: ${original.provider} ${restoreReason(requested)}; back on ${originalRef}.`, "info");
-					forgetOriginal(ctx);
-					return;
-				}
-				restoreNote = `${originalRef}: ${failure}`;
-				publishState();
-			}
-		}
+		if (await restoreOriginalModel(ctx, config, current, requested)) return;
 
 		if (manualRef && manualRef === current) return; // the user's own choice is never pre-empted
 		const currentProvider = splitRef(current).provider;
@@ -611,7 +616,7 @@ export default function (pi: ExtensionAPI) {
 			notify(ctx, `provider-fallback: ${currentProvider} is limited but switching to ${target} failed: ${failure}`, "warning");
 			return;
 		}
-		rememberOriginal(ctx, originalRef ?? current, reason, target, until);
+		rememberOriginal(ctx, { ref: originalRef ?? current, reason, destination: target, until });
 		notify(ctx, `provider-fallback: ${currentProvider} limited (${formatUntil(until)} left); using ${target} instead of ${current} (${allowance}).`, "warning");
 	}
 
@@ -645,6 +650,22 @@ export default function (pi: ExtensionAPI) {
 		await checkRestore(ctx);
 	});
 
+	/** A reload / context reset loses the in-memory originalRef and pin: take them from the latest persisted entries. */
+	function loadPersisted(ctx: ExtensionContext): void {
+		try {
+			const branch = ctx.sessionManager.getBranch();
+			const restored = restoreOriginal(branch);
+			originalRef = restored?.originalRef;
+			originalReason = restored?.reason;
+			originalDestination = restored?.destination;
+			originalUntil = restored?.until;
+			const pin = restoreManualPin(branch);
+			manualRef = pin && pin === refOf(ctx.model) ? pin : undefined;
+		} catch {
+			// entries unavailable: behave as before
+		}
+	}
+
 	pi.on("session_start", async (_event, ctx) => {
 		clearStall();
 		fallbacksThisPrompt = 0;
@@ -662,20 +683,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			sessionId = undefined;
 		}
-		if (isMain) {
-			// A reload / context reset loses the in-memory originalRef: take it from the latest persisted entry.
-			try {
-				const restored = restoreOriginal(ctx.sessionManager.getBranch());
-				originalRef = restored?.originalRef;
-				originalReason = restored?.reason;
-				originalDestination = restored?.destination;
-				originalUntil = restored?.until;
-				const pin = restoreManualPin(ctx.sessionManager.getBranch());
-				manualRef = pin && pin === refOf(ctx.model) ? pin : undefined;
-			} catch {
-				// entries unavailable: behave as before
-			}
-		}
+		if (isMain) loadPersisted(ctx);
 		publishState();
 		await preempt(ctx);
 	});
@@ -728,6 +736,17 @@ export default function (pi: ExtensionAPI) {
 		updateMarks(statePath(), (raw) => clearOnSuccess(raw, ref, startedAt, classify));
 	}
 
+	/** Absolute expiry of a new mark: unavailable uses the short mark, a limit the reset in the error text, then the response headers, then the default. */
+	function limitExpiry(config: FallbackConfig, kind: "limit" | "unavailable", message: { provider: string; errorMessage?: string }, now: number): number {
+		const headers =
+			lastLimitHeaders && now - lastLimitHeaders.at < HEADER_MAX_AGE_MS && lastLimitHeaders.provider === message.provider
+				? resetFromHeaders(lastLimitHeaders.headers, now)
+				: undefined;
+		lastLimitHeaders = undefined;
+		const fallback = kind === "unavailable" ? now + (config.unavailableMinutes ?? 10) * 60_000 : (resetFromText(message.errorMessage ?? "", now) ?? headers ?? now + (config.defaultLimitMinutes ?? 60) * 60_000);
+		return Math.max(now + MIN_LIMIT_MS, fallback);
+	}
+
 	pi.on("turn_end", async (event, ctx) => {
 		clearStall();
 		const started = request;
@@ -741,17 +760,7 @@ export default function (pi: ExtensionAPI) {
 		const what = kind === "limit" ? "hit a usage/rate limit" : "is unavailable";
 
 		const now = Date.now();
-		const headers =
-			lastLimitHeaders && now - lastLimitHeaders.at < HEADER_MAX_AGE_MS && lastLimitHeaders.provider === message.provider
-				? resetFromHeaders(lastLimitHeaders.headers, now)
-				: undefined;
-		lastLimitHeaders = undefined;
-		const until = Math.max(
-			now + MIN_LIMIT_MS,
-			kind === "unavailable"
-				? now + (config.unavailableMinutes ?? 10) * 60_000
-				: (resetFromText(message.errorMessage, now) ?? headers ?? now + (config.defaultLimitMinutes ?? 60) * 60_000),
-		);
+		const until = limitExpiry(config, kind, message, now);
 		const from = `${message.provider}/${message.model}`;
 		const scope = kind === "unavailable" ? "account" : limitScope(config, message.provider, message.errorMessage);
 		markLimited(markKeyFor(scope, message.provider, from), { until, since: now, model: from, reason: message.errorMessage.slice(0, 200), scope });
@@ -797,7 +806,7 @@ export default function (pi: ExtensionAPI) {
 
 		fallbacksThisPrompt++;
 		pendingContinue = true;
-		rememberOriginal(ctx, originalRef ?? from, reason, target, until);
+		rememberOriginal(ctx, { ref: originalRef ?? from, reason, destination: target, until });
 		const text = `provider-fallback: ${from} ${what} (${formatUntil(until)}); continuing on ${target} (${allowance}).`;
 		notify(ctx, text, "warning");
 		return {

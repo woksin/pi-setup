@@ -57,21 +57,21 @@ export function limitScope(config: { accountWidePatterns?: Record<string, string
 
 export const markKeyFor = (scope: Scope, provider: string, ref: string): string => (scope === "account" ? provider : ref);
 
-/** Legacy provider-wide entries narrow to their model only when the stored error is a plain rate limit naming a model. */
+/** A legacy entry narrows to its model only when the stored error is a plain rate limit (not an outage or quota). */
+function isPlainModelRateLimit(provider: string, entry: MarkEntry, classify: Classify): boolean {
+	const reason = entry.reason ?? "";
+	const model = splitKey(entry.model ?? "");
+	if (entry.scope || model.provider !== provider || !model.id) return false;
+	return PLAIN_RATE_LIMIT.test(reason) && !OUTAGE.test(reason) && classify(provider, reason) === "model";
+}
+
+/** Legacy provider-wide entries narrow to their model only for a plain rate limit naming a model of that provider. */
 export function interpret(key: string, entry: MarkEntry, classify: Classify): Interpreted {
 	const base = { key, until: entry.until, since: entry.since ?? 0 };
 	const { provider, id } = splitKey(key);
 	if (id !== undefined) return { ...base, provider, ref: key, scope: "model" };
-	const model = entry.model;
-	const narrow =
-		!entry.scope &&
-		typeof model === "string" &&
-		splitKey(model).provider === provider &&
-		splitKey(model).id !== undefined &&
-		PLAIN_RATE_LIMIT.test(entry.reason ?? "") &&
-		!OUTAGE.test(entry.reason ?? "") &&
-		classify(provider, entry.reason ?? "") === "model";
-	return narrow ? { ...base, provider, ref: model, scope: "model" } : { ...base, provider, scope: "account" };
+	if (isPlainModelRateLimit(provider, entry, classify)) return { ...base, provider, ref: entry.model, scope: "model" };
+	return { ...base, provider, scope: "account" };
 }
 
 const blocks = (mark: Interpreted, ref: string): boolean =>
@@ -87,12 +87,10 @@ export function liveMarks(raw: RawMarks, now: number): RawMarks {
 
 /** The live mark with the latest `until` that blocks `ref` (its provider's account mark or its own model mark). */
 export function blockingMark(raw: RawMarks, ref: string, now: number, classify: Classify): Interpreted | undefined {
-	let best: Interpreted | undefined;
-	for (const [key, entry] of entriesOf(liveMarks(raw, now))) {
-		const mark = interpret(key, entry, classify);
-		if (blocks(mark, ref) && (!best || mark.until > best.until)) best = mark;
-	}
-	return best;
+	const blocking = entriesOf(liveMarks(raw, now))
+		.map(([key, entry]) => interpret(key, entry, classify))
+		.filter((mark) => blocks(mark, ref));
+	return blocking.sort((x, y) => y.until - x.until)[0];
 }
 
 /** Add a mark (expired entries pruned, the later `until` kept). */
