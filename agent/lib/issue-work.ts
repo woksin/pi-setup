@@ -7,6 +7,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { claimDelivery, filterRegister, ownerResult, type IssueRef } from "./issue-work-register.ts";
+export { parseIssueRefs, ownershipOf, deliveries, formatOwnership, RECENT_DAYS, type IssueRef, type Ownership, type RecentSession } from "./issue-work-register.ts";
 
 export type IssueState = "in-progress" | "in-review" | "blocked" | "paused" | "done" | "unknown";
 export const SETTABLE_STATES = ["in-progress", "in-review", "blocked", "paused", "done"] as const;
@@ -14,8 +16,7 @@ export const STATE_LABEL: Record<IssueState, string> = {
 	"in-progress": "In progress", "in-review": "In review", blocked: "Blocked", paused: "Paused", done: "Done", unknown: "Unknown",
 };
 const HOLDING: IssueState[] = ["in-progress", "in-review"];
-export const RECENT_DAYS = 14;
-const DAY_MS = 86_400_000;
+
 
 export interface RegistryEvent {
 	ts: string;
@@ -46,27 +47,6 @@ export const issueKey = (repo: string, issue: number) => `${repo.toLowerCase()}#
 export const issueUrl = (repo: string, issue: number) => `https://github.com/${repo}/issues/${issue}`;
 export const REPO_RE = /^(?!\.+\/)[A-Za-z0-9_.-]+\/(?!\.+$)[A-Za-z0-9_.-]+$/;
 const PR_RE = /^https:\/\/github\.com\/((?!\.+\/)[A-Za-z0-9_.-]+\/(?!\.+\/)[A-Za-z0-9_.-]+)\/pull\/(\d+)$/;
-
-export interface IssueRef { repo: string; issue: number }
-
-export function parseIssueRefs(items: unknown[], defaultRepo?: string): IssueRef[] {
-	if (items.length > 50) throw new Error("at most 50 issues");
-	const refs = new Map<string, IssueRef>();
-	for (const item of items) {
-		const text = typeof item === "string" || typeof item === "number" ? String(item) : "";
-		const bare = text.match(/^#?(\d+)$/);
-		const qualified = text.match(/^([^/#]+\/[^/#]+)#(\d+)$/) ?? text.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)$/);
-		if (!bare && !qualified) throw new Error("issue refs must be N, #N, OWNER/REPO#N or an issue URL");
-		const repo = qualified?.[1] ?? defaultRepo;
-		const issue = Number(qualified?.[2] ?? bare![1]);
-		if (!repo) throw new Error("repo is required for bare issue refs");
-		try { validate(repo, issue); }
-		catch { throw new Error("issue refs must be N, #N, OWNER/REPO#N or an issue URL"); }
-		const key = issueKey(repo, issue);
-		if (!refs.has(key)) refs.set(key, { repo, issue });
-	}
-	return [...refs.values()];
-}
 
 /** Parse JSONL, silently skipping corrupt, partial or structurally invalid lines. */
 export function parseRegistry(text: string): RegistryEvent[] {
@@ -473,80 +453,8 @@ export function formatList(views: IssueView[], live: Set<string>, cache: Record<
 	return lines.join("\n");
 }
 
-export interface RecentSession extends SessionTouch { lastStateTs?: string; note?: string; noteTs?: string; pr?: string }
-const DELIVERED_NOTE = /(?<!\bnot )\bdelivered\b/i;
-const windowDays = (days = RECENT_DAYS) => Math.max(1, Math.min(90, Number.isFinite(days) ? Math.trunc(days) : RECENT_DAYS));
-const inWindow = (ts: string | undefined, now: Date, days: number) => ts !== undefined && Date.parse(ts) >= now.getTime() - days * DAY_MS;
-
-function sessionsInWindow(events: RegistryEvent[], key: string, now: Date, days: number): RecentSession[] {
-	const sessions = new Map<string, RecentSession>();
-	for (const e of events) {
-		if (issueKey(e.repo, e.issue) !== key) continue;
-		let s = sessions.get(e.sessionId);
-		if (!s) { s = { sessionId: e.sessionId, lastTs: e.ts }; sessions.set(e.sessionId, s); }
-		if (e.ts > s.lastTs) s.lastTs = e.ts;
-		if (e.state) { s.lastState = e.state; s.lastStateTs = e.ts; }
-		if (e.source === "tool" && e.note !== undefined) { s.note = e.note; s.noteTs = e.ts; }
-		if (e.pr) s.pr = e.pr;
-		if (e.cwd) s.cwd = e.cwd;
-		if (e.branch) s.branch = e.branch;
-	}
-	return [...sessions.values()].filter((s) => inWindow(s.lastTs, now, days));
-}
-
-export function deliveries(events: RegistryEvent[], key: string, now: Date, days = RECENT_DAYS, excludeSessionId?: string): RecentSession[] {
-	return sessionsInWindow(events, key, now, days).filter((s) => s.sessionId !== excludeSessionId && (
-		(inWindow(s.lastStateTs, now, days) && (s.lastState === "in-review" || s.lastState === "done"))
-		|| (inWindow(s.noteTs, now, days) && DELIVERED_NOTE.test(s.note ?? ""))
-	));
-}
-
-export interface Ownership extends IssueRef {
-	verdict: "OWNED" | "FREE"; reason: string; view?: IssueView; recent: RecentSession[]; days: number;
-}
-
-const sessionStatus = (liveness: Map<string, SessionLiveness>, id: string) => liveness.get(id)?.status ?? "ended";
-const deliverySummary = (s: RecentSession, liveness: Map<string, SessionLiveness>, now: Date) =>
-	`${short(s.sessionId)} (${STATE_LABEL[s.lastState ?? "unknown"]} ${relativeTime(s.lastStateTs ?? s.lastTs, now)}, ${sessionStatus(liveness, s.sessionId)}, branch ${s.branch ?? "-"}${s.pr ? `, PR ${s.pr}` : ""}, note "${(s.note ?? "").slice(0, 100)}")`;
-
-export function ownershipOf(events: RegistryEvent[], view: IssueView | undefined, liveness: Map<string, SessionLiveness>, now: Date, days = RECENT_DAYS): Ownership {
-	days = windowDays(days);
-	if (!view) return { repo: "", issue: 0, verdict: "FREE", reason: "no register entry", recent: [], days };
-	const base = { repo: view.repo, issue: view.issue, view, recent: sessionsInWindow(events, view.key, now, days), days };
-	const holders = view.sessions.filter((s) => s.lastState && HOLDING.includes(s.lastState));
-	const live = holders.find((s) => sessionStatus(liveness, s.sessionId) === "live");
-	if (live) return { ...base, verdict: "OWNED", reason: `held by live session ${short(live.sessionId)} (${STATE_LABEL[live.lastState!]})` };
-	const unknown = holders.find((s) => sessionStatus(liveness, s.sessionId) === "unknown");
-	if (unknown) return { ...base, verdict: "OWNED", reason: `held by session ${short(unknown.sessionId)} (pid ${liveness.get(unknown.sessionId)!.pid}); liveness cannot be verified` };
-	const delivered = deliveries(events, view.key, now, days);
-	if (delivered.length) return { ...base, verdict: "OWNED", reason: `delivered or in review: ${delivered.map((s) => deliverySummary(s, liveness, now)).join(", ")}` };
-	const age = relativeTime(view.lastTs, now);
-	if ((view.state === "in-progress" || view.state === "blocked") && inWindow(view.lastTs, now, days)) {
-		const latest = [...view.sessions].sort((a, b) => b.lastTs.localeCompare(a.lastTs))[0];
-		return { ...base, verdict: "OWNED", reason: `ended session ${short(latest.sessionId)} left ${STATE_LABEL[view.state]} ${age}; confirm with its owner before reassigning` };
-	}
-	if (view.state === "paused" && inWindow(view.lastTs, now, 1)) return { ...base, verdict: "OWNED", reason: `paused ${age} (under 24 h)` };
-	return { ...base, verdict: "FREE", reason: `latest ${STATE_LABEL[view.state]} ${age}; no live holder and nothing delivered in the last ${days} days` };
-}
-
-export function formatOwnership(o: Ownership, liveness: Map<string, SessionLiveness>, now: Date, ownSessionId?: string): string {
-	const ownHolder = o.view?.sessions.some((s) => s.sessionId === ownSessionId && s.lastState && HOLDING.includes(s.lastState));
-	const lines = [`${o.repo}#${o.issue}: ${o.verdict} — ${o.reason}${ownHolder ? " (this session)" : ""}${o.view?.title ? ` | ${o.view.title.replace(/\s+/g, " ")}` : ""}`];
-	if (o.view) lines.push(`  latest: ${STATE_LABEL[o.view.state]} ${relativeTime(o.view.lastTs, now)} | branch: ${o.view.branch ?? "-"} | note: ${(o.view.note ?? "-").slice(0, 140)}`);
-	if (o.recent.length) lines.push(`  sessions (${o.days}d): ${o.recent.map((s) => `${short(s.sessionId)}${s.sessionId === ownSessionId ? " (this session)" : ""} ${sessionStatus(liveness, s.sessionId)}/${s.lastState ?? "-"} ${s.cwd ? basename(s.cwd) : "-"} ${s.branch ?? "-"} ${relativeTime(s.lastTs, now)}`).join(", ")}`);
-	return lines.join("\n");
-}
-
-export async function owner(d: Deps, a: { refs: IssueRef[]; days?: number; ownSessionId?: string }): Promise<{ text: string; results: { repo: string; issue: number; verdict: "OWNED" | "FREE"; reason: string }[] }> {
-	const events = await readEvents(d);
-	const views = foldRegistry(events);
-	const liveness = await livenessOf(d);
-	const now = d.now?.() ?? new Date();
-	const rows = a.refs.map((ref) => ({ ...ownershipOf(events, views.get(issueKey(ref.repo, ref.issue)), liveness, now, a.days), ...ref }));
-	return {
-		text: rows.map((o) => formatOwnership(o, liveness, now, a.ownSessionId)).join("\n"),
-		results: rows.map(({ repo, issue, verdict, reason }) => ({ repo, issue, verdict, reason })),
-	};
+export async function owner(d: Deps, a: { refs: IssueRef[]; days?: number; ownSessionId?: string }) {
+	return ownerResult({ ...a, events: await readEvents(d), liveness: await livenessOf(d), now: d.now?.() ?? new Date() });
 }
 
 // ---------- store and actions (dependency-injected) ----------
@@ -1148,15 +1056,12 @@ async function claimLocked(d: Deps, s: SessionInfo, a: ClaimArgs): Promise<strin
 	const u = holders.find((t) => liveness.get(t.sessionId)?.status === "unknown");
 	if (u && !a.force)
 		throw new Error(`${a.repo}#${a.issue} is held (${u.lastState}) by session ${u.sessionId} (pid ${liveness.get(u.sessionId)!.pid}, cwd ${u.cwd ?? "?"}), but cannot verify whether it is still running (process start time unavailable). Confirm with the user that it is not, then retry with force: true.`);
-	const delivered = deliveries(events, issueKey(a.repo, a.issue), now(), RECENT_DAYS, s.sessionId);
-	if (delivered.length && !a.takeover)
-		throw new Error(`${a.repo}#${a.issue} is in review or delivered by another session in the last 14 days: ${delivered.map((t) => deliverySummary(t, liveness, now())).join(", ")}. It is probably part of a release train or awaiting release. Do not start; report to the user or your coordinator. Only if you are continuing that session's work (handoff) or the user/coordinator confirmed, claim again with takeover: true.`);
-	const tookOver = a.takeover === true && delivered.length > 0;
+	const delivery = claimDelivery({ events, liveness, now: now(), claim: a, session: s });
 	const checkClaimable = (data: IssueData) => {
 		if (data.state && data.state !== "OPEN") throw new Error(`${a.repo}#${a.issue} is ${data.state} on GitHub; not claiming.`);
 		const block = extractStatusBlock(data.body);
 		const ghState = statusStateOf(block);
-		if (!a.force && !tookOver && statusStateIsHolding(ghState)) {
+		if (!delivery.bypassStatus && statusStateIsHolding(ghState)) {
 			const branchLine = block?.split("\n").find((l) => fieldRe("Branch").test(l))?.replace(/^\s*\*\*Branch:\*\*\s*/, "").trim();
 			const ours = s.branch && branchLine && (branchLine === s.branch || branchLine.startsWith(`${s.branch} `));
 			const heldByUs = view?.sessions.some((t) => t.sessionId === s.sessionId && t.lastState && HOLDING.includes(t.lastState));
@@ -1174,7 +1079,7 @@ async function claimLocked(d: Deps, s: SessionInfo, a: ClaimArgs): Promise<strin
 	await appendEvent(d, event(s, now(), { repo: a.repo, issue: a.issue, url: data.url, title: data.title, state: "in-progress", note: a.note }));
 	await mergeCache(d, a.repo, a.issue, { ...infoFrom(data, now()), statusState: statusStateOf(text) });
 	const recorded = await recordActivity(d, s, a.repo, a.issue, activity, true);
-	return `Claimed ${a.repo}#${a.issue} "${data.title}" (${data.url}): assigned @me, status In progress${s.branch ? ` on ${s.branch}` : ""}. ${out}\n${activity.text}${recorded}${await planReminder(d, s, a.repo, a.issue)}${tookOver ? `\nTook over from ${delivered.map((t) => `${short(t.sessionId)} (${STATE_LABEL[t.lastState ?? "unknown"]} ${relativeTime(t.lastStateTs ?? t.lastTs, now())}, branch ${t.branch ?? "-"})`).join(", ")}.` : ""}`;
+	return `Claimed ${a.repo}#${a.issue} "${data.title}" (${data.url}): assigned @me, status In progress${s.branch ? ` on ${s.branch}` : ""}. ${out}\n${activity.text}${recorded}${await planReminder(d, s, a.repo, a.issue)}${delivery.notice(now())}`;
 }
 
 export interface UpdateArgs { repo: string; issue: number; state: IssueState; note?: string; pr?: string; plan?: string }
@@ -1242,21 +1147,8 @@ export async function recordDetected(d: Deps, s: SessionInfo, command: string, f
 
 export async function list(d: Deps, opts: { all?: boolean; refresh?: boolean; fetch?: boolean; ownSessionId?: string; repo?: string; state?: IssueState; free?: boolean; days?: number } = {}): Promise<string> {
 	const events = await readEvents(d);
-	let views = [...foldRegistry(events).values()];
 	const liveness = await livenessOf(d);
-	const now = d.now?.() ?? new Date();
-	const extra = opts.free ? new Map<string, string>() : undefined;
-	views = views.filter((v) => {
-		if (opts.repo && v.repo.toLowerCase() !== opts.repo.toLowerCase()) return false;
-		if (opts.state && v.state !== opts.state) return false;
-		if (opts.free) {
-			const o = ownershipOf(events, v, liveness, now, opts.days);
-			if (opts.state !== "done" && o.verdict !== "FREE") return false;
-			if (o.verdict === "FREE") extra!.set(v.key, o.reason);
-		}
-		return true;
-	});
-	const all = opts.all || opts.state === "done";
+	const { views, all, extra } = filterRegister({ events, views: [...foldRegistry(events).values()], liveness, now: d.now?.() ?? new Date(), filters: opts });
 	const shown = views.filter((v) => all || v.state !== "done");
 	const cache = opts.fetch === false ? await readCache(d) : await refreshCache(d, shown, opts.refresh);
 	return formatList(views, withStatus(liveness, "live"), cache, d.now?.() ?? new Date(), { all, ownSessionId: opts.ownSessionId, unknown: withStatus(liveness, "unknown") }, extra);

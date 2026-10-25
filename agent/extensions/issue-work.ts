@@ -127,6 +127,23 @@ export default function issueWork(pi: ExtensionAPI, options: IssueWorkOptions = 
 		} catch { /* detection is best effort */ }
 	});
 
+	async function handleList(params: any, s: SessionInfo) {
+		const text = await list(deps, { all: !!params.all, refresh: !!params.refresh, ownSessionId: s.sessionId, repo: params.repo || undefined, state: params.state, free: !!params.free, days: params.days });
+		return { content: [{ type: "text", text }], details: {} };
+	}
+
+	async function handleOwner(params: any, s: SessionInfo & { repo?: string }) {
+		const items = [...(params.issues ?? []), ...(params.issue ? [params.issue] : [])];
+		if (!items.length) throw new Error("owner needs issue or issues");
+		const refs = parseIssueRefs(items, params.repo || s.repo);
+		const { text, results } = await owner(deps, { refs, days: params.days, ownSessionId: s.sessionId });
+		return { content: [{ type: "text", text }], details: { results } };
+	}
+
+	const readHandlers = new Map<string, (params: any, s: SessionInfo & { repo?: string }) => Promise<{ content: { type: string; text: string }[]; details: object }>>([
+		["list", handleList], ["owner", handleOwner],
+	]);
+
 	pi.registerTool({
 		name: "issue_work",
 		label: "Issue work",
@@ -155,28 +172,20 @@ export default function issueWork(pi: ExtensionAPI, options: IssueWorkOptions = 
 		} as any,
 		async execute(_id: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const s = await sessionInfo(ctx);
+			const readHandler = readHandlers.get(params.action);
+			if (readHandler) return readHandler(params, s);
 			let text: string;
-			if (params.action === "list") {
-				text = await list(deps, { all: !!params.all, refresh: !!params.refresh, ownSessionId: s.sessionId, repo: params.repo || undefined, state: params.state, free: !!params.free, days: params.days });
-			} else if (params.action === "owner") {
-				const items = [...(params.issues ?? []), ...(params.issue ? [params.issue] : [])];
-				if (!items.length) throw new Error("owner needs issue or issues");
-				const refs = parseIssueRefs(items, params.repo || s.repo);
-				const { text, results } = await owner(deps, { refs, days: params.days, ownSessionId: s.sessionId });
-				return { content: [{ type: "text", text }], details: { results } };
-			} else {
-				if (params.action !== "check" && !ctx.hasUI) throw new Error("issue_work claim/update is only available in the main session. Report the issue state to your parent session instead.");
-				const repo: string | undefined = params.repo || s.repo;
-				if (!repo) throw new Error("repo is required (OWNER/REPO); the cwd has no GitHub origin.");
-				const issue = Number(params.issue);
-				if (params.action === "check") text = await check(deps, s, { repo, issue });
-				else if (params.action === "claim") text = await claim(deps, s, { repo, issue, note: params.note, force: !!params.force, plan: params.plan, acceptOutsider: params.acceptOutsider === true, takeover: params.takeover === true });
-				else if (params.action === "update") {
-					if (!params.state) throw new Error("state is required for update");
-					text = await update(deps, s, { repo, issue, state: params.state as IssueState, note: params.note, pr: params.pr, plan: params.plan });
-				} else throw new Error(`unknown action ${params.action}`);
-				await refreshStatus(ctx, s.repo);
-			}
+			if (params.action !== "check" && !ctx.hasUI) throw new Error("issue_work claim/update is only available in the main session. Report the issue state to your parent session instead.");
+			const repo: string | undefined = params.repo || s.repo;
+			if (!repo) throw new Error("repo is required (OWNER/REPO); the cwd has no GitHub origin.");
+			const issue = Number(params.issue);
+			if (params.action === "check") text = await check(deps, s, { repo, issue });
+			else if (params.action === "claim") text = await claim(deps, s, { repo, issue, note: params.note, force: !!params.force, plan: params.plan, acceptOutsider: params.acceptOutsider === true, takeover: params.takeover === true });
+			else if (params.action === "update") {
+				if (!params.state) throw new Error("state is required for update");
+				text = await update(deps, s, { repo, issue, state: params.state as IssueState, note: params.note, pr: params.pr, plan: params.plan });
+			} else throw new Error(`unknown action ${params.action}`);
+			await refreshStatus(ctx, s.repo);
 			return { content: [{ type: "text", text }], details: {} };
 		},
 	} as any);
