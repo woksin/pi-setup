@@ -53,7 +53,7 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 ### Full hang dumps fill the disk
 - **Symptom:** free disk fell from 27 GiB to 5 GiB in two minutes.
 - **Cause:** a recommended test command used `--blame-hang`, whose default dump type is full (7.4 GB per dump).
-- **Rule:** mini dumps only (`--blame-hang-dump-type mini`, `--hangdump-type Mini`); delete `.dmp` files once the stack is extracted.
+- **Rule:** no hang dump by default (`--blame-hang-dump-type none`); mini dumps (`--blame-hang-dump-type mini`, `--hangdump-type Mini`) only while diagnosing a hang, declared with `pi-phase run --diagnose-hang`; delete `.dmp` files once the stack is extracted. A full VSTest hang dump from `--blame-hang` without a dump type reached 6 GiB on 2026-10-25.
 - **Enforced:** tool (pi-phase warns before such phases and lists leftover dumps of 1 GiB or more afterwards).
 
 ### Provider fallback does not restore after limits lift
