@@ -4,6 +4,7 @@ import { afterEach, beforeEach, test, type TestContext } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ORIGINAL_ENTRY, restoreManualPin, restoreOriginal } from "./provider-fallback-state.ts";
 import fallbackExtension, { DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK, fallbackContextLimit, classifyError, equivalentOf, fallbackContextVeto, selectFallback } from "../extensions/provider-fallback.ts";
 
 const CONFIG = {
@@ -40,13 +41,13 @@ test("equivalentOf: pairs are bidirectional; unknown has none", () => {
 
 test("selectFallback: pair equivalent; limited candidate is blocked, not chosen", () => {
 	assert.deepEqual(selectFallback(CONFIG, "anthropic/a", undefined, none), { target: "openai/b", blocked: [], chain: false });
-	assert.deepEqual(selectFallback(CONFIG, "anthropic/a", undefined, p => p === "openai"), { blocked: ["openai/b"], chain: false });
+	assert.deepEqual(selectFallback(CONFIG, "anthropic/a", undefined, r => r.startsWith("openai/")), { blocked: ["openai/b"], chain: false });
 	assert.deepEqual(selectFallback(CONFIG, "x/y", undefined, none), { blocked: [], chain: false }); // no equivalent
 });
 
 test("selectFallback: chains take precedence, skip limited providers and the current model, keyed by origin", () => {
 	assert.deepEqual(selectFallback(CONFIG, "anthropic/c", undefined, none), { target: "openai/b", blocked: [], chain: true });
-	assert.deepEqual(selectFallback(CONFIG, "anthropic/c", undefined, p => p === "openai"), { target: "kimi/k", blocked: ["openai/b"], chain: true });
+	assert.deepEqual(selectFallback(CONFIG, "anthropic/c", undefined, r => r.startsWith("openai/")), { target: "kimi/k", blocked: ["openai/b"], chain: true });
 	assert.deepEqual(selectFallback(CONFIG, "anthropic/c", undefined, () => true), { blocked: ["openai/b", "kimi/k"], chain: true });
 	assert.equal(selectFallback(CONFIG, "openai/b", "anthropic/c", none).target, "kimi/k"); // on first hop, next entry; origin selects the chain
 	assert.equal(selectFallback(CONFIG, "kimi/k", "anthropic/c", none).target, "openai/b");
@@ -75,6 +76,8 @@ test("auto uses target registry window minus output, capped by main/subagent han
 
 const A = { provider: "anthropic", id: "a" };
 const B = { provider: "openai", id: "b" };
+const C = { provider: "anthropic", id: "c" };
+const O = { provider: "anthropic", id: "o" };
 let stateFile: string;
 let saved: Record<string, string | undefined>;
 const shutdowns: (() => Promise<void>)[] = [];
@@ -96,28 +99,38 @@ afterEach(async () => {
 });
 const writeConfig = (c: object) => writeFileSync(process.env.PI_PROVIDER_FALLBACK_CONFIG!, JSON.stringify(c));
 
-function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; target?: { contextWindow: number; maxTokens: number } } = {}) {
+function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; target?: { contextWindow: number; maxTokens: number }; gate?: boolean } = {}) {
 	const handlers: Record<string, any> = {};
 	const commands: Record<string, any> = {};
 	const notices: [string, string][] = [];
 	const switched: any[] = [];
 	const prompts: string[] = [];
+	const widgets: [string, string[] | undefined][] = [];
+	const appended: any[] = [];
+	const gates: (() => void)[] = [];
 	const ctx: any = {
 		isIdle: () => true,
 		hasUI: opts.hasUI ?? false,
 		model: opts.model ?? A,
-		ui: { notify: (t: string, ty: string) => notices.push([t, ty]) },
+		ui: { notify: (t: string, ty: string) => notices.push([t, ty]), setWidget: (k: string, l: string[] | undefined) => widgets.push([k, l]) },
+		sessionManager: { getBranch: () => appended.map(a => ({ type: "custom", customType: a.type, data: a.data })), getSessionId: () => "sid" },
 		getContextUsage: () => (opts.tokens === undefined ? undefined : { tokens: opts.tokens }),
-		modelRegistry: { find: (p: string, id: string) => [A, opts.target ? { ...B, ...opts.target } : B].find(m => m.provider === p && m.id === id) },
+		modelRegistry: { find: (p: string, id: string) => [A, C, opts.target ? { ...B, ...opts.target } : B].find(m => m.provider === p && m.id === id) },
 	};
 	const pi: any = {
 		on: (name: string, h: any) => { handlers[name] = h; },
 		registerCommand: (name: string, command: any) => { commands[name] = command; },
 		sendUserMessage: (text: string) => { prompts.push(text); },
-		appendEntry: () => {},
+		appendEntry: (type: string, data: any) => { appended.push({ type, data }); },
 		getThinkingLevel: () => "off",
 		setThinkingLevel: () => {},
-		setModel: async (m: any) => { switched.push(m); ctx.model = m; return true; },
+		setModel: async (m: any) => {
+			switched.push(m);
+			if (opts.gate) await new Promise<void>(resolve => gates.push(resolve));
+			ctx.model = m;
+			await handlers.model_select?.({ source: "set", model: m }, ctx);
+			return true;
+		},
 	};
 	fallbackExtension(pi);
 	shutdowns.push(() => handlers.session_shutdown({}, ctx));
@@ -126,7 +139,8 @@ function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; tar
 		entries: [{ type: "message", id: "m0" }],
 		messageEntryId: "m1",
 	}, ctx);
-	return { fire, notices, switched, prompts, ctx,
+	return { fire, notices, switched, prompts, ctx, widgets, appended, gates,
+		select: (model: { provider: string; id: string }, source = "set") => { ctx.model = model; return handlers.model_select({ source, model }, ctx); },
 		restore: (args = "") => commands["provider-restore"].handler(args, ctx),
 		boundary: (name = "turn_start") => handlers[name]({}, ctx),
 	};
@@ -165,12 +179,12 @@ test("limit expiry resumes once and a fresh limit episode can resume again", asy
 	writeConfig({ ...CONFIG, defaultLimitMinutes: 1 });
 	const s = session({ hasUI: true });
 	await s.fire("429");
-	const firstSince = marks().anthropic.since;
+	const firstSince = marks()["anthropic/a"].since;
 	await poll();
 	assert.deepEqual(s.switched, [B, A]);
 	assert.equal(s.prompts.length, 1);
 	await s.fire("429");
-	assert.ok(marks().anthropic.since > firstSince);
+	assert.ok(marks()["anthropic/a"].since > firstSince);
 	await poll();
 	await poll();
 	assert.equal(s.prompts.length, 2);
@@ -337,7 +351,7 @@ test("broadcast cannot override a fresh real limit and restored providers still 
 	await receiver.boundary();
 	assert.deepEqual(sender.switched, [B, A, B]);
 	assert.deepEqual(receiver.switched, [B]);
-	assert.ok(marks().anthropic);
+	assert.ok(marks()["anthropic/a"]);
 });
 
 test("named broadcasts leave other originals and manual model choices alone", async () => {
@@ -355,7 +369,7 @@ test("turn_end limit: marks provider, switches to equivalent, drops failed attem
 	const s = session();
 	const r = await s.fire("429 rate_limit_error");
 	assert.deepEqual(s.switched, [B]);
-	assert.ok(marks().anthropic.until > Date.now() + 59 * 60_000); // default 60 min
+	assert.ok(marks()["anthropic/a"].until > Date.now() + 59 * 60_000); // default 60 min
 	assert.match(s.notices[0][0], /^provider-fallback: anthropic\/a hit a usage\/rate limit \(~\d+ (min|h)\); continuing on openai\/b \(auto: 200k for openai\/b\)\.$/);
 	assert.equal(s.notices[0][1], "warning");
 	assert.deepEqual(r.entries.at(-2), { type: "context_edit", targetId: "m1", replacement: null });
@@ -421,7 +435,7 @@ test("over-limit notice requests handoff now, then switches at the next recovere
 	const main = session({ hasUI: true, tokens: 200_000, target: { contextWindow: 272_000, maxTokens: 128_000 } });
 	const result = await main.fire("429");
 	assert.equal(main.switched.length, 0);
-	assert.ok(marks().anthropic);
+	assert.ok(marks()["anthropic/a"]);
 	assert.match(main.notices[0][0], /fallback deferred: context 200k > auto: 72k for openai\/b/);
 	assert.match(result.entries.at(-1).content, /context_handoff now.*next prompt/);
 	main.ctx.getContextUsage = () => ({ tokens: 50_000 });
@@ -471,4 +485,192 @@ test("turn_end: per-prompt cap (default 2) stops further switches", async () => 
 	assert.equal(s.switched.length, 1);
 	assert.match(s.notices.at(-1)![0], /per-prompt fallback cap was reached\. Not switching\./);
 	assert.equal(third.entries.at(-1).type, "custom_message");
+});
+
+// ---- #54: manual selection, model-scoped marks, widget, restore while busy ------------------------
+
+const K = { provider: "kimi", id: "k" };
+const hour = () => Date.now() + 3_600_000;
+const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test("manual select clears blocking marks, pins the model through later marks and reload, forgets the original; a real limit still falls back", async () => {
+	const s = session({ hasUI: true });
+	await s.boundary("session_start");
+	await s.fire("429");
+	assert.deepEqual(s.switched, [B]);
+	writeFileSync(stateFile, JSON.stringify({ anthropic: { until: hour(), since: 0 }, "anthropic/a": { until: hour(), since: 0 }, kimi: { until: hour(), since: 0 } }));
+	await s.select(A);
+	assert.deepEqual(Object.keys(marks()), ["kimi"]);
+	assert.deepEqual(s.appended.at(-1).data.manualRef, "anthropic/a");
+	assert.equal(s.appended.at(-1).data.originalRef, null);
+	assert.equal(s.widgets.at(-1)![1], undefined);
+	await s.boundary("before_agent_start");
+	assert.deepEqual(s.switched, [B]);
+	writeFileSync(stateFile, JSON.stringify({ "anthropic/a": { until: hour(), since: Date.now() } })); // a mark written afterwards (another session)
+	await s.boundary("before_agent_start");
+	await s.boundary("session_start"); // /reload: the pin comes back from the persisted entry
+	await s.boundary("before_agent_start");
+	assert.deepEqual(s.switched, [B]);
+	assert.equal(s.ctx.model, A);
+	await s.fire("429"); // this session's own real limit still moves it
+	assert.deepEqual(s.switched, [B, B]);
+});
+
+test("subagent (no UI) model_select never clears shared marks", async () => {
+	const s = session({ hasUI: false });
+	writeFileSync(stateFile, JSON.stringify({ "anthropic/a": { until: hour(), since: 0 } }));
+	await s.select(A);
+	assert.ok(marks()["anthropic/a"]);
+});
+
+test("a Sonnet rate_limit_error marks only that model; a usage-limit error marks the account", async () => {
+	writeConfig({ ...CONFIG, pairs: [...CONFIG.pairs, ["anthropic/o", "openai/b"]] });
+	const sonnet = session({ model: C });
+	await sonnet.fire("rate_limit_error", { model: "c" });
+	assert.deepEqual(Object.keys(marks()), ["anthropic/c"]);
+	assert.equal(marks()["anthropic/c"].scope, "model");
+	const opus = session({ model: O, hasUI: true });
+	await opus.boundary("before_agent_start");
+	assert.deepEqual(opus.switched, []);
+	await sonnet.fire("You hit your usage limit", { model: "c" });
+	assert.ok(marks().anthropic);
+	assert.equal(marks().anthropic.scope, "account");
+	await opus.boundary("before_agent_start");
+	assert.deepEqual(opus.switched, [B]);
+});
+
+test("legacy marks: a plain rate limit naming a model blocks only that model; others stay provider-wide", async () => {
+	writeConfig({ ...CONFIG, pairs: [...CONFIG.pairs, ["anthropic/o", "openai/b"]] });
+	writeFileSync(stateFile, JSON.stringify({ anthropic: { until: hour(), since: 0, model: "anthropic/a", reason: "429 rate_limit_error" } }));
+	const opus = session({ model: O, hasUI: true });
+	await opus.boundary("before_agent_start");
+	assert.deepEqual(opus.switched, []);
+	const sonnet = session({ model: A, hasUI: true });
+	await sonnet.boundary("before_agent_start");
+	assert.deepEqual(sonnet.switched, [B]);
+	for (const legacy of [{ model: "anthropic/a", reason: "overloaded_error 529" }, { reason: "429" }, { model: "anthropic/a", reason: "usage limit 429" }]) {
+		writeFileSync(stateFile, JSON.stringify({ anthropic: { until: hour(), since: 0, ...legacy } }));
+		const o = session({ model: O, hasUI: true });
+		await o.boundary("before_agent_start");
+		assert.deepEqual(o.switched, [B], JSON.stringify(legacy));
+	}
+});
+
+test("a success after turn_start clears older marks of that model and account only, never a fresher or sibling one", async () => {
+	const old = { until: hour(), since: Date.now() - 10_000 };
+	writeFileSync(stateFile, JSON.stringify({ anthropic: { ...old, scope: "account" }, "anthropic/a": old, "anthropic/c": old }));
+	const s = session();
+	await s.boundary("turn_start");
+	await s.fire(undefined, { stopReason: "stop" });
+	assert.deepEqual(Object.keys(marks()), ["anthropic/c"]);
+	writeFileSync(stateFile, JSON.stringify({ "anthropic/a": old }));
+	await s.boundary("turn_start");
+	writeFileSync(stateFile, JSON.stringify({ "anthropic/a": { until: hour(), since: Date.now() + 5 } })); // another session's fresh 429 meanwhile
+	await s.fire(undefined, { stopReason: "stop" });
+	assert.ok(marks()["anthropic/a"]);
+	await s.fire(undefined, { stopReason: "stop" }); // no turn_start since: nothing is proven
+	assert.ok(marks()["anthropic/a"]);
+});
+
+test("limit error from a request started before the manual pick records the mark but does not switch; a fresh one does", async () => {
+	const s = session({ hasUI: true });
+	await s.boundary("session_start");
+	await s.boundary("turn_start");
+	await s.select(A);
+	await s.fire("429");
+	assert.deepEqual(s.switched, []);
+	assert.ok(marks()["anthropic/a"]);
+	assert.match(s.notices.at(-1)![0], /before your model selection; not switching/);
+	await s.boundary("turn_start");
+	await s.fire("429");
+	assert.deepEqual(s.switched, [B]);
+});
+
+test("overlapping own switches are both fallback; a user select during or after them is manual", async () => {
+	const s = session({ hasUI: true, gate: true });
+	await s.boundary("session_start");
+	const first = s.fire("429");
+	const second = s.fire("429", { model: "c" });
+	await settle();
+	assert.equal(s.gates.length, 1); // switches are serialized
+	await s.select(K); // the user picks something while our switch is in flight
+	s.gates.shift()!();
+	await first;
+	await settle();
+	assert.equal(s.gates.length, 1);
+	s.gates.shift()!();
+	await second;
+	const pins = () => s.appended.filter(a => a.data.manualRef).map(a => a.data.manualRef);
+	assert.deepEqual(pins(), ["kimi/k"]);
+	assert.equal(s.appended.filter(a => typeof a.data.originalRef === "string").length, 2);
+	await s.select(B); // after both: manual
+	assert.deepEqual(pins(), ["kimi/k", "openai/b"]);
+});
+
+test("widget shows reason, expiry and both undo commands while fallback holds; restore, manual select and shutdown clear it", async () => {
+	const s = session({ hasUI: true });
+	await s.boundary("session_start");
+	await s.fire("429");
+	const [key, lines] = s.widgets.at(-1)!;
+	assert.equal(key, "provider-fallback");
+	assert.match(lines![0], /on openai\/b instead of anthropic\/a — anthropic\/a limited until \d.* \(until .*\)/);
+	assert.equal(lines![1], "undo: /provider-restore anthropic · shell: provider-restore anthropic");
+	assert.equal(lines!.length, 2);
+	await s.restore("anthropic");
+	assert.equal(s.widgets.at(-1)![1], undefined);
+	await s.fire("429");
+	assert.ok(s.widgets.at(-1)![1]);
+	await s.select(K);
+	assert.equal(s.widgets.at(-1)![1], undefined);
+	await s.boundary("input");
+	await s.boundary("before_agent_start"); // new prompt: per-prompt cap resets
+	await s.fire("429", { model: "c" });
+	assert.ok(s.widgets.at(-1)![1]);
+	await s.boundary("session_shutdown");
+	assert.equal(s.widgets.at(-1)![1], undefined);
+});
+
+test("stale hint appears once the extension files on disk differ from the loaded copy", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pfa-"));
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = dir;
+	try {
+		mkdirSync(join(dir, "extensions"));
+		mkdirSync(join(dir, "lib"));
+		const files = ["extensions/provider-fallback.ts", "lib/provider-limit-marks.ts", "lib/provider-fallback-status.ts", "lib/provider-fallback-state.ts"].map(f => join(dir, f));
+		for (const file of files) writeFileSync(file, "v1");
+		const s = session({ hasUI: true });
+		await s.boundary("session_start");
+		await s.fire("429");
+		assert.equal(s.widgets.at(-1)![1]!.length, 2);
+		writeFileSync(files[0], "version two");
+		await s.boundary("before_agent_start");
+		assert.equal(s.widgets.at(-1)![1]!.length, 3);
+		assert.match(s.widgets.at(-1)![1]![2], /changed on disk since this session loaded it: \/reload when idle/);
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+	}
+});
+
+test("/provider-restore works while the session is busy; a CLI broadcast while busy applies at the next turn_start", async () => {
+	const s = session({ hasUI: true });
+	await s.fire("429");
+	s.ctx.isIdle = () => false;
+	await s.restore("anthropic");
+	assert.deepEqual(s.switched, [B, A]);
+	const receiver = session({ hasUI: true });
+	await receiver.fire("429");
+	receiver.ctx.isIdle = () => false;
+	broadcastRestore();
+	await receiver.boundary("turn_start");
+	assert.deepEqual(receiver.switched, [B, A]);
+});
+
+test("restoreManualPin returns the pin only from the latest persisted entry", () => {
+	const entry = (data: object) => ({ type: "custom", customType: ORIGINAL_ENTRY, data });
+	assert.equal(restoreManualPin([entry({ originalRef: null, manualRef: "anthropic/a" })]), "anthropic/a");
+	assert.equal(restoreManualPin([entry({ originalRef: null, manualRef: "anthropic/a" }), entry({ originalRef: "anthropic/a", destination: "openai/b" })]), undefined);
+	assert.equal(restoreManualPin([entry({ originalRef: null })]), undefined);
+	assert.equal(restoreManualPin([{ type: "message" }]), undefined);
+	assert.equal(restoreOriginal([entry({ originalRef: "anthropic/a", until: 5 })])?.until, 5);
 });

@@ -286,6 +286,6 @@ test("reactive turn_end limit: switches, persists destination, announces drift",
 	assert.equal(persisted?.data.originalRef, "anthropic/a");
 	assert.equal(persisted?.data.destination, "openai/b");
 	assert.equal(h.messages.length, 1);
-	assert.match(h.messages[0].content, /provider-fallback moved this session: anthropic limited until/);
+	assert.match(h.messages[0].content, /provider-fallback moved this session: anthropic\/a limited until/);
 	assert.match(h.statuses.at(-1) ?? "", /via provider-fallback/);
 });

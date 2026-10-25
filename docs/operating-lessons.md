@@ -61,6 +61,12 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Rule:** one command restores the original model, and one broadcast restores all main sessions.
 - **Enforced:** tool. `/provider-restore [provider]` clears the limit mark and restores this session; `/provider-restore --all` or the `provider-restore [provider] --all-sessions` command also tells every running session to restore at its next turn. A fresh real limit still wins. See `agent/provider-fallback.md`.
 
+### A stale model mark overrode a manual model choice
+- **Symptom:** after a Sonnet 429, the user selected Opus and the session was switched straight back to the fallback model; `/provider-restore` typed into a long-lived session was sent as chat text.
+- **Cause:** limit marks were keyed per provider, so one model's rate limit blocked every model of the provider, and a manual `/model` neither cleared the mark nor stopped the pre-emptive switch. The restore command was missing because that session had loaded the extension before the command existed.
+- **Rule:** a manual model selection wins over fallback; marks are scoped to the model unless the error is account-wide; a persistent widget shows why fallback holds a session and how to undo it; the `provider-restore` shell command is the reliable undo for sessions loaded before an update.
+- **Enforced:** tool (`provider-fallback` model-scoped marks, selection pin, locked shared state and status widget; specs in `provider-fallback.test.ts`, `provider-limit-marks.test.ts`, `tests/test_provider_restore.py`). See `agent/provider-fallback.md` (#54).
+
 ### Fallback switches forced constant compaction
 - **Symptom:** main sessions compacted far too often because fallback refused to switch above a fixed 150k-token context.
 - **Cause:** one fixed limit for every target model and session kind.

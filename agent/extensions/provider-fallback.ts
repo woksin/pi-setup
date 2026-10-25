@@ -32,7 +32,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { ORIGINAL_ENTRY, publishFallbackState, restoreOriginal, type OriginalEntryData } from "../lib/provider-fallback-state.ts";
+import { ORIGINAL_ENTRY, publishFallbackState, restoreManualPin, restoreOriginal, type OriginalEntryData } from "../lib/provider-fallback-state.ts";
+import { codeFingerprint, fallbackStatusLines } from "../lib/provider-fallback-status.ts";
+import {
+	blockingMark, clearForSelection, clearOnSuccess, clearProvider, limitScope, markKeyFor, merge, readMarks, updateMarks,
+	type Classify, type MarkEntry,
+} from "../lib/provider-limit-marks.ts";
 
 interface FallbackConfig {
 	enabled?: boolean;
@@ -60,16 +65,11 @@ interface FallbackConfig {
 	unavailablePatterns?: Record<string, string[]>;
 	/** How long an "unavailable" mark lasts (default 10). */
 	unavailableMinutes?: number;
+	/** provider id -> extra regex sources (case-insensitive) marking a limit error as account-wide (all models) instead of per model. */
+	accountWidePatterns?: Record<string, string[]>;
 }
 
-interface LimitEntry {
-	until: number;
-	since: number;
-	model?: string;
-	reason?: string;
-}
-type LimitState = Record<string, LimitEntry>;
-type StalledLimit = { provider: string; since: number; ctx: ExtensionContext };
+type StalledLimit = { provider: string; ref: string; since: number; ctx: ExtensionContext };
 
 const CUSTOM_TYPE = "provider-fallback";
 const MIN_LIMIT_MS = 60_000;
@@ -97,25 +97,11 @@ function loadConfig(): FallbackConfig | undefined {
 	return config;
 }
 
-function readState(now = Date.now()): LimitState {
-	const raw = readJson<LimitState>(statePath()) ?? {};
-	const live: LimitState = {};
-	for (const [provider, entry] of Object.entries(raw)) {
-		if (entry && typeof entry.until === "number" && entry.until > now) live[provider] = entry;
-	}
-	return live;
-}
+const classify: Classify = (provider, text) => limitScope(loadConfig() ?? {}, provider, text);
 
-/** Merge one limit mark into the shared state (expired marks are pruned), written atomically. */
-function markLimited(provider: string, entry: LimitEntry): void {
-	const state = readState();
-	const previous = state[provider];
-	state[provider] = previous && previous.until > entry.until ? { ...entry, until: previous.until } : entry;
-	const path = statePath();
-	mkdirSync(dirname(path), { recursive: true });
-	const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-	writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-	renameSync(tmp, path);
+/** Merge one limit mark (key = provider for account-wide, provider/id for a model) under the shared-state lock. */
+function markLimited(key: string, entry: MarkEntry): void {
+	updateMarks(statePath(), (raw) => merge(raw, key, entry, Date.now()));
 }
 
 function restorePath(): string {
@@ -131,9 +117,7 @@ function writeJson(path: string, value: object): void {
 
 /** Operator-requested restore; the signal never overrides a subsequent live limit mark. */
 function clearLimits(provider: string | undefined, broadcast: boolean): void {
-	const state = readState();
-	if (provider) delete state[provider];
-	writeJson(statePath(), provider ? state : {});
+	updateMarks(statePath(), (raw) => (provider ? clearProvider(raw, provider) : {}));
 	if (!broadcast) return;
 	const signals = readJson<Record<string, number>>(restorePath()) ?? {};
 	const epoch = Math.max(Date.now(), ...Object.values(signals).filter(Number.isFinite)) + 1;
@@ -141,12 +125,13 @@ function clearLimits(provider: string | undefined, broadcast: boolean): void {
 	writeJson(restorePath(), signals);
 }
 
-function limitedUntil(provider: string): number | undefined {
-	return readState()[provider]?.until;
+/** When the live mark blocking `ref` (its provider's account mark or its own model mark) expires. */
+function limitedUntil(ref: string): number | undefined {
+	return blockingMark(readMarks(statePath()), ref, Date.now(), classify)?.until;
 }
 
-function isLimited(provider: string): boolean {
-	return limitedUntil(provider) !== undefined;
+function isLimited(ref: string): boolean {
+	return limitedUntil(ref) !== undefined;
 }
 
 function matchesAny(patterns: string[] | undefined, errorMessage: string): boolean {
@@ -188,13 +173,13 @@ export function selectFallback(
 	config: FallbackConfig,
 	current: string,
 	origin: string | undefined,
-	isLimited: (provider: string) => boolean,
+	isLimited: (ref: string) => boolean,
 ): { target?: string; blocked: string[]; chain: boolean } {
 	const chain = (origin && config.chains?.[origin]) || config.chains?.[current];
 	const candidates = chain?.length ? chain.filter((ref) => ref !== current) : [equivalentOf(config, current)].filter((ref): ref is string => !!ref);
 	const blocked: string[] = [];
 	for (const ref of candidates) {
-		if (!isLimited(splitRef(ref).provider)) return { target: ref, blocked, chain: !!chain?.length };
+		if (!isLimited(ref)) return { target: ref, blocked, chain: !!chain?.length };
 		blocked.push(ref);
 	}
 	return { blocked, chain: !!chain?.length };
@@ -375,7 +360,19 @@ export default function (pi: ExtensionAPI) {
 	let pendingContinue = false;
 	/** The model this extension moved the session away from (cleared on a manual model change). */
 	let originalRef: string | undefined;
-	let selfSwitching = false;
+	/** The one fallback-initiated setModel in flight; its model_select is ours, any other `set`/`cycle` is the user's. */
+	let inFlight: { ref: string; seen: boolean } | undefined;
+	let switchChain: Promise<unknown> = Promise.resolve();
+	/** Model the user picked manually (pinned: never pre-empted away), and a counter bumped on every manual pick. */
+	let manualRef: string | undefined;
+	let selectionGen = 0;
+	/** Start time and selection generation of the request in flight (set at turn_start, consumed at turn_end). */
+	let request: { at: number; gen: number } | undefined;
+	let originalUntil: number | undefined;
+	let uiCtx: ExtensionContext | undefined;
+	const commandRegistered = typeof pi.registerCommand === "function";
+	const watchedFiles = () => ["extensions/provider-fallback.ts", "lib/provider-limit-marks.ts", "lib/provider-fallback-status.ts", "lib/provider-fallback-state.ts"].map((file) => join(getAgentDir(), file));
+	const loadedPrint = codeFingerprint(watchedFiles());
 	let originalReason: string | undefined;
 	/** The model fallback switched TO; a persisted original is only restorable while the session is still on it. */
 	let originalDestination: string | undefined;
@@ -385,13 +382,15 @@ export default function (pi: ExtensionAPI) {
 	let pendingOriginal: { ref: string; reason: string } | undefined;
 
 	/** Remember (and persist, main sessions only) the model we moved away from, so a reload can restore it. */
-	function rememberOriginal(ctx: ExtensionContext, ref: string, reason: string, destination: string): void {
+	function rememberOriginal(ctx: ExtensionContext, ref: string, reason: string, destination: string, until?: number): void {
 		originalRef = ref;
 		originalDestination = destination;
 		originalReason = reason;
+		originalUntil = until;
+		manualRef = undefined; // a reactive fallback moved the session off the pinned model
 		restoreNote = undefined;
 		publishState();
-		if (ctx.hasUI) pi.appendEntry<OriginalEntryData>(ORIGINAL_ENTRY, { originalRef: ref, destination, reason, at: Date.now() });
+		if (ctx.hasUI) pi.appendEntry<OriginalEntryData>(ORIGINAL_ENTRY, { originalRef: ref, destination, reason, until, at: Date.now() });
 	}
 
 	function forgetOriginal(ctx: ExtensionContext): void {
@@ -399,6 +398,7 @@ export default function (pi: ExtensionAPI) {
 		originalRef = undefined;
 		originalReason = undefined;
 		originalDestination = undefined;
+		originalUntil = undefined;
 		restoreNote = undefined;
 		publishState();
 		if (had && ctx.hasUI) pi.appendEntry<OriginalEntryData>(ORIGINAL_ENTRY, { originalRef: null, at: Date.now() });
@@ -407,19 +407,42 @@ export default function (pi: ExtensionAPI) {
 	/** Main sessions only: subagents share this process and must not overwrite the main session's state. */
 	let isMain = false;
 	function publishState(): void {
+		renderStatus();
 		if (!isMain) return;
 		publishFallbackState(
-			originalRef || pendingOriginal || selfSwitching
+			originalRef || pendingOriginal || inFlight
 				? {
 						originalRef: originalRef ?? pendingOriginal?.ref,
 						reason: originalRef ? originalReason : pendingOriginal?.reason,
 						at: Date.now(),
 						sessionId,
-						switching: selfSwitching,
+						switching: inFlight !== undefined,
 						restoreNote,
 					}
 				: undefined,
 		);
+	}
+
+	/** Persistent widget while fallback holds the session (footer statuses share one truncated line). Ctx may be stale after a reload. */
+	function renderStatus(): void {
+		try {
+			const ui = uiCtx?.ui;
+			if (!ui?.setWidget) return;
+			if (!originalRef) return ui.setWidget("provider-fallback", undefined);
+			const lines = fallbackStatusLines({
+				originalRef,
+				current: originalDestination,
+				reason: originalReason,
+				until: originalUntil,
+				provider: splitRef(originalRef).provider,
+				commandRegistered,
+				restoreNote,
+				stale: codeFingerprint(watchedFiles()) !== loadedPrint,
+			});
+			ui.setWidget("provider-fallback", lines, { placement: "belowEditor" });
+		} catch {
+			// stale context or no widget support
+		}
 	}
 	let lastLimitHeaders: { at: number; provider?: string; headers: Record<string, string> } | undefined;
 	let stalledLimit: StalledLimit | undefined;
@@ -445,7 +468,7 @@ export default function (pi: ExtensionAPI) {
 
 	function canResume(stalled: StalledLimit): boolean {
 		// Identity includes the episode's start time; fresh live marks always beat restore epochs.
-		return stalledLimit === stalled && stalled.ctx.isIdle() && !isLimited(stalled.provider);
+		return stalledLimit === stalled && stalled.ctx.isIdle() && !isLimited(stalled.ref);
 	}
 
 	async function resumeStalled(): Promise<void> {
@@ -467,13 +490,19 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	/** Switch to `ref`, keeping the current thinking level (pi clamps it to the target). */
-	async function switchTo(ctx: ExtensionContext, ref: string, pending?: { ref: string; reason: string }): Promise<string | undefined> {
+	/** Switch to `ref`, keeping the current thinking level. Our own switches run one at a time so each model_select can be matched to its switch. */
+	function switchTo(ctx: ExtensionContext, ref: string, pending?: { ref: string; reason: string }): Promise<string | undefined> {
+		const run = switchChain.then(() => performSwitch(ctx, ref, pending));
+		switchChain = run.catch(() => undefined);
+		return run;
+	}
+
+	async function performSwitch(ctx: ExtensionContext, ref: string, pending?: { ref: string; reason: string }): Promise<string | undefined> {
 		const { provider, id } = splitRef(ref);
 		const model = ctx.modelRegistry.find(provider, id);
 		if (!model) return `model ${ref} not found`;
 		const level = pi.getThinkingLevel();
-		selfSwitching = true;
+		inFlight = { ref, seen: false };
 		pendingOriginal = pending;
 		publishState();
 		try {
@@ -482,11 +511,31 @@ export default function (pi: ExtensionAPI) {
 		} catch (error) {
 			return error instanceof Error ? error.message : String(error);
 		} finally {
-			selfSwitching = false;
+			inFlight = undefined;
 			pendingOriginal = undefined;
 			publishState();
 		}
 		return undefined;
+	}
+
+	/** True (once) for the model_select our in-flight switch causes. */
+	function isOwnSelect(model: { provider: string; id: string }): boolean {
+		if (!inFlight || inFlight.seen || inFlight.ref !== refOf(model)) return false;
+		inFlight.seen = true;
+		return true;
+	}
+
+	/** The user picked `ref`: bump the generation, pin it and drop the marks that block it (main sessions only; subagents never touch shared marks). */
+	function adoptManualSelection(ref: string): void {
+		selectionGen++;
+		manualRef = ref;
+		try {
+			updateMarks(statePath(), (raw) => clearForSelection(raw, ref, classify));
+		} catch (error) {
+			console.error("provider-fallback: clearing limit marks failed:", error);
+		}
+		pi.appendEntry<OriginalEntryData>(ORIGINAL_ENTRY, { originalRef: null, manualRef: ref, at: Date.now() });
+		renderStatus();
 	}
 
 	function notify(ctx: ExtensionContext, text: string, type: "info" | "warning" | "error"): void {
@@ -532,7 +581,7 @@ export default function (pi: ExtensionAPI) {
 			publishState();
 		} else if (originalRef && originalRef !== current) {
 			const original = splitRef(originalRef);
-			if (limitedUntil(original.provider) === undefined) {
+			if (limitedUntil(originalRef) === undefined) {
 				const failure = await switchTo(ctx, originalRef);
 				if (!failure) {
 					notify(ctx, `provider-fallback: ${original.provider} ${restoreReason(requested)}; back on ${originalRef}.`, "info");
@@ -544,8 +593,9 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
+		if (manualRef && manualRef === current) return; // the user's own choice is never pre-empted
 		const currentProvider = splitRef(current).provider;
-		const until = limitedUntil(currentProvider);
+		const until = limitedUntil(current);
 		if (until === undefined) return;
 		const { target } = selectFallback(config, current, originalRef, isLimited);
 		if (!target) return; // no equivalent, or every candidate limited: nothing to gain
@@ -561,7 +611,7 @@ export default function (pi: ExtensionAPI) {
 			notify(ctx, `provider-fallback: ${currentProvider} is limited but switching to ${target} failed: ${failure}`, "warning");
 			return;
 		}
-		rememberOriginal(ctx, originalRef ?? current, reason, target);
+		rememberOriginal(ctx, originalRef ?? current, reason, target, until);
 		notify(ctx, `provider-fallback: ${currentProvider} limited (${formatUntil(until)} left); using ${target} instead of ${current} (${allowance}).`, "warning");
 	}
 
@@ -579,7 +629,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const parsed = restoreArgs(args);
 			if (!parsed) {
-				notify(ctx, "Usage: /provider-restore [provider] [--all]", "warning");
+				notify(ctx, "Usage: /provider-restore [provider] [--all]  (shell: provider-restore [provider] [--all-sessions])", "warning");
 				return;
 			}
 			const { provider, broadcast } = parsed;
@@ -590,7 +640,10 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("turn_start", async (_event, ctx) => { await checkRestore(ctx); });
+	pi.on("turn_start", async (_event, ctx) => {
+		request = { at: Date.now(), gen: selectionGen };
+		await checkRestore(ctx);
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		clearStall();
@@ -600,7 +653,10 @@ export default function (pi: ExtensionAPI) {
 		originalRef = undefined;
 		originalReason = undefined;
 		originalDestination = undefined;
+		originalUntil = undefined;
+		manualRef = undefined;
 		restoreNote = undefined;
+		uiCtx = ctx.hasUI ? ctx : undefined;
 		try {
 			sessionId = ctx.sessionManager.getSessionId();
 		} catch {
@@ -613,6 +669,9 @@ export default function (pi: ExtensionAPI) {
 				originalRef = restored?.originalRef;
 				originalReason = restored?.reason;
 				originalDestination = restored?.destination;
+				originalUntil = restored?.until;
+				const pin = restoreManualPin(ctx.sessionManager.getBranch());
+				manualRef = pin && pin === refOf(ctx.model) ? pin : undefined;
 			} catch {
 				// entries unavailable: behave as before
 			}
@@ -623,6 +682,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		clearStall();
+		originalRef = undefined;
+		renderStatus(); // clears the widget
+		uiCtx = undefined;
 		if (isMain) publishFallbackState(undefined);
 		isMain = false;
 	});
@@ -635,10 +697,13 @@ export default function (pi: ExtensionAPI) {
 		pendingContinue = false;
 		await checkRestore(ctx);
 		await preempt(ctx);
+		renderStatus(); // surfaces the stale-extension hint
 	});
 
 	pi.on("model_select", async (event, ctx) => {
-		if (!selfSwitching && event.source !== "restore") forgetOriginal(ctx);
+		if (event.source === "restore" || isOwnSelect(event.model)) return;
+		forgetOriginal(ctx);
+		if (ctx.hasUI) adoptManualSelection(refOf(event.model) ?? "");
 	});
 
 	pi.on("after_provider_response", async (event, ctx) => {
@@ -654,9 +719,21 @@ export default function (pi: ExtensionAPI) {
 		if (stalledLimit) recoveryWatch.schedule();
 	});
 
+	/** A successful request proves its model works: expire the marks that predate the request (never a fresher one). */
+	function recordSuccess(message: { provider: string; model: string; stopReason?: string }, startedAt: number | undefined): void {
+		if (startedAt === undefined || !["stop", "toolUse", "length"].includes(message.stopReason ?? "")) return;
+		const ref = `${message.provider}/${message.model}`;
+		const before = readMarks(statePath());
+		if (Object.keys(clearOnSuccess(before, ref, startedAt, classify)).length === Object.keys(before).length) return;
+		updateMarks(statePath(), (raw) => clearOnSuccess(raw, ref, startedAt, classify));
+	}
+
 	pi.on("turn_end", async (event, ctx) => {
 		clearStall();
+		const started = request;
+		request = undefined;
 		const message = event.message;
+		if (message.role === "assistant") recordSuccess(message, started?.at);
 		if (message.role !== "assistant" || message.stopReason !== "error" || !message.errorMessage) return;
 		const config = loadConfig();
 		const kind = config && classifyError(config, message.provider, message.errorMessage);
@@ -676,8 +753,14 @@ export default function (pi: ExtensionAPI) {
 				: (resetFromText(message.errorMessage, now) ?? headers ?? now + (config.defaultLimitMinutes ?? 60) * 60_000),
 		);
 		const from = `${message.provider}/${message.model}`;
-		markLimited(message.provider, { until, since: now, model: from, reason: message.errorMessage.slice(0, 200) });
-		recordStall({ ctx, provider: message.provider, since: now }, config, kind);
+		const scope = kind === "unavailable" ? "account" : limitScope(config, message.provider, message.errorMessage);
+		markLimited(markKeyFor(scope, message.provider, from), { until, since: now, model: from, reason: message.errorMessage.slice(0, 200), scope });
+		if (started && started.gen < selectionGen) {
+			// The request began before the user's latest model choice: record the mark, but do not move the chosen model.
+			notify(ctx, `provider-fallback: ${from} hit a limit in a request started before your model selection; not switching.`, "info");
+			return;
+		}
+		recordStall({ ctx, provider: message.provider, ref: from, since: now }, config, kind);
 
 		const note = (text: string, type: "info" | "warning" | "error") => {
 			notify(ctx, text, type);
@@ -688,7 +771,7 @@ export default function (pi: ExtensionAPI) {
 		const target = selection.target;
 		if (!target && !selection.blocked.length) return note(`provider-fallback: ${from} ${what} and has no configured equivalent.`, "error");
 		if (!target && selection.chain) {
-			const list = selection.blocked.map((ref) => `${ref} (${formatUntil(limitedUntil(splitRef(ref).provider) ?? now)})`).join(", ");
+			const list = selection.blocked.map((ref) => `${ref} (${formatUntil(limitedUntil(ref) ?? now)})`).join(", ");
 			return note(
 				`provider-fallback: ${from} ${what} (${formatUntil(until)}) and every fallback is limited — ${list}. Not switching; stop and wait or change plans.`,
 				"error",
@@ -696,7 +779,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!target) {
 			const targetProvider = splitRef(selection.blocked[0]).provider;
-			const targetUntil = limitedUntil(targetProvider) ?? now;
+			const targetUntil = limitedUntil(selection.blocked[0]) ?? now;
 			return note(
 				`provider-fallback: both providers are limited — ${message.provider} (${formatUntil(until)}) and ${targetProvider} (${formatUntil(targetUntil)}). Not switching; stop and wait or change plans.`,
 				"error",
@@ -707,14 +790,14 @@ export default function (pi: ExtensionAPI) {
 		}
 		const veto = contextVeto(ctx, config, target);
 		if (veto) return note(`provider-fallback: ${from} ${what} (${formatUntil(until)}); ${veto}.`, "error");
-		const reason = `${message.provider} ${kind === "limit" ? "limited" : "unavailable"} until ${untilClock(until)}`;
+		const reason = `${scope === "account" ? message.provider : from} ${kind === "limit" ? "limited" : "unavailable"} until ${untilClock(until)}`;
 		const allowance = contextLimitLabel(ctx, config, target);
 		const failure = await switchTo(ctx, target, { ref: originalRef ?? from, reason });
 		if (failure) return note(`provider-fallback: ${from} hit a limit; switching to ${target} failed: ${failure}`, "error");
 
 		fallbacksThisPrompt++;
 		pendingContinue = true;
-		rememberOriginal(ctx, originalRef ?? from, reason, target);
+		rememberOriginal(ctx, originalRef ?? from, reason, target, until);
 		const text = `provider-fallback: ${from} ${what} (${formatUntil(until)}); continuing on ${target} (${allowance}).`;
 		notify(ctx, text, "warning");
 		return {

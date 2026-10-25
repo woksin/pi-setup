@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Clear recovered provider limits and broadcast a restore request to running sessions.
-// Usage: provider-restore [provider] [--all-sessions]
-const { mkdirSync, readFileSync, renameSync, writeFileSync } = require("node:fs");
+// Clear recovered provider limits (the provider's account mark and every "<provider>/<model>" mark) and broadcast a restore request.
+// Usage: provider-restore [provider] [--all | --all-sessions]   (the signal is always written; both flags are accepted aliases)
+// Works for every running session, including ones that loaded provider-fallback before /provider-restore existed.
+const { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } = require("node:fs");
 const { dirname, join } = require("node:path");
 const { homedir } = require("node:os");
 
@@ -15,21 +16,41 @@ function write(path, data) {
 	writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
 	renameSync(tmp, path);
 }
+// Same lock protocol as agent/lib/provider-limit-marks.ts (withMarksLock): O_EXCL `<state>.lock`, stale after 10 s, ~2 s wait.
+function withLock(path, fn) {
+	const lock = `${path}.lock`;
+	mkdirSync(dirname(path), { recursive: true });
+	let held = false;
+	for (let attempt = 0; attempt < 400 && !held; attempt++) {
+		try { closeSync(openSync(lock, "wx")); held = true; }
+		catch (error) {
+			if (error.code !== "EEXIST") break;
+			try {
+				if (Date.now() - statSync(lock).mtimeMs > 10000) unlinkSync(lock);
+				else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+			} catch { /* released meanwhile */ }
+		}
+	}
+	try { return fn(); }
+	finally { if (held) { try { unlinkSync(lock); } catch { /* gone */ } } }
+}
 function main(args) {
 	const providers = args.filter(arg => !arg.startsWith("--"));
-	if (providers.length > 1 || args.some(arg => arg.startsWith("--") && arg !== "--all-sessions")) {
-		throw new Error("Usage: provider-restore [provider] [--all-sessions]");
+	if (providers.length > 1 || args.some(arg => arg.startsWith("--") && arg !== "--all-sessions" && arg !== "--all")) {
+		throw new Error("Usage: provider-restore [provider] [--all|--all-sessions]");
 	}
 	const path = process.env.PI_PROVIDER_FALLBACK_STATE || join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent"), ".provider-limits.json");
 	const provider = providers[0];
-	const state = read(path);
-	if (provider) delete state[provider];
-	write(path, provider ? state : {});
+	withLock(path, () => {
+		const state = read(path);
+		if (provider) for (const key of Object.keys(state)) if (key === provider || key.startsWith(`${provider}/`)) delete state[key];
+		write(path, provider ? state : {});
+	});
 	const signalPath = join(dirname(path), ".provider-restore.json");
 	const signals = read(signalPath);
 	signals[provider || "*"] = Math.max(Date.now(), ...Object.values(signals).filter(Number.isFinite)) + 1;
 	write(signalPath, signals);
-	console.log(`Cleared ${provider || "all provider"} limits; sessions restore at their next turn/agent boundary (unless limited again).`);
+	console.log(`Cleared ${provider ? `${provider} limits (all models)` : "all provider limits"}; sessions restore at their next turn/agent boundary (unless limited again).`);
 }
 try { main(process.argv.slice(2)); }
 catch (error) { console.error(`provider-restore: ${error.message}`); process.exitCode = 2; }

@@ -18,6 +18,8 @@ export interface FallbackPublished {
 	destination?: string;
 	/** True while provider-fallback itself is calling setModel (its model_select is not a user choice). */
 	switching?: boolean;
+	/** When the limit that moved the session expires. */
+	until?: number;
 	/** Why switching back is currently impossible (restore failed / disabled), if so. */
 	restoreNote?: string;
 }
@@ -53,6 +55,10 @@ export interface OriginalEntryData {
 	destination?: string;
 	reason?: string;
 	at?: number;
+	/** When the limit mark that caused the fallback expires (for the status widget). */
+	until?: number;
+	/** With `originalRef: null`: the model the user picked manually; fallback does not pre-empt it. */
+	manualRef?: string;
 }
 
 /** Latest persisted originalRef in the given branch entries (undefined when none or cleared). */
@@ -62,7 +68,18 @@ export function restoreOriginal(entries: readonly unknown[]): FallbackPublished 
 		if (entry?.type !== "custom" || entry.customType !== ORIGINAL_ENTRY) continue;
 		const ref = entry.data?.originalRef;
 		if (typeof ref !== "string" || !ref) return undefined;
-		return { originalRef: ref, destination: typeof entry.data?.destination === "string" ? entry.data.destination : undefined, reason: typeof entry.data?.reason === "string" ? entry.data.reason : undefined, at: entry.data?.at };
+		return { originalRef: ref, until: typeof entry.data?.until === "number" ? entry.data.until : undefined, destination: typeof entry.data?.destination === "string" ? entry.data.destination : undefined, reason: typeof entry.data?.reason === "string" ? entry.data.reason : undefined, at: entry.data?.at };
+	}
+	return undefined;
+}
+
+/** The manual-selection pin in the latest persisted entry (an entry with `originalRef: null` and a `manualRef`), else undefined. */
+export function restoreManualPin(entries: readonly unknown[]): string | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i] as { type?: string; customType?: string; data?: Partial<OriginalEntryData> } | undefined;
+		if (entry?.type !== "custom" || entry.customType !== ORIGINAL_ENTRY) continue;
+		const pin = entry.data?.manualRef;
+		return entry.data?.originalRef === null && typeof pin === "string" && pin ? pin : undefined;
 	}
 	return undefined;
 }
