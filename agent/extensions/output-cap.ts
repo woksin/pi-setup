@@ -32,7 +32,7 @@ export default function (pi: ExtensionAPI) {
 			if (!config.enabled) return undefined;
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (!scopeAllows(config.scope, roles.role(sessionId))) return undefined;
-			const content = capResult(event as any, config.maxChars, offloadDirs(ctx.cwd, sessionId));
+			const content = capResult(event as any, config.maxChars, offloadDirs(ctx.cwd, sessionId), undefined, { cwd: ctx.cwd });
 			return content ? { content } : undefined;
 		} catch (e) {
 			logError("output-cap", "tool_result", e);

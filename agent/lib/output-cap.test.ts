@@ -92,6 +92,15 @@ test("offloads and truncates masked full text, including env values in the elide
 	assert.ok(event.content[0].text.includes(value), "does not mutate the caller's parts");
 });
 
+test("diagnostics locate pre-cap joined hook input, not shortened preview or requested file", () => {
+	const full = lines(1000, i => i === 500 ? "password: 'Syn7hetic!one'" : `ok ${i}`);
+	const result = capResult({ toolName: "read", toolCallId: "diagnostics", input: { path: "file.ts", offset: 90 }, content: [...text("earlier extension header"), ...text(full)] }, 1000, [dir], SECRET_DEFAULTS, { cwd: "/project" })!;
+	assert.match(result[0].text, /connection-string at output line 502 before output-cap truncation \(provenance unknown\)/);
+	assert.match(result[0].text, /Read request: \/project\/file.ts \(requested path only; content provenance unknown\)/);
+	assert.ok(!result[0].text.includes("Syn7hetic!one"));
+	assert.ok(!readFileSync(join(dir, "diagnostics.txt"), "utf8").includes("Syn7hetic!one"));
+});
+
 test("an incomplete PEM is masked before any offload/truncation", () => {
 	const full = lines(1000) + "\n-----BEGIN RSA " + PK + "-----\nfixture-material";
 	const content = capResult({ toolName: "read", toolCallId: "fragment", input: {}, content: text(full) }, 12000, [dir])!;

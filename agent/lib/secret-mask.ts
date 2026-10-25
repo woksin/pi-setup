@@ -29,6 +29,8 @@ import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isGuardOff } from "./guards.ts";
+import { MAX_FINDINGS, resultNotice } from "./secret-mask-diagnostics.ts";
+import type { Finding } from "./secret-mask-diagnostics.ts";
 import { cratisVerdict, spawnRunner } from "./cratis-hooks-detect.ts";
 import { guardSelect, isOrchestrated, orchLog } from "./orchestration.ts";
 import { logError, processRoles, scopeAllows } from "./output-cap.ts";
@@ -139,7 +141,7 @@ export function blockReason(matched: Rule): string {
 }
 
 interface Candidate { start: number; end: number; kind: string }
-export interface Scan { text: string; kinds: string[]; count: number; skipped: boolean }
+export interface Scan { text: string; kinds: string[]; count: number; skipped: boolean; findings?: Finding[] }
 const TOKEN_PATTERNS: [string, RegExp][] = [
 	["anthropic-key", /\bsk-ant-[A-Za-z0-9_-]{20,}/g],
 	["openai-key", /\bsk-(?!ant-)(?:proj-|live-|test-)?[A-Za-z0-9_-]{24,}/g],
@@ -405,8 +407,9 @@ function kubeCandidates(text: string, out: Candidate[]): void {
 	}
 }
 
-export function scan(text: string, allowlist: readonly string[] = []): Scan {
+export function scan(text: string, allowlist: readonly string[] = [], options: { diagnostics?: boolean } = {}): Scan {
 	const result: Scan = { text, kinds: [], count: 0, skipped: false };
+	if (options.diagnostics) result.findings = [];
 	if (Buffer.byteLength(text, "utf8") > MAX_BYTES) return { ...result, skipped: true };
 	const out: Candidate[] = [];
 	const protectedSpans = [...text.matchAll(/\[REDACTED:[A-Za-z0-9-]{1,64}\]/g)].map(m => ({ start: m.index, end: m.index + m[0].length }));
@@ -431,6 +434,7 @@ export function scan(text: string, allowlist: readonly string[] = []): Scan {
 	// Prefer the whole containing value, then the more specific earlier recognizer on ties.
 	out.sort((a, b) => a.start - b.start || b.end - a.end);
 	let until = 0, renderedUntil = 0, protectedIndex = 0;
+	let lineCursor = 0, line = 1;
 	const chunks: string[] = [];
 	for (const candidate of out) {
 		while (protectedIndex < protectedSpans.length && protectedSpans[protectedIndex].end <= candidate.start) protectedIndex++;
@@ -440,6 +444,10 @@ export function scan(text: string, allowlist: readonly string[] = []): Scan {
 		until = candidate.end;
 		const value = text.slice(candidate.start, candidate.end);
 		if (allowed.some(pattern => pattern.test(value))) continue;
+		if (result.findings && result.findings.length < MAX_FINDINGS) {
+			for (; lineCursor < candidate.start; lineCursor++) if (text[lineCursor] === "\n") line++;
+			result.findings.push({ kind: candidate.kind, line });
+		}
 		const marker = `[REDACTED:${candidate.kind}]`;
 		// Existing markers inside a large section must not exempt its OTHER raw values.
 		const replacement = coarse ? value.split(/(\[REDACTED:[A-Za-z0-9-]{1,64}\])/g)
@@ -451,6 +459,12 @@ export function scan(text: string, allowlist: readonly string[] = []): Scan {
 	}
 	if (result.count) result.text = chunks.join("") + text.slice(renderedUntil);
 	return result;
+}
+
+// Paths never inherit configured value allowlists. Skipped checks fail closed.
+export function pathSensitive(text: string): boolean {
+	const result = scan(text);
+	return result.skipped || result.count > 0;
 }
 
 export function summary(count: number, kinds: readonly string[]): string {
@@ -495,8 +509,8 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 		const config = deps.config();
 		return config.enabled && scopeAllows(config.scope, deps.role(ctx.sessionManager.getSessionId())) ? config : undefined;
 	}
-	function inspect(text: string, config: Config): Scan {
-		const result = scan(text, config.allowlist);
+	function inspect(text: string, config: Config, diagnostics = false): Scan {
+		const result = scan(text, config.allowlist, { diagnostics });
 		if (result.skipped && !loggedOversize) { loggedOversize = true; deps.error("part-over-2MiB-skipped"); }
 		return result;
 	}
@@ -536,20 +550,30 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 				return undefined;
 			}
 		},
-		toolResult<T extends { type: string; text?: string }>(event: { toolName: string; content: T[] }, ctx: ExtensionContext) {
+		toolResult<T extends { type: string; text?: string }>(event: { toolName: string; content: T[]; input?: Record<string, unknown>; details?: unknown; isError?: boolean }, ctx: ExtensionContext) {
 			const config = active(ctx);
 			if (!config?.redactResults) return;
-			let count = 0;
+			let count = 0, lineBase = 0;
+			const findings: Finding[] = [];
 			const kinds = new Set<string>();
+			function addFindings(result: Scan, original: string): void {
+				for (const finding of result.findings ?? []) {
+					if (findings.length < MAX_FINDINGS) findings.push({ kind: finding.kind, line: lineBase + finding.line });
+				}
+				// Text parts are conceptually joined with one LF, ignoring non-text parts.
+				for (const char of original) if (char === "\n") lineBase++;
+				lineBase++;
+			}
 			const content = event.content.map(part => {
 				if (part.type !== "text" || typeof part.text !== "string") return part;
-				const result = inspect(part.text, config);
+				const result = inspect(part.text, config, true);
+				addFindings(result, part.text);
 				count += result.count;
 				for (const kind of result.kinds) kinds.add(kind);
 				return result.count ? { ...part, text: result.text } : part;
 			});
 			if (!count) return;
-			const notice = summary(count, [...kinds]);
+			const notice = resultNotice({ count, kinds: [...kinds], findings }, event, { sensitive: pathSensitive, fallback: summary, cwd: ctx.cwd });
 			const last = content.findLastIndex(part => part.type === "text");
 			content[last] = { ...content[last], text: content[last].text + "\n" + notice };
 			report(ctx, event.toolName, [...kinds], count, notice);

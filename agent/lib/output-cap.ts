@@ -9,7 +9,8 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { loadConfig as loadSecretConfig, scan, summary } from "./secret-mask.ts";
+import { loadConfig as loadSecretConfig, pathSensitive, scan, summary } from "./secret-mask.ts";
+import { resultNotice } from "./secret-mask-diagnostics.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Config and gating
@@ -242,18 +243,19 @@ export function capResult(
 	event: { toolName: string; toolCallId: string; input: Record<string, unknown>; content: Part[] },
 	maxChars: number,
 	dirs: string[],
-	secretConfig = loadSecretConfig(),
+	...options: [secretConfig?: ReturnType<typeof loadSecretConfig>, diagnosticContext?: { cwd: string }]
 ): TextPart[] | undefined {
+	const [secretConfig = loadSecretConfig(), diagnosticContext] = options;
 	const full = capText(event.toolName, event.content, maxChars);
 	if (full === undefined) return undefined;
 	// Never persist or truncate raw credentials first: a downstream handler cannot undo
 	// an offload or recover a secret cut across the head/tail boundary. Oversized scans
 	// fail closed here, rather than writing an unscanned >2 MiB payload to disk.
-	const masked = secretConfig.enabled ? scan(full, secretConfig.allowlist) : { text: full, skipped: false, count: 0, kinds: [] };
+	const masked = secretConfig.enabled ? scan(full, secretConfig.allowlist, { diagnostics: true }) : { text: full, skipped: false, count: 0, kinds: [] };
 	const text = masked.skipped ? "[secret-mask] Output omitted: exceeds 2 MiB scan limit; raw text was not offloaded." : masked.text;
 	const path = offload(text, dirs, event.toolCallId);
 	const keepFailures = looksLikeTestOrBuild(event.toolName, event.input ?? {}, text);
-	const notice = masked.count ? "\n" + summary(masked.count, masked.kinds) : "";
+	const notice = masked.count ? "\n" + resultNotice(masked, event, { sensitive: pathSensitive, fallback: summary, cwd: diagnosticContext?.cwd, beforeCap: true }) : "";
 	return [{ type: "text", text: truncate(text, maxChars, { keepFailures, path }) + notice }];
 }
 

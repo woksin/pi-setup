@@ -8,10 +8,47 @@ import { guardSelect } from "./orchestration.ts";
 import type { CratisRunner, ToolLister } from "./cratis-hooks-detect.ts";
 import { cratisRepo, loaded, notLoaded } from "./cratis-hooks-detect.test.ts";
 import extension from "../extensions/secret-mask.ts";
+import { renderDiagnostics } from "./secret-mask-diagnostics.ts";
 import {
 	commandRule, createHandlers, DEFAULTS, INPUT_NOTICE, loadConfig, logRedaction,
 	MAX_BYTES, parseConfig, RUN_ANYWAY, scan, summary, isSecretKey,
 } from "./secret-mask.ts";
+
+test("diagnostic scan keeps legacy shape and reports only selected start lines", () => {
+	assert.deepEqual(scan("plain"), { text: "plain", kinds: [], count: 0, skipped: false });
+	const source = "earlier extension header\r\n😀\npassword: 'Syn7hetic!one'\npassword: 'Syn8hetic!two'";
+	const result = scan(source, [], { diagnostics: true });
+	assert.deepEqual(result.findings, [{ kind: "connection-string", line: 3 }, { kind: "connection-string", line: 4 }]);
+	assert.deepEqual(Object.keys(result), ["text", "kinds", "count", "skipped", "findings"]);
+	assert.deepEqual(scan(source, ["^Syn"], { diagnostics: true }).findings, []);
+	assert.deepEqual(scan("x".repeat(MAX_BYTES + 1), [], { diagnostics: true }).findings, []);
+	const many = scan(Array.from({ length: 30 }, () => "password: 'Syn7hetic!one'").join("\n"), [], { diagnostics: true });
+	assert.equal(many.count, 30);
+	assert.equal(many.findings!.length, 20);
+});
+
+test("operational labels retain indistinguishable numeric and punctuation credentials", () => {
+	for (const key of ["secret-mask", "secret-sweep", "SECRET-MASK", "secret_mask", "secretSweep", "secret-mask-password"]) {
+		for (const value of ["123456789", "syn!thetic-value", "synthetic-service-label"]) {
+			assert.equal(scan(`${key}: '${value}'`).count, 1);
+		}
+	}
+});
+
+test("result diagnostics use hook-input joined lines and never infer file provenance", () => {
+	const f = fixture();
+	const image = { type: "image", text: undefined };
+	const content = [{ type: "text", text: "earlier extension header\n-----BEGIN PRIVATE KEY-----\nsynthetic-material\n-----END PRIVATE KEY-----" }, image,
+		{ type: "text", text: "password: 'Syn7hetic!one'" }];
+	const result = f.handlers.toolResult({ toolName: "read", input: { path: "file.ts", offset: 90, limit: 1 }, details: { synthetic: true }, isError: true, content }, f.ctx)!;
+	assert.equal(result.content[1], image);
+	const notice = result.content[2].text!;
+	assert.match(notice, /connection-string at output line 5/);
+	assert.match(notice, /Read request: \/tmp\/file.ts \(requested path only; content provenance unknown\)/);
+	assert.doesNotMatch(notice, /file.ts:|synthetic-material|Syn7hetic|line 90/);
+	assert.equal(f.records.length, 1);
+	assert.equal(f.handlers.toolResult({ toolName: "read", content: result.content }, f.ctx), undefined);
+});
 
 const PK = "PRIVATE" + " KEY";
 const MIX = "a1B2c3" + "d4e5f6";
@@ -304,7 +341,7 @@ for (const [input, value] of [
 	assert.equal(scan(expected).count, 0);
 	const f = fixture();
 	assert.equal(f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: input }] }, f.ctx)!.content[0].text,
-		expected + "\n" + summary(1, ["connection-string"]));
+		expected + "\n" + renderDiagnostics(1, [{ kind: "connection-string", line: input.slice(0, input.indexOf(value)).split("\n").length }]));
 });
 for (const input of [
 	"PASSWORD=changeme", "password = getPassword()", "secret = secretValue", "API_KEY=abc",
@@ -318,7 +355,7 @@ test("incomplete PEM in truncated JSON is hidden through end of text by scan and
 	assert.equal(scan(expected).count, 0);
 	const f = fixture();
 	assert.equal(f.handlers.toolResult({ toolName: "read", content: [{ type: "text", text: input }] }, f.ctx)!.content[0].text,
-		expected + "\n" + summary(1, ["private-key"]));
+		expected + "\n" + renderDiagnostics(1, [{ kind: "private-key", line: 1 }]));
 });
 test("over-limit PEM and JSON/YAML Secret data are hidden, never left as raw base64", () => {
 	const payload = "A".repeat(70000);
@@ -512,7 +549,7 @@ test("every tool and text part is scanned, with one notice/log per result and no
 		const result = f.handlers.toolResult(input, f.ctx)!;
 		assert.equal(result.content[1], image);
 		assert.equal(result.content[0].text, "[REDACTED:anthropic-key]");
-		assert.equal(result.content[2].text, `https://u:[REDACTED:url-credentials]@local/\n${summary(2, ["anthropic-key", "url-credentials"])}`);
+		assert.equal(result.content[2].text, `https://u:[REDACTED:url-credentials]@local/\n${renderDiagnostics(2, [{ kind: "anthropic-key", line: 1 }, { kind: "url-credentials", line: 2 }])}`);
 		assert.equal(f.notices.length, 1);
 		assert.deepEqual(f.records, [["test-session", toolName, ["anthropic-key", "url-credentials"], 2]]);
 		assert.equal(f.handlers.toolResult({ toolName, content: result.content }, f.ctx), undefined);
