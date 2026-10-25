@@ -156,12 +156,17 @@ export function isGuardOff(name: GuardName): boolean {
 	return guardStatus().find(entry => entry.name === name)!.off;
 }
 
-const LOCK_WAIT_MS = 1000;
+function persistenceLockWaitMs(): number {
+	const value = Number(process.env.PI_GUARDS_LOCK_WAIT_MS);
+	return Number.isSafeInteger(value) && value > 0 ? value : 1000;
+}
+
 const LOCK_STALE_MS = 3000;
 const LOCK_RETRY_MS = 20;
 const lockSleep = new Int32Array(new SharedArrayBuffer(4));
 
 function withPersistenceLock(file: string, write: () => void): void {
+	const LOCK_WAIT_MS = persistenceLockWaitMs();
 	const lock = `${file}.lock`;
 	const deadline = Date.now() + LOCK_WAIT_MS;
 	for (;;) {

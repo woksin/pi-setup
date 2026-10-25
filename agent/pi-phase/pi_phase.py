@@ -1633,26 +1633,40 @@ def dump_command_options(command):
     return options
 
 
-def warn_full_dumps(command):
+def warn_full_dumps(command, diagnose_hang=False):
     """Inspect the user's argv, before the no-dump VSTest preset is injected."""
     for segment in dump_command_segments(command):
-        warn_full_dump_options(dump_command_options(segment))
+        warn_full_dump_options(dump_command_options(segment), diagnose_hang)
 
 
-def warn_full_dump_options(options):
+def dump_option_advice(dump_type):
+    default = "omit dump options"
+    if dump_type == "--blame-hang-dump-type":
+        default = f"add {dump_type} none"
+    return f"{default}; use pi-phase run --diagnose-hang with mini only when diagnosing a hang"
+
+
+def warn_explicit_dump_type(value, dump_type, advice, diagnose_hang):
+    if value == "full":
+        dump_warning(f"{dump_type} full writes full dumps (GBs); {advice}")
+    elif value == "mini" and not diagnose_hang:
+        dump_warning(f"{dump_type} mini writes dumps without --diagnose-hang; {advice}")
+
+
+def warn_full_dump_options(options, diagnose_hang=False):
     reported = set()
-    for flag, dump_type, mini in (
-            ("--blame-hang", "--blame-hang-dump-type", "mini"),
-            ("--blame-crash", "--blame-crash-dump-type", "mini"),
-            ("--blame", "--blame-crash-dump-type", "mini"),
-            ("--hangdump", "--hangdump-type", "Mini"),
-            ("--crashdump", "--crashdump-type", "Mini")):
+    for flag, dump_type in (
+            ("--blame-hang", "--blame-hang-dump-type"),
+            ("--blame-crash", "--blame-crash-dump-type"),
+            ("--blame", "--blame-crash-dump-type"),
+            ("--hangdump", "--hangdump-type"),
+            ("--crashdump", "--crashdump-type")):
+        advice = dump_option_advice(dump_type)
         if flag in options and dump_type not in options:
-            dump_warning(f"{flag} without {dump_type} {mini} writes full dumps (GBs); "
-                         f"add {dump_type} {mini}")
-        elif options.get(dump_type, "").lower() == "full" and dump_type not in reported:
+            dump_warning(f"{flag} without {dump_type} writes full dumps (GBs); {advice}")
+        elif dump_type not in reported:
             # --blame and --blame-crash share a dump type; report it only once.
-            dump_warning(f"{dump_type} full writes full dumps (GBs); add {dump_type} {mini}")
+            warn_explicit_dump_type(options.get(dump_type, "").lower(), dump_type, advice, diagnose_hang)
             reported.add(dump_type)
 
 
@@ -2731,7 +2745,7 @@ def run(args, state, configuration, output=None):
     if not command:
         raise ValueError("missing command after --")
     if args.kind in ("test", "integration"):
-        warn_full_dumps(command)
+        warn_full_dumps(command, args.diagnose_hang)
     if args.vstest_hang_minutes is not None:
         if not args.vstest_confirmed or args.kind not in ("test", "integration"):
             raise ValueError("VSTest preset requires --vstest-confirmed and kind test/integration")
@@ -3093,6 +3107,7 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--commit", help="ci watcher commit identity")
     runner.add_argument("--vstest-hang-minutes", type=int, help="opt-in VSTest-only hang diagnostics without dumps")
     runner.add_argument("--vstest-confirmed", action="store_true", help="attest project uses VSTest, not MTP")
+    runner.add_argument("--diagnose-hang", action="store_true", help="declare active hang diagnosis; suppress mini-dump warnings only")
     runner.add_argument("--log", help="write producer stdout/stderr to FILE instead of streaming", metavar="FILE")
     runner.add_argument("--tail", type=int, help="print last N log lines on completion (default 60; requires --log)", metavar="N")
     runner.add_argument("command", nargs=argparse.REMAINDER)

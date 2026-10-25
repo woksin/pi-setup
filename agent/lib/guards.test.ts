@@ -18,6 +18,7 @@ let directory: string;
 let file: string;
 let previousFile: string | undefined;
 let previousEnv: string | undefined;
+let previousLockWait: string | undefined;
 let previousState: unknown;
 let warnings: string[];
 const ORCH_ENV = ["PI_ORCH_ID", "PI_ORCH_MODE_FILE", "PI_ORCH_REPO_ROOT", "PI_ORCH_MESSAGES_DIR", "PI_GUARD_DECISIONS_LOG"];
@@ -27,6 +28,8 @@ let context = "Test context: chronicle://user:<password>@localhost\n";
 beforeEach(() => {
 	previousFile = process.env.PI_GUARDS_FILE;
 	previousEnv = process.env.PI_GUARDS_OFF;
+	previousLockWait = process.env.PI_GUARDS_LOCK_WAIT_MS;
+	delete process.env.PI_GUARDS_LOCK_WAIT_MS;
 	previousState = (globalThis as any)[key];
 	directory = mkdtempSync(join(tmpdir(), "pi-guards-test-"));
 	file = join(directory, "guards.json");
@@ -62,6 +65,8 @@ afterEach(() => {
 	else process.env.PI_GUARDS_FILE = previousFile;
 	if (previousEnv === undefined) delete process.env.PI_GUARDS_OFF;
 	else process.env.PI_GUARDS_OFF = previousEnv;
+	if (previousLockWait === undefined) delete process.env.PI_GUARDS_LOCK_WAIT_MS;
+	else process.env.PI_GUARDS_LOCK_WAIT_MS = previousLockWait;
 	if (previousState === undefined) delete (globalThis as any)[key];
 	else (globalThis as any)[key] = previousState;
 	// Only this test's fresh, uniquely named directory is removed.
@@ -313,7 +318,7 @@ test("concurrent child-process named updates all survive", { timeout: 10000 }, a
 				process.disconnect();
 			});
 			process.send("ready");
-		`], { env: process.env, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+		`], { env: { ...process.env, PI_GUARDS_LOCK_WAIT_MS: "8000" }, stdio: ["ignore", "ignore", "pipe", "ipc"] });
 		let stderr = "";
 		child.stderr!.on("data", chunk => { stderr += chunk; });
 		const ready = new Promise<void>((resolve, reject) => {
@@ -346,6 +351,17 @@ test("an abandoned stale persistence lock is recovered", () => {
 	setGuards("mcp", true, { persist: true });
 	assert.deepEqual(offOnly(), stored(false, { mcp: true }));
 	assert.equal(existsSync(`${file}.lock`), false);
+});
+
+test("persistence lock wait uses a positive integer override or the default", () => {
+	let now = 0;
+	mock.method(Date, "now", () => now += 10000);
+	for (const value of ["", "0", "-1", "1.5", "invalid", "Infinity", "8000"]) {
+		process.env.PI_GUARDS_LOCK_WAIT_MS = value;
+		const expected = value === "8000" ? 8000 : 1000;
+		assert.throws(() => setGuards("mcp", true, { persist: true }),
+			new RegExp(`within ${expected}ms; try again`));
+	}
 });
 
 test("a live lock is not stolen even when old; /guards reports timeout without writing", async () => {

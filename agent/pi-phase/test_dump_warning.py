@@ -18,46 +18,54 @@ import pi_phase
 
 AI_WORK = Path(__file__).resolve().parents[2] / ".ai-work"
 DUMP_FLAGS = (
-    ("--blame-hang", "--blame-hang-dump-type", "mini"),
-    ("--blame-crash", "--blame-crash-dump-type", "mini"),
-    ("--blame", "--blame-crash-dump-type", "mini"),
-    ("--hangdump", "--hangdump-type", "Mini"),
-    ("--crashdump", "--crashdump-type", "Mini"),
+    ("--blame-hang", "--blame-hang-dump-type", "add --blame-hang-dump-type none"),
+    ("--blame-crash", "--blame-crash-dump-type", "omit dump options"),
+    ("--blame", "--blame-crash-dump-type", "omit dump options"),
+    ("--hangdump", "--hangdump-type", "omit dump options"),
+    ("--crashdump", "--crashdump-type", "omit dump options"),
 )
 
 
 class DumpFlagTests(unittest.TestCase):
-    def warnings(self, command):
+    def warnings(self, command, diagnose_hang=False):
         output = io.StringIO()
         with redirect_stdout(output):
-            pi_phase.warn_full_dumps(command)
+            pi_phase.warn_full_dumps(command, diagnose_hang)
         return output.getvalue()
 
     def test_missing_type_warns_without_changing_command(self):
-        for flag, dump_type, mini in DUMP_FLAGS:
-            with self.subTest(flag=flag):
+        for (flag, dump_type, advice), diagnose in product(DUMP_FLAGS, (False, True)):
+            with self.subTest(flag=flag, diagnose=diagnose):
                 command = ["dotnet", "test", flag]
                 original = command[:]
-                self.assertEqual(self.warnings(command),
-                                 f"pi-phase: warning: {flag} without {dump_type} {mini} writes "
-                                 f"full dumps (GBs); add {dump_type} {mini}\n")
+                output = self.warnings(command, diagnose)
+                self.assertIn(f"{flag} without {dump_type} writes full dumps (GBs); {advice}", output)
+                self.assertIn("--diagnose-hang", output)
                 self.assertEqual(command, original)
 
     def test_explicit_full_is_case_insensitive_and_accepts_equals(self):
-        for flag, dump_type, mini in DUMP_FLAGS:
-            for value in ("full", "Full", "FULL"):
-                for suffix in ([dump_type, value], [f"{dump_type}={value}"]):
-                    with self.subTest(flag=flag, suffix=suffix):
-                        output = self.warnings(["dotnet", "test", flag, *suffix])
-                        self.assertEqual(output.count("pi-phase: warning:"), 1)
-                        self.assertIn(f"add {dump_type} {mini}", output)
+        cases = product(DUMP_FLAGS, ("full", "Full", "FULL"), (False, True))
+        for (flag, dump_type, advice), value, diagnose in cases:
+            for suffix in ([dump_type, value], [f"{dump_type}={value}"]):
+                with self.subTest(flag=flag, suffix=suffix, diagnose=diagnose):
+                    output = self.warnings(["dotnet", "test", flag, *suffix], diagnose)
+                    self.assertEqual(output.count("pi-phase: warning:"), 1)
+                    self.assertIn(advice, output)
 
-    def test_mini_and_none_do_not_warn(self):
-        for flag, dump_type, _ in DUMP_FLAGS:
-            for value in ("mini", "Mini", "none", "None"):
-                for suffix in ([dump_type, value], [f"{dump_type}={value}"]):
-                    with self.subTest(flag=flag, suffix=suffix):
-                        self.assertEqual(self.warnings(["dotnet", "test", flag, *suffix]), "")
+    def test_mini_requires_diagnosis_but_none_is_silent(self):
+        cases = product(DUMP_FLAGS, ("mini", "Mini", "none", "None"), (False, True))
+        for (flag, dump_type, _), value, diagnose in cases:
+            for suffix in ([dump_type, value], [f"{dump_type}={value}"]):
+                with self.subTest(flag=flag, suffix=suffix, diagnose=diagnose):
+                    output = self.warnings(["dotnet", "test", flag, *suffix], diagnose)
+                    self.assertEqual(bool(output), value.lower() == "mini" and not diagnose)
+
+    def test_mini_type_alone_warns_once_and_suggests_no_dump_or_diagnosis(self):
+        output = self.warnings(["dotnet", "test", "--blame-crash-dump-type", "Mini"])
+        self.assertEqual(output.count("pi-phase: warning:"), 1)
+        self.assertIn("--diagnose-hang", output)
+        output = self.warnings(["dotnet", "test", "--blame-hang-dump-type", "mini"])
+        self.assertIn("--blame-hang-dump-type none", output)
 
     def test_full_type_alone_warns_once_for_shared_crash_type(self):
         output = self.warnings(["dotnet", "test", "--blame-crash-dump-type", "full"])
@@ -65,7 +73,7 @@ class DumpFlagTests(unittest.TestCase):
 
     def test_unrelated_and_similar_flags_do_not_warn(self):
         self.assertEqual(self.warnings(["dotnet", "test", "--blame-hang-timeout", "5m"]), "")
-        self.assertEqual(self.warnings(["dotnet", "test", "--hangdump-type", "Mini"]), "")
+        self.assertEqual(self.warnings(["dotnet", "test", "--hangdump-type", "Mini"], True), "")
 
     def test_simple_shell_wrapper_is_inspected_without_execution(self):
         self.assertIn("--hangdump without", self.warnings(["sh", "-c", "dotnet test --hangdump"]))
@@ -81,12 +89,13 @@ class DumpFlagTests(unittest.TestCase):
                     execute.assert_not_called()
                     self.assertEqual(command, original)
 
-    def test_shell_chain_mini_and_none_are_exempt(self):
-        for flag, dump_type, _ in DUMP_FLAGS:
-            for value in ("mini", "Mini", "none", "None"):
-                with self.subTest(flag=flag, value=value):
-                    script = f"cd tests && dotnet test {flag} {dump_type}={value}; echo done"
-                    self.assertEqual(self.warnings(["bash", "-c", script]), "")
+    def test_shell_chain_mini_requires_diagnosis_but_none_is_exempt(self):
+        cases = product(DUMP_FLAGS, ("mini", "Mini", "none", "None"), (False, True))
+        for (flag, dump_type, _), value, diagnose in cases:
+            with self.subTest(flag=flag, value=value, diagnose=diagnose):
+                script = f"cd tests && dotnet test {flag} {dump_type}={value}; echo done"
+                output = self.warnings(["bash", "-c", script], diagnose)
+                self.assertEqual(bool(output), value.lower() == "mini" and not diagnose)
 
     def test_dump_types_do_not_leak_between_shell_segments(self):
         cases = product(("&&", "||", ";", "|", "&", "\n"), DUMP_FLAGS, ("mini", "none", "full"))
@@ -105,7 +114,8 @@ class DumpFlagTests(unittest.TestCase):
     def test_quoted_escaped_and_commented_separators_are_not_boundaries(self):
         for literal in ("'&&'", '";"', r"\&\&"):
             script = f"dotnet test --hangdump --filter {literal} --hangdump-type Mini"
-            self.assertEqual(self.warnings(["sh", "-c", script]), "")
+            self.assertEqual(self.warnings(["sh", "-c", script], True), "")
+            self.assertEqual(self.warnings(["sh", "-c", script]).count("pi-phase: warning:"), 1)
         self.assertEqual(self.warnings(["sh", "-c", "echo ok # ; --hangdump\necho done"]), "")
 
     def test_shell_continuations_preserve_dump_flags_and_chains(self):
@@ -118,13 +128,13 @@ class DumpFlagTests(unittest.TestCase):
                     script += f" && dotnet test --hangdump-type {continuation} Mini"
                     self.assertIn(f"{flag} without", self.warnings(["sh", "-c", script]))
 
-    def test_shell_continued_mini_and_none_are_exempt(self):
+    def test_shell_continued_mini_and_none_are_exempt_when_diagnosing(self):
         continuation = "\\\n"
         for (flag, dump_type, _), value in product(DUMP_FLAGS, ("mini", "none")):
             for prefix in ("", "cd tests && "):
                 with self.subTest(flag=flag, value=value, prefix=prefix):
                     script = f"{prefix}dotnet test {flag} {continuation} {dump_type} {continuation} {value}"
-                    self.assertEqual(self.warnings(["sh", "-c", script]), "")
+                    self.assertEqual(self.warnings(["sh", "-c", script], True), "")
 
     def test_shell_continuations_respect_quote_context(self):
         continuation = "\\\n"
@@ -306,6 +316,14 @@ class DumpPhaseTests(DumpWorkspace):
                     self.assertLess(output.index("finished kind="), output.index("leftover.dmp"))
                     self.assertEqual(command, original)
 
+    def test_diagnose_hang_flag_silences_mini_but_not_full(self):
+        for value, diagnose in product(("mini", "full"), (False, True)):
+            with self.subTest(value=value, diagnose=diagnose):
+                command = [sys.executable, "-c", "pass", "--blame-hang-dump-type", value]
+                result, output = self.phase("test", command, ["--diagnose-hang"] if diagnose else [])
+                self.assertEqual(result, 0)
+                self.assertEqual("pi-phase: warning:" in output, value == "full" or not diagnose)
+
     def test_build_does_not_run_either_check(self):
         with patch.object(pi_phase, "warn_full_dumps") as before, \
                 patch.object(pi_phase, "warn_large_dumps") as after:
@@ -323,9 +341,9 @@ class DumpPhaseTests(DumpWorkspace):
         inspected = []
         original_warning = pi_phase.warn_full_dumps
 
-        def inspect(command):
+        def inspect(command, diagnose_hang=False):
             inspected.append(command[:])
-            original_warning(command)
+            original_warning(command, diagnose_hang)
 
         with patch.object(pi_phase, "warn_full_dumps", side_effect=inspect):
             result, output = self.phase("test", [str(executable), "test"], extra)
@@ -335,7 +353,8 @@ class DumpPhaseTests(DumpWorkspace):
         self.assertEqual(inspected, [[str(executable), "test"]])
         result, output = self.phase("test", [str(executable), "test", "--blame-hang"], extra)
         self.assertEqual(result, 7)
-        self.assertIn("--blame-hang without --blame-hang-dump-type mini", output)
+        self.assertIn("--blame-hang without --blame-hang-dump-type writes full dumps", output)
+        self.assertIn("--blame-hang-dump-type none", output)
 
 
 if __name__ == "__main__":
