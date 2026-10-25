@@ -1633,10 +1633,41 @@ def dump_command_options(command):
     return options
 
 
-def warn_full_dumps(command, diagnose_hang=False):
-    """Inspect the user's argv, before the no-dump VSTest preset is injected."""
+def hang_dump_defaults(command, diagnose_hang=False):
+    """Only append options to direct argv; shell strings remain warning-only."""
+    if diagnose_hang:
+        return {}
+    inner = unwrap_command(command, stop_at_shell=True)
+    if not inner:
+        return {}
+    if Path(inner[0]).name in ("sh", "bash", "zsh", "dash", "ksh", "fish"):
+        return {}
+    options = dump_command_options(inner)
+    defaults = {}
+    for flags, dump_type, value in (
+            (("--blame-hang", "--blame-hang-timeout"), "--blame-hang-dump-type", "none"),
+            (("--hangdump",), "--hangdump-type", "Mini")):
+        if any(flag in options for flag in flags) and dump_type not in options:
+            defaults[dump_type] = value
+    return defaults
+
+
+def prepare_dump_command(command, diagnose_hang=False):
+    defaults = hang_dump_defaults(command, diagnose_hang)
+    warn_full_dumps(command, diagnose_hang, ignored_types=defaults)
+    if not defaults:
+        return command
+    injected = [argument for option in defaults.items() for argument in option]
+    print(f"pi-phase: injected {' '.join(injected)} "
+          "(no dump type given; pass --diagnose-hang or an explicit type to keep a dump)",
+          file=sys.stderr, flush=True)
+    return [*command, *injected]
+
+
+def warn_full_dumps(command, diagnose_hang=False, ignored_types=()):
+    """Inspect argv before the no-dump preset, ignoring types fixed by injection."""
     for segment in dump_command_segments(command):
-        warn_full_dump_options(dump_command_options(segment), diagnose_hang)
+        warn_full_dump_options(dump_command_options(segment), diagnose_hang, ignored_types)
 
 
 def dump_option_advice(dump_type):
@@ -1653,7 +1684,7 @@ def warn_explicit_dump_type(value, dump_type, advice, diagnose_hang):
         dump_warning(f"{dump_type} mini writes dumps without --diagnose-hang; {advice}")
 
 
-def warn_full_dump_options(options, diagnose_hang=False):
+def warn_full_dump_options(options, diagnose_hang=False, ignored_types=()):
     reported = set()
     for flag, dump_type in (
             ("--blame-hang", "--blame-hang-dump-type"),
@@ -1661,6 +1692,8 @@ def warn_full_dump_options(options, diagnose_hang=False):
             ("--blame", "--blame-crash-dump-type"),
             ("--hangdump", "--hangdump-type"),
             ("--crashdump", "--crashdump-type")):
+        if dump_type in ignored_types:
+            continue
         advice = dump_option_advice(dump_type)
         if flag in options and dump_type not in options:
             dump_warning(f"{flag} without {dump_type} writes full dumps (GBs); {advice}")
@@ -2744,8 +2777,11 @@ def run(args, state, configuration, output=None):
         command = command[1:]
     if not command:
         raise ValueError("missing command after --")
+    # Fingerprints/identity retain the original argv for stable history (#32),
+    # while the launcher and argvHash below describe the executed command.
+    original_command = command[:]
     if args.kind in ("test", "integration"):
-        warn_full_dumps(command, args.diagnose_hang)
+        command = prepare_dump_command(command, args.diagnose_hang)
     if args.vstest_hang_minutes is not None:
         if not args.vstest_confirmed or args.kind not in ("test", "integration"):
             raise ValueError("VSTest preset requires --vstest-confirmed and kind test/integration")
@@ -2764,6 +2800,8 @@ def run(args, state, configuration, output=None):
         raise ValueError("--vstest-confirmed requires --vstest-hang-minutes")
 
     ledger = getattr(args, "ledger", None)
+    if ledger:
+        ledger.record["argvHash"] = hashlib.sha256(os.fsencode("\0".join(command))).hexdigest()
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     ci_key = (args.repo, args.pr, args.commit)
     long_queue_hint = False
@@ -2788,13 +2826,13 @@ def run(args, state, configuration, output=None):
     producer_exit = [None]
     operation = "prepare"
     primary = None
-    fingerprint = test_fingerprint(os.getcwd(), command)
+    fingerprint = test_fingerprint(os.getcwd(), original_command)
     admission_args = argparse.Namespace(**vars(args))
     try:
         config_notes = set()
         settings = config(configuration, notes=config_notes)
         options = settings.options
-        identity = work_identity(os.getcwd(), command, args.kind)
+        identity = work_identity(os.getcwd(), original_command, args.kind)
         prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity)
         if ledger:
             ledger.prepare_snapshot()

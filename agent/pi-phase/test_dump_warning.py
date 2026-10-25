@@ -1,5 +1,6 @@
 """Advisory dump checks, using sparse files and synthetic phases only."""
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+import hashlib
 import io
 from itertools import product
 import json
@@ -156,6 +157,90 @@ class DumpFlagTests(unittest.TestCase):
             pi_phase.warn_full_dumps(["dotnet", "test", "--hangdump"])
 
 
+class DumpInjectionTests(unittest.TestCase):
+    def prepare(self, command, diagnose_hang=False):
+        output, errors = io.StringIO(), io.StringIO()
+        original = command[:]
+        with redirect_stdout(output), redirect_stderr(errors):
+            prepared = pi_phase.prepare_dump_command(command, diagnose_hang)
+        self.assertEqual(command, original)
+        return prepared, output.getvalue(), errors.getvalue()
+
+    def test_vstest_missing_type_injects_none_with_one_stderr_line(self):
+        for suffix in (["--blame-hang"], ["--blame-hang-timeout", "5m"], ["--blame-hang-timeout=5m"]):
+            with self.subTest(suffix=suffix):
+                command = ["dotnet", "test", *suffix]
+                prepared, warnings, errors = self.prepare(command)
+                self.assertEqual(prepared, command + ["--blame-hang-dump-type", "none"])
+                self.assertEqual(warnings, "")
+                self.assertEqual(errors, "pi-phase: injected --blame-hang-dump-type none "
+                                 "(no dump type given; pass --diagnose-hang or an explicit type to keep a dump)\n")
+
+    def test_explicit_types_are_never_changed(self):
+        for flag, dump_type in (("--blame-hang", "--blame-hang-dump-type"), ("--hangdump", "--hangdump-type")):
+            for value in ("mini", "Mini", "full", "none", "custom"):
+                for suffix in ([dump_type, value], [f"{dump_type}={value}"]):
+                    with self.subTest(flag=flag, suffix=suffix):
+                        command = ["dotnet", "test", flag, *suffix]
+                        prepared, warnings, errors = self.prepare(command)
+                        self.assertEqual(prepared, command)
+                        self.assertEqual(bool(warnings), value.lower() in ("mini", "full"))
+                        self.assertEqual(errors, "")
+
+    def test_diagnosis_disables_injection_but_keeps_full_and_missing_type_warnings(self):
+        for flag, dump_type in (("--blame-hang", "--blame-hang-dump-type"), ("--hangdump", "--hangdump-type")):
+            for suffix in ([], [dump_type, "full"], [dump_type, "Mini"]):
+                with self.subTest(flag=flag, suffix=suffix):
+                    command = ["dotnet", "test", flag, *suffix]
+                    prepared, warnings, errors = self.prepare(command, True)
+                    self.assertEqual(prepared, command)
+                    self.assertEqual(bool(warnings), suffix != [dump_type, "Mini"])
+                    self.assertEqual(errors, "")
+
+    def test_mtp_missing_type_injects_smallest_dump_without_double_warning(self):
+        command = ["dotnet", "test", "--hangdump"]
+        prepared, warnings, errors = self.prepare(command)
+        self.assertEqual(prepared, command + ["--hangdump-type", "Mini"])
+        self.assertEqual(warnings, "")
+        self.assertEqual(len(errors.splitlines()), 1)
+        self.assertIn("injected --hangdump-type Mini", errors)
+
+    def test_shell_strings_are_warning_only_even_through_wrappers(self):
+        for shell in ("bash", "sh"):
+            for prefix in ([], ["env", "MODE=test", "nice", "-n", "5"]):
+                with self.subTest(shell=shell, prefix=prefix):
+                    command = [*prefix, shell, "-c", "cd tests && dotnet test --hangdump"]
+                    prepared, warnings, errors = self.prepare(command)
+                    self.assertEqual(prepared, command)
+                    self.assertIn("--hangdump without", warnings)
+                    self.assertEqual(errors, "")
+
+    def test_direct_env_and_nice_wrappers_allow_injection(self):
+        command = ["env", "MODE=test", "nice", "-n", "5", "dotnet", "test", "--blame-hang"]
+        prepared, warnings, errors = self.prepare(command)
+        self.assertEqual(prepared, command + ["--blame-hang-dump-type", "none"])
+        self.assertEqual(warnings, "")
+        self.assertEqual(len(errors.splitlines()), 1)
+
+    def test_injection_keeps_unrelated_explicit_full_warning(self):
+        command = ["dotnet", "test", "--hangdump", "--blame-crash-dump-type", "Full"]
+        _, warnings, errors = self.prepare(command)
+        self.assertEqual(warnings.count("pi-phase: warning:"), 1)
+        self.assertIn("--blame-crash-dump-type full", warnings)
+        self.assertEqual(len(errors.splitlines()), 1)
+
+    def test_both_runners_get_defaults_in_a_single_stderr_line(self):
+        command = ["dotnet", "test", "--blame-hang", "--hangdump"]
+        prepared, warnings, errors = self.prepare(command)
+        self.assertEqual(prepared, command + ["--blame-hang-dump-type", "none", "--hangdump-type", "Mini"])
+        self.assertEqual(warnings, "")
+        self.assertEqual(len(errors.splitlines()), 1)
+
+    def test_unrelated_command_is_unchanged(self):
+        command = ["dotnet", "test", "--filter", "SomeTest"]
+        self.assertEqual(self.prepare(command), (command, "", ""))
+
+
 class DumpWorkspace(unittest.TestCase):
     def setUp(self):
         AI_WORK.mkdir(exist_ok=True)
@@ -294,14 +379,14 @@ class DumpPhaseTests(DumpWorkspace):
         self.addCleanup(os.chdir, previous)
 
     def phase(self, kind, command, extra=()):
-        output = io.StringIO()
-        with patch.object(pi_phase, "PhaseLedger", return_value=None), redirect_stdout(output):
+        output, self.errors = io.StringIO(), io.StringIO()
+        with patch.object(pi_phase, "PhaseLedger", return_value=None), redirect_stdout(output), redirect_stderr(self.errors):
             result = pi_phase.main(["run", "--kind", kind, "--label", "dump case", "--timeout", "4",
                                     "--queue-timeout", "4", "--policy", "direct", *extra, "--", *command],
                                    state=self.root / "state", configuration=self.config)
         return result, output.getvalue()
 
-    def test_warnings_preserve_success_and_failure_for_test_and_integration(self):
+    def test_injection_preserves_success_failure_and_leftover_warnings(self):
         self.dump("leftover.dmp")
         for kind in ("test", "integration"):
             for code in (0, 7):
@@ -310,9 +395,10 @@ class DumpPhaseTests(DumpWorkspace):
                     original = command[:]
                     result, output = self.phase(kind, command)
                     self.assertEqual(result, code)
-                    self.assertIn("--hangdump without", output)
+                    self.assertNotIn("--hangdump without", output)
+                    self.assertIn("injected --hangdump-type Mini", self.errors.getvalue())
+                    self.assertEqual(len(self.errors.getvalue().splitlines()), 1)
                     self.assertIn("leftover.dmp (1.00 GiB)", output)
-                    self.assertLess(output.index("--hangdump without"), output.index("running kind="))
                     self.assertLess(output.index("finished kind="), output.index("leftover.dmp"))
                     self.assertEqual(command, original)
 
@@ -341,9 +427,9 @@ class DumpPhaseTests(DumpWorkspace):
         inspected = []
         original_warning = pi_phase.warn_full_dumps
 
-        def inspect(command, diagnose_hang=False):
+        def inspect(command, diagnose_hang=False, ignored_types=()):
             inspected.append(command[:])
-            original_warning(command, diagnose_hang)
+            original_warning(command, diagnose_hang, ignored_types)
 
         with patch.object(pi_phase, "warn_full_dumps", side_effect=inspect):
             result, output = self.phase("test", [str(executable), "test"], extra)
@@ -351,10 +437,33 @@ class DumpPhaseTests(DumpWorkspace):
         self.assertNotIn("pi-phase: warning:", output)
         self.assertIn("--blame-hang-dump-type\nnone", arguments.read_text())
         self.assertEqual(inspected, [[str(executable), "test"]])
+        self.assertEqual(self.errors.getvalue(), "")
         result, output = self.phase("test", [str(executable), "test", "--blame-hang"], extra)
         self.assertEqual(result, 7)
-        self.assertIn("--blame-hang without --blame-hang-dump-type writes full dumps", output)
-        self.assertIn("--blame-hang-dump-type none", output)
+        self.assertNotIn("pi-phase: warning:", output)
+        self.assertIn("injected --blame-hang-dump-type none", self.errors.getvalue())
+
+    def test_executed_argv_and_ledger_hash_include_injection_but_fingerprint_does_not(self):
+        for flag, dump_type, value in (("--blame-hang", "--blame-hang-dump-type", "none"),
+                                      ("--hangdump", "--hangdump-type", "Mini")):
+            with self.subTest(flag=flag):
+                arguments = self.root / "arguments.json"
+                script = f"import json, sys; open({str(arguments)!r}, 'w').write(json.dumps(sys.argv[1:]))"
+                command = [sys.executable, "-c", script, flag]
+                state = self.root / flag
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    result = pi_phase.main(["run", "--kind", "test", "--policy", "direct", "--rerun",
+                                            "--label", "argv", "--timeout", "4", "--", *command],
+                                           state=state, configuration=self.config)
+                self.assertEqual(result, 0)
+                self.assertEqual(json.loads(arguments.read_text()), [flag, dump_type, value])
+                records, skipped = pi_phase.read_ledger(state)
+                self.assertEqual(skipped, 0)
+                self.assertEqual(len(records), 1)
+                executed = command + [dump_type, value]
+                expected_hash = hashlib.sha256(os.fsencode("\0".join(executed))).hexdigest()
+                self.assertEqual(records[0]["argvHash"], expected_hash)
+                self.assertEqual(records[0]["fingerprint"], pi_phase.test_fingerprint(str(self.root), command))
 
 
 if __name__ == "__main__":
