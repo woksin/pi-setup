@@ -48,6 +48,15 @@ class ProviderRestoreTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('Usage', result.stderr)
 
+    def test_a_held_lock_times_out_without_deleting_and_exits_nonzero(self):
+        self.state.write_text(json.dumps({'kimi': MARK}))
+        Path(f'{self.state}.lock').write_text('')
+        result = run(self.state, 'kimi')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('nothing was cleared, retry', result.stderr)
+        self.assertIn('kimi', json.loads(self.state.read_text()))
+        self.assertFalse(self.signals.exists())
+
     def test_a_stale_lock_is_taken_over(self):
         lock = Path(f'{self.state}.lock')
         lock.write_text('')

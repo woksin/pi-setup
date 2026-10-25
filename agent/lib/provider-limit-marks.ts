@@ -6,7 +6,7 @@
  * Old files hold provider keys with a `model` and `reason`; they are reinterpreted on read, never rewritten.
  * `agent/bin/provider-restore` repeats the lock protocol of `withMarksLock` (it is a stdlib-only CLI): keep them in sync.
  */
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export type Scope = "account" | "model";
@@ -138,44 +138,97 @@ const LOCK_STALE_MS = 10_000;
 const LOCK_ATTEMPTS = 400;
 const LOCK_WAIT_MS = 5;
 
-/** Exclusive O_EXCL lock file (`<path>.lock`); a lock older than 10 s is taken over, and after ~2 s of waiting we proceed unlocked. */
-export function withMarksLock<T>(path: string, fn: () => T): T {
-	const lock = `${path}.lock`;
-	mkdirSync(dirname(path), { recursive: true });
-	let held = false;
-	for (let attempt = 0; attempt < LOCK_ATTEMPTS && !held; attempt++) {
+export class LockTimeoutError extends Error {
+	constructor(path: string) {
+		super(`could not lock ${path} (held by another process); retry`);
+	}
+}
+
+const sleep = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** Take over a stale lock by atomic rename (only one taker's rename succeeds); give it back if what we moved was not stale after all. */
+function takeOverStale(lock: string): void {
+	const aside = `${lock}.stale.${process.pid}.${Date.now()}`;
+	try {
+		renameSync(lock, aside);
+	} catch {
+		return; // another taker or the holder won
+	}
+	try {
+		if (Date.now() - statSync(aside).mtimeMs <= LOCK_STALE_MS) {
+			try {
+				linkSync(aside, lock); // hand the live owner's lock back unless someone re-took it meanwhile
+			} catch {
+				// a new lock exists: ours is dropped
+			}
+			unlinkSync(aside);
+			return;
+		}
+		unlinkSync(aside);
+	} catch {
+		// gone
+	}
+}
+
+/** Acquire `<path>.lock` (O_EXCL); false after ~2 s. */
+function acquire(lock: string): boolean {
+	for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
 		try {
 			closeSync(openSync(lock, "wx"));
-			held = true;
+			return true;
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") break;
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
 			try {
-				if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock);
-				else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_WAIT_MS);
+				if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) takeOverStale(lock);
+				else sleep(LOCK_WAIT_MS);
 			} catch {
-				// the holder released it between our calls: retry
+				// released between our calls: retry
 			}
 		}
 	}
+	return false;
+}
+
+/** Run `fn` holding the lock; throws LockTimeoutError if it cannot be taken. */
+export function withMarksLock<T>(path: string, fn: () => T): T {
+	const lock = `${path}.lock`;
+	mkdirSync(dirname(path), { recursive: true });
+	if (!acquire(lock)) throw new LockTimeoutError(path);
 	try {
 		return fn();
 	} finally {
-		if (held) {
-			try {
-				unlinkSync(lock);
-			} catch {
-				// already gone
-			}
+		try {
+			unlinkSync(lock);
+		} catch {
+			// already gone
 		}
 	}
 }
 
-/** The single read-modify-write path: lock, read, mutate, write atomically (skipped when nothing changed). */
-export function updateMarks(path: string, mutate: (raw: RawMarks) => RawMarks): RawMarks {
-	return withMarksLock(path, () => {
+function write(path: string, before: RawMarks, after: RawMarks): void {
+	if (JSON.stringify(after) !== JSON.stringify(before)) writeMarks(path, after);
+}
+
+/**
+ * The single read-modify-write path: lock, read, mutate, write atomically (skipped when nothing changed).
+ * A destructive mutation (clear, early expiry, restore) never runs unlocked: it throws LockTimeoutError.
+ * With `additive: true` (recording a new limit) a lock timeout falls back to a merge that re-reads, applies the
+ * mutation and re-adds anything it would have removed, so other sessions' marks survive.
+ */
+export function updateMarks(path: string, mutate: (raw: RawMarks) => RawMarks, options: { additive?: boolean } = {}): RawMarks {
+	try {
+		return withMarksLock(path, () => {
+			const before = readMarks(path);
+			const after = mutate(before);
+			write(path, before, after);
+			return after;
+		});
+	} catch (error) {
+		if (!(error instanceof LockTimeoutError) || !options.additive) throw error;
+		console.error(`provider-fallback: ${error.message}; recording the mark without the lock (merge only)`);
 		const before = readMarks(path);
-		const after = mutate(before);
-		if (JSON.stringify(after) !== JSON.stringify(before)) writeMarks(path, after);
+		const after = { ...before, ...mutate(before) };
+		write(path, before, after);
 		return after;
-	});
+	}
 }

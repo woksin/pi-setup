@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-	blockingMark, clearForSelection, clearOnSuccess, clearProvider, interpret, limitScope, liveMarks, markKeyFor, merge, readMarks, updateMarks, withMarksLock,
+	LockTimeoutError, blockingMark, clearForSelection, clearOnSuccess, clearProvider, interpret, limitScope, liveMarks, markKeyFor, merge, readMarks, updateMarks, withMarksLock,
 	type Classify, type RawMarks,
 } from "./provider-limit-marks.ts";
 
@@ -115,4 +115,35 @@ test("withMarksLock: serializes (a held lock is waited on or taken over once sta
 	writeFileSync(path, "not json");
 	assert.deepEqual(readMarks(path), {});
 	assert.equal(readFileSync(path, "utf8"), "not json");
+});
+
+test("lock timeout: a destructive update throws and deletes nothing; an additive one keeps other sessions' marks and is logged", () => {
+	const dir = mkdtempSync(join(tmpdir(), "plm-"));
+	const path = join(dir, "marks.json");
+	writeFileSync(path, JSON.stringify({ kimi: live(), "anthropic/a": live() }));
+	writeFileSync(`${path}.lock`, ""); // fresh lock held by someone else
+	assert.throws(() => updateMarks(path, (raw) => clearProvider(raw, "kimi")), LockTimeoutError);
+	assert.deepEqual(Object.keys(readMarks(path)).sort(), ["anthropic/a", "kimi"]);
+	const logged: unknown[] = [];
+	const original = console.error;
+	console.error = (...args: unknown[]) => void logged.push(args);
+	try {
+		updateMarks(path, (raw) => ({ ...clearProvider(raw, "kimi"), "openai/b": live() }), { additive: true });
+	} finally {
+		console.error = original;
+	}
+	assert.deepEqual(Object.keys(readMarks(path)).sort(), ["anthropic/a", "kimi", "openai/b"]);
+	assert.equal(logged.length, 1);
+});
+
+test("a stale lock is taken over exactly once by rename", () => {
+	const dir = mkdtempSync(join(tmpdir(), "plm-"));
+	const path = join(dir, "marks.json");
+	writeFileSync(`${path}.lock`, "");
+	const old = (Date.now() - 60_000) / 1000;
+	utimesSync(`${path}.lock`, old, old);
+	let ran = 0;
+	withMarksLock(path, () => { ran++; });
+	assert.equal(ran, 1);
+	assert.deepEqual(readdirSync(dir), []);
 });

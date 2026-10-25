@@ -2,7 +2,7 @@
 // Clear recovered provider limits (the provider's account mark and every "<provider>/<model>" mark) and broadcast a restore request.
 // Usage: provider-restore [provider] [--all | --all-sessions]   (the signal is always written; both flags are accepted aliases)
 // Works for every running session, including ones that loaded provider-fallback before /provider-restore existed.
-const { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } = require("node:fs");
+const { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } = require("node:fs");
 const { dirname, join } = require("node:path");
 const { homedir } = require("node:os");
 
@@ -16,7 +16,16 @@ function write(path, data) {
 	writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
 	renameSync(tmp, path);
 }
-// Same lock protocol as agent/lib/provider-limit-marks.ts (withMarksLock): O_EXCL `<state>.lock`, stale after 10 s, ~2 s wait.
+// Same lock protocol as agent/lib/provider-limit-marks.ts (withMarksLock): O_EXCL `<state>.lock`, stale after 10 s taken over by
+// atomic rename, ~2 s wait. On timeout nothing is deleted: the command fails and asks for a retry.
+function takeOverStale(lock) {
+	const aside = `${lock}.stale.${process.pid}.${Date.now()}`;
+	try { renameSync(lock, aside); } catch { return; }
+	try {
+		if (Date.now() - statSync(aside).mtimeMs <= 10000) { try { linkSync(aside, lock); } catch { /* re-taken */ } }
+		unlinkSync(aside);
+	} catch { /* gone */ }
+}
 function withLock(path, fn) {
 	const lock = `${path}.lock`;
 	mkdirSync(dirname(path), { recursive: true });
@@ -26,13 +35,14 @@ function withLock(path, fn) {
 		catch (error) {
 			if (error.code !== "EEXIST") break;
 			try {
-				if (Date.now() - statSync(lock).mtimeMs > 10000) unlinkSync(lock);
+				if (Date.now() - statSync(lock).mtimeMs > 10000) takeOverStale(lock);
 				else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
 			} catch { /* released meanwhile */ }
 		}
 	}
+	if (!held) throw new Error(`could not lock ${path} (held by another process); nothing was cleared, retry in a few seconds`);
 	try { return fn(); }
-	finally { if (held) { try { unlinkSync(lock); } catch { /* gone */ } } }
+	finally { try { unlinkSync(lock); } catch { /* gone */ } }
 }
 function main(args) {
 	const providers = args.filter(arg => !arg.startsWith("--"));

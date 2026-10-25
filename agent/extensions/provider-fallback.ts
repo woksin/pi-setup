@@ -101,7 +101,7 @@ const classify: Classify = (provider, text) => limitScope(loadConfig() ?? {}, pr
 
 /** Merge one limit mark (key = provider for account-wide, provider/id for a model) under the shared-state lock. */
 function markLimited(key: string, entry: MarkEntry): void {
-	updateMarks(statePath(), (raw) => merge(raw, key, entry, Date.now()));
+	updateMarks(statePath(), (raw) => merge(raw, key, entry, Date.now()), { additive: true });
 }
 
 function restorePath(): string {
@@ -366,6 +366,7 @@ export default function (pi: ExtensionAPI) {
 	/** Model the user picked manually (pinned: never pre-empted away), and a counter bumped on every manual pick. */
 	let manualRef: string | undefined;
 	let selectionGen = 0;
+	const SUPERSEDED = "superseded by your manual model selection";
 	/** Start time and selection generation of the request in flight (set at turn_start, consumed at turn_end). */
 	let request: { at: number; gen: number } | undefined;
 	let originalUntil: number | undefined;
@@ -492,21 +493,27 @@ export default function (pi: ExtensionAPI) {
 
 	/** Switch to `ref`, keeping the current thinking level. Our own switches run one at a time so each model_select can be matched to its switch. */
 	function switchTo(ctx: ExtensionContext, ref: string, pending?: { ref: string; reason: string }): Promise<string | undefined> {
-		const run = switchChain.then(() => performSwitch(ctx, ref, pending));
+		const gen = selectionGen; // a manual pick after this point cancels the switch
+		const run = switchChain.then(() => performSwitch(ctx, ref, gen, pending));
 		switchChain = run.catch(() => undefined);
 		return run;
 	}
 
-	async function performSwitch(ctx: ExtensionContext, ref: string, pending?: { ref: string; reason: string }): Promise<string | undefined> {
+	async function performSwitch(ctx: ExtensionContext, ref: string, gen: number, pending?: { ref: string; reason: string }): Promise<string | undefined> {
 		const { provider, id } = splitRef(ref);
 		const model = ctx.modelRegistry.find(provider, id);
 		if (!model) return `model ${ref} not found`;
+		if (gen !== selectionGen) return SUPERSEDED;
 		const level = pi.getThinkingLevel();
 		inFlight = { ref, seen: false };
 		pendingOriginal = pending;
 		publishState();
 		try {
 			if (!(await pi.setModel(model))) return `no credentials for ${provider}`;
+			if (gen !== selectionGen) {
+				await reselectManual(ctx);
+				return SUPERSEDED;
+			}
 			pi.setThinkingLevel(level);
 		} catch (error) {
 			return error instanceof Error ? error.message : String(error);
@@ -516,6 +523,19 @@ export default function (pi: ExtensionAPI) {
 			publishState();
 		}
 		return undefined;
+	}
+
+	/** The user picked a model while our switch was in flight: put their model back (our own select is not a new manual pick). */
+	async function reselectManual(ctx: ExtensionContext): Promise<void> {
+		const { provider, id } = splitRef(manualRef ?? "");
+		const model = manualRef ? ctx.modelRegistry.find(provider, id) : undefined;
+		if (!model || !manualRef) return;
+		inFlight = { ref: manualRef, seen: false };
+		try {
+			await pi.setModel(model);
+		} catch {
+			// the user's model stays as pi left it
+		}
 	}
 
 	/** True (once) for the model_select our in-flight switch causes. */
@@ -638,7 +658,12 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const { provider, broadcast } = parsed;
-			clearLimits(provider, broadcast);
+			try {
+				clearLimits(provider, broadcast);
+			} catch (error) {
+				notify(ctx, `provider-fallback: limits NOT cleared: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				return;
+			}
 			const affectsOriginal = !provider || splitRef(originalRef ?? "").provider === provider;
 			if (affectsOriginal) await preempt(ctx, true);
 			notify(ctx, `provider-fallback: cleared ${provider ?? "all provider"} limits${broadcast ? "; restore broadcast sent" : ""}.`, "info");
@@ -733,7 +758,11 @@ export default function (pi: ExtensionAPI) {
 		const ref = `${message.provider}/${message.model}`;
 		const before = readMarks(statePath());
 		if (Object.keys(clearOnSuccess(before, ref, startedAt, classify)).length === Object.keys(before).length) return;
-		updateMarks(statePath(), (raw) => clearOnSuccess(raw, ref, startedAt, classify));
+		try {
+			updateMarks(statePath(), (raw) => clearOnSuccess(raw, ref, startedAt, classify));
+		} catch (error) {
+			console.error("provider-fallback: early expiry skipped:", error instanceof Error ? error.message : error);
+		}
 	}
 
 	/** Absolute expiry of a new mark: unavailable uses the short mark, a limit the reset in the error text, then the response headers, then the default. */

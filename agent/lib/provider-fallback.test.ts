@@ -78,6 +78,7 @@ const A = { provider: "anthropic", id: "a" };
 const B = { provider: "openai", id: "b" };
 const C = { provider: "anthropic", id: "c" };
 const O = { provider: "anthropic", id: "o" };
+const K = { provider: "kimi", id: "k" };
 let stateFile: string;
 let saved: Record<string, string | undefined>;
 const shutdowns: (() => Promise<void>)[] = [];
@@ -115,7 +116,7 @@ function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; tar
 		ui: { notify: (t: string, ty: string) => notices.push([t, ty]), setWidget: (k: string, l: string[] | undefined) => widgets.push([k, l]) },
 		sessionManager: { getBranch: () => appended.map(a => ({ type: "custom", customType: a.type, data: a.data })), getSessionId: () => "sid" },
 		getContextUsage: () => (opts.tokens === undefined ? undefined : { tokens: opts.tokens }),
-		modelRegistry: { find: (p: string, id: string) => [A, C, opts.target ? { ...B, ...opts.target } : B].find(m => m.provider === p && m.id === id) },
+		modelRegistry: { find: (p: string, id: string) => [A, C, K, opts.target ? { ...B, ...opts.target } : B].find(m => m.provider === p && m.id === id) },
 	};
 	const pi: any = {
 		on: (name: string, h: any) => { handlers[name] = h; },
@@ -489,7 +490,6 @@ test("turn_end: per-prompt cap (default 2) stops further switches", async () => 
 
 // ---- #54: manual selection, model-scoped marks, widget, restore while busy ------------------------
 
-const K = { provider: "kimi", id: "k" };
 const hour = () => Date.now() + 3_600_000;
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 
@@ -586,25 +586,46 @@ test("limit error from a request started before the manual pick records the mark
 	assert.deepEqual(s.switched, [B]);
 });
 
-test("overlapping own switches are both fallback; a user select during or after them is manual", async () => {
+test("manual pick while our switch is in flight leaves the user's model selected and cancels queued switches; a fresh 429 still falls back", async () => {
 	const s = session({ hasUI: true, gate: true });
 	await s.boundary("session_start");
+	await s.boundary("turn_start");
 	const first = s.fire("429");
 	const second = s.fire("429", { model: "c" });
 	await settle();
 	assert.equal(s.gates.length, 1); // switches are serialized
-	await s.select(K); // the user picks something while our switch is in flight
+	await s.select(K); // the user picks while our switch is in flight
+	s.gates.shift()!();
+	await settle();
+	assert.equal(s.gates.length, 1); // the undo setModel (back to the user's model) is gated like any switch
 	s.gates.shift()!();
 	await first;
+	await second; // queued switch was cancelled, never reached setModel
+	assert.equal(s.gates.length, 0);
+	assert.equal(s.ctx.model, K);
+	assert.deepEqual(s.switched.map((m: any) => m.id), ["b", "k"]);
+	assert.deepEqual(s.appended.filter(a => a.data.manualRef).map(a => a.data.manualRef), ["kimi/k"]);
+	assert.equal(s.appended.filter(a => typeof a.data.originalRef === "string").length, 0);
+	// a request started after the pick (on the user's model) hitting a limit is fresh: it falls back
+	writeFileSync(stateFile, "{}");
+	const p = session({ hasUI: true, gate: true });
+	await p.boundary("session_start");
+	await p.boundary("turn_start");
+	const cancelled = p.fire("429");
 	await settle();
-	assert.equal(s.gates.length, 1);
-	s.gates.shift()!();
-	await second;
-	const pins = () => s.appended.filter(a => a.data.manualRef).map(a => a.data.manualRef);
-	assert.deepEqual(pins(), ["kimi/k"]);
-	assert.equal(s.appended.filter(a => typeof a.data.originalRef === "string").length, 2);
-	await s.select(B); // after both: manual
-	assert.deepEqual(pins(), ["kimi/k", "openai/b"]);
+	await p.select(A);
+	p.gates.shift()!();
+	await settle();
+	p.gates.shift()!();
+	await cancelled;
+	await p.boundary("before_agent_start"); // new prompt resets the per-prompt cap
+	await p.boundary("turn_start");
+	const fresh = p.fire("429");
+	await settle();
+	assert.equal(p.gates.length, 1);
+	p.gates.shift()!();
+	await fresh;
+	assert.equal(p.ctx.model, B);
 });
 
 test("widget shows reason, expiry and both undo commands while fallback holds; restore, manual select and shutdown clear it", async () => {
