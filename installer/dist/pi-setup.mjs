@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 5db2f64e832f06e23d9a704c9ec40ed6b50b232323340b57d87d697317519dd9
+// pi-setup-source-sha256: d6b91f754399af0febbc3f1338085cdc6cee008f4b7f58076e8565dcf981d1a1
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -4970,7 +4970,7 @@ var init_packages = __esm({
     init_settings();
     PINNED_PACKAGES = [
       { name: "@woksin/pi-jobs", version: "0.3.1" },
-      { name: "@woksin/pi-context-budget", version: "0.4.0" },
+      { name: "@woksin/pi-context-budget", version: "0.5.0" },
       { name: "@woksin/pi-recover", version: "0.1.1" },
       { name: "@woksin/pi-orch", version: "0.1.1" }
     ];

@@ -89,7 +89,7 @@ test("only-if-absent files are not overwritten and settings.json gets pi-questio
   assert.ok(!actions.some((a) => a.op === "install" && a.path.endsWith("/settings.json")));
   await apply(ctxFor(h), actions, opts);
   const settingsJson = JSON.parse(readFileSync(join(h, ".pi/agent/settings.json"), "utf8"));
-  assert.deepEqual(settingsJson, { keep: true, packages: ["a", "npm:@woksin/pi-jobs@0.3.1", "npm:@woksin/pi-context-budget@0.4.0", "npm:@woksin/pi-recover@0.1.1", "npm:@woksin/pi-orch@0.1.1", "./local-packages/pi-questions"] });
+  assert.deepEqual(settingsJson, { keep: true, packages: ["a", "npm:@woksin/pi-jobs@0.3.1", "npm:@woksin/pi-context-budget@0.5.0", "npm:@woksin/pi-recover@0.1.1", "npm:@woksin/pi-orch@0.1.1", "./local-packages/pi-questions"] });
   assert.equal(plan(h).filter((a) => a.op === "register").length, 0);
 });
 
