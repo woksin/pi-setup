@@ -200,6 +200,7 @@ SH_PHASE
   if [ "$name" = image-before-doctor ]; then
     mkdir -p "$T/guardian"
     cp "$G" "$T/guardian/docker-guardian"
+    cp "$(dirname "$G")/phase_status.py" "$T/guardian/phase_status.py"
     guardian="$T/guardian/docker-guardian"
     echo 0 > "$T/state/last-doctor"
     cat > "$T/guardian/dev-doctor" <<'SH_DOCTOR'

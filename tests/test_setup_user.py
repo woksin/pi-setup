@@ -172,6 +172,8 @@ class InstallTests(unittest.TestCase):
         pi = self.home / ".pi/agent"
         self.assertEqual(json.loads((pi / "user.json").read_text()),
                          {"githubUser": "einari", "reposRoot": "/tmp/x/repos"})
+        self.assertEqual((pi / "docker-guardian/local-tags.txt").read_bytes(),
+                         (REPO / "agent/docker-guardian/local-tags.example.txt").read_bytes())
         self.assertIn("--add-assignee einari", (pi / "AGENTS.md").read_text())
         self.assertIn("--add-assignee einari", (self.home / ".agents/skills/github-issue-hygiene/SKILL.md").read_text())
         author = (REPO / "LICENSE").read_text().splitlines()[2].split()[-1]
@@ -195,7 +197,9 @@ class InstallTests(unittest.TestCase):
         pi = self.clean_install()
         original = (pi / "AGENTS.md").read_bytes()
         (pi / "settings.json").write_text('{"keep": true}\n')
+        (pi / "docker-guardian/local-tags.txt").write_text('custom-*\n')
         self.install("--user", "another-user", "--repos-root", "/tmp/other repos")
+        self.assertEqual((pi / "docker-guardian/local-tags.txt").read_text(), 'custom-*\n')
         self.assertIn("--add-assignee another-user", (pi / "AGENTS.md").read_text())
         self.assertEqual(next(pi.glob(".pi-setup/backups/*/AGENTS.md")).read_bytes(), original)
         # The user removed the pinned npm packages after the first install; a reinstall respects that.

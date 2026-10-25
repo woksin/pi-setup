@@ -1,0 +1,16 @@
+# Local build tag globs. Patterns without a colon match only the tag (after the last colon).
+# Patterns containing a colon match the full repo:tag ref, including registry/namespace.
+# Copy to ~/.pi/agent/docker-guardian/local-tags.txt to replace the built-in defaults.
+# Only unused, unpinned images older than 24 hours qualify; floating aliases protect images.
+# Blank lines and lines beginning with # are ignored; an empty file disables local tag matching.
+*-local
+stage-train-*
+*-train-*
+ci
+# Lane repositories (any tag, still subject to floating-tag protection).
+*-cand:*
+*-main:*
+# Issue tags: 3-5 digits followed by a hyphen and a lowercase word (not semver).
+*:[0-9][0-9][0-9]-[a-z]*
+*:[0-9][0-9][0-9][0-9]-[a-z]*
+*:[0-9][0-9][0-9][0-9][0-9]-[a-z]*

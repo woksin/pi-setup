@@ -6,6 +6,12 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 
 ## 2026-10-25
 
+### Unused local build tags escape semver cleanup
+- **Symptom:** eight unused local build tags retained about 6 GiB at the 25 GiB disk floor.
+- **Cause:** image cleanup only considered superseded versions and dangling images; reproducible `Created` timestamps also hid recent tagging.
+- **Rule:** age unused local build tags after 24 h (configurable `local-tags.txt` globs), and prefer `Metadata.LastTagTime` for age. Versioned development tags keep the newest two and require 24 h; pinned, used and unversioned floating images stay protected.
+- **Enforced:** tool (`docker-guardian`, without forced removal).
+
 ### Sessions stall after a rate limit
 - **Symptom:** five sessions stayed idle for about 80 minutes after provider recovery until someone typed into them.
 - **Cause:** restore epochs were consumed only at turn/agent boundaries, and clearing a provider mark did not start a new turn.

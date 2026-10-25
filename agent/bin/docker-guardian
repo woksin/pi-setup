@@ -7,7 +7,9 @@
 #  - Not running at all => start it.
 #  - Hygiene every 15 min while healthy: remove exited/dead containers finished >20 min ago,
 #    prune unused networks older than 30 min, unused anonymous volumes, build cache above 8 GB.
-#    Images: only superseded semver tags (keep newest 2) / dangling >24h; pinned/in-use/recent/floating stay.
+#    Images: superseded semver tags (keep newest 2), unused local build tags / dangling >24h.
+#    Local patterns: docker-guardian/local-tags.txt; versioned development tags also need >24h.
+#    Age prefers LastTagTime over Created; pinned/in-use/recent/unversioned-floating stay.
 # Authorised (2026-10-20): "the agents need to be able to do what it needs to do".
 set -u
 # DOCKER_GUARDIAN_TEST_PATH/_STATE/_LOG exist only for the dry-run harness (docker-guardian/test/run-scenarios.sh).
@@ -121,14 +123,30 @@ def version(tag):
     return suffix, len(numbers), (numbers, not bool(pre), marker, serial)
 
 
-def age(created):
+def timestamp(value):
     try:
-        return (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(created.replace('Z', '+00:00'))).total_seconds()
+        # Docker emits nanoseconds; older fromisoformat versions accept only microseconds.
+        value = re.sub(r'(\.\d{6})\d+', r'\1', value)
+        parsed = dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is not None and parsed != dt.datetime.min.replace(tzinfo=parsed.tzinfo):
+            return parsed
     except (ValueError, TypeError, AttributeError):
-        return 0
+        pass
+    return None
+
+def age(image):
+    metadata = image.get('Metadata') or {}
+    tagged = timestamp(metadata.get('LastTagTime')) if isinstance(metadata, dict) else None
+    created = tagged or timestamp(image.get('Created'))
+    return (dt.datetime.now(dt.timezone.utc) - created).total_seconds() if created else 0
 
 def floating(tag):
-    return tag == 'latest' or tag.endswith('-development') or tag.startswith('local-')
+    return (tag in ('latest', 'latest-development', 'development') or tag.startswith('local-')
+            or (tag.endswith('-development') and version(tag) is None))
+
+def patterns(path):
+    return [line.strip() for line in path.read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith('#')]
 
 def main():
     if Path(sys.argv[1]).with_name('no-image-prune').is_file():
@@ -147,10 +165,18 @@ def main():
         print('images: skipped (not a local Unix endpoint)')
         return
     try:
-        pins = [line.strip() for line in Path(sys.argv[1]).read_text().splitlines()
-                if line.strip() and not line.lstrip().startswith('#')]
+        pins = patterns(Path(sys.argv[1]))
     except OSError:
         print('images: skipped (pin list unreadable)')
+        return
+    try:
+        local_tags = patterns(Path(sys.argv[1]).with_name('local-tags.txt'))
+    except FileNotFoundError:
+        local_tags = ['*-local', 'stage-train-*', '*-train-*', 'ci', '*-cand:*', '*-main:*',
+                      '*:[0-9][0-9][0-9]-[a-z]*', '*:[0-9][0-9][0-9][0-9]-[a-z]*',
+                      '*:[0-9][0-9][0-9][0-9][0-9]-[a-z]*']
+    except OSError:
+        print('images: skipped (local tag list unreadable)')
         return
     output = run(['docker', 'image', 'ls', '-q', '--no-trunc'])
     dangling = run(['docker', 'image', 'ls', '-q', '--no-trunc', '--filter', 'dangling=true'])
@@ -197,7 +223,7 @@ def main():
     candidates = []
     for image in images:
         iid, tags = image['Id'], image.get('RepoTags') or []
-        hours = age(image.get('Created')) / 3600
+        hours = age(image) / 3600
         if (iid in used or hours < 6
                 or any(fnmatch.fnmatchcase(ref, pin) for ref in [iid, *tags, *(image.get('RepoDigests') or [])] for pin in pins)):
             continue
@@ -214,9 +240,15 @@ def main():
             continue
         for ref in actual_tags:
             repo, _, tag = ref.rpartition(':')
+            if any(fnmatch.fnmatchcase(ref if ':' in pattern else tag, pattern) for pattern in local_tags):
+                if hours > 24:
+                    candidates.append((ref, iid))
+                continue
             value = version(tag)
             if value is not None:
                 suffix, precision, rank = value
+                if (suffix == '-development' or suffix.startswith('-development-')) and hours <= 24:
+                    continue
                 peers = repositories.get((repo, suffix, precision), {})
                 if ref not in keep and any(v > rank for v in peers.values()):
                     candidates.append((ref, iid))

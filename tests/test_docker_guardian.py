@@ -327,7 +327,9 @@ class CleanupTests(GuardianCase):
 
     def image(self, char, tags, hours=48, **extra):
         created = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)).isoformat()
-        return dict(Id=image_id(char), RepoTags=tags, RepoDigests=[], Created=created, **extra)
+        image = dict(Id=image_id(char), RepoTags=tags, RepoDigests=[], Created=created)
+        image.update(extra)
+        return image
 
     def image_scenario(self):
         self.install_phase_stub()
@@ -361,6 +363,157 @@ class CleanupTests(GuardianCase):
         docker = self.call_lines('docker')
         self.assertFalse([c for c in docker if c.startswith(('docker system', 'docker image prune'))], docker)
         self.assertFalse([c for c in docker if c.startswith('docker rmi') and ' -' in c], docker)
+
+    def test_local_build_tags_require_twenty_four_hours(self):
+        self.image_scenario()
+        self.docker_cfg['containers'] = []
+        self.docker_cfg['images'] = [
+            self.image('1', ['acme/app:feature-local'], hours=25),
+            self.image('2', ['acme/app:recent-local'], hours=20),
+            self.image('3', ['acme/app:stage-train-x'], hours=25),
+            self.image('4', ['acme/app:ci'], hours=25),
+            self.image('5', ['acme/app:feature-train-x'], hours=25),
+        ]
+        self.write_docker()
+        self.run_guardian()
+        refs = ['feature-local', 'stage-train-x', 'ci', 'feature-train-x']
+        self.assertEqual(sorted(self.call_lines('docker rmi')),
+                         sorted('docker rmi acme/app:' + ref for ref in refs))
+        self.assertIn('images: removed acme/app:feature-local (' + image_id('1') + ')', self.log_text())
+
+    def test_local_tags_preserve_used_pinned_and_floating_images(self):
+        self.image_scenario()
+        self.docker_cfg['images'] = [
+            self.image('7', ['acme/app:used-local']),
+            self.image('1', ['acme/app:pinned-local']),
+            self.image('2', ['acme/app:id-local']),
+            self.image('3', ['acme/app:digest-local'], RepoDigests=['acme/app@sha256:' + 'a' * 64]),
+            self.image('4', ['acme/app:alias-local', 'acme/app:latest-development']),
+            self.image('5', ['acme/app:plain-local', 'acme/app:development']),
+            self.image('6', ['acme/app:unknown-local', 'acme/app:l44-5322-development']),
+            self.image('8', ['acme/app:other-local', 'acme/app:local-feature']),
+        ]
+        (self.state / 'pinned.txt').write_text(
+            '# tag, id and digest pins\nacme/app:pinned-*\n' + image_id('2') + '\nacme/app@sha256:*\n')
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), [])
+
+    def test_custom_local_tag_patterns_replace_defaults_and_match_only_tag(self):
+        self.image_scenario()
+        (self.state / 'local-tags.txt').write_text('  # custom tags\n\n  nightly-*  \n acme/custom:build-* \n')
+        self.docker_cfg['images'] = [
+            self.image('1', ['acme/app:nightly-feature']),
+            self.image('2', ['acme/app:feature-local']),
+            self.image('3', ['acme/app:stage-train-x']),
+            self.image('4', ['acme/app:feature-train-x']),
+            self.image('5', ['acme/app:ci']),
+            self.image('6', ['nightly-repo/app:feature']),
+            self.image('8', ['acme/custom:build-feature']),
+            self.image('9', ['acme/other:build-feature']),
+            self.image('a', ['chronicle-cand:17ed55808e']),
+            self.image('b', ['cratis/chronicle:5230-structural']),
+        ]
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), [
+            'docker rmi acme/app:nightly-feature', 'docker rmi acme/custom:build-feature'])
+
+    def test_lane_and_issue_tags_age_out_without_matching_semver(self):
+        self.image_scenario()
+        self.docker_cfg['containers'] = []
+        self.docker_cfg['images'] = [
+            self.image('1', ['chronicle-cand:17ed55808e'], hours=25),
+            self.image('2', ['chronicle-main:eff4670e99'], hours=25),
+            self.image('3', ['cratis/chronicle:5230-structural'], hours=25),
+            self.image('4', ['cratis/chronicle:123-structural'], hours=25),
+            self.image('5', ['cratis/chronicle:12345-structural'], hours=25),
+            self.image('6', ['cratis/chronicle:19.99.1-development'], hours=25),
+            self.image('7', ['chronicle-cand:recent'], hours=20),
+            self.image('8', ['chronicle-main:recent'], hours=20),
+            self.image('9', ['cratis/chronicle:5322-recent'], hours=20),
+            self.image('a', ['cratis/short-issue:12-structural']),
+            self.image('b', ['cratis/long-issue:123456-structural']),
+            self.image('c', ['cratis/uppercase-issue:5322-Structural']),
+        ]
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(sorted(self.call_lines('docker rmi')), sorted([
+            'docker rmi chronicle-cand:17ed55808e', 'docker rmi chronicle-main:eff4670e99',
+            'docker rmi cratis/chronicle:5230-structural', 'docker rmi cratis/chronicle:123-structural',
+            'docker rmi cratis/chronicle:12345-structural']))
+
+    def test_lane_and_issue_tags_preserve_used_pinned_and_floating_images(self):
+        self.image_scenario()
+        self.docker_cfg['images'] = [
+            self.image('7', ['chronicle-cand:17ed55808e']),
+            self.image('1', ['chronicle-main:eff4670e99']),
+            self.image('2', ['cratis/chronicle:5230-structural']),
+            self.image('3', ['chronicle-cand:l44-5322-development']),
+            self.image('4', ['cratis/chronicle:5322-structural', 'cratis/chronicle:latest-development']),
+        ]
+        (self.state / 'pinned.txt').write_text('chronicle-main:*\ncratis/chronicle:5230-*\n')
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), [])
+
+    def test_empty_local_tag_file_disables_defaults(self):
+        self.image_scenario()
+        (self.state / 'local-tags.txt').write_text('# no local tag pruning\n\n')
+        self.docker_cfg['images'] = [self.image('1', ['acme/app:feature-local'])]
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), [])
+
+    def test_versioned_development_tags_keep_two_and_require_twenty_four_hours(self):
+        self.image_scenario()
+        self.docker_cfg['containers'] = []
+        self.docker_cfg['images'] = []
+        chars = iter('123456789abc')
+        for repo, hours in [('old', 25), ('recent', 10)]:
+            for suffix in ['-development', '-development-slim']:
+                for version in ['19.85.1', '19.99.1', '20.0.0']:
+                    self.docker_cfg['images'].append(
+                        self.image(next(chars), [f'acme/{repo}:{version}{suffix}'], hours=hours))
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(sorted(self.call_lines('docker rmi')), [
+            'docker rmi acme/old:19.85.1-development',
+            'docker rmi acme/old:19.85.1-development-slim',
+        ])
+
+    def test_last_tag_time_overrides_epoch_created_for_all_age_limits(self):
+        self.image_scenario()
+        self.docker_cfg['containers'] = []
+        self.docker_cfg['images'] = [
+            self.image('1', ['acme/app:feature-local'], Metadata={'LastTagTime': old_stamp(20 * 60)}),
+            self.image('2', ['acme/app:1.0.0'], Metadata={'LastTagTime': old_stamp(60)}),
+            self.image('3', ['acme/app:1.1.0']),
+            self.image('4', ['acme/app:1.2.0']),
+            self.image('5', None, dangling=True, Metadata={'LastTagTime': old_stamp(20 * 60)}),
+            self.image('6', ['acme/app:old-local'], Metadata={'LastTagTime': old_stamp(25 * 60)}),
+            self.image('7', ['acme/dev:1.0.0-development'], Metadata={'LastTagTime': old_stamp(10 * 60)}),
+            self.image('8', ['acme/dev:1.1.0-development']),
+            self.image('9', ['acme/dev:1.2.0-development']),
+        ]
+        for image in self.docker_cfg['images']:
+            image['Created'] = '1970-01-01T00:00:00Z'
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), ['docker rmi acme/app:old-local'])
+
+    def test_invalid_or_zero_last_tag_time_falls_back_to_created(self):
+        self.image_scenario()
+        self.docker_cfg['images'] = [
+            self.image('1', ['acme/app:invalid-local'], hours=25, Metadata={'LastTagTime': 'invalid'}),
+            self.image('2', ['acme/app:zero-local'], hours=25,
+                       Metadata={'LastTagTime': '0001-01-01T00:00:00.000000000Z'}),
+            self.image('3', ['acme/app:recent-local'], hours=20, Metadata={'LastTagTime': 'invalid'}),
+        ]
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(sorted(self.call_lines('docker rmi')), [
+            'docker rmi acme/app:invalid-local', 'docker rmi acme/app:zero-local'])
 
     def test_images_are_left_alone_with_switch_or_busy_integration_phase(self):
         self.image_scenario()

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 041523e035164876d3f2936034156527112ab2762bfeb492acf30b8baf101812
+// pi-setup-source-sha256: 6c800663d5e0055ed445590f399abc2f27843baa2ade9448bda0025213d23cfc
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -7337,6 +7337,7 @@ function buildPlan(input) {
   registerJson(actions, join55(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => void 0)));
   const absent = [
     ["docker-guardian/pinned.example.txt", "docker-guardian/pinned.txt"],
+    ["docker-guardian/local-tags.example.txt", "docker-guardian/local-tags.txt"],
     ["dev-doctor.example.json", "dev-doctor.json"],
     ["npm-package.json", "npm/package.json"]
   ];

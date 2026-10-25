@@ -228,6 +228,7 @@ export function buildPlan(input: PlanInput): Action[] {
   registerJson(actions, join(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => undefined)));
   const absent: [string, string][] = [
     ["docker-guardian/pinned.example.txt", "docker-guardian/pinned.txt"],
+    ["docker-guardian/local-tags.example.txt", "docker-guardian/local-tags.txt"],
     ["dev-doctor.example.json", "dev-doctor.json"],
     ["npm-package.json", "npm/package.json"],
   ];
