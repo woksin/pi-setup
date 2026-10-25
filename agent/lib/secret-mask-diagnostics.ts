@@ -48,11 +48,18 @@ function oversized(value: string | undefined): boolean {
 	return value !== undefined && value.length > 4096;
 }
 
+function unsafeResolutionInputs(inputs: readonly string[], sensitive: Sensitive): boolean {
+	if (inputs.some(oversized)) return true;
+	return inputs.some(sensitive);
+}
+
 /** Requested context only; never reads a file or asserts content provenance. */
 export function sanitizeRequestedPath(value: unknown, sensitive: Sensitive, cwd?: string, home = homedir()): string | undefined {
 	if (typeof value !== "string") return undefined;
-	if (oversized(value) || oversized(cwd)) return OMIT_PATH;
 	try {
+		// Check all raw inputs before normalize/resolve can collapse credential syntax
+		// or remove sensitive components. Home also participates in display shortening.
+		if (unsafeResolutionInputs([value, cwd ?? "", home], sensitive)) return OMIT_PATH;
 		const path = absolutePath(value, cwd, home);
 		if (!path) return undefined;
 		if (oversized(path)) return OMIT_PATH;

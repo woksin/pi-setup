@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { normalize } from "node:path";
 import { renderDiagnostics, resultNotice, sanitizeRequestedPath } from "./secret-mask-diagnostics.ts";
 import { scan } from "./secret-mask.ts";
 
@@ -39,6 +40,26 @@ test("sensitive and display-injecting segments disappear whole, without allowlis
 	}
 	assert.equal(sanitizeRequestedPath("/cross/segment", value => value.includes("cross/segment")), "[path omitted]");
 	assert.equal(sanitizeRequestedPath("/safe", () => { throw new Error("synthetic"); }), "[path omitted]");
+});
+
+test("raw requested paths cannot launder credentials through lexical normalization", () => {
+	const raw = "/project/https://synthetic-user:synthetic-pass@example.invalid/file";
+	assert.equal(sensitive(raw), true);
+	assert.equal(sensitive(normalize(raw)), false);
+	for (const requested of [raw, "@" + raw, raw + "/../../clean", "~" + raw]) {
+		assert.equal(path(requested, "/project"), "[path omitted]");
+	}
+});
+
+test("raw resolution contexts are checked before normalization or home shortening", () => {
+	const context = "/project/https://synthetic-user:synthetic-pass@example.invalid";
+	assert.equal(sensitive(context), true);
+	assert.equal(sensitive(normalize(context)), false);
+	assert.equal(sanitizeRequestedPath("file", sensitive, context, "/home/tester"), "[path omitted]");
+	assert.equal(sanitizeRequestedPath("~/file", sensitive, "/project", context), "[path omitted]");
+	assert.equal(sanitizeRequestedPath("file", sensitive, context, context), "[path omitted]");
+	assert.equal(sanitizeRequestedPath("/safe/file", sensitive, "/project", context), "[path omitted]");
+	assert.equal(sanitizeRequestedPath("~/file", sensitive, "/project", "/" + "x".repeat(4097)), "[path omitted]");
 });
 
 test("complete-path detection is repeated after segment removal", () => {
