@@ -1629,8 +1629,18 @@ def dump_command_options(command):
     options = {}
     for argument, following in zip(command, command[1:] + [""]):
         name, separator, value = argument.partition("=")
+        if not separator:
+            name, separator, value = argument.partition(":")
         options[name] = value if separator else following
     return options
+
+
+def dump_option_end(command):
+    """Find the inner argv's runsettings boundary, not an env/nice separator."""
+    inner = unwrap_command(command, stop_at_shell=True)
+    if inner is None or "--" not in inner:
+        return len(command)
+    return len(command) - len(inner) + inner.index("--")
 
 
 def hang_dump_defaults(command, diagnose_hang=False):
@@ -1642,7 +1652,7 @@ def hang_dump_defaults(command, diagnose_hang=False):
         return {}
     if Path(inner[0]).name in ("sh", "bash", "zsh", "dash", "ksh", "fish"):
         return {}
-    options = dump_command_options(inner)
+    options = dump_command_options(inner[:dump_option_end(inner)])
     defaults = {}
     for flags, dump_type, value in (
             (("--blame-hang", "--blame-hang-timeout"), "--blame-hang-dump-type", "none"),
@@ -1658,10 +1668,11 @@ def prepare_dump_command(command, diagnose_hang=False):
     if not defaults:
         return command
     injected = [argument for option in defaults.items() for argument in option]
+    boundary = dump_option_end(command)
     print(f"pi-phase: injected {' '.join(injected)} "
           "(no dump type given; pass --diagnose-hang or an explicit type to keep a dump)",
           file=sys.stderr, flush=True)
-    return [*command, *injected]
+    return [*command[:boundary], *injected, *command[boundary:]]
 
 
 def warn_full_dumps(command, diagnose_hang=False, ignored_types=()):
@@ -2777,8 +2788,8 @@ def run(args, state, configuration, output=None):
         command = command[1:]
     if not command:
         raise ValueError("missing command after --")
-    # Fingerprints/identity retain the original argv for stable history (#32),
-    # while the launcher and argvHash below describe the executed command.
+    # Fingerprints/identity and PhaseLedger's argvHash retain the original argv
+    # for stable history (#32), excluding injection and random preset paths.
     original_command = command[:]
     if args.kind in ("test", "integration"):
         command = prepare_dump_command(command, args.diagnose_hang)
@@ -2800,8 +2811,6 @@ def run(args, state, configuration, output=None):
         raise ValueError("--vstest-confirmed requires --vstest-hang-minutes")
 
     ledger = getattr(args, "ledger", None)
-    if ledger:
-        ledger.record["argvHash"] = hashlib.sha256(os.fsencode("\0".join(command))).hexdigest()
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     ci_key = (args.repo, args.pr, args.commit)
     long_queue_hint = False

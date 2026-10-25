@@ -179,7 +179,7 @@ class DumpInjectionTests(unittest.TestCase):
     def test_explicit_types_are_never_changed(self):
         for flag, dump_type in (("--blame-hang", "--blame-hang-dump-type"), ("--hangdump", "--hangdump-type")):
             for value in ("mini", "Mini", "full", "none", "custom"):
-                for suffix in ([dump_type, value], [f"{dump_type}={value}"]):
+                for suffix in ([dump_type, value], [f"{dump_type}={value}"], [f"{dump_type}:{value}"]):
                     with self.subTest(flag=flag, suffix=suffix):
                         command = ["dotnet", "test", flag, *suffix]
                         prepared, warnings, errors = self.prepare(command)
@@ -221,6 +221,23 @@ class DumpInjectionTests(unittest.TestCase):
         self.assertEqual(prepared, command + ["--blame-hang-dump-type", "none"])
         self.assertEqual(warnings, "")
         self.assertEqual(len(errors.splitlines()), 1)
+
+    def test_injection_precedes_runsettings_and_ignores_wrapper_separators(self):
+        for prefix in ([], ["env", "--"], ["nice", "-n", "5", "--"], ["env", "--", "nice", "--"]):
+            for tail in ([], ["--", "RunConfiguration.MaxCpuCount=1"]):
+                for flag, dump_type, value in (("--blame-hang", "--blame-hang-dump-type", "none"),
+                                              ("--hangdump", "--hangdump-type", "Mini")):
+                    with self.subTest(prefix=prefix, tail=tail, flag=flag):
+                        leading = [*prefix, "dotnet", "test", flag]
+                        prepared, warnings, errors = self.prepare(leading + tail)
+                        self.assertEqual(prepared, [*leading, dump_type, value, *tail])
+                        self.assertEqual(warnings, "")
+                        self.assertEqual(len(errors.splitlines()), 1)
+
+    def test_runsettings_tail_cannot_supply_an_explicit_dump_type(self):
+        command = ["dotnet", "test", "--blame-hang", "--", "--blame-hang-dump-type=full"]
+        prepared, _, _ = self.prepare(command)
+        self.assertEqual(prepared, command[:3] + ["--blame-hang-dump-type", "none"] + command[3:])
 
     def test_injection_keeps_unrelated_explicit_full_warning(self):
         command = ["dotnet", "test", "--hangdump", "--blame-crash-dump-type", "Full"]
@@ -443,25 +460,54 @@ class DumpPhaseTests(DumpWorkspace):
         self.assertNotIn("pi-phase: warning:", output)
         self.assertIn("injected --blame-hang-dump-type none", self.errors.getvalue())
 
-    def test_executed_argv_and_ledger_hash_include_injection_but_fingerprint_does_not(self):
+    def test_preset_runs_keep_original_argv_hash_despite_random_results_paths(self):
+        executable = self.root / "dotnet"
+        arguments = self.root / "arguments"
+        executable.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shlex.quote(str(arguments)) + "\n")
+        executable.chmod(0o700)
+        command = [str(executable), "test"]
+        options = ["run", "--kind", "test", "--policy", "direct", "--label", "preset", "--timeout", "4",
+                   "--vstest-confirmed", "--vstest-hang-minutes", "1"]
+        state = self.root / "preset-state"
+        results = []
+        for _ in range(2):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                result = pi_phase.main([*options, "--rerun", "--", *command],
+                                       state=state, configuration=self.config)
+            self.assertEqual(result, 0)
+            executed = arguments.read_text().splitlines()
+            results.append(executed[executed.index("--results-directory") + 1])
+        self.assertNotEqual(*results)
+        records, skipped = pi_phase.read_ledger(state)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(len(records), 2)
+        expected_hash = hashlib.sha256(os.fsencode("\0".join(command))).hexdigest()
+        self.assertEqual([record["argvHash"] for record in records], [expected_hash, expected_hash])
+        output = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(io.StringIO()):
+            result = pi_phase.main([*options, "--", *command], state=state, configuration=self.config)
+        self.assertEqual(result, 0)
+        self.assertIn("already passed", output.getvalue())
+
+    def test_executed_argv_includes_injection_but_hash_and_fingerprint_use_original(self):
         for flag, dump_type, value in (("--blame-hang", "--blame-hang-dump-type", "none"),
                                       ("--hangdump", "--hangdump-type", "Mini")):
             with self.subTest(flag=flag):
                 arguments = self.root / "arguments.json"
                 script = f"import json, sys; open({str(arguments)!r}, 'w').write(json.dumps(sys.argv[1:]))"
-                command = [sys.executable, "-c", script, flag]
+                tail = ["--", "RunConfiguration.MaxCpuCount=1"]
+                command = [sys.executable, "-c", script, flag, *tail]
                 state = self.root / flag
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     result = pi_phase.main(["run", "--kind", "test", "--policy", "direct", "--rerun",
                                             "--label", "argv", "--timeout", "4", "--", *command],
                                            state=state, configuration=self.config)
                 self.assertEqual(result, 0)
-                self.assertEqual(json.loads(arguments.read_text()), [flag, dump_type, value])
+                self.assertEqual(json.loads(arguments.read_text()), [flag, dump_type, value, *tail])
                 records, skipped = pi_phase.read_ledger(state)
                 self.assertEqual(skipped, 0)
                 self.assertEqual(len(records), 1)
-                executed = command + [dump_type, value]
-                expected_hash = hashlib.sha256(os.fsencode("\0".join(executed))).hexdigest()
+                expected_hash = hashlib.sha256(os.fsencode("\0".join(command))).hexdigest()
                 self.assertEqual(records[0]["argvHash"], expected_hash)
                 self.assertEqual(records[0]["fingerprint"], pi_phase.test_fingerprint(str(self.root), command))
 
