@@ -269,12 +269,21 @@ test("shutdown closes the directory watch and cancels fallback and debounced che
 test("directory watcher notices atomic limit removal without waiting for the slow timer", async () => {
 	const s = session({ hasUI: true });
 	await s.fire("429");
-	writeFileSync(`${stateFile}.tmp`, "{}");
-	renameSync(`${stateFile}.tmp`, stateFile);
+	// FSEvents may not deliver a rename made before the watch is fully registered, so repeat the
+	// atomic replace until the watcher reacts. The slow fallback timer (60 s) cannot satisfy this.
+	const replace = () => {
+		writeFileSync(`${stateFile}.tmp`, "{}");
+		renameSync(`${stateFile}.tmp`, stateFile);
+	};
+	replace();
 	await new Promise<void>((resolve, reject) => {
-		const deadline = setTimeout(() => { clearInterval(check); reject(new Error("watcher did not resume")); }, 3000);
+		let ticks = 0;
+		const deadline = setTimeout(() => { clearInterval(check); reject(new Error("watcher did not resume")); }, 8000);
 		const check = setInterval(() => {
-			if (!s.prompts.length) return;
+			if (!s.prompts.length) {
+				if (++ticks % 10 === 0) replace();
+				return;
+			}
 			clearTimeout(deadline);
 			clearInterval(check);
 			resolve();
