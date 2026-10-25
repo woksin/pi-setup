@@ -7,7 +7,7 @@ import type { ComponentRecord, Manifest, ServiceRecord } from "./manifest.ts";
 import type { Action, Ctx } from "./types.ts";
 
 /** Plist base name per service component. */
-const LAUNCHD_NAME: Record<string, string> = { "docker-guardian": "docker-guardian", cleanup: "pi-cleanup", "secret-sweep": "secret-sweep" };
+const LAUNCHD_NAME: Record<string, string> = { "docker-guardian": "docker-guardian", cleanup: "pi-cleanup", "secret-sweep": "secret-sweep", "disk-growth": "disk-growth" };
 const TIMER = "pi-cleanup.timer";
 const TIMEOUT = 5000;
 

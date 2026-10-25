@@ -13,7 +13,7 @@ const tmp = () => {
   roots.push(d);
   return d;
 };
-const none = { "docker-guardian": false, cleanup: false, "secret-sweep": false, codescene: false, cratis: false, web: false, lanes: false };
+const none = { "docker-guardian": false, cleanup: false, "secret-sweep": false, "disk-growth": false, codescene: false, cratis: false, web: false, lanes: false };
 
 test("precedence: flag > answer > saved > installed > detected", () => {
   const r = resolveComponents({
@@ -38,6 +38,8 @@ test("availability: docker-guardian and secret-sweep need macOS; cleanup also wo
   const which = (n: string) => (n === "systemctl" ? "/bin/systemctl" : undefined);
   assert.equal(available("docker-guardian", { platform: "linux", which }), "needs Docker Desktop on macOS");
   assert.equal(available("docker-guardian", { platform: "darwin", which }), true);
+  assert.equal(typeof available("disk-growth", { platform: "linux", which }), "string");
+  assert.equal(available("disk-growth", { platform: "darwin", which }), true);
   assert.equal(available("cleanup", { platform: "linux", which }), true);
   assert.equal(typeof available("cleanup", { platform: "linux", which: () => undefined }), "string");
 });
@@ -58,6 +60,8 @@ test("detectDefaults: Cratis by org, directory or a .cratis dir; CodeScene by pr
   assert.equal(detectDefaults(ctx({}, ["cs-mcp", "docker", "gitleaks"]), gh([]), root)["secret-sweep"], true);
   assert.equal(detectDefaults(ctx({}, ["docker"]), gh([]), root)["docker-guardian"], true);
   assert.equal(detectDefaults(ctx(), gh([]), root).web, true);
+  assert.equal(detectDefaults(ctx(), gh([]), root)["disk-growth"], true);
+  assert.equal(detectDefaults({ ...ctx(), platform: "linux" }, gh([]), root)["disk-growth"], false);
 });
 
 test("stripSections removes a marked block with one blank line and warns when markers are missing", () => {

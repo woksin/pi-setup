@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""Sample home-volume free space; alert on a 5 GiB drop within 5 minutes.
+
+Usage: disk-growth [--once] [--dry-run]
+Defaults: 60 s launchd schedule, 30 min debounce, 5 GiB rearm, 20 s probe.
+Config: ~/.pi/agent/disk-growth.json; user defaults: ~/.pi/agent/user.json.
+State: ~/.pi/agent/disk-growth/state.json; log: ~/.pi/agent/logs/disk-growth.log.
+Overrides: DISK_GROWTH_STATE, DISK_GROWTH_LOG, DISK_GROWTH_CONFIG,
+DISK_GROWTH_DROP_GIB, DISK_GROWTH_WINDOW_S, DISK_GROWTH_MESSAGES (path list).
+Inbox fallback: PI_ORCH_MESSAGES_DIR, orchMessagesDir, then PI_ORCH_REPO_ROOT
+or orchRepoRoot plus .ai-work/messages. --dry-run writes nothing.
+"""
+import argparse
+import json
+import math
+import os
+from pathlib import Path
+import runpy
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+GIB = 1 << 30
+SLACK = 45
+
+
+def read_json(path, default):
+    try:
+        value = json.loads(Path(path).read_text())
+        return value if isinstance(value, dict) else default
+    except (OSError, ValueError):
+        return default
+
+
+def number(value, default):
+    return value if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                     and math.isfinite(value) and value >= 0) else default
+
+
+def configured_path(env, user, env_key, user_key):
+    value = env.get(env_key) or user.get(user_key)
+    return value if isinstance(value, str) else ''
+
+
+def inbox_dirs(env, user):
+    explicit = env.get('DISK_GROWTH_MESSAGES')
+    if explicit is not None:
+        return [part for part in explicit.split(os.pathsep) if part]
+    inbox = configured_path(env, user, 'PI_ORCH_MESSAGES_DIR', 'orchMessagesDir')
+    root = configured_path(env, user, 'PI_ORCH_REPO_ROOT', 'orchRepoRoot')
+    if not inbox and root:
+        inbox = str(Path(root) / '.ai-work/messages')
+    return [inbox] if inbox else []
+
+
+def numeric_settings(config, env):
+    defaults = {'drop_gib': 5, 'window_seconds': 300, 'debounce_seconds': 1800,
+                'rearm_gib': 5, 'probe_budget_seconds': 20}
+    cfg = {key: number(config.get(key), default) for key, default in defaults.items()}
+    for key, name in [('drop_gib', 'DISK_GROWTH_DROP_GIB'), ('window_seconds', 'DISK_GROWTH_WINDOW_S')]:
+        try:
+            cfg[key] = number(float(env.get(name, cfg[key])), cfg[key])
+        except ValueError:
+            pass
+    return cfg
+
+
+def path_list(value, default):
+    if not isinstance(value, list):
+        return default
+    return value if all(isinstance(p, str) for p in value) else default
+
+
+def list_settings(config, env, user, home):
+    agent = home / '.pi/agent'
+    repos = user.get('reposRoot')
+    roots = [repos] if isinstance(repos, str) and repos else []
+    roots += [str(agent / name) for name in ('jobs', 'logs', 'sessions', 'pi-phase')]
+    roots.append(tempfile.gettempdir())
+    defaults = {'roots': roots, 'messages_dirs': inbox_dirs(env, user),
+                'watch_files': [str(home / 'Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw')]}
+    result = {key: path_list(config.get(key), default) for key, default in defaults.items()}
+    if 'DISK_GROWTH_MESSAGES' in env:
+        result['messages_dirs'] = inbox_dirs(env, user)
+    return result
+
+
+def settings(env, home):
+    home = Path(home)
+    agent = home / '.pi/agent'
+    user = read_json(agent / 'user.json', {})
+    config = read_json(env.get('DISK_GROWTH_CONFIG', agent / 'disk-growth.json'), {})
+    cfg = numeric_settings(config, env)
+    cfg.update(list_settings(config, env, user, home))
+    cfg.update(home=str(home), repos_root=user.get('reposRoot'), volume=config.get('volume', str(home)),
+               state_dir=env.get('DISK_GROWTH_STATE', str(agent / 'disk-growth')),
+               log=env.get('DISK_GROWTH_LOG', str(agent / 'logs/disk-growth.log')))
+    return cfg
+
+
+def sample(now, cfg):
+    watch = {}
+    for path in cfg['watch_files']:
+        try:
+            watch[path] = Path(path).expanduser().stat().st_blocks * 512
+        except OSError:
+            pass
+    return {'ts': now, 'free': shutil.disk_usage(Path(cfg['volume']).expanduser()).free, 'watch': watch}
+
+
+def evaluate(samples, now, cfg, last_alert):
+    recent = [s for s in samples if now - cfg['window_seconds'] - SLACK <= s['ts'] <= now]
+    if not recent:
+        return 'seed', {}
+    current = max(recent, key=lambda s: s['ts'])
+    baseline = max(recent, key=lambda s: s['free'])
+    info = {'baseline': baseline, 'current': current, 'drop': baseline['free'] - current['free']}
+    if len(recent) < 2:
+        return 'seed', info
+    if info['drop'] < cfg['drop_gib'] * GIB:
+        return 'quiet', info
+    return ('suppressed' if debounced(now, current['free'], last_alert, cfg) else 'fire'), info
+
+
+def debounced(now, free, last_alert, cfg):
+    if not last_alert:
+        return False
+    return (now - last_alert['ts'] < cfg['debounce_seconds']
+            and free > last_alert['free'] - cfg['rearm_gib'] * GIB)
+
+
+def clock(now, fmt='%H:%M'):
+    return time.strftime(fmt, time.localtime(now))
+
+
+def display_path(path, home):
+    return '~' + path[len(home):] if path == home or path.startswith(home + os.sep) else path
+
+
+def format_notice(now, info, writers, coverage, cfg):
+    baseline, current = info['baseline'], info['current']
+    elapsed = (current['ts'] - baseline['ts']) / 60
+    scope = f"{'partial' if coverage['partial'] else 'complete'}: {coverage['walked']} of {coverage['total']} units"
+    if coverage.get('timed_out'):
+        scope = 'probe timed out/partial; ' + scope
+    lines = [f"disk-growth ({clock(now)}): free space dropped {info['drop'] / GIB:.1f} GiB in {elapsed:g} min "
+             f"({baseline['free'] / GIB:.1f} -> {current['free'] / GIB:.1f} GiB free).",
+             f"Top writers (files modified since {clock(baseline['ts'] - 60)}; full file sizes; "
+             f"probe {cfg['probe_budget_seconds']:g} s, {scope}):"]
+    shown = sorted((w for w in writers if w['bytes'] >= 64 * (1 << 20)), key=lambda w: (-w['bytes'], w['path']))[:5]
+    for writer in shown:
+        detail = ', '.join(f'{key} {size / GIB:.1f}' for key, size in sorted(writer['categories'].items()) if size)
+        if writer.get('watch'):
+            detail = 'allocated growth'
+        line = f"- {writer['bytes'] / GIB:.1f} GiB  {display_path(writer['path'], cfg['home'])}  ({detail})"
+        if writer['procs']:
+            line += '  procs: ' + ', '.join(sorted(writer['procs']))
+        lines.append(line)
+    if not shown:
+        lines.append('No recently modified files were found in the probed roots; try docker system df and df -h ~.')
+    lines += ['Act: stop an unexpected writer; delete leftover .dmp files; ~/.pi/agent/bin/dev-doctor --only disk.',
+              f"Next notice after {cfg['debounce_seconds'] / 60:g} min unless free space drops another {cfg['rearm_gib']:g} GiB."]
+    return '\n'.join(lines) + '\n'
+
+
+def log_line(text, path=None):
+    path = Path(path or Path.home() / '.pi/agent/logs/disk-growth.log')
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a') as stream:
+            stream.write(text + '\n')
+    except OSError:
+        pass
+
+
+def post_notice(text, dirs, now, logger=log_line):
+    for directory in dirs:
+        path = Path(directory).expanduser()
+        if path.is_dir():
+            try:
+                (path / f"ALL-disk-growth-{clock(now, '%H%M')}.md").write_text(text)
+            except OSError as error:
+                logger(f'message file failed: {error}')
+
+
+def osascript_notify(text):
+    short = text.replace('\\', ' ').replace('"', "'")[:230]
+    try:
+        subprocess.run(['osascript', '-e', f'display notification "{short}" with title "disk-growth"'],
+                       capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def worker_command():
+    return [sys.executable, str(Path(__file__).resolve().with_name('disk_growth_probe.py'))]
+
+
+def isolated_probe(cfg, since):
+    request = {'roots': [str(Path(p).expanduser()) for p in cfg['roots']], 'repos_root': cfg['repos_root'],
+               'since': since, 'deadline': time.monotonic() + cfg['probe_budget_seconds']}
+    partial = ([], {'walked': 0, 'total': 0, 'partial': True, 'timed_out': True})
+    # A file, rather than communicate's unbounded output buffer, caps the parent read.
+    with tempfile.TemporaryFile() as output:
+        with subprocess.Popen(worker_command(), stdin=subprocess.PIPE, stdout=output,
+                              stderr=subprocess.DEVNULL, start_new_session=True,
+                              env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}) as child:
+            try:
+                child.communicate(json.dumps(request).encode(), timeout=cfg['probe_budget_seconds'])
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+                return partial
+            output.seek(0)
+            try:
+                return json.loads(output.read(2 * (1 << 20))) if child.returncode == 0 else partial
+            except ValueError:
+                return partial
+
+
+def watch_writers(info):
+    before = info['baseline'].get('watch', {})
+    return [{'path': Path(path).name, 'bytes': size - before[path], 'categories': {}, 'procs': [], 'watch': True}
+            for path, size in info['current'].get('watch', {}).items() if path in before and size > before[path]]
+
+
+def save_state(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(state, stream)
+            stream.close()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def alert(now, info, cfg, notifier, probe, dry_run):
+    since = info['baseline']['ts'] - 60
+    if probe:
+        writers, coverage = probe(roots=cfg['roots'], repos_root=cfg['repos_root'], since=since,
+                                  deadline=time.monotonic() + cfg['probe_budget_seconds'])
+    else:
+        # Validate/load the helper using the same extensionless-bin module pattern.
+        runpy.run_path(Path(__file__).resolve().with_name('disk_growth_probe.py'))
+        writers, coverage = isolated_probe(cfg, since)
+    writers += watch_writers(info)
+    text = format_notice(now, info, writers, coverage, cfg)
+    if dry_run:
+        print(text, end='')
+    else:
+        post_notice(text, cfg['messages_dirs'], now, lambda text: log_line(text, cfg['log']))
+        notifier(text)
+    top = max(writers, key=lambda w: w['bytes'])['path'] if writers else 'none'
+    return f" writers={display_path(top, cfg['home'])} coverage={coverage}"
+
+
+def run(now=None, free_bytes=None, env=os.environ, notifier=osascript_notify, probe=None, dry_run=False):
+    now = time.time() if now is None else now
+    cfg = settings(env, Path(env.get('HOME', str(Path.home()))))
+    path = Path(cfg['state_dir']).expanduser() / 'state.json'
+    state = read_json(path, {})
+    current = sample(now, cfg)
+    if free_bytes is not None:
+        current['free'] = free_bytes
+    samples = [s for s in state.get('samples', []) if now - cfg['window_seconds'] - 120 <= s['ts'] <= now]
+    samples = (samples + [current])[-100:]
+    status, info = evaluate(samples, now, cfg, state.get('last_alert'))
+    suffix = ''
+    if dry_run:
+        print(status)
+    if status == 'fire':
+        suffix = alert(now, info, cfg, notifier, probe, dry_run)
+        state['last_alert'] = {'ts': now, 'free': current['free']}
+    if not dry_run:
+        if status in ('fire', 'suppressed'):
+            action = 'fired' if status == 'fire' else status
+            log_line(f"{clock(now, '%Y-%m-%d %H:%M:%S')} {action} drop={info['drop'] / GIB:.1f}GiB "
+                     f"free={current['free'] / GIB:.1f}GiB{suffix}", cfg['log'])
+        state['samples'] = samples
+        save_state(path, state)
+    return status
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--once', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args(argv)
+    try:
+        run(dry_run=args.dry_run)
+        return 0
+    except Exception as error:
+        if not args.dry_run:
+            log_line(f"{clock(time.time(), '%Y-%m-%d %H:%M:%S')} error: {error}", os.environ.get('DISK_GROWTH_LOG'))
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

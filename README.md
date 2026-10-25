@@ -36,7 +36,7 @@ In a terminal, `./install.sh` is a guided setup (see [The guided installer](#the
 ## Highlights
 
 - Safe to re-run: files you changed are kept and the new version is written next to them, and every overwrite is backed up.
-- Nothing is scheduled behind your back. The `docker-guardian`, `cleanup` and `secret-sweep` schedules are extras: the guided installer pre-selects the ones your machine supports and shows them in the Review before anything is written, and unattended installs need `--with <id>`.
+- Nothing is scheduled behind your back. The `docker-guardian`, `cleanup`, `secret-sweep` and `disk-growth` schedules are extras: the guided installer pre-selects the ones your machine supports and shows them in the Review before anything is written, and unattended installs need `--with <id>`.
 - Releases are cut by hand from tagged versions; `./install.sh update` moves a checkout to the latest release tag.
 
 ## Install
@@ -65,7 +65,7 @@ Doctor fails missing required tools/packages and warns about missing optional to
 
 In a terminal, `./install.sh` opens a short welcome and one first choice:
 
-- **Use our recommended setup** (the default; on a rerun it reads **Update with your current choices**). It uses what detection finds and asks only what it cannot settle itself, such as your GitHub login or repositories folder. The recommended extras are the detected defaults: `docker-guardian` (macOS with Docker), `cleanup`, `secret-sweep` (macOS with `gitleaks`), `codescene` (when `cs-mcp` or `CS_ACCESS_TOKEN` is found), `cratis` (when Cratis repositories are found) and web tools. `lanes` is off.
+- **Use our recommended setup** (the default; on a rerun it reads **Update with your current choices**). It uses what detection finds and asks only what it cannot settle itself, such as your GitHub login or repositories folder. The recommended extras are the detected defaults: `docker-guardian` (macOS with Docker), `cleanup`, `secret-sweep` (macOS with `gitleaks`), `disk-growth` (macOS), `codescene` (when `cs-mcp` or `CS_ACCESS_TOKEN` is found), `cratis` (when Cratis repositories are found) and web tools. `lanes` is off.
 - **Customise step by step** asks every step: GitHub login, repositories folder, AI logins, profile and extras.
 
 Each question shows "Step n of N". Steps already answered by flags such as `--user`, `--repos-root` or `--profile` are skipped and not counted.
@@ -142,7 +142,7 @@ For temporary-HOME testing use `--no-launchd`. Loading/unloading launchd is also
 
 `inbox-watch` accepts an explicit directory with `INBOX_DIR=/absolute/path/to/messages ~/.pi/agent/bin/inbox-watch`. Set it for your checkout rather than relying on the legacy default.
 
-Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" question) turn on `docker-guardian`, `cleanup`, `secret-sweep`, `codescene`, `cratis`, `web` or `lanes`. Your choice is saved in the manifest and reused on later runs; turning one off removes what pi-setup added and leaves files you changed. The schedules (`docker-guardian`, `cleanup`, `secret-sweep`) are only installed when you choose them (the guided installer pre-selects the supported ones in its Review; unattended runs need `--with`): on macOS they are written to `~/Library/LaunchAgents/com.<user>.<name>.plist` and loaded with `launchctl bootstrap`; `cleanup` on Linux uses a systemd user timer. `codescene` needs `cs-mcp` on PATH and `CS_ACCESS_TOKEN` in your shell profile; pi-setup never stores the token.
+Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" question) turn on `docker-guardian`, `cleanup`, `secret-sweep`, `disk-growth`, `codescene`, `cratis`, `web` or `lanes`. Your choice is saved in the manifest and reused on later runs; turning one off removes what pi-setup added and leaves files you changed. The schedules (`docker-guardian`, `cleanup`, `secret-sweep`, `disk-growth`) are only installed when you choose them (the guided installer pre-selects the supported ones in its Review; unattended runs need `--with`): on macOS they are written to `~/Library/LaunchAgents/com.<user>.<name>.plist` and loaded with `launchctl bootstrap`; `cleanup` on Linux uses a systemd user timer. `codescene` needs `cs-mcp` on PATH and `CS_ACCESS_TOKEN` in your shell profile; pi-setup never stores the token.
 
 ### Lanes (opt-in)
 
@@ -176,7 +176,7 @@ Lanes operations (use `--dir <folder>` outside the coordination folder):
 - `lanes close <ID> [--reassign-to ID2] [--reason text] [--quit]` posts closure and a removal hint; it never removes worktrees or edits lanes.json. `--quit` is opt-in and refuses busy or recently active sessions.
 Watch exits: 0 fire/OK, 1 nothing/missing, 2 error. Nudge: 0 sent, 3 refused, 4 no tab/pane or print backend.
 
-Optional, macOS only: use `--with docker-guardian`, `--with cleanup` or `--with secret-sweep` to manage schedules. The installer fills in your home and username and creates `~/Library/LaunchAgents/com.<user>.docker-guardian.plist`, `com.<user>.pi-cleanup.plist` or `com.<user>.secret-sweep.plist`. Files under `agent/launchd/` remain manual-install templates, not the managed filenames.
+Optional, macOS only: use `--with docker-guardian`, `--with cleanup`, `--with secret-sweep` or `--with disk-growth` to manage schedules. The installer fills in your home and username and creates `~/Library/LaunchAgents/com.<user>.docker-guardian.plist`, `com.<user>.pi-cleanup.plist`, `com.<user>.secret-sweep.plist` or `com.<user>.disk-growth.plist`. Files under `agent/launchd/` remain manual-install templates, not the managed filenames.
 
 `settings.json` lists the packages I load. Local checkouts are mapped to their npm packages (`npm:@woksin/pi-jobs`, `npm:@woksin/pi-recover`, `npm:@woksin/pi-context-budget`, `npm:@woksin/pi-orch`). Remove the ones you don't want.
 
@@ -270,6 +270,8 @@ Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your ver
 
 **Stuck-session watchdog:** `bin/session-watchdog` runs every 2 min from docker-guardian and only notifies, never kills. It flags live pi sessions (positively mapped to a running pi process through pi-orch heartbeats) with an unanswered tool call or an unanswered user/tool-result message older than 10 min, and raises an all-sessions-silent alarm (3+ sessions, none writing for over 15 min). Stuck notices go to `ALL-session-watchdog-*-stuck.md` and a macOS notification; sessions it cannot map, memory pressure (`kern.memorystatus_level` below 15% with swap used over 12 GB, or below 8%) and `fseventsd` above 4 GB go to the coordinator only. State is in `~/.pi/agent/session-watchdog/`, the log in `logs/session-watchdog.log`.
 
+**Disk-growth alert:** `bin/disk-growth` samples home-volume free space every minute and alerts on a drop of at least 5 GiB within 5 minutes (45 s jitter slack). Enable with `--with disk-growth`. Notices are `ALL-disk-growth-<HHMM>.md` in each existing `DISK_GROWTH_MESSAGES` directory (path-separated), otherwise `PI_ORCH_MESSAGES_DIR`, user.json `orchMessagesDir`, or `.ai-work/messages` under `PI_ORCH_REPO_ROOT` / user.json `orchRepoRoot`. State is `~/.pi/agent/disk-growth/state.json`, log `~/.pi/agent/logs/disk-growth.log`. A notice is suppressed for 30 minutes unless free space falls another 5 GiB below the last alert. `~/.pi/agent/disk-growth.json` accepts `drop_gib`, `window_seconds`, `debounce_seconds`, `rearm_gib`, `probe_budget_seconds`, `volume`, `roots`, `watch_files` and `messages_dirs`. Defaults probe user.json `reposRoot`, pi jobs/logs/sessions/pi-phase and the temp directory; Docker.raw allocated growth is sampled separately. Overrides: `DISK_GROWTH_DROP_GIB`, `DISK_GROWTH_WINDOW_S`, `DISK_GROWTH_CONFIG`, `DISK_GROWTH_STATE`, `DISK_GROWTH_LOG`. The isolated probe is killed after 20 s, caps discovery at 3000 units and discovery/traversal at 100000 entries, skips symlinks and may report partial coverage. Writer sizes are full allocated sizes of recently modified files, not true write deltas; APFS purgeable space or snapshots may explain drops with no obvious writer. `--dry-run` prints the evaluation and any notice without writing state or notices.
+
 **pi-phase memory ceilings:** `rss_cap_mb` (default 12288) kills a phase when one process in its tree stays above the cap for 3 consecutive samples (about 45 s; exit 76). On macOS, admission uses free memory percent; the swap-free floor (`memory_admission.min_swap_free_mb`, default 2048) applies on Linux only, since macOS grows swap on demand.
 
 Guardian image hygiene is **active once `~/.pi/agent/docker-guardian/pinned.txt`
@@ -333,13 +335,14 @@ The lessons behind the global rules are in [docs/operating-lessons.md](docs/oper
 | `bin/docker-guardian` | macOS: checks that Docker Desktop answers every 2 minutes, restarts it within a budget, removes dead containers and old build cache, only removes superseded semver tags/dangling old images under the narrow rule below. Run it from the launchd template in `launchd/`. |
 | `bin/inbox-watch` | Polls a directory of files that parallel agent sessions use as messages; pair it with one `job_watch`. Set `INBOX_DIR`. |
 | `bin/gpt-meter` | Read-only spend meter for OpenAI usage from session logs. |
-| `launchd/` | Templates for the `docker-guardian`, `pi-cleanup` and `secret-sweep` schedules (placeholders instead of my user name). |
+| `launchd/` | Templates for the `docker-guardian`, `pi-cleanup`, `secret-sweep` and `disk-growth` schedules (placeholders instead of my user name). |
 | `context-budget.json`, `efficiency.json`, `provider-fallback.json`, `subagents.json`, `mcp-adapter.json` | Default configs for the extensions and packages above. |
 | `AGENTS.subagent.md` | Rules for subagents (derived from `AGENTS.md`, without the orchestration policy). |
 | `bin/pi-profile` | Switch model-routing profiles. |
 | `bin/pi-account` | Switch between saved Anthropic logins (tokens are never printed or stored here). |
 | `bin/pi-usage` | Provider usage and limit pressure from session logs. |
 | `bin/secret-sweep` | Read-only daily gitleaks scan of local sessions and `.ai-work` records; redacted reports under `~/.pi/agent/logs/secret-sweep/`. |
+| `bin/disk-growth` | macOS: per-minute free-space sampling and bounded top-writer alerts; helper in `bin/disk_growth_probe.py`. |
 | `bin/pi-cleanup` | Disk cleanup of build output and stale worktrees (dry run by default). |
 | `templates/brief.md` | Template for delegation briefs. |
 | `templates/repo-orchestrator-brief.md` | Template brief for the repo orchestrator that coordinates several lanes in one repository. |

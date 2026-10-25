@@ -136,6 +136,20 @@ describe("services", () => {
     assert.ok(!existsSync(plist));
   });
 
+  test("disk-growth: fills HOME, bootstraps, and removes the unit on turn-off", async () => {
+    const b = box();
+    assert.equal(await run(b, "--with", "disk-growth"), 0, b.err.join("\n"));
+    const plist = unit(b, "com.tester.disk-growth.plist");
+    const text = readFileSync(plist, "utf8");
+    assert.ok(text.includes(`${b.home}/.pi/agent/bin/disk-growth`) && !text.includes("__HOME__") && !text.includes("com.example"));
+    const uid = process.getuid?.() ?? 0;
+    assert.deepEqual(b.calls, [`launchctl print gui/${uid}/com.tester.disk-growth`, `launchctl bootstrap gui/${uid} ${plist}`]);
+    b.calls.length = 0;
+    assert.equal(await run(b, "--without", "disk-growth"), 0, b.err.join("\n"));
+    assert.deepEqual(b.calls, [`launchctl bootout gui/${uid}/com.tester.disk-growth`]);
+    assert.ok(!existsSync(plist));
+  });
+
   test("a rerun with nothing changed does not reload a loaded unit", async () => {
     const b = box();
     await run(b, "--with", "secret-sweep");

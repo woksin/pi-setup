@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: d6b91f754399af0febbc3f1338085cdc6cee008f4b7f58076e8565dcf981d1a1
+// pi-setup-source-sha256: c514d1fa65c42c65fcf10a4a42c22c6f9d76345e8e349f4f23404de1611935d0
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -6123,7 +6123,7 @@ import { existsSync as existsSync30, readdirSync as readdirSync18, readFileSync 
 import { join as join49 } from "node:path";
 function available(id, ctx) {
   if (id === "docker-guardian") return ctx.platform === "darwin" ? true : "needs Docker Desktop on macOS";
-  if (id === "secret-sweep") return ctx.platform === "darwin" ? true : "its schedule is a macOS launchd job";
+  if (["secret-sweep", "disk-growth"].includes(id)) return ctx.platform === "darwin" ? true : "its schedule is a macOS launchd job";
   if (id === "lanes") return ctx.which("git") ? true : "needs git";
   if (id === "cleanup") return ctx.platform === "darwin" || ctx.which("systemctl") ? true : "needs launchd (macOS) or systemd";
   return true;
@@ -6181,6 +6181,7 @@ function detectDefaults(ctx, detection, reposRoot) {
     "docker-guardian": ctx.platform === "darwin" && Boolean(ctx.which("docker")),
     cleanup: ctx.platform === "darwin" || Boolean(ctx.which("systemctl")),
     "secret-sweep": ctx.platform === "darwin" && Boolean(ctx.which("gitleaks")),
+    "disk-growth": ctx.platform === "darwin",
     codescene: Boolean(ctx.which("cs-mcp")) || Boolean(ctx.env.CS_ACCESS_TOKEN),
     cratis,
     web: true,
@@ -6192,6 +6193,7 @@ function hintFor(def, on) {
     "docker-guardian": ["docker found", "no docker found"],
     cleanup: ["a scheduler is available", "no scheduler found"],
     "secret-sweep": ["gitleaks found", "gitleaks not found"],
+    "disk-growth": ["macOS launchd available", "needs macOS launchd"],
     codescene: ["cs-mcp or a token found", "no cs-mcp or token found"],
     cratis: ["Cratis repos found", "no Cratis repos found"],
     web: ["on by default", "off"],
@@ -6237,11 +6239,12 @@ function codesceneNotes(ctx) {
 var COMPONENT_IDS, COMPONENTS, isComponentId, readJson2, WEB_PACKAGES, LIMIT, markerRe, CS_REPO, CS_SKILLS;
 var init_components = __esm({
   "src/components.ts"() {
-    COMPONENT_IDS = ["docker-guardian", "cleanup", "secret-sweep", "codescene", "cratis", "web", "lanes"];
+    COMPONENT_IDS = ["docker-guardian", "cleanup", "secret-sweep", "disk-growth", "codescene", "cratis", "web", "lanes"];
     COMPONENTS = [
       { id: "docker-guardian", label: "docker-guardian", explain: "restarts a hung Docker Desktop every 2 minutes (macOS launchd)", service: true },
       { id: "cleanup", label: "cleanup schedule", explain: "daily disk cleanup of pi's caches (launchd or systemd timer)", service: true },
       { id: "secret-sweep", label: "secret-sweep", explain: "daily scan of pi sessions for leaked secrets (macOS launchd; needs gitleaks)", service: true },
+      { id: "disk-growth", label: "disk-growth alert", explain: "every minute: alerts when free disk drops 5 GiB within 5 minutes and names the top writers (macOS launchd)", service: true },
       { id: "codescene", label: "CodeScene", explain: "Code Health MCP server and policy in AGENTS.md (needs cs-mcp and a token)", service: false },
       { id: "cratis", label: "Cratis conventions", explain: "Cratis rules, cratis-cli guard and agent, and the Cratis sections of AGENTS.md", service: false },
       { id: "lanes", label: "lanes", explain: "the lanes command: a coordinator and several pi sessions in git worktrees, talking through message files", service: false },
@@ -6434,7 +6437,7 @@ var init_services = __esm({
   "src/services.ts"() {
     init_components();
     init_manifest();
-    LAUNCHD_NAME = { "docker-guardian": "docker-guardian", cleanup: "pi-cleanup", "secret-sweep": "secret-sweep" };
+    LAUNCHD_NAME = { "docker-guardian": "docker-guardian", cleanup: "pi-cleanup", "secret-sweep": "secret-sweep", "disk-growth": "disk-growth" };
     TIMER = "pi-cleanup.timer";
     TIMEOUT = 5e3;
     xml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
