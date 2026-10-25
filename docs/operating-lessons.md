@@ -6,6 +6,12 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 
 ## 2026-10-25
 
+### An org-wide write workflow reverted a deliberate deletion
+- **Symptom:** merging a workflow change triggered a bootstrap that pushed a config file back into 32 repositories (31 commits with a CI skip token), although it had been removed on purpose and a PR to stop the propagation was still open.
+- **Cause:** the rollout was authorized without checking open PRs on the same files, the list of files and repositories it would write, or recent deletions.
+- **Rule:** before merging or authorizing anything that triggers an org-wide write workflow, list open PRs touching the same files, get a dry-run list of files and repositories, and compare it with recent deliberate deletions. Bootstrap commits never carry CI skip tokens.
+- **Enforced:** rule (`agent/AGENTS.md`, "Destructive-action safety").
+
 ### Unused local build tags escape semver cleanup
 - **Symptom:** eight unused local build tags retained about 6 GiB at the 25 GiB disk floor.
 - **Cause:** image cleanup only considered superseded versions and dangling images; reproducible `Created` timestamps also hid recent tagging.
