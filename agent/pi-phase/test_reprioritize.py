@@ -128,6 +128,19 @@ class ReprioritizeTests(Harness):
         self.assertFalse(self.admit("C"))
         self.assertTrue(self.admit("A"))
 
+    def test_lowered_ranked_waiter_gets_promotion_deadline(self):
+        path = self.register("ranked", 115)
+        data = pi_phase.metadata(path)
+        data.update(expected=60.0, basis="default", ageAt=data["enqueued"])
+        path.write_text(json.dumps(data))
+        self.assertEqual(self.change(115)[0], 0)
+        after = pi_phase.metadata(path)
+        order = pi_phase.config(self.config).options["queue_order"]
+        if order["mode"] == "shortest-first":
+            self.assertEqual(after["promoteAt"], data["enqueued"] + order["low_promote_after_s"])
+        else:
+            self.assertNotIn("promoteAt", after)
+
     def test_high_without_grant_is_unchanged(self):
         path = self.register("unapproved", 112)
         before = path.read_bytes()

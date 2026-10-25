@@ -2343,7 +2343,9 @@ def reprioritize(state, configuration, args):
     if not state.exists():
         note("no queued phase matches (already admitted/running phases cannot be reprioritized)")
         return 1
-    cap = config(configuration).options["max_high"]
+    options = config(configuration).options
+    cap = options["max_high"]
+    order = options["queue_order"]
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
         matches, owned = reprioritize_matches(state, args.target)
@@ -2362,6 +2364,11 @@ def reprioritize(state, configuration, args):
             return 0
         priority, message = approved_priority(state, args.priority, cap)
         waiter["priority"] = priority
+        # A waiter lowered to low gets the same promotion deadline a low run would have had,
+        # measured from its original enqueue time, so it cannot starve behind normal work.
+        if (priority == "low" and "promoteAt" not in waiter and "expected" in waiter
+                and order["mode"] == "shortest-first"):
+            waiter["promoteAt"] = waiter["enqueued"] + order["low_promote_after_s"]
         waiter["reprioritization"] = dict(previous=previous, priority=priority, at=time.time(), uid=os.getuid())
         # The waiter holds this inode's flock for its lifetime. Replacing the path
         # would make it look dead. All queue readers hold the coordinator too.
