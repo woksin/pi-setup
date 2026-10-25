@@ -193,8 +193,8 @@ class DiskGrowthTests(unittest.TestCase):
         self.assertEqual(value['Label'], 'com.example.disk-growth')
         self.assertEqual(value['ProgramArguments'], ['__HOME__/.pi/agent/bin/disk-growth'])
         self.assertEqual(value['StartInterval'], 60)
-        self.assertEqual(value['ProcessType'], 'Background')
-        self.assertTrue(value['LowPriorityIO'])
+        self.assertEqual(value['ProcessType'], 'Standard')
+        self.assertFalse(value['LowPriorityIO'])
         self.assertTrue(value['RunAtLoad'])
         self.assertEqual(value['EnvironmentVariables']['PYTHONDONTWRITEBYTECODE'], '1')
 
