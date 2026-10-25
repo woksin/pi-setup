@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assertTempHome, REPO, tempDir } from "./helpers/home.ts";
 import { main } from "../src/lanes/main.ts";
@@ -140,12 +140,42 @@ test("close reports unread names, preserves messages and worktree, and quotes re
   assert.equal(await f.invoke("close", "L1", "--reassign-to", "L2", "--reason", 'done "for now"'), 0);
   assert.ok(f.err.some((s) => s.includes("still running")));
   assert.equal(readFileSync(original, "utf8"), "do not edit"); assert.equal(statSync(original).mtimeMs, mtime);
-  assert.equal(readFileSync(join(f.root, "lanes.json"), "utf8"), config); assert.ok(existsSync(f.cwd));
+  const changed = JSON.parse(readFileSync(join(f.root, "lanes.json"), "utf8"));
+  const before = JSON.parse(config);
+  before.lanes.find(l => l.id === "L1").closed = { reason: 'done "for now"', by: "L0", at: f.now.toISOString() };
+  assert.deepEqual(changed, before); assert.ok(existsSync(f.cwd));
   assert.match(readFileSync(join(f.messages, "status/L1.status"), "utf8"), /^closed reassigned-to L2 at .* reason "done 'for now'"/);
   const sent = readdirSync(f.messages).find((n) => n.includes("lane-closed-l1"))!;
   assert.match(readFileSync(join(f.messages, sent), "utf8"), /L0-to-GROUP-help-1200.md/);
   assert.match(f.out.at(-1)!, /git -C '.*' worktree unlock '.*' && git -C '.*' worktree remove '.*'/);
   assert.ok(!f.calls.some((c) => c.cmd === "git" && c.args.includes("remove")));
+});
+test("close missing worktree skips git and records closed state", async () => {
+  const f = fixture(); rmSync(f.cwd, { recursive: true });
+  assert.equal(await f.invoke("close", "L1", "--reason", "merged", "--from", "L2"), 0);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, "lanes.json"), "utf8")).lanes[0].closed,
+    { reason: "merged", by: "L2", at: f.now.toISOString() });
+  assert.ok(f.out.includes("worktree already removed; no removal hint"));
+  assert.ok(!f.calls.some(call => call.cmd === "git" || call.cmd === "pgrep"));
+});
+test("close fails clearly when lanes.json cannot be replaced", async () => {
+  const f = fixture(); const run = f.ctx.run;
+  f.ctx.run = async (cmd, args, options) => {
+    if (cmd === "git") { rmSync(join(f.root, "lanes.json")); mkdirSync(join(f.root, "lanes.json")); }
+    return run(cmd, args, options);
+  };
+  assert.equal(await f.invoke("close", "L1", "--reason", "done"), 2);
+  assert.match(f.err.at(-1)!, /cannot write closed state to lanes.json/);
+  assert.ok(!existsSync(join(f.messages, "status/L1.status")));
+});
+test("status hides closed lanes and --all shows their reason, author and time separately", async () => {
+  const f = fixture(); f.c.lanes[0].closed = { reason: "merged", by: "L0", at: f.now.toISOString() };
+  saveConfig(f.root, f.c);
+  assert.equal(await f.invoke("status"), 0);
+  assert.ok(!f.out.join("\n").includes("L1"));
+  f.out.length = 0;
+  assert.equal(await f.invoke("status", "--all"), 0);
+  assert.match(f.out.join("\n"), /closed\nLANE\tREASON\tBY\tTIME\nL1\tmerged\tL0\t2026-/);
 });
 test("close --quit busy/recent/timeout cannot mark or send; print does not inject", async () => {
   for (const reason of ["busy", "recent", "print", "timeout"]) {
@@ -204,6 +234,7 @@ test("close removal hint quotes hostile clone and worktree paths", async () => {
   const f = fixture(); f.setRunning(false);
   f.c.worktreesDir = join(f.home, `space ' \" $(touch INJECTED) ;`); saveConfig(f.root, f.c);
   const clone = join(f.home, `clone ' \" $(touch INJECTED) ;`);
+  mkdirSync(join(f.c.worktreesDir, "l1"), { recursive: true });
   f.ctx.run = async (cmd) => cmd === "git" ? f.result(join(clone, ".git")) : f.result("", 1);
   assert.equal(await f.invoke("close", "L1"), 0);
   const wt = join(f.c.worktreesDir, "l1");

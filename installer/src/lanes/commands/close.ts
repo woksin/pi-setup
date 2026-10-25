@@ -1,6 +1,7 @@
+import { existsSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { backendFor, type MessageRef } from "../backend.ts";
-import { UsageError, type Config } from "../config.ts";
+import { saveConfig, UsageError, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { validId } from "../names.ts";
 import { alive, descendants } from "../processes.ts";
@@ -28,6 +29,18 @@ async function quit(id: string, pid: number, cwd: string, c: Config, root: strin
   }
   ctx.err(`REFUSED: pi ${pid} did not quit`); return false;
 }
+async function removalHint(cwd: string, ctx: LanesCtx): Promise<string> {
+  if (!existsSync(cwd)) return "worktree already removed; no removal hint";
+  const common = await ctx.run("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 10000 });
+  if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
+  const clone = shellQuote(dirname(common.stdout.trim())); const wt = shellQuote(cwd);
+  return `when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`;
+}
+function persistClosed(c: Config, root: string, record: { id: string; reason: string; by: string; at: Date }): void {
+  c.lanes.find(l => l.id === record.id)!.closed = { reason: record.reason, by: record.by, at: record.at.toISOString() };
+  try { saveConfig(root, c); }
+  catch (error) { throw new Error(`cannot write closed state to lanes.json: ${(error as Error).message}`); }
+}
 export async function close(id: string, opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx): Promise<number> {
   if (!c.lanes.some((l) => l.id === id)) throw new UsageError(`not a lane: ${id}`);
   const to = opts["reassign-to"]; const from = opts.from || ctx.env.PI_ORCH_ID || c.coordinator.id;
@@ -35,18 +48,18 @@ export async function close(id: string, opts: Record<string, string>, c: Config,
   if (!validId(from)) throw new UsageError("invalid sender id");
   if (to && to !== c.coordinator.id && !c.lanes.some((l) => l.id === to)) ctx.err(`unknown reassignment target: ${to}`);
   const target = laneTarget(id, c, root, ctx);
-  const common = await ctx.run("git", ["-C", target.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 10000 });
-  if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
-  const clone = shellQuote(dirname(common.stdout.trim())); const wt = shellQuote(target.cwd);
+  const hint = await removalHint(target.cwd, ctx);
   const backend = backendFor(c, ctx, root);
   const unread = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
-  const pid = await piIn(target.cwd, ctx);
+  const pid = existsSync(target.cwd) ? await piIn(target.cwd, ctx) : undefined;
   if (pid && opts.quit && !await quit(id, pid, target.cwd, c, root, ctx)) return 1;
   if (pid && !opts.quit) ctx.err(`${id} is still running; type /quit in its session or use --quit`);
-  const line = closedLine(to, opts.reason, ctx.now());
+  const at = ctx.now();
+  persistClosed(c, root, { id, reason: opts.reason || "", by: from, at });
+  const line = closedLine(to, opts.reason, at);
   await backend.setStatus(id, line);
   const message = await backend.send({ from, to: c.messages.broadcast, topic: `lane-closed-${id.toLowerCase()}`, body: closeBody(id, to, opts.reason, unread) });
   ctx.out(`${id}: ${line}`); ctx.out(message.path);
-  ctx.out(`when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`);
+  ctx.out(hint);
   return 0;
 }

@@ -4,11 +4,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { realRun, realWhich } from "../context.ts";
 import type { Runner } from "../types.ts";
+import type { ProcessSample } from "./reap/work.ts";
 
 export interface LanesCtx {
   env: Record<string, string | undefined>; platform: string; home: string; cwd: string; now(): Date;
   run: Runner; which(name: string): string | undefined; out(line: string): void; err(line: string): void;
   sleep?(ms: number): Promise<void>;
+  processInventory?(): Promise<ProcessSample[]>;
   stdinTTY: boolean; readStdin(): Promise<string>; templatesDir: string; piAgentDir: string;
   loadModule(path: string): Promise<Record<string, unknown>>; realpath(p: string): string; readCwd?(pid: number): Promise<string | undefined>;
 }

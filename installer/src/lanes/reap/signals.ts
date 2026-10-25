@@ -16,7 +16,7 @@ export interface Claim {
 }
 export interface Signals extends DecisionSignals {
   id: string; cwd: string; pid?: number; pids: number[]; sessionId?: string; sessionFile?: string;
-  lastWrite?: number; procStart?: string; tty?: string;
+  lastWrite?: number; procStart?: string; tty?: string; helpers?: string[];
   claims: Claim[]; git: GitEvidence; unread: string[]; status?: string; notes?: string[]; inboxWatch?: boolean; inboxAliases?: string[];
 }
 export interface EvidenceContext { c: Config; lane: Lane; root: string; ctx: LanesCtx; minutes: number }
@@ -36,6 +36,7 @@ export async function collect(env: EvidenceContext): Promise<Signals> {
   const { c, lane, root, ctx } = env;
   const s: Signals = { id: lane.id, cwd: "", asks: [], keeps: [], finished: false, takeover: false,
     pids: [], claims: [], git: {}, unread: [] };
+  if (lane.closed) { s.keeps.push("closed"); return s; }
   const protectedReason = callerProtection(env);
   if (protectedReason) { s.keeps.push(protectedReason); return s; }
   try {

@@ -19,7 +19,7 @@ function fixture() {
   const ctx: LanesCtx = { home, cwd: root, env: {}, platform: "darwin", piAgentDir: join(home, "agent"),
     templatesDir: join(REPO, "installer/lanes/templates"), now: () => new Date("2026-10-23T12:00:00Z"),
     which: () => undefined, realpath: p => p, out: s => out.push(s), err: s => err.push(s),
-    stdinTTY: true, readStdin: async () => "", loadModule: async () => ({}), sleep: async () => {},
+    stdinTTY: true, readStdin: async () => "", loadModule: async () => ({}), sleep: async () => {}, processInventory: async () => [],
     run: async (cmd, args) => { calls.push({ cmd, args }); return probe(cmd, args, rows); } };
   const put = (path: string, body: string) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, body); return path; };
   const add = (id: string | undefined, tty = `ttys${String(rows.length).padStart(3, "0")}`, cwd = join(home, `outside/w${rows.length}`)) => {

@@ -3,6 +3,7 @@ import { join, normalize } from "node:path";
 import type { LanesCtx } from "../ctx.ts";
 import type { Signals } from "./signals.ts";
 import { expectedForeground } from "./foreground.ts";
+import { childWork, helperCommand, helperKind } from "./work.ts";
 export function absolute(ctx: LanesCtx, path: string): string { return normalize(ctx.realpath(path)); }
 export function requireProbe(result: { code: number; timedOut: boolean }, message: string): void { if (result.code !== 0 || result.timedOut) throw new Error(message); }
 export async function processCwd(ctx: LanesCtx, pid: number): Promise<string> {
@@ -22,17 +23,18 @@ export async function processIds(ctx: LanesCtx, cwd: string): Promise<number[]> 
   return ids;
 }
 async function busyChildren(s: Signals, ctx: LanesCtx): Promise<void> {
-  const ps = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,command="], { timeoutMs: 4000 }); requireProbe(ps, "process descendants unknown");
-  const rows = ps.stdout.split("\n").map(line => /^(\d+)\s+(\d+)\s+(.+)$/.exec(line.trim())).filter(Boolean);
-  const owned = new Set([s.pid]);
-  const addChild = (row: RegExpExecArray | null) => { if (!owned.has(Number(row![2])) || owned.has(Number(row![1]))) return false; owned.add(Number(row![1])); return true; };
-  let changed = true; while (changed) { changed = rows.map(addChild).some(Boolean); }
-  if (owned.size > 1) s.keeps.push("busy child process");
+  const work = await childWork(s.pid!, s.cwd, ctx);
+  s.helpers = work.helpers;
+  if (work.busy) s.keeps.push("busy child process");
 }
 async function openJobs(s: Signals, ctx: LanesCtx): Promise<void> {
   const files = await ctx.run("lsof", ["-p", String(s.pid), "-Fn"], { timeoutMs: 4000 }); requireProbe(files, "open files unknown");
   const jobs = files.stdout.split("\n").filter(l => l.startsWith("n" + join(ctx.piAgentDir, "jobs") + "/"));
-  for (const path of jobs) { readFileSync(path.slice(1), "utf8"); s.keeps.push("job/watch running (log open)"); }
+  for (const path of jobs) {
+    const header = readFileSync(path.slice(1), "utf8").split("\n", 1)[0];
+    if (helperCommand(header)) (s.helpers ??= []).push(helperKind(header));
+    else s.keeps.push("job/watch running (log open)");
+  }
 }
 async function foreground(s: Signals, ctx: LanesCtx): Promise<void> {
   const tty = await ctx.run("ps", ["-o", "tty=", "-p", String(s.pid)], { timeoutMs: 4000 }); requireProbe(tty, "TTY unknown");

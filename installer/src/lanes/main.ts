@@ -25,7 +25,7 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
   resume <ID> [--terminal backend]
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
   status [--all]
-  messages prune [--dry-run] [--json]
+  messages prune [--dry-run] [--json] [--legacy [--legacy-age hours] [--apply]]
   idle-check [--minutes n]
   nudge <ID|coordinator> <text> [--terminal backend]
   resume-check
@@ -44,14 +44,14 @@ const OPTIONS: Record<string, string[]> = {
   add: ["repo", "issue", "goal", "group", "branch", "base", "path",
     "orchestrator", "orchestrator-id", "no-orchestrator"],
   start: ["terminal", "from-handoff"], resume: ["terminal"], send: ["m", "from", "direct"],
-  status: ["all"], messages: ["dry-run", "json"],
+  status: ["all"], messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"],
   handoff: ["to", "accept", "from"], reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
   snooze: ["until", "clear"],
   close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"],
 };
 const FLAGS = ["write", "preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all",
-  "no-orchestrator", "inactive", "clear", "apply", "accept"];
+  "no-orchestrator", "inactive", "clear", "apply", "accept", "legacy"];
 interface Invocation { command: string; positional: string[]; opts: Record<string, string> }
 interface CommandEnv { c: Config; root: string; ctx: LanesCtx }
 interface ParsePosition { argv: string[]; index: number }

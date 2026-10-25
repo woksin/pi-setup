@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 6c800663d5e0055ed445590f399abc2f27843baa2ade9448bda0025213d23cfc
+// pi-setup-source-sha256: 0dc41d1a7e7d89462e8f8cce6458929c92c5640d5513a9557398ef70d2a76c09
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -255,9 +255,13 @@ function validateHierarchyFields(lane, c, key) {
   requireField(lane.orchestrates === void 0 || lane.role === "repo-orch" && Array.isArray(lane.orchestrates) && lane.orchestrates.every(validRepo), `${key}.orchestrates`);
   requireField(lane.retired === void 0 || typeof lane.retired === "boolean", `${key}.retired`);
   requireField(validStateFile(lane.stateFile), `${key}.stateFile`);
+  requireField(validClosed(lane.closed), `${key}.closed`);
   requireField(lane.cwd === void 0 || typeof lane.cwd === "string" && isAbsolute(lane.cwd), `${key}.cwd`);
   requireField(validParent(lane, c), `${key}.parent`);
   requireField(validOrchestratorParent(lane, c), `${key}.parent`);
+}
+function validClosed(value) {
+  return value === void 0 || value !== null && typeof value === "object" && typeof value.reason === "string" && typeof value.by === "string" && validId(value.by) && typeof value.at === "string" && Number.isFinite(Date.parse(value.at));
 }
 function validStateFile(value) {
   return value === void 0 || typeof value === "string" && value.length > 0;
@@ -548,6 +552,84 @@ function expectedForeground(pid, pgid, text2) {
   return rows.filter((row) => row.pgid === pgid).every((row) => parents.has(row.pid) || ancestors(row.pid, table).has(pid));
 }
 
+// src/lanes/reap/work.ts
+import { basename as basename2 } from "node:path";
+function workCommand(command) {
+  const words = command.trim().replace(/["']/g, "").split(/\s+/);
+  const executable = basename2(words[0] || "");
+  if (/^(dotnet|msbuild|vstest(?:\.console)?|testhost|cargo|make|gmake|vitest|jest)(?:\.exe)?$/i.test(executable)) return true;
+  if (/(?:^|\s)(?:\S*\/)?pi-phase\s+run\b/.test(command)) return true;
+  if (/^(node|nodejs|npm|npx|yarn|pnpm)$/.test(executable)) {
+    return words.slice(1).some((word) => /^(test|build|vitest|jest)(?::[\w-]+)?$/.test(word) || /(?:^|\/)(vitest|jest)(?:\.[cm]?js)?$/.test(word));
+  }
+  if (/^python(?:\d+(?:\.\d+)?)?$/.test(executable)) return /\s-m\s+(pytest|unittest)\b/.test(command);
+  return executable === "docker" && /\s(?:build|buildx\s+build)\b/.test(command);
+}
+function helperKind(command) {
+  if (/\binbox-watch\b/.test(command)) return "inbox-watch";
+  if (/\bmcp\b|mcp-server|server-mcp/.test(command)) return "mcp";
+  if (/\bjob_watch\b|\bwatch\b/.test(command)) return "watch";
+  if (/^(?:\S*\/)?-?(?:bash|zsh|sh|fish)(?:\s|$)/.test(command)) return "shell";
+  return "other";
+}
+function helperCommand(command) {
+  return helperKind(command) !== "other";
+}
+function cpuTime(value) {
+  const [days, clock] = value.includes("-") ? value.split("-") : ["0", value];
+  const seconds = clock.split(":").reduce((total, part) => total * 60 + Number(part), 0);
+  return Number(days) * 86400 + seconds;
+}
+async function processInventory(ctx) {
+  if (ctx.processInventory) return ctx.processInventory();
+  const ps = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,time=,command="], { timeoutMs: 4e3 });
+  if (ps.code !== 0 || ps.timedOut) throw new Error("process descendants unknown");
+  const lines = ps.stdout.trim().split("\n").filter(Boolean);
+  if (lines.length > 2e4) throw new Error("process descendants inventory too large");
+  return lines.map(parseSample);
+}
+function parseSample(line) {
+  const match = /^(\d+)\s+(\d+)\s+([\d:.\-]+)\s+(.+)$/.exec(line.trim());
+  if (!match) throw new Error("process descendants malformed");
+  return { pid: Number(match[1]), ppid: Number(match[2]), cpuSeconds: cpuTime(match[3]), command: match[4] };
+}
+function descendants(pid, inventory2) {
+  const owned2 = /* @__PURE__ */ new Set([pid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of inventory2) {
+      if (!owned2.has(row.ppid) || owned2.has(row.pid)) continue;
+      owned2.add(row.pid);
+      changed = true;
+    }
+  }
+  return inventory2.filter((row) => row.pid !== pid && owned2.has(row.pid));
+}
+async function ownedPhase(cwd, ctx) {
+  const phase = ctx.which("pi-phase");
+  if (!phase) return false;
+  const result2 = await ctx.run(phase, ["status"], { timeoutMs: 4e3 });
+  if (result2.code !== 0 || result2.timedOut) throw new Error("pi-phase status unknown");
+  return result2.stdout.split("\n").some((line) => {
+    const match = / pid=\d+ cwd=(.+) elapsed=\d+s (?:running|orphan-group)\b/.exec(line);
+    return match !== null && (match[1] === cwd || match[1].startsWith(cwd + "/"));
+  });
+}
+async function childWork(pid, cwd, ctx) {
+  const children = descendants(pid, await processInventory(ctx));
+  const helpers = children.filter((row) => !workCommand(row.command)).map((row) => helperKind(row.command));
+  if (children.some((row) => workCommand(row.command)) || await ownedPhase(cwd, ctx)) return { busy: true, helpers };
+  if (!children.length) return { busy: false, helpers };
+  await (ctx.sleep ? ctx.sleep(1e3) : new Promise((done) => setTimeout(done, 1e3)));
+  const second = descendants(pid, await processInventory(ctx));
+  const busy = second.some((row) => {
+    const before = children.find((first) => first.pid === row.pid && first.ppid === row.ppid && first.command === row.command);
+    return before !== void 0 && row.cpuSeconds - before.cpuSeconds >= 0.05;
+  });
+  return { busy, helpers };
+}
+
 // src/lanes/reap/process.ts
 function absolute(ctx, path) {
   return normalize(ctx.realpath(path));
@@ -576,28 +658,18 @@ async function processIds(ctx, cwd) {
   return ids;
 }
 async function busyChildren(s, ctx) {
-  const ps = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,command="], { timeoutMs: 4e3 });
-  requireProbe(ps, "process descendants unknown");
-  const rows = ps.stdout.split("\n").map((line) => /^(\d+)\s+(\d+)\s+(.+)$/.exec(line.trim())).filter(Boolean);
-  const owned2 = /* @__PURE__ */ new Set([s.pid]);
-  const addChild = (row) => {
-    if (!owned2.has(Number(row[2])) || owned2.has(Number(row[1]))) return false;
-    owned2.add(Number(row[1]));
-    return true;
-  };
-  let changed = true;
-  while (changed) {
-    changed = rows.map(addChild).some(Boolean);
-  }
-  if (owned2.size > 1) s.keeps.push("busy child process");
+  const work = await childWork(s.pid, s.cwd, ctx);
+  s.helpers = work.helpers;
+  if (work.busy) s.keeps.push("busy child process");
 }
 async function openJobs(s, ctx) {
   const files = await ctx.run("lsof", ["-p", String(s.pid), "-Fn"], { timeoutMs: 4e3 });
   requireProbe(files, "open files unknown");
   const jobs = files.stdout.split("\n").filter((l) => l.startsWith("n" + join6(ctx.piAgentDir, "jobs") + "/"));
   for (const path of jobs) {
-    readFileSync4(path.slice(1), "utf8");
-    s.keeps.push("job/watch running (log open)");
+    const header = readFileSync4(path.slice(1), "utf8").split("\n", 1)[0];
+    if (helperCommand(header)) (s.helpers ??= []).push(helperKind(header));
+    else s.keeps.push("job/watch running (log open)");
   }
 }
 async function foreground(s, ctx) {
@@ -784,6 +856,10 @@ function currentJob(job, s, ctx) {
 }
 function runningJob(job, s, ctx) {
   if (job.status !== "running") return;
+  if (helperCommand(String(job.command || ""))) {
+    (s.helpers ??= []).push(helperKind(job.command));
+    return;
+  }
   if (!job.command || !Number.isFinite(job.startedAt)) {
     s.asks.push(`job ${job.id} start evidence missing`);
     return;
@@ -811,7 +887,10 @@ async function sessionWork(s, ctx) {
     return;
   }
   if (agents.launches.size) s.asks.push("subagent launched without completion");
-  for (const tool of pending.values()) s.keeps.push(`${tool} tool call pending`);
+  for (const tool of pending.values()) {
+    if (tool === "job_watch") (s.helpers ??= []).push("watch");
+    else s.keeps.push(`${tool} tool call pending`);
+  }
   for (const job of jobs.values()) runningJob(job, s, ctx);
 }
 
@@ -1149,6 +1228,10 @@ async function collect(env) {
     git: {},
     unread: []
   };
+  if (lane.closed) {
+    s.keeps.push("closed");
+    return s;
+  }
   const protectedReason = callerProtection(env);
   if (protectedReason) {
     s.keeps.push(protectedReason);
@@ -1903,6 +1986,12 @@ function keep(s) {
   return { verdict: "keep", reason: topReasons(s.keeps), notes: [...new Set(s.asks)] };
 }
 function verdict(s) {
+  const result2 = decide(s);
+  if (!s.helpers?.length) return result2;
+  const kinds = [...new Set(s.helpers)].sort().map((kind) => `${kind}=${s.helpers.filter((value) => value === kind).length}`);
+  return { ...result2, notes: [...result2.notes ?? [], `helpers (${s.helpers.length}): ${kinds.join(", ")}`] };
+}
+function decide(s) {
   if (liveActivity(s.keeps)) return keep(s);
   if (s.asks.length) return { verdict: "ask", reason: topReasons(s.asks) };
   if (s.keeps.length) return keep(s);
@@ -1968,7 +2057,7 @@ async function reap(args, opts, env) {
   const { c, root, ctx } = env;
   const minutes = validateArgs(args, opts, c);
   const rows = [];
-  const active = laneTree(c).reverse().map((row) => row.lane).filter((l) => !args[0] || l.id === args[0]);
+  const active = laneTree(c).reverse().map((row) => row.lane).filter((l) => !l.closed && (!args[0] || l.id === args[0]));
   for (const lane of active) rows.push(await planRow({ c, lane, root, ctx, minutes }, opts));
   const summaries = summary(rows.map((row) => row.signals), env);
   atomicJson(join21(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), minutes, rows, summaries });
@@ -2100,7 +2189,7 @@ import { existsSync as existsSync8, readFileSync as readFileSync13 } from "node:
 import { join as join26, resolve as resolve7 } from "node:path";
 
 // src/lanes/adopt/discover.ts
-import { basename as basename2, join as join25 } from "node:path";
+import { basename as basename3, join as join25 } from "node:path";
 
 // src/lanes/processes.ts
 async function runningPi(ctx) {
@@ -2146,7 +2235,7 @@ async function foregroundPi(ctx, tty, pid, cwd) {
     return false;
   }
 }
-async function descendants(ctx, rootPid) {
+async function descendants2(ctx, rootPid) {
   const r = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,command="], { timeoutMs: 1e4 });
   if (r.code !== 0) throw new Error("cannot inspect process descendants");
   const rows = r.stdout.split("\n").flatMap((line) => {
@@ -2226,7 +2315,7 @@ async function identify(row, entries, ctx) {
   row.sessionId = signals.sessionId;
   const map = identityMap(row.sessionId, ctx);
   const candidates = entries.filter((e) => e.tty === row.tty);
-  if (candidates.some((e) => ![row.cwd, basename2(row.cwd)].includes(e.worktree))) throw new Error("conflict: inventory worktree differs from cwd");
+  if (candidates.some((e) => ![row.cwd, basename3(row.cwd)].includes(e.worktree))) throw new Error("conflict: inventory worktree differs from cwd");
   applyInventory(row, map, candidates);
 }
 function identityMap(sessionId, ctx) {
@@ -2314,7 +2403,7 @@ function roleAssignment(value) {
 
 // src/lanes/adopt/proposal.ts
 import { existsSync as existsSync7 } from "node:fs";
-import { basename as basename3, dirname as dirname6, relative as relative7 } from "node:path";
+import { basename as basename4, dirname as dirname6, relative as relative7 } from "node:path";
 function mergeDiscovered(c, rows, options) {
   for (const row of rows) {
     if (row.id && !row.excluded) mergeLane(row, { c, ...options });
@@ -2389,7 +2478,7 @@ function adoptedLane(row, env) {
     ...env.orchestrates?.has(row.id) ? { orchestrates: env.orchestrates.get(row.id) } : {},
     ...row.repo ? { repo: row.repo } : {},
     ...row.branch ? { branch: row.branch } : {},
-    worktree: basename3(row.cwd),
+    worktree: basename4(row.cwd),
     group: null,
     prompt: `prompts/${row.id}.md`
   };
@@ -2735,7 +2824,7 @@ function needsOrchestrator(plan, opts) {
 }
 
 // src/lanes/commands/resume.ts
-import { join as join31, resolve as resolve9 } from "node:path";
+import { join as join32, resolve as resolve9 } from "node:path";
 import { existsSync as existsSync12, statSync as statSync8 } from "node:fs";
 
 // src/lanes/commands/start.ts
@@ -2770,8 +2859,70 @@ async function piIn(cwd, ctx) {
 }
 
 // src/lanes/retention.ts
-import { closeSync, copyFileSync as copyFileSync2, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync, readdirSync as readdirSync9, renameSync as renameSync4, unlinkSync as unlinkSync3, utimesSync } from "node:fs";
+import { closeSync, copyFileSync as copyFileSync2, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync, readdirSync as readdirSync10, renameSync as renameSync4, unlinkSync as unlinkSync3, utimesSync } from "node:fs";
+import { join as join31 } from "node:path";
+
+// src/lanes/legacy-prune.ts
+import { readdirSync as readdirSync9 } from "node:fs";
 import { join as join30 } from "node:path";
+function settings({ opts, config, root, ctx }) {
+  const hours = Number(opts["legacy-age"] ?? 24);
+  if (!Number.isFinite(hours) || hours < 24) throw new UsageError("--legacy-age must be at least 24 hours");
+  if (opts.apply && opts["dry-run"]) throw new UsageError("choose --apply or --dry-run");
+  const base = archiveDir(config, root, ctx.home);
+  return {
+    dir: expand(config.messages.dir, config, root, ctx.home),
+    destination: config.messages.retention ? base : join30(base, "legacy"),
+    cutoff: ctx.now().getTime() - hours * 36e5,
+    dryRun: !opts.apply
+  };
+}
+var LegacyArchive = class {
+  options;
+  storage;
+  constructor(options, storage) {
+    this.options = options;
+    this.storage = storage;
+  }
+  directory(path) {
+    const info = this.storage.stat(path);
+    if (!info) return void 0;
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`not a regular directory: ${path}`);
+    return info;
+  }
+  candidate(name) {
+    if (name.startsWith(".") || parseMessageName(name)) return [];
+    const path = join30(this.options.dir, name);
+    const info = this.storage.stat(path);
+    return info?.isFile() && info.mtimeMs < this.options.cutoff ? [{ name, path, info }] : [];
+  }
+  files() {
+    this.directory(this.options.destination);
+    if (!this.directory(this.options.dir)) return [];
+    return readdirSync9(this.options.dir).flatMap((name) => this.candidate(name));
+  }
+  collision(file) {
+    if (this.storage.stat(join30(this.options.destination, file.name))) return true;
+    return !this.options.dryRun && !this.storage.archive(file, this.options.destination);
+  }
+  run() {
+    const result2 = { dryRun: this.options.dryRun, archived: [], skippedCollision: [] };
+    for (const file of this.files()) (this.collision(file) ? result2.skippedCollision : result2.archived).push(file.name);
+    return result2;
+  }
+};
+function show(result2, ctx) {
+  for (const name of result2.archived) ctx.out(`${result2.dryRun ? "would archive" : "archived"}: ${name}`);
+  ctx.out(`legacy ${result2.dryRun ? "dry run" : "apply"}: archived: ${result2.archived.length}, skipped (collision): ${result2.skippedCollision.length}`);
+}
+function pruneLegacy(request2, storage) {
+  const result2 = new LegacyArchive(settings(request2), storage).run();
+  if (request2.opts.json) request2.ctx.out(JSON.stringify(result2));
+  else show(result2, request2.ctx);
+  return 0;
+}
+
+// src/lanes/retention.ts
 var DAY = 864e5;
 function stat(path) {
   try {
@@ -2785,10 +2936,10 @@ function messages(dir) {
   const info = stat(dir);
   if (!info) return [];
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`not a regular directory: ${dir}`);
-  return readdirSync9(dir).flatMap((name) => {
+  return readdirSync10(dir).flatMap((name) => {
     const parsed = parseMessageName(name);
     if (!parsed || name.startsWith(".")) return [];
-    const path = join30(dir, name);
+    const path = join31(dir, name);
     const info2 = stat(path);
     return info2?.isFile() ? [{ name, path, info: info2, ...parsed, at: info2.mtime }] : [];
   });
@@ -2797,13 +2948,13 @@ function unread(m, c, dir) {
   const broadcast = addressed2(m, "ALL") || addressed2(m, c.messages.broadcast);
   return [{ id: c.coordinator.id, group: null }, ...c.lanes].some(({ id, group }) => {
     if (!broadcast && ![id, ...group ? [group] : []].some((recipient2) => addressed2(m, recipient2))) return false;
-    const marker = stat(join30(dir, `${id}-inbox.marker`));
+    const marker = stat(join31(dir, `${id}-inbox.marker`));
     return marker?.isFile() === true && marker.mtimeMs < m.info.mtimeMs;
   });
 }
 function archive2(m, dir) {
   mkdirSync9(dir, { recursive: true });
-  const target = join30(dir, m.name);
+  const target = join31(dir, m.name);
   try {
     closeSync(openSync(target, "wx"));
   } catch (e) {
@@ -2858,7 +3009,7 @@ function prune(c, root, ctx, dryRun = false) {
       counts.deleted++;
       continue;
     }
-    const target = stat(join30(destination, m.name));
+    const target = stat(join31(destination, m.name));
     const expired = target?.isFile() && r.archiveMaxAgeDays !== null && target.mtimeMs < now - r.archiveMaxAgeDays * DAY;
     if (target && !(dryRun && expired) || !dryRun && !archive2(m, destination)) {
       counts.skippedCollision++;
@@ -2869,6 +3020,8 @@ function prune(c, root, ctx, dryRun = false) {
   return counts;
 }
 function messagesPrune(opts, c, root, ctx) {
+  if (opts.legacy) return pruneLegacy({ opts, config: c, root, ctx }, { stat, archive: archive2 });
+  if (opts.apply || opts["legacy-age"]) throw new UsageError("--apply and --legacy-age require --legacy");
   const counts = prune(c, root, ctx, opts["dry-run"] === "true");
   ctx.out(opts.json === "true" ? JSON.stringify(counts) : `archived: ${counts.archived}, deleted: ${counts.deleted}, skipped (unread): ${counts.skippedUnread}, skipped (collision): ${counts.skippedCollision}, kept: ${counts.kept}, archive-expired: ${counts.archiveExpired}`);
   return 0;
@@ -2917,7 +3070,7 @@ async function resume(args, opts, env) {
   return fromHandoff({ id: args[0], opts: { ...opts, "from-handoff": args[0] } }, env);
 }
 function filePath(value, env) {
-  return env.c.lanes.some((lane) => lane.id === value) ? join31(env.root, ".state/handoffs", `${value}.md`) : resolve9(env.ctx.cwd, value);
+  return env.c.lanes.some((lane) => lane.id === value) ? join32(env.root, ".state/handoffs", `${value}.md`) : resolve9(env.ctx.cwd, value);
 }
 function sourceLane(snapshot, env) {
   const { c, ctx, root } = env;
@@ -3044,7 +3197,7 @@ async function idleCheck(opts, c, root, ctx) {
     if (parseStatus(line).kind === "closed" || suppressed(line, ctx.now())) continue;
     const { cwd } = laneTarget(lane.id, c, root, ctx);
     const pid = await piIn(cwd, ctx);
-    if (!pid || (await descendants(ctx, pid)).some((s) => /\bpi-phase run\b/.test(s))) continue;
+    if (!pid || (await descendants2(ctx, pid)).some((s) => /\bpi-phase run\b/.test(s))) continue;
     const minutes = idleMinutes2(cwd, ctx);
     if (minutes !== void 0 && minutes > Number(opts.minutes ?? c.idle?.minutes ?? 75)) silent.push(`${lane.id}:${minutes}m`);
   }
@@ -3080,11 +3233,11 @@ async function nudge(id, text2, opts, c, root, ctx) {
 
 // src/lanes/commands/resume-check.ts
 import { existsSync as existsSync13, readFileSync as readFileSync16, statSync as statSync10 } from "node:fs";
-import { join as join33 } from "node:path";
+import { join as join34 } from "node:path";
 
 // src/lanes/joblogs.ts
-import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync10, statSync as statSync9 } from "node:fs";
-import { join as join32 } from "node:path";
+import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync11, statSync as statSync9 } from "node:fs";
+import { join as join33 } from "node:path";
 function parseWatches(text2) {
   return text2.split(/\r?\n/).flatMap((line) => {
     const [tag, label, until2, interval, ...check] = line.split("|");
@@ -3109,16 +3262,16 @@ function liveWatch(jobs, watch2, now) {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   for (const date of [now, yesterday]) {
-    const dir = join32(jobs, day(date));
+    const dir = join33(jobs, day(date));
     let names;
     try {
-      names = readdirSync10(dir);
+      names = readdirSync11(dir);
     } catch (e) {
       if (e.code === "ENOENT") continue;
       throw e;
     }
     for (const name of names.filter((n) => n.endsWith(".log"))) {
-      const path = join32(dir, name);
+      const path = join33(dir, name);
       const stat2 = statSync9(path);
       if (!stat2.isFile() || !chunk(path, Math.min(4096, stat2.size), 0).split("\n")[0].includes(watch2.check)) continue;
       const tail = chunk(path, Math.min(65536, stat2.size), Math.max(0, stat2.size - 65536));
@@ -3152,12 +3305,12 @@ async function resumeCheck(c, root, ctx) {
   const now = ctx.now();
   let bad = false;
   ctx.out(`date: ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`);
-  const watches = join33(root, "coordinator/WATCHES.md");
+  const watches = join34(root, "coordinator/WATCHES.md");
   if (!existsSync13(watches)) {
     ctx.out("MISSING coordinator/WATCHES.md");
     bad = true;
   } else for (const w of parseWatches(readFileSync16(watches, "utf8"))) {
-    if (liveWatch(join33(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
+    if (liveWatch(join34(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
     else {
       ctx.out(`MISSING watch: ${w.label} -> job_watch until=${w.until} interval=${w.interval} check from coordinator/WATCHES.md`);
       bad = true;
@@ -3173,7 +3326,7 @@ async function resumeCheck(c, root, ctx) {
     if (old.length) bad = true;
     else ctx.out("OK      inbox: no unread backlog");
   }
-  const path = join33(root, "coordinator/NOW.md");
+  const path = join34(root, "coordinator/NOW.md");
   if (!existsSync13(path)) {
     ctx.out("MISSING coordinator/NOW.md");
     bad = true;
@@ -3185,7 +3338,7 @@ async function resumeCheck(c, root, ctx) {
       bad = true;
     }
   }
-  const questions = join33(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
+  const questions = join34(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
   if (existsSync13(questions)) {
     const r = await ctx.run(process.execPath, [questions, "list", "--all"], { timeoutMs: 15e3 });
     for (const line of r.stdout.split("\n").filter((s) => /^Q-\d+/.test(s))) ctx.out(`OPEN    ${line}`);
@@ -3195,7 +3348,7 @@ async function resumeCheck(c, root, ctx) {
 
 // src/lanes/commands/green-prs.ts
 import { existsSync as existsSync14, mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync8 } from "node:fs";
-import { join as join34 } from "node:path";
+import { join as join35 } from "node:path";
 
 // src/lanes/stale-check.ts
 var completedCheck = (check) => check.status === "completed" && ["success", "skipped", "neutral"].includes(check.conclusion);
@@ -3296,9 +3449,9 @@ async function greenPrs(opts, c, root, ctx) {
     }
   }
   refs.sort();
-  const ack = join34(root, ".state/green-ack");
+  const ack = join35(root, ".state/green-ack");
   if (opts.ack) {
-    mkdirSync10(join34(root, ".state"), { recursive: true });
+    mkdirSync10(join35(root, ".state"), { recursive: true });
     writeFileSync8(ack, refs.length ? `${refs.join("\n")}
 ` : "");
     ctx.out(`acked ${refs.length}`);
@@ -3311,7 +3464,8 @@ async function greenPrs(opts, c, root, ctx) {
 }
 
 // src/lanes/commands/close.ts
-import { basename as basename4, dirname as dirname8 } from "node:path";
+import { existsSync as existsSync15 } from "node:fs";
+import { basename as basename5, dirname as dirname8 } from "node:path";
 function closeBody(id, to, reason, unread2) {
   const body = [
     `Lane ${id} is closed.${to ? ` Reassigned to ${to}.` : ""}${reason ? ` Reason: ${clean(reason)}` : ""}`,
@@ -3326,7 +3480,7 @@ function closeBody(id, to, reason, unread2) {
 `;
 }
 async function quit(id, pid, cwd, c, root, ctx) {
-  const busy = (await descendants(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename4(cmd.split(/\s+/)[0])));
+  const busy = (await descendants2(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename5(cmd.split(/\s+/)[0])));
   if (busy.length) {
     ctx.err(`REFUSED: busy children: ${busy.join(" ")}`);
     return false;
@@ -3344,6 +3498,22 @@ async function quit(id, pid, cwd, c, root, ctx) {
   ctx.err(`REFUSED: pi ${pid} did not quit`);
   return false;
 }
+async function removalHint(cwd, ctx) {
+  if (!existsSync15(cwd)) return "worktree already removed; no removal hint";
+  const common = await ctx.run("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 });
+  if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
+  const clone = shellQuote(dirname8(common.stdout.trim()));
+  const wt = shellQuote(cwd);
+  return `when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`;
+}
+function persistClosed(c, root, record2) {
+  c.lanes.find((l) => l.id === record2.id).closed = { reason: record2.reason, by: record2.by, at: record2.at.toISOString() };
+  try {
+    saveConfig(root, c);
+  } catch (error) {
+    throw new Error(`cannot write closed state to lanes.json: ${error.message}`);
+  }
+}
 async function close(id, opts, c, root, ctx) {
   if (!c.lanes.some((l) => l.id === id)) throw new UsageError(`not a lane: ${id}`);
   const to = opts["reassign-to"];
@@ -3352,26 +3522,25 @@ async function close(id, opts, c, root, ctx) {
   if (!validId(from)) throw new UsageError("invalid sender id");
   if (to && to !== c.coordinator.id && !c.lanes.some((l) => l.id === to)) ctx.err(`unknown reassignment target: ${to}`);
   const target = laneTarget(id, c, root, ctx);
-  const common = await ctx.run("git", ["-C", target.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 });
-  if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
-  const clone = shellQuote(dirname8(common.stdout.trim()));
-  const wt = shellQuote(target.cwd);
+  const hint = await removalHint(target.cwd, ctx);
   const backend = backendFor(c, ctx, root);
   const unread2 = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
-  const pid = await piIn(target.cwd, ctx);
+  const pid = existsSync15(target.cwd) ? await piIn(target.cwd, ctx) : void 0;
   if (pid && opts.quit && !await quit(id, pid, target.cwd, c, root, ctx)) return 1;
   if (pid && !opts.quit) ctx.err(`${id} is still running; type /quit in its session or use --quit`);
-  const line = closedLine(to, opts.reason, ctx.now());
+  const at = ctx.now();
+  persistClosed(c, root, { id, reason: opts.reason || "", by: from, at });
+  const line = closedLine(to, opts.reason, at);
   await backend.setStatus(id, line);
   const message = await backend.send({ from, to: c.messages.broadcast, topic: `lane-closed-${id.toLowerCase()}`, body: closeBody(id, to, opts.reason, unread2) });
   ctx.out(`${id}: ${line}`);
   ctx.out(message.path);
-  ctx.out(`when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`);
+  ctx.out(hint);
   return 0;
 }
 
 // src/lanes/commands/status.ts
-import { existsSync as existsSync15 } from "node:fs";
+import { existsSync as existsSync16 } from "node:fs";
 async function status(c, root, ctx, all = false) {
   const backend = backendFor(c, ctx, root);
   const processes = await runningPi(ctx);
@@ -3397,6 +3566,7 @@ async function status(c, root, ctx, all = false) {
   warnMissingOrchestrators(c, ctx);
   const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
   ctx.out(rows.map((r) => r.map((s, i) => i === r.length - 1 ? s : s.padEnd(widths[i])).join("  ")).join("\n"));
+  if (all) showClosed(c, ctx);
   return 0;
 }
 function statusLanes(env, all) {
@@ -3412,7 +3582,7 @@ function statusLanes(env, all) {
       label: c.coordinator.id,
       cwd: expand(c.coordinator.cwd, c, root, ctx.home)
     },
-    ...laneTree(c, all).map(({ lane, depth }) => ({
+    ...laneTree(c, all).filter(({ lane }) => !lane.closed).map(({ lane, depth }) => ({
       ...lane,
       role: lane.role || "lane",
       parent: effectiveParent(lane, c),
@@ -3421,9 +3591,18 @@ function statusLanes(env, all) {
     }))
   ];
 }
+function showClosed(c, ctx) {
+  const lanes = c.lanes.filter((lane) => lane.closed);
+  if (!lanes.length) return;
+  ctx.out("closed\nLANE	REASON	BY	TIME");
+  for (const lane of lanes) {
+    const { reason, by, at } = lane.closed;
+    ctx.out(`${lane.id}	${reason}	${by}	${at}`);
+  }
+}
 function findPid(cwd, processes, ctx) {
   let pid = "missing";
-  if (existsSync15(cwd)) {
+  if (existsSync16(cwd)) {
     try {
       pid = String(processes.find((p) => p.cwd === ctx.realpath(cwd))?.pid || "-");
     } catch {
@@ -3435,8 +3614,9 @@ function lastMessage(last, ctx) {
   return last ? `${last.name} (${Math.max(0, Math.floor((ctx.now().getTime() - last.at.getTime()) / 6e4))}m)` : "-";
 }
 function warnMissingOrchestrators(c, ctx) {
-  for (const repo of new Set(c.lanes.filter((l) => !l.retired && l.repo).map((l) => l.repo))) {
-    const lanes = c.lanes.filter((l) => !l.retired && l.repo === repo);
+  const active = c.lanes.filter((l) => !l.retired && !l.closed);
+  for (const repo of new Set(active.filter((l) => l.repo).map((l) => l.repo))) {
+    const lanes = active.filter((l) => l.repo === repo);
     if (lanes.length > 1 && !repoOrchestrator(c, repo)) {
       ctx.err(`warning: ${repo}: ${lanes.length} lanes, no repo-orch`);
     }
@@ -3453,7 +3633,7 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
   resume <ID> [--terminal backend]
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
   status [--all]
-  messages prune [--dry-run] [--json]
+  messages prune [--dry-run] [--json] [--legacy [--legacy-age hours] [--apply]]
   idle-check [--minutes n]
   nudge <ID|coordinator> <text> [--terminal backend]
   resume-check
@@ -3485,7 +3665,7 @@ var OPTIONS = {
   resume: ["terminal"],
   send: ["m", "from", "direct"],
   status: ["all"],
-  messages: ["dry-run", "json"],
+  messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"],
   nudge: ["terminal"],
   "resume-check": [],
@@ -3509,7 +3689,8 @@ var FLAGS = [
   "inactive",
   "clear",
   "apply",
-  "accept"
+  "accept",
+  "legacy"
 ];
 function parseOption(argv, i, opts) {
   const token = argv[i];

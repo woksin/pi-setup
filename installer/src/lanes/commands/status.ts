@@ -25,6 +25,7 @@ export async function status(c: Config, root: string, ctx: LanesCtx, all = false
   warnMissingOrchestrators(c, ctx);
   const widths = rows[0].map((_, i) => Math.max(...rows.map(r => r[i].length)));
   ctx.out(rows.map(r => r.map((s, i) => i === r.length - 1 ? s : s.padEnd(widths[i])).join("  ")).join("\n"));
+  if (all) showClosed(c, ctx);
   return 0;
 }
 function statusLanes(env: { c: Config; root: string; ctx: LanesCtx }, all: boolean): StatusLane[] {
@@ -32,11 +33,20 @@ function statusLanes(env: { c: Config; root: string; ctx: LanesCtx }, all: boole
   return [
     { id: c.coordinator.id, repo: "-", branch: "-", group: null, role: "coord", parent: "-",
       label: c.coordinator.id, cwd: expand(c.coordinator.cwd, c, root, ctx.home) },
-    ...laneTree(c, all).map(({ lane, depth }) => ({
+    ...laneTree(c, all).filter(({ lane }) => !lane.closed).map(({ lane, depth }) => ({
       ...lane, role: lane.role || "lane", parent: effectiveParent(lane, c), label: "  ".repeat(depth) + lane.id,
       cwd: laneDir(lane, c, root, ctx),
     })),
   ];
+}
+function showClosed(c: Config, ctx: LanesCtx): void {
+  const lanes = c.lanes.filter(lane => lane.closed);
+  if (!lanes.length) return;
+  ctx.out("closed\nLANE\tREASON\tBY\tTIME");
+  for (const lane of lanes) {
+    const { reason, by, at } = lane.closed!;
+    ctx.out(`${lane.id}\t${reason}\t${by}\t${at}`);
+  }
 }
 function findPid(cwd: string, processes: Awaited<ReturnType<typeof runningPi>>, ctx: LanesCtx): string {
   let pid = "missing";
@@ -50,8 +60,9 @@ function lastMessage(last: MessageRef | undefined, ctx: LanesCtx): string {
   return last ? `${last.name} (${Math.max(0, Math.floor((ctx.now().getTime() - last.at.getTime()) / 60000))}m)` : "-";
 }
 function warnMissingOrchestrators(c: Config, ctx: LanesCtx): void {
-  for (const repo of new Set(c.lanes.filter(l => !l.retired && l.repo).map(l => l.repo))) {
-    const lanes = c.lanes.filter(l => !l.retired && l.repo === repo);
+  const active = c.lanes.filter(l => !l.retired && !l.closed);
+  for (const repo of new Set(active.filter(l => l.repo).map(l => l.repo))) {
+    const lanes = active.filter(l => l.repo === repo);
     if (lanes.length > 1 && !repoOrchestrator(c, repo)) {
       ctx.err(`warning: ${repo}: ${lanes.length} lanes, no repo-orch`);
     }

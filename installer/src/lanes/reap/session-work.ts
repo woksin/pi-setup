@@ -1,6 +1,7 @@
 import type { LanesCtx } from "../ctx.ts";
 import type { Signals } from "./signals.ts";
 import { scanSession } from "./session-scan.ts";
+import { helperCommand, helperKind } from "./work.ts";
 import { foldSubagentWork, type SubagentWork } from "./subagent-completions.ts";
 
 type Snapshot = Record<string, any>;
@@ -51,6 +52,7 @@ function currentJob(job: Snapshot, s: Signals, ctx: LanesCtx): boolean {
 }
 function runningJob(job: Snapshot, s: Signals, ctx: LanesCtx): void {
   if (job.status !== "running") return;
+  if (helperCommand(String(job.command || ""))) { (s.helpers ??= []).push(helperKind(job.command)); return; }
   if (!job.command || !Number.isFinite(job.startedAt)) {
     s.asks.push(`job ${job.id} start evidence missing`); return;
   }
@@ -71,6 +73,9 @@ export async function sessionWork(s: Signals, ctx: LanesCtx): Promise<void> {
     s.asks.push((error as Error).message === "session scan incomplete" ? "session scan incomplete" : "session work history malformed"); return;
   }
   if (agents.launches.size) s.asks.push("subagent launched without completion");
-  for (const tool of pending.values()) s.keeps.push(`${tool} tool call pending`);
+  for (const tool of pending.values()) {
+    if (tool === "job_watch") (s.helpers ??= []).push("watch");
+    else s.keeps.push(`${tool} tool call pending`);
+  }
   for (const job of jobs.values()) runningJob(job, s, ctx);
 }

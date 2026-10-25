@@ -9,6 +9,7 @@ export const BACKENDS = ["auto", "terminal-app", "iterm", "tmux", "print"];
 export interface Lane {
   id: string; repo?: string; orchestrates?: string[]; issue?: number; goal?: string; group: string | null;
   role?: "lane" | "repo-orch" | "sub-orch"; parent?: string; retired?: boolean; stateFile?: string;
+  closed?: { reason: string; by: string; at: string };
   worktree: string; cwd?: string; branch?: string; prompt: string; [key: string]: unknown;
 }
 export interface Retention {
@@ -120,9 +121,15 @@ function validateHierarchyFields(lane: Lane, c: Config, key: string): void {
     && lane.orchestrates.every(validRepo)), `${key}.orchestrates`);
   requireField(lane.retired === undefined || typeof lane.retired === "boolean", `${key}.retired`);
   requireField(validStateFile(lane.stateFile), `${key}.stateFile`);
+  requireField(validClosed(lane.closed), `${key}.closed`);
   requireField(lane.cwd === undefined || (typeof lane.cwd === "string" && isAbsolute(lane.cwd)), `${key}.cwd`);
   requireField(validParent(lane, c), `${key}.parent`);
   requireField(validOrchestratorParent(lane, c), `${key}.parent`);
+}
+function validClosed(value: Lane["closed"]): boolean {
+  return value === undefined || (value !== null && typeof value === "object"
+    && typeof value.reason === "string" && typeof value.by === "string" && validId(value.by)
+    && typeof value.at === "string" && Number.isFinite(Date.parse(value.at)));
 }
 function validStateFile(value: string | undefined): boolean {
   return value === undefined || (typeof value === "string" && value.length > 0);

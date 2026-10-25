@@ -6,6 +6,7 @@ import { defaults, saveConfig } from "../src/lanes/config.ts";
 import { main } from "../src/lanes/main.ts";
 import { treeDigest } from "../src/lanes/reap/tree.ts";
 import { processEvidence } from "../src/lanes/reap/process.ts";
+import { childWork, processInventory, workCommand } from "../src/lanes/reap/work.ts";
 import { collect, type Signals } from "../src/lanes/reap/signals.ts";
 import { expectedSnapshot, readContext, validateContext } from "../src/lanes/reap/context-format.ts";
 import { verdict } from "../src/lanes/reap/verdict.ts";
@@ -25,6 +26,10 @@ export function fixture() {
   const head = "a".repeat(40);
   const ctx: LanesCtx = { home, cwd: root, piAgentDir: join(home, ".pi/agent"), templatesDir: join(REPO, "installer/lanes/templates"), env: {}, platform: "darwin", now: () => now, which: () => undefined,
     out: s => out.push(s), err: s => err.push(s), realpath: p => p, stdinTTY: true, readStdin: async () => "", loadModule: async () => ({}), sleep: async () => {},
+    processInventory: async () => busy.split("\n").filter(Boolean).map(line => {
+      const [, pid, ppid, command] = /^(\d+) (\d+) (.+)$/.exec(line)!;
+      return { pid: Number(pid), ppid: Number(ppid), command, cpuSeconds: 0 };
+    }),
     run: async (cmd, args) => { calls.push({ cmd, args });
       if (cmd === "pgrep") { const pids = processList({ running, shared, receiver }); return result(pids.join("\n"), pids.length ? 0 : 1); }
       if (cmd === "lsof") return result(args.includes("cwd") ? `p101\nn${args.includes("201") ? root : cwd}\n` : files);
@@ -195,7 +200,7 @@ test("whole-session folding retains early jobs, watches and pending calls beyond
   const history = `${agentLaunch()}${result("job_watch", job)}\n${call}\n${padding}`;
   f.put(f.sessionFile, history, 120);
   const active = await evidence(f);
-  assert.deepEqual(active.asks, ["subagent launched without completion"]); assert.ok(active.keeps.includes("job/watch running (session snapshot)"));
+  assert.deepEqual(active.asks, ["subagent launched without completion"]); assert.ok(!active.keeps.includes("job/watch running (session snapshot)")); assert.ok(active.helpers?.includes("inbox-watch"));
   assert.ok(active.keeps.includes("subagent tool call pending")); assert.equal(active.inboxWatch, true);
   assert.deepEqual(active.inboxAliases, ["R-AI"]);
   const notification = JSON.stringify({ customType: "subagent-notification", details: { status: "completed", id: "agent1" } });
@@ -396,11 +401,12 @@ test("fresh subagent activity keeps a lane while unmatched launches and claim do
   assert.ok(row.notes.includes("subagent launched without completion")); assert.ok(row.notes.some((note: string) => note.includes("claim")));
   assert.ok(output.some(line => line.includes("[notes: subagent launched without completion")));
 });
-test("job snapshots cover sleeping watches and terminal updates clear them", async () => {
+test("sleeping watch snapshots are context only and terminal updates clear them", async () => {
   const f = fixture(); const snapshot = { id: "j1", command: "inbox-watch L1", status: "running", cwd: f.cwd, startedAt: f.now.getTime() - 120000, timeoutSeconds: 3600 };
   const lines = [{ type: "message", message: { role: "toolResult", toolName: "job_watch", details: snapshot } }];
   f.put(f.sessionFile, lines.map(line => JSON.stringify(line)).join("\n"), 120);
-  assert.ok((await evidence(f)).keeps.includes("job/watch running (session snapshot)"));
+  const active = await evidence(f);
+  assert.ok(!active.keeps.includes("job/watch running (session snapshot)")); assert.ok(active.helpers?.includes("inbox-watch"));
   lines.push({ type: "message", message: { role: "toolResult", toolName: "job_output", details: { ...snapshot, status: "matched" } } });
   f.put(f.sessionFile, lines.map(line => JSON.stringify(line)).join("\n"), 120);
   assert.ok(!(await evidence(f)).keeps.some(reason => reason.startsWith("job/watch")));
@@ -426,11 +432,58 @@ test("dry run is read-only except plan, explains takeover and threshold fallback
   assert.ok(!f.calls.some(c => ["tmux", "osascript"].includes(c.cmd))); assert.ok(!f.calls.some(c => c.args.includes("fetch")));
   f.c.idle = { minutes: 150 }; saveConfig(f.root, f.c); await f.invoke("reap", "--json"); assert.match(f.rows()[0].reason, /recent write/);
 });
+test("closed lanes produce no reap actions or process probes", async () => {
+  const f = fixture(); f.c.lanes[0].closed = { reason: "merged", by: "L0", at: f.now.toISOString() }; saveConfig(f.root, f.c);
+  for (const args of [["--json"], ["L1", "--apply", "--json"]]) {
+    assert.equal(await f.invoke("reap", ...args), 0); assert.deepEqual(f.rows(), []);
+  }
+  assert.equal(f.calls.length, 0);
+});
+test("idle helpers and sleeping job watchers are context, not busy work", async () => {
+  const f = fixture(); f.setBusy("102 101 node chrome-devtools-mcp\n103 101 inbox-watch L1\n104 101 bash\n105 102 node mcp-server\n106 101 job_watch");
+  const log = f.put(join(f.ctx.piAgentDir, "jobs/watch.log"), "# pi-jobs watch until x: gh run watch 123"); f.setFiles(`n${log}\n`);
+  await f.invoke("reap", "--json"); const row = JSON.parse(f.out.at(-1)!)[0];
+  assert.equal(row.verdict, "handoff"); assert.ok(!row.reason.includes("busy"));
+  assert.match(row.notes.join(" "), /helpers .*inbox-watch=1.*mcp=2.*shell=1.*watch=2/);
+});
+test("build work in a grandchild keeps the lane busy", async () => {
+  const f = fixture(); f.setBusy("102 101 bash\n103 102 dotnet build");
+  await f.invoke("reap", "--json"); assert.equal(f.rows()[0].verdict, "keep"); assert.match(f.rows()[0].reason, /busy child/);
+});
+test("detached pi-phase status matches only the owning worktree", async () => {
+  for (const suffix of ["", "/installer", "-other"]) {
+    const f = fixture(); const run = f.ctx.run; f.ctx.which = name => name === "pi-phase" ? "/stub/pi-phase" : undefined;
+    f.ctx.run = async (cmd, args, options) => cmd === "/stub/pi-phase"
+      ? f.result(`pi-phase: build test pid=999 cwd=${f.cwd}${suffix} elapsed=2s running policy=direct source=cli`)
+      : run(cmd, args, options);
+    await f.invoke("reap", "--json"); assert.equal(f.rows()[0].verdict, suffix === "-other" ? "handoff" : "keep");
+  }
+});
+test("CPU sampling counts only owned descendants above the threshold", async () => {
+  for (const delta of [0, 0.01, 0.1]) {
+    const f = fixture(); let samples = 0; const sleeps: number[] = [];
+    f.ctx.sleep = async ms => { sleeps.push(ms); };
+    f.ctx.processInventory = async () => {
+      samples++;
+      return [{ pid: 102, ppid: 101, command: "node worker.js", cpuSeconds: 10 + (samples > 1 ? delta : 0) },
+        { pid: 202, ppid: 1, command: "dotnet build", cpuSeconds: samples * 10 }];
+    };
+    const result = await childWork(101, f.cwd, f.ctx);
+    assert.equal(result.busy, delta >= 0.05); assert.equal(samples, 2); assert.deepEqual(sleeps, [1000]);
+  }
+});
+test("work command list is explicit and process samples parse without real processes", async () => {
+  for (const command of ["dotnet build", "/bin/msbuild project", "npm run test:unit", "yarn build", "pnpm test", "node node_modules/vitest/vitest.mjs", "python3 -m pytest", "python -m unittest", "docker build .", "cargo test", "make all"]) assert.equal(workCommand(command), true, command);
+  for (const command of ["node server.js", "npm exec mcp-server", "inbox-watch L1", "bash", "gh run watch 123"]) assert.equal(workCommand(command), false, command);
+  const f = fixture(); delete f.ctx.processInventory;
+  f.ctx.run = async () => f.result("101 1 00:01.20 pi\n102 101 1-01:02:03 node worker.js");
+  assert.deepEqual((await processInventory(f.ctx)).map(row => row.cpuSeconds), [1.2, 90123]);
+  f.ctx.run = async () => f.result("not a process"); await assert.rejects(processInventory(f.ctx), /malformed/);
+});
 const keepCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["not running", f => f.setRunning(false)], ["recent write", f => f.put(f.sessionFile, "{}", 5)],
   ["busy child", f => f.setBusy("102 101 dotnet build")], ["busy child", f => f.setBusy("102 101 pi-phase run --kind build")],
   ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/job.log"), "command"); f.setFiles(`n${p}\n`); }],
-  ["job/watch", f => { const p = f.put(join(f.ctx.piAgentDir, "jobs/watch.log"), "# pi-jobs watch until x: gh run watch 123"); f.setFiles(`n${p}\n`); }],
   ["subagent", f => subagentStatus(f, { primarySessionId: "s1", state: "active" })],
   ["unread", f => f.put(join(f.root, "messages/L0-to-L1-work-1200.md"), "hi")],
   ["in-progress claim", f => f.claim("in-progress")],
@@ -442,7 +495,7 @@ for (const [reason, setup] of keepCases) test(`keep ${reason}`, async () => { co
 const askCases: [string, (f: ReturnType<typeof fixture>) => void][] = [
   ["shared cwd", f => f.setShared()], ["session file unknown", f => rmSync(f.lease)],
   ["sessions directory", f => rmSync(dirname(f.sessionFile), { recursive: true })],
-  ["process descendants", f => { const run = f.ctx.run; f.ctx.run = async (cmd, a, o) => cmd === "ps" && a[0] === "-A" ? f.result("", 1) : run(cmd, a, o); }],
+  ["process descendants", f => { f.ctx.processInventory = async () => { throw new Error("process descendants unknown"); }; }],
   ["open files", f => { const run = f.ctx.run; f.ctx.run = async (cmd, a, o) => cmd === "lsof" && !a.includes("cwd") ? f.result("", 1) : run(cmd, a, o); }],
   ["pending inbound", f => { rmSync(f.marker); f.put(join(f.root, "messages/L0-to-L1-pending.md"), "fixture"); }],
   ["message name ambiguous", f => f.put(join(f.root, "messages/mystery-L1-123.md"), "?")],

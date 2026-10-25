@@ -65,7 +65,11 @@ esac`);
     assert.match(readFileSync(join(root, "messages/status/L2.status"), "utf8"), /^closed reassigned-to L1/);
     assert.ok(readdirSync(join(root, "messages")).some((n) => n.includes("L0-to-ALL-lane-closed-l2-")));
     assert.equal(readFileSync(path, "utf8"), before); assert.ok(existsSync(join(repos, ".worktrees", c.lanes[1].worktree)));
-    assert.equal(readFileSync(join(root, "lanes.json"), "utf8"), configBefore);
+    const afterClose = JSON.parse(readFileSync(join(root, "lanes.json"), "utf8"));
+    const closed = afterClose.lanes[1].closed;
+    assert.deepEqual({ reason: closed.reason, by: closed.by }, { reason: "done", by: "L0" });
+    assert.ok(Number.isFinite(Date.parse(closed.at))); delete afterClose.lanes[1].closed;
+    assert.deepEqual(afterClose, JSON.parse(configBefore));
     assert.doesNotMatch(readFileSync(box.log, "utf8").slice(installLogLength), /^(?:osascript|tmux|pi|pi-session) /m);
   } finally { rmSync(box.root, { recursive: true, force: true }); }
 });

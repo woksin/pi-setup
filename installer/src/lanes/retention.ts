@@ -1,9 +1,10 @@
 import { closeSync, copyFileSync, lstatSync, mkdirSync, openSync, readdirSync, renameSync, unlinkSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { addressed } from "./backend.ts";
-import { archiveDir, expand, type Config } from "./config.ts";
+import { archiveDir, expand, UsageError, type Config } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
 import { parseMessageName } from "./names.ts";
+import { pruneLegacy } from "./legacy-prune.ts";
 
 export interface PruneCounts { archived: number; deleted: number; skippedUnread: number; skippedCollision: number; kept: number; archiveExpired: number }
 const DAY = 86400000;
@@ -30,7 +31,7 @@ function unread(m: ReturnType<typeof messages>[number], c: Config, dir: string):
     return marker?.isFile() === true && marker.mtimeMs < m.info.mtimeMs;
   });
 }
-function archive(m: ReturnType<typeof messages>[number], dir: string): boolean {
+function archive(m: Pick<ReturnType<typeof messages>[number], "name" | "path" | "info">, dir: string): boolean {
   mkdirSync(dir, { recursive: true });
   const target = join(dir, m.name);
   // Reserve the destination exclusively: rename must never replace another message.
@@ -79,6 +80,8 @@ export function prune(c: Config, root: string, ctx: LanesCtx, dryRun = false): P
   return counts;
 }
 export function messagesPrune(opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx): number {
+  if (opts.legacy) return pruneLegacy({ opts, config: c, root, ctx }, { stat, archive });
+  if (opts.apply || opts["legacy-age"]) throw new UsageError("--apply and --legacy-age require --legacy");
   const counts = prune(c, root, ctx, opts["dry-run"] === "true");
   ctx.out(opts.json === "true" ? JSON.stringify(counts) : `archived: ${counts.archived}, deleted: ${counts.deleted}, skipped (unread): ${counts.skippedUnread}, skipped (collision): ${counts.skippedCollision}, kept: ${counts.kept}, archive-expired: ${counts.archiveExpired}`);
   return 0;

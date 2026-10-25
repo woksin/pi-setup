@@ -50,7 +50,7 @@ function display(rows: Row[], json: boolean, ctx: LanesCtx): void {
 export async function reap(args: string[], opts: Record<string, string>, env: CommandEnv): Promise<number> {
   const { c, root, ctx } = env;
   const minutes = validateArgs(args, opts, c); const rows: Row[] = [];
-  const active = laneTree(c).reverse().map(row => row.lane).filter(l => !args[0] || l.id === args[0]);
+  const active = laneTree(c).reverse().map(row => row.lane).filter(l => !l.closed && (!args[0] || l.id === args[0]));
   for (const lane of active) rows.push(await planRow({ c, lane, root, ctx, minutes }, opts));
   const summaries = summary(rows.map(row => row.signals), env);
   atomicJson(join(root, ".state/reap-plan.json"), { at: ctx.now().toISOString(), minutes, rows, summaries });
