@@ -1653,6 +1653,54 @@ class PhaseTests(unittest.TestCase):
                                           state=self.state, configuration=self.config), 0)
             cold.assert_not_called()
 
+    def test_default_queue_timeout_is_120(self):
+        for flags, expected in (([], 120), (["--queue-timeout", "2400"], 2400)):
+            with self.subTest(flags=flags), patch.object(pi_phase, "run", return_value=0) as run:
+                self.assertEqual(pi_phase.main(
+                    ["run", "--kind", "test", "--label", "default", *flags, "--", "synthetic"],
+                    state=self.state, configuration=self.config), 0)
+                self.assertEqual(run.call_args.args[0].queue_timeout, expected)
+
+    def assert_queue_timeout_guidance(self, output, budget):
+        for message in (f"queue timeout ({budget}s); command not started",
+                        "not a failed command/test attempt", "Do not loop short requeues",
+                        "pi-phase status once", "retry once in the background",
+                        "job_start", "otherwise a background agent", "--queue-timeout 2400",
+                        "outer deadline must cover queue + execution + cleanup",
+                        "gate not run: queue saturated"):
+            self.assertEqual(output.count(message), 1, output)
+
+    def test_queue_timeout_guidance_covers_deadline_paths(self):
+        self.configure(container_test_detection="off")
+        late_permit = [(self.state / "heavy-0.lock", 123)]
+        identity = pi_phase.work_identity(os.getcwd(), ["synthetic"], "build")
+        for path, ticks, permit in (("before admission", [0, 0, 2], None),
+                                    ("late permit", [0, 0, 0, 2], late_permit),
+                                    ("unsuccessful claim", [0, 0, 0, 2], None)):
+            with self.subTest(path=path):
+                ledger = Mock(record={})
+                args = SimpleNamespace(label="queue", timeout=1, queue_timeout=2,
+                    approved_long_timeout=False, kind="build", priority="normal", policy="queued",
+                    repo=None, pr=None, commit=None, command=["synthetic"],
+                    vstest_hang_minutes=None, vstest_confirmed=False, ledger=ledger, rerun=True)
+                with patch.object(pi_phase.time, "monotonic", side_effect=ticks), \
+                        patch.object(pi_phase, "work_identity", return_value=identity), \
+                        patch.object(pi_phase, "register_waiter", return_value=(True, None)) as register, \
+                        patch.object(pi_phase, "claim", return_value=permit) as claim, \
+                        patch.object(pi_phase, "release") as release, \
+                        patch.object(pi_phase.subprocess, "Popen") as producer, \
+                        patch.object(pi_phase, "note") as note:
+                    self.assertEqual(pi_phase.run(args, self.state, self.config), 75)
+                self.assert_queue_timeout_guidance("\n".join(c.args[0] for c in note.call_args_list), "2")
+                ledger.outcome.assert_called_once_with("queue-timeout")
+                producer.assert_not_called()
+                self.assertEqual(register.call_count, int(path != "before admission"))
+                self.assertEqual(claim.call_count, int(path != "before admission"))
+                if permit:
+                    release.assert_called_once_with(self.state, late_permit, unittest.mock.ANY, True)
+                else:
+                    release.assert_not_called()
+
     def test_long_queue_hint_once_without_waiting_ten_minutes(self):
         self.configure(container_test_detection="off")
         args = SimpleNamespace(label="queue", timeout=1, queue_timeout=900, approved_long_timeout=True,
@@ -2844,6 +2892,7 @@ class PhaseTests(unittest.TestCase):
         code, out = self.done(self.run_phase(queue=".25", extra=("--log", str(log))))
         self.assertEqual(code, 75, out)
         self.assertEqual(log.read_bytes(), b"")
+        self.assert_queue_timeout_guidance(out, "0.25")
         self.assertTrue(out.endswith(f"pi-phase: log={log.resolve()} exit=75 lines=0\n"), out)
         self.assertEqual(self.done(active)[0], 0)
 
@@ -2985,8 +3034,9 @@ class PhaseTests(unittest.TestCase):
         queued = self.run_phase(label="queued", queue=".25", command=self.marker_job("never"))
         code, out = self.done(queued)
         self.assertEqual(code, 75, out)
-        self.assertIn("queue timeout", out)
+        self.assert_queue_timeout_guidance(out, "0.25")
         self.assertFalse((self.root / "never.json").exists())
+        self.assertFalse(list((self.state / "waiters").glob("*.json")))
         self.assertEqual(self.done(active)[0], 0)
 
     def test_timeout_and_term_resistant_descendant_cleanup(self):
@@ -3096,6 +3146,8 @@ class PhaseTests(unittest.TestCase):
         code, out = self.done(duplicate)
         self.assertEqual(code, 75, out)
         self.assertIn("already watching", out)
+        for advice in ("queue timeout", "job_start", "--queue-timeout 2400", "retry once"):
+            self.assertNotIn(advice, out)
         self.assertFalse((self.root / "duplicate.json").exists())
         self.assertEqual(self.done(self.run_phase(kind="build"))[0], 0)
         self.assertEqual(self.done(watcher)[0], 0)

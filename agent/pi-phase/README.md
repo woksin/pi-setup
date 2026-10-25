@@ -99,7 +99,21 @@ Change this single config for *all cooperating sessions*, not a per-invocation o
 
 Admission uses one deadline-bounded process-list snapshot per scan outside the shared coordinator; a failed/slow probe conservatively defers admission rather than taking an orphaned permit. Cancellation is checked after admission and before the launcher receives its execution gate, so an already-cancelled command does not start. Execution defaults to **300s** for build/test/integration and **120s** for CI, with a **separate 120s queue budget** (queue time does not consume execution time). Choose ~120s for known short targeted checks; 300s for a build/test phase; execution longer than 600s requires the `--approved-long-timeout` declaration, which the agent adds itself when it has a concrete runtime basis (run such phases in the background, not as a foreground bash call) (e.g. `--timeout 900 --approved-long-timeout`). Long queue waits belong in background jobs (`job_start`): `--queue-timeout` accepts up to 7200s without an approval flag; larger finite queue budgets require `--approved-long-timeout`. Foreground queue waits over 600s still follow wait-guard’s normal long-timeout rules. Do not use speculative long limits. No stdout-silence killer or automatic retries. Exit 77 means withdrawn while queued (command not started; not a failure); 124 means phase timeout; 130/143 mean SIGINT/SIGTERM cancellation; 75 means queue timeout or duplicate CI watcher (neither is a test/CI failure); 125 means wrapper/config/cleanup failure; 126/127 mean command could not be executed; otherwise the exact producer exit (a producer itself can return one of these codes). Timeouts/CI cancellation are **incomplete/unknown**, never a pass or evidence of a remote CI failure. For long-running diagnostics prefer native runner hang support when compatible, not a generic silence timeout.
 
-On queue-timeout exit 75, the command did not start: it is not a failed code/test attempt. Do not loop short requeues: each retry joins the back of the queue. Continue code work and retry the phase **once**, in the background (`job_start`), with a queue budget sized to the queue: `pi-phase status` showing several phases running or queued ahead is the concrete basis for `--queue-timeout 3600` (up to 7200 for every kind, no approval flag). Add `--priority low` when nothing waits on the result. If that long wait also times out, report `gate not run: queue saturated`. The timeout message does not include counts or rank: run `pi-phase status` once at that checkpoint for running/queued entries and waiter ranks. For a duplicate CI watcher (also 75), reuse the existing watch instead of retrying.
+The default queue timeout remains **120s in every launch mode**, including background jobs. Longer waits require an explicit `--queue-timeout` and belong in the background; the foreground wait-guard is unchanged.
+
+On queue-timeout exit 75, the command did not start: it is not a failed code/test attempt. Do not loop short requeues: each retry joins the back of the queue. Check `pi-phase status` **once** for running/queued entries and waiter ranks. If a retry is appropriate, retry the phase **once**, in the background (`job_start` if available, otherwise a background agent), with an explicit queue-sized budget, for example `--queue-timeout 2400` (up to 7200 for every kind, no approval flag). This example is not an admission guarantee or a reason to shorten an already larger budget. Add `--priority low` when nothing waits on the result. Continue independent work rather than polling; if that long background wait also times out, report `gate not run: queue saturated`. For a duplicate CI watcher (also 75), reuse the existing watch instead of retrying.
+
+For example, call `job_start` with the following arguments to retry a test phase with a 2400s queue budget while retaining its 300s execution timeout:
+
+```json
+{
+  "command": "~/.pi/agent/bin/pi-phase run --kind test --label 'unit tests' --timeout 300 --queue-timeout 2400 -- node --test",
+  "cwd": "/path/to/repository",
+  "timeoutSeconds": 2820
+}
+```
+
+Preserve your actual phase arguments, command and cwd; the command and label above are generic examples. The outer deadline must cover **queue + execution + cleanup** (here 2400 + 300 + 120 seconds of startup/cleanup allowance). There is no automatic retry or detachment: the caller must launch the background job.
 
 ## .NET worker lifetime and orchestration guard
 

@@ -1,3 +1,5 @@
 # Fake test fixture values committed in c83da9e (tests/test_sync_publish.py); not credentials.
 c83da9eedda145db3763a800aabfa5048c811a3c:tests/test_sync_publish.py:generic-api-key:85
 c83da9eedda145db3763a800aabfa5048c811a3c:tests/test_sync_publish.py:generic-api-key:93
+# Fake PASSWORD= fixture for the outbound secret scanner test (e791c9b); not a credential.
+e791c9bd60288f2eb0aeec0915231e1474fe0848:agent/lib/secret-mask-outbound.test.ts:generic-api-key:77

@@ -2630,6 +2630,15 @@ def bounded(value, name, approved):
     return value
 
 
+def queue_timeout_note(timeout):
+    note(f"queue timeout ({timeout:g}s); command not started")
+    note("not a failed command/test attempt. Do not loop short requeues; check pi-phase status once.")
+    note("If a retry is appropriate, retry once in the background (job_start if available, otherwise a background agent) "
+         "with an explicit queue-sized budget (e.g. --queue-timeout 2400; keep a larger budget if appropriate).")
+    note("The outer deadline must cover queue + execution + cleanup. Admission is not guaranteed; "
+         "if that background retry also times out, report: gate not run: queue saturated.")
+
+
 def report_log(path, tail, return_code):
     lines = 0
     recent = deque(maxlen=tail)
@@ -2810,7 +2819,7 @@ def run(args, state, configuration, output=None):
                 note(f"long queue ({int(time.monotonic() - queued)}s): run dev-doctor to look for contention")
                 long_queue_hint = True
             if time.monotonic() >= deadline:
-                note(f"queue timeout ({args.queue_timeout:g}s); command not started")
+                queue_timeout_note(args.queue_timeout)
                 if ledger:
                     ledger.outcome("queue-timeout")
                 return 75
@@ -2840,7 +2849,7 @@ def run(args, state, configuration, output=None):
                 if time.monotonic() >= deadline:
                     release(state, held, token, True)
                     held = None
-                    note(f"queue timeout ({args.queue_timeout:g}s); command not started")
+                    queue_timeout_note(args.queue_timeout)
                     if ledger:
                         ledger.outcome("queue-timeout")
                     return 75
@@ -2854,7 +2863,7 @@ def run(args, state, configuration, output=None):
                 return 75
             now = time.monotonic()
             if now >= deadline:
-                note(f"queue timeout ({args.queue_timeout:g}s); command not started")
+                queue_timeout_note(args.queue_timeout)
                 if ledger:
                     ledger.outcome("queue-timeout")
                 return 75
