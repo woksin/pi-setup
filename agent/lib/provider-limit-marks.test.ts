@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -136,14 +137,38 @@ test("lock timeout: a destructive update throws and deletes nothing; an additive
 	assert.equal(logged.length, 1);
 });
 
-test("a stale lock is taken over exactly once by rename", () => {
+test("competing stale-lock takers never enter the critical section together", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "plm-"));
 	const path = join(dir, "marks.json");
 	writeFileSync(`${path}.lock`, "");
 	const old = (Date.now() - 60_000) / 1000;
 	utimesSync(`${path}.lock`, old, old);
-	let ran = 0;
-	withMarksLock(path, () => { ran++; });
-	assert.equal(ran, 1);
+	const source = `
+		import { withMarksLock } from ${JSON.stringify(new URL("./provider-limit-marks.ts", import.meta.url).href)};
+		import { closeSync, openSync, unlinkSync } from "node:fs";
+		withMarksLock(${JSON.stringify(path)}, () => {
+			const marker = ${JSON.stringify(join(dir, "critical"))};
+			closeSync(openSync(marker, "wx"));
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 80);
+			unlinkSync(marker);
+		});
+	`;
+	await Promise.all(Array.from({ length: 6 }, () => new Promise<void>((resolve, reject) => {
+		const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", source]);
+		let stderr = "";
+		child.stderr.on("data", (data) => { stderr += data; });
+		child.on("error", reject);
+		child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`child exit ${code}: ${stderr}`)));
+	})));
 	assert.deepEqual(readdirSync(dir), []);
+});
+
+test("an old lock with a live owner is not taken over", () => {
+	const dir = mkdtempSync(join(tmpdir(), "plm-"));
+	const path = join(dir, "marks.json");
+	writeFileSync(`${path}.lock`, String(process.pid));
+	const old = (Date.now() - 60_000) / 1000;
+	utimesSync(`${path}.lock`, old, old);
+	assert.throws(() => withMarksLock(path, () => assert.fail("must not run")), LockTimeoutError);
+	assert.equal(readFileSync(`${path}.lock`, "utf8"), String(process.pid));
 });

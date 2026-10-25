@@ -1,5 +1,7 @@
 /** provider-fallback: classification, selection, context veto, turn_end switch/notice. Complements model-drift.test.ts (restore/drift flows). */
 import assert from "node:assert/strict";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, test, type TestContext } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -109,11 +111,12 @@ function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; tar
 	const widgets: [string, string[] | undefined][] = [];
 	const appended: any[] = [];
 	const gates: (() => void)[] = [];
+	const notify: ExtensionContext["ui"]["notify"] = (text, type) => { notices.push([text, type ?? "info"]); };
 	const ctx: any = {
 		isIdle: () => true,
 		hasUI: opts.hasUI ?? false,
 		model: opts.model ?? A,
-		ui: { notify: (t: string, ty: string) => notices.push([t, ty]), setWidget: (k: string, l: string[] | undefined) => widgets.push([k, l]) },
+		ui: { notify, setWidget: (k: string, l: string[] | undefined) => widgets.push([k, l]) },
 		sessionManager: { getBranch: () => appended.map(a => ({ type: "custom", customType: a.type, data: a.data })), getSessionId: () => "sid" },
 		getContextUsage: () => (opts.tokens === undefined ? undefined : { tokens: opts.tokens }),
 		modelRegistry: { find: (p: string, id: string) => [A, C, K, opts.target ? { ...B, ...opts.target } : B].find(m => m.provider === p && m.id === id) },
@@ -135,7 +138,7 @@ function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; tar
 	};
 	fallbackExtension(pi);
 	shutdowns.push(() => handlers.session_shutdown({}, ctx));
-	const fire = (errorMessage: string | undefined, over: object = {}) => handlers.turn_end({
+	const fire = (errorMessage: AssistantMessage["errorMessage"], over: Partial<AssistantMessage> = {}) => handlers.turn_end({
 		message: { role: "assistant", stopReason: "error", errorMessage, provider: "anthropic", model: "a", ...over },
 		entries: [{ type: "message", id: "m0" }],
 		messageEntryId: "m1",

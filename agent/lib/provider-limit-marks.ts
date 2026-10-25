@@ -6,7 +6,7 @@
  * Old files hold provider keys with a `model` and `reason`; they are reinterpreted on read, never rewritten.
  * `agent/bin/provider-restore` repeats the lock protocol of `withMarksLock` (it is a stdlib-only CLI): keep them in sync.
  */
-import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export type Scope = "account" | "model";
@@ -146,27 +146,36 @@ export class LockTimeoutError extends Error {
 
 const sleep = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/** Take over a stale lock by atomic rename (only one taker's rename succeeds); give it back if what we moved was not stale after all. */
-function takeOverStale(lock: string): void {
-	const aside = `${lock}.stale.${process.pid}.${Date.now()}`;
+/** A live owner is never evicted, even if its mutation took more than 10 s. Old empty lock files have no owner. */
+function ownerAlive(lock: string): boolean {
+	const pid = Number(readFileSync(lock, "utf8"));
+	if (!Number.isSafeInteger(pid) || pid <= 0) return false;
 	try {
-		renameSync(lock, aside);
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ESRCH";
+	}
+}
+
+/** Serialize takers with O_EXCL `.reap`, then recheck age/owner before atomically renaming the abandoned lock. */
+function takeOverStale(lock: string): void {
+	const guard = `${lock}.reap`;
+	try {
+		closeSync(openSync(guard, "wx"));
 	} catch {
-		return; // another taker or the holder won
+		return; // another taker won; a crashed reaper fails closed
 	}
 	try {
-		if (Date.now() - statSync(aside).mtimeMs <= LOCK_STALE_MS) {
-			try {
-				linkSync(aside, lock); // hand the live owner's lock back unless someone re-took it meanwhile
-			} catch {
-				// a new lock exists: ours is dropped
-			}
-			unlinkSync(aside);
-			return;
-		}
+		if (Date.now() - statSync(lock).mtimeMs <= LOCK_STALE_MS) return;
+		if (ownerAlive(lock)) return;
+		const aside = `${lock}.stale.${process.pid}`;
+		renameSync(lock, aside);
 		unlinkSync(aside);
 	} catch {
-		// gone
+		// holder released or another taker finished before we acquired the guard
+	} finally {
+		unlinkSync(guard);
 	}
 }
 
@@ -174,13 +183,18 @@ function takeOverStale(lock: string): void {
 function acquire(lock: string): boolean {
 	for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
 		try {
-			closeSync(openSync(lock, "wx"));
+			const fd = openSync(lock, "wx");
+			try {
+				writeFileSync(fd, String(process.pid));
+			} finally {
+				closeSync(fd);
+			}
 			return true;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
 			try {
 				if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) takeOverStale(lock);
-				else sleep(LOCK_WAIT_MS);
+				sleep(LOCK_WAIT_MS);
 			} catch {
 				// released between our calls: retry
 			}
