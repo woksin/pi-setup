@@ -20,7 +20,7 @@ const psFails = new Set<number>();
 const ev = (over: Partial<RegistryEvent>): RegistryEvent => ({ ts: "2026-10-08T10:00:00.000Z", repo: "o/r", issue: 1, sessionId: "s1", source: "tool", ...over });
 
 function apiReply(path: string): string {
-	if (path === "user") return "woksin\n";
+	if (path === "user") return "tester\n";
 	if (path.endsWith("/comments")) return "[[]]";
 	return JSON.stringify({ user: { login: "opener" }, author_association: "OWNER", labels: [] });
 }
