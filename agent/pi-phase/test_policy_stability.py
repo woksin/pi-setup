@@ -45,6 +45,43 @@ class FingerprintTests(unittest.TestCase):
                 self.assertEqual(self.fingerprint("dotnet", "pack", prefix + "5.0.0-local.1"),
                                  self.fingerprint("dotnet", "pack", prefix + "6.0.0-train.42"))
 
+    def test_compound_properties_preserve_workload_values(self):
+        for prefix in ("-p:Version=", "/p:Version=", "-p:PackageVersion=", "/p:PackageVersion="):
+            for separator in (";", ","):
+                with self.subTest(prefix=prefix, separator=separator):
+                    base = prefix + "1.0.0" + separator + "BuildProjectReferences="
+                    disabled, enabled = base + "false", base + "true"
+                    self.assertEqual(pi_phase.fingerprint_argument(disabled), disabled)
+                    self.assertEqual(pi_phase.fingerprint_argument(enabled), enabled)
+                    self.assertNotEqual(self.fingerprint("dotnet", "build", disabled),
+                                        self.fingerprint("dotnet", "build", enabled))
+
+    def test_compound_properties_keep_version_values_and_git_suffixes_exact(self):
+        for prefix in ("-p:Version=", "/p:Version=", "-p:PackageVersion=", "/p:PackageVersion="):
+            for separator in (";", ","):
+                with self.subTest(prefix=prefix, separator=separator):
+                    first = prefix + "1.0.0-local.1" + separator + "OutputPath=bin.gabcdef0"
+                    changed_version = first.replace("1.0.0-local.1", "2.0.0-train.2")
+                    changed_path = first.replace("bin.gabcdef0", "bin.g1234567")
+                    for argument in (first, changed_version, changed_path):
+                        self.assertEqual(pi_phase.fingerprint_argument(argument), argument)
+                    self.assertNotEqual(self.fingerprint("dotnet", "pack", first),
+                                        self.fingerprint("dotnet", "pack", changed_version))
+                    self.assertNotEqual(self.fingerprint("dotnet", "pack", first),
+                                        self.fingerprint("dotnet", "pack", changed_path))
+
+    def test_compound_properties_with_version_after_another_property_stay_exact(self):
+        for switch in ("-p:", "/p:"):
+            for name in ("Version", "PackageVersion"):
+                for separator in (";", ","):
+                    with self.subTest(switch=switch, name=name, separator=separator):
+                        first = switch + "BuildProjectReferences=false" + separator + name + "=1.0.0.gabcdef0"
+                        changed = first.replace("false", "true")
+                        self.assertEqual(pi_phase.fingerprint_argument(first), first)
+                        self.assertEqual(pi_phase.fingerprint_argument(changed), changed)
+                        self.assertNotEqual(self.fingerprint("dotnet", "build", first),
+                                            self.fingerprint("dotnet", "build", changed))
+
     def test_local_and_train_stamp_tokens(self):
         base = ["bash", "cratis-local-packages.sh", "pack-nuget", "producer"]
         for stamp in ("5.0.0-local.1", "5.0.0-train.42", "6.1.2-local.20261025.gabcdef0"):

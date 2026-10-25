@@ -1320,6 +1320,9 @@ def shim_environment(directory, cap):
 
 def fingerprint_argument(argument):
     """Remove volatile version/stamp values without changing ordinary command tokens."""
+    # Compound MSBuild properties may alter the workload; keep the whole argument exact.
+    if re.match(r"^[-/]p:.*[;,]", argument, flags=re.DOTALL):
+        return argument
     argument = re.sub(r"^([-/]p:(?:Version|PackageVersion)=).*$", r"\1<version>", argument)
     argument = re.sub(r"^\d+\.\d+\.\d+-(?:local|train)\.\S+$", "<version>", argument)
     return re.sub(r"\.g[0-9a-fA-F]{7}$", ".g<sha>", argument)
