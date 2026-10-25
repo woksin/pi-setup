@@ -2074,17 +2074,19 @@ class PhaseTests(unittest.TestCase):
         rule = dict(path=str(self.root) + "*", kinds=["build", "test"], policy="direct", max_expected_s=90)
         self.configure(policy=[rule])
         with patch.object(pi_phase.os, "getcwd", return_value=str(alias)):
-            self.assertEqual(self.policy(), ("fast", "config"))
+            self.assertEqual(self.policy(), ("direct", "config"))
             self.fast_records([90])
             self.assertEqual(self.policy(), ("direct", "config"))
             self.assertEqual(self.policy(policy="queued"), ("queued", "flag"))
             self.assertEqual(self.policy(kind="integration"), ("queued", "default"))
             self.fast_records([91])
+            self.assertEqual(self.policy(), ("direct", "config"))
+            self.fast_records([91])
             self.assertEqual(self.policy(), ("queued", "config"))
         rule["max_expected_s"] = 10
         self.configure(policy=[rule])
         with patch.object(pi_phase.os, "getcwd", return_value=str(alias)), \
-                patch.object(pi_phase, "fast_history", return_value=[dict(runS=11)]):
+                patch.object(pi_phase, "fast_history", return_value=[dict(runS=11)] * 3):
             self.assertEqual(self.policy(), ("fast", "config"))
         self.configure(policy=[dict(rule, path="/never/matches/*")])
         self.assertEqual(self.policy(), ("queued", "default"))

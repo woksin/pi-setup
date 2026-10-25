@@ -320,16 +320,18 @@ class FastShapeTests(Harness):
         slow = [dict(quick[0], runS=200)] * 2
         self.assertEqual(self.decide(command, pi_phase.PhaseHistory(slow))[0], ("queued", "default"))
 
-    def test_direct_rule_uses_work_history_not_the_exact_command(self):
+    def test_direct_rule_uses_exact_history_not_the_work_family(self):
         _, identity = self.decide()
         rule = dict(path=str(self.root) + "*", kinds=["test"], policy="direct", max_expected_s=90)
         options = self.policy_options(policy=[rule])
         cwd = patch.object(pi_phase.os, "getcwd", return_value=str(self.root))
         with cwd:
             self.assertEqual(pi_phase.rule_policy(self.state, rule, "fp", history=pi_phase.PhaseHistory([]),
-                                                  identity=identity), "fast")
-            slow = pi_phase.PhaseHistory([dict(self.overrun(identity), fastBudgetExceeded=False, runS=200)])
-            self.assertEqual(pi_phase.rule_policy(self.state, rule, "other", history=slow, identity=identity), "fast")
+                                                  identity=identity), "direct")
+            slow = pi_phase.PhaseHistory([dict(self.overrun(identity), fingerprint="fp",
+                                                fastBudgetExceeded=False, runS=200)] * 3)
+            self.assertEqual(pi_phase.rule_policy(self.state, rule, "other", history=slow, identity=identity), "direct")
+            self.assertEqual(pi_phase.rule_policy(self.state, rule, "fp", history=slow, identity=identity), "fast")
             fine = pi_phase.PhaseHistory([dict(self.overrun(identity), fastBudgetExceeded=False, runS=5)])
             self.assertEqual(pi_phase.rule_policy(self.state, rule, "other", history=fine, identity=identity), "direct")
         self.assertEqual(options["policy"], [rule])

@@ -833,12 +833,34 @@ def requested_policy(args):
     return None, "default"
 
 
-def configured_policy(state, args, options, fingerprint, *, history=None, identity=None):
+def main_worktree(cwd):
+    """Resolve a checkout's shared .git directory; failed probes never inherit rules."""
+    try:
+        result = subprocess.run(["git", "--no-optional-locks", "rev-parse", "--git-common-dir"],
+                                cwd=cwd, capture_output=True, text=True, check=True, timeout=1)
+        common = (Path(cwd) / result.stdout.strip()).resolve()
+        if common.name == ".git" and common.is_dir():
+            return str(common.parent)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def matching_policy_rules(kind, rules):
     cwd = os.path.realpath(os.getcwd())
-    for rule in options["policy"]:
-        if args.kind not in rule["kinds"] or not fnmatch.fnmatchcase(cwd, os.path.expanduser(rule["path"])):
-            continue
-        return rule_policy(state, rule, fingerprint, history=history, identity=identity), "config"
+    inherited = main_worktree(cwd) if rules else None
+    paths = (cwd, inherited) if inherited is not None else (cwd,)
+    for rule in rules:
+        if kind in rule["kinds"] and any(fnmatch.fnmatchcase(path, os.path.expanduser(rule["path"])) for path in paths):
+            yield rule
+
+
+def configured_policy(state, args, options, fingerprint, *, history=None, identity=None):
+    for rule in matching_policy_rules(args.kind, options["policy"]):
+        policy = rule_policy(state, rule, fingerprint, history=history, identity=identity)
+        if policy == "direct":
+            args.config_direct_limit = rule.get("max_expected_s", 90)
+        return policy, "config"
     fast, source = fast_decision(state, args, options["fast_lane"], fingerprint, history=history, identity=identity)
     return ("fast", source) if fast else ("queued", "default")
 
@@ -846,15 +868,8 @@ def configured_policy(state, args, options, fingerprint, *, history=None, identi
 def rule_policy(state, rule, fingerprint, *, history=None, identity=None):
     if rule["policy"] != "direct":
         return rule["policy"]
-    limit = rule.get("max_expected_s", 90)
-    if history is not None:
-        # Work/family history, so a new filter or executable path cannot bypass a slow record.
-        records = history.scoped(fingerprint, identity)
-        if not records or slow_fast_history(records, limit) or history.family_overran(identity):
-            return "fast"
-        return "direct"
-    records = policy_history(state, fingerprint)
-    if not records or slow_fast_history(records, limit):
+    records = history.exact_runs(fingerprint) if history is not None else policy_history(state, fingerprint)
+    if len(records) >= 3 and percentile([r["runS"] for r in records], 90) > rule.get("max_expected_s", 90):
         return "fast"
     return "direct"
 
@@ -1303,8 +1318,16 @@ def shim_environment(directory, cap):
     return env
 
 
+def fingerprint_argument(argument):
+    """Remove volatile version/stamp values without changing ordinary command tokens."""
+    argument = re.sub(r"^([-/]p:(?:Version|PackageVersion)=).*$", r"\1<version>", argument)
+    argument = re.sub(r"^\d+\.\d+\.\d+-(?:local|train)\.\S+$", "<version>", argument)
+    return re.sub(r"\.g[0-9a-fA-F]{7}$", ".g<sha>", argument)
+
+
 def test_fingerprint(cwd, command):
-    return hashlib.sha1("\0".join([os.path.realpath(cwd), *command]).encode()).hexdigest()
+    normalized = [fingerprint_argument(argument) for argument in command]
+    return hashlib.sha1("\0".join([os.path.realpath(cwd), *normalized]).encode()).hexdigest()
 
 
 WorkIdentity = namedtuple("WorkIdentity", "repo_key work_key family_key project shape filtered")
@@ -2651,19 +2674,29 @@ def phase_candidates(state, args, context):
     return slot_paths(state, args.kind, heavy, integration, identity)
 
 
-def apply_fast_budget(args, settings, held):
-    if not any(path.name.startswith("fast-") for path, _ in held):
+def apply_fast_budget(args, settings, held, policy_args=None):
+    limit = getattr(policy_args, "config_direct_limit", None)
+    if limit is not None and any(path.name.startswith("direct-") for path, _ in held):
+        budget = fast_budget(dict(max_expected_s=limit))
+        args.config_direct_budget = True
+        lane = "config-direct"
+    elif any(path.name.startswith("fast-") for path, _ in held):
+        budget = fast_budget(settings)
+        lane = "fast lane"
+    else:
         return None
-    budget = fast_budget(settings)
     args.timeout = min(args.timeout, budget)
-    note(f"fast lane (budget {budget:g}s)")
+    note(f"{lane} (budget {budget:g}s)")
     return budget
 
 
 def fast_timeout(args, budget):
     if budget is None or args.timeout < budget:
         return
-    note("fast-lane phase exceeded its budget; rerun normally; this command family now queues")
+    if getattr(args, "config_direct_budget", False):
+        note("config-direct phase exceeded its budget; history will be re-evaluated on the next run")
+    else:
+        note("fast-lane phase exceeded its budget; rerun normally; this command family now queues")
     if getattr(args, "ledger", None):
         args.ledger.record["fastBudgetExceeded"] = True
 
@@ -2832,7 +2865,7 @@ def run(args, state, configuration, output=None):
             if ledger:
                 ledger.outcome("cancelled")
             return 128 + cancelled[0]
-        budget = apply_fast_budget(args, options["fast_lane"], held)
+        budget = apply_fast_budget(args, options["fast_lane"], held, admission_args)
         child_env = None
         cap = msbuild_cap(options["msbuild_max_cpu"], heavy)
         if cap and args.kind in ("build", "test", "integration"):

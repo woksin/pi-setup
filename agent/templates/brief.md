@@ -32,7 +32,7 @@ Copy to `<repo>/.ai-work/<task>/brief.md`, fill every section, and pass the agen
 Ordered, small steps, each naming the file(s) and the change, and the specs/tests to add first.
 
 ## Execution policy (binding — do not re-decide)
-- pi-phase policy: auto / direct / fast / queued (pass `--policy` for an explicit choice).
+- pi-phase policy: auto / direct / fast / queued (pass `--policy` for an explicit choice); pack/restore use `--kind build`, including `pi-phase run --kind build ... -- bash …/cratis-local-packages.sh pack-nuget …` (inner dotnet shim applies; version/stamp tokens are normalized for history).
 - High priority: yes / no.
 - These execution decisions override general rules; run the exact gate below.
 
