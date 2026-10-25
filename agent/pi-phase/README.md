@@ -108,6 +108,20 @@ Supervisor failures label the primary operation and any secondary cleanup operat
 
 The executable `bin/pi-phase` is only a Python launcher; cleanup lives in `pi-phase/pi_phase.py`. It already handles missing groups and ignores EPERM only when no live group members remain. A reported EPERM alone does not establish that cleanup was safe, so do not swallow all permission errors. Changes to that implementation require separate scope and descendant-cleanup tests.
 
+## Reprioritize a queued phase
+
+```sh
+pi-phase reprioritize <pid|label> --priority low|normal|high
+pi-phase reprioritize 12345 --priority low
+pi-phase reprioritize 'integration checks' --priority normal
+```
+
+The target is an exact waiter PID, or an exact label matching exactly one queued waiter owned by your uid. Numeric targets select PIDs. Ambiguous labels are refused with candidate PIDs; another uid's waiters and already-admitted/running phases cannot be changed. There is no force option. `status` shows the updated `priority=`.
+
+The change keeps the waiter's locked inode, token, original enqueue time and sequence: it does not cancel/requeue or reset FIFO position within the new priority class. Existing shortest-expected/aging rules still apply. Queue scans re-read the priority under the coordinator lock; current-version waiters also carry it into running lease metadata and their phase ledger. Lowering high priority immediately frees its queued high slot. Raising to high uses the same approval grant and `max_high` cap as `run --priority high`: without approval nothing changes; at the cap an approved request becomes normal without consuming a grant use. An unchanged priority is a no-op.
+
+No queue-format migration is needed. Older waiters continue to read and rank the updated entry without losing their liveness lock; however, old executables retain their original priority when publishing running metadata/ledger records. For high-priority accounting across admission, use a current-version waiter. The existing phase ledger records the last observed change as `reprioritization` (`previous`, `priority`, `at`, `uid`); the reprioritize command itself writes no ledger line.
+
 ## Phase history and throughput
 
 Each `run` appends one version-1 JSON line to `~/.pi/agent/state/pi-phase/ledger/YYYY-MM-DD.jsonl` (UTC), including phases that fail, time out, are cancelled, or are rejected after their kind is known. Ledger files older than 60 days are pruned opportunistically on append. A ledger error prints one stderr note and does not change the phase's output or exit status. There is no service or configuration toggle.

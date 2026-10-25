@@ -1922,6 +1922,18 @@ def caller_identity():
     return (session[:200] if session else None, lane[:200] if lane else None)
 
 
+def approved_priority(state, priority, cap):
+    """Caller holds the coordinator; share approval and cap semantics with run."""
+    if priority != "high":
+        return priority, None
+    if high_count(state) >= cap:
+        if priority_grant(state) is None:
+            raise ValueError(APPROVAL_REQUIRED)
+        return "normal", f"high-priority cap ({cap}) reached; queued as normal"
+    consume_priority(state)
+    return "high", None
+
+
 def register_waiter(state, args, token):
     """Nonblocking registration, including atomic grant consumption and FIFO sequence."""
     coordinator = lock_file(state / "coordinator.lock")
@@ -1931,15 +1943,7 @@ def register_waiter(state, args, token):
     fd = None
     downgrade_note = None
     try:
-        if args.priority == "high":
-            cap = getattr(args, "max_high", 3)
-            if high_count(state) >= cap:
-                if priority_grant(state) is None:
-                    raise ValueError(APPROVAL_REQUIRED)
-                args.priority = "normal"
-                downgrade_note = f"high-priority cap ({cap}) reached; queued as normal"
-            else:
-                consume_priority(state)
+        args.priority, downgrade_note = approved_priority(state, args.priority, getattr(args, "max_high", 3))
         if slotless_policy(args):
             return True, None
         path.parent.mkdir(mode=0o700, exist_ok=True)
@@ -2111,6 +2115,13 @@ def record_order(scan, waiter, free):
         scan["reason"] = "order" if waiter_resources(waiter, free) else "slots"
 
 
+def record_candidate(scan, waiter, free, candidate):
+    if scan is not None:
+        scan["waiter"] = waiter
+    if not candidate:
+        record_order(scan, waiter, free)
+
+
 def ordered_candidate(state, available, token, cancelled, scan=None):
     """Reserve satisfiable earlier waiters virtually; blocked ones take nothing."""
     pools = {key: sorted(p for p in available if p.name.startswith(key + "-"))
@@ -2119,8 +2130,7 @@ def ordered_candidate(state, available, token, cancelled, scan=None):
     for waiter in all_waiters(state, cancelled):
         candidate = waiter_resources(waiter, pools)
         if waiter.get("token") == token:
-            if not candidate:
-                record_order(scan, waiter, free)
+            record_candidate(scan, waiter, free, candidate)
             return candidate
         for path in candidate:
             pools[path.name.split("-", 1)[0]].pop(0)
@@ -2318,6 +2328,61 @@ def withdraw(state, args):
         note(f"withdrawn id={waiter['token'][:12]} kind={waiter['kind']} label={waiter.get('label', '?')} "
              f"pid={waiter.get('pid', '?')} waited={age}s; waiter exits with 77 within ~3s")
     return 0
+
+
+def reprioritize_matches(state, target):
+    """Caller holds the coordinator; ownership comes from the locked file, not JSON."""
+    waiters = all_waiters(state, readonly=True)
+    matches = [w for w in waiters if str(w.get("pid")) == target] if target.isdecimal() else [
+        w for w in waiters if w.get("label") == target]
+    owned = [w for w in matches if waiter_path(state, w["token"]).stat().st_uid == os.getuid()]
+    return matches, owned
+
+
+def reprioritize(state, configuration, args):
+    if not state.exists():
+        note("no queued phase matches (already admitted/running phases cannot be reprioritized)")
+        return 1
+    cap = config(configuration).options["max_high"]
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        matches, owned = reprioritize_matches(state, args.target)
+        if not matches:
+            note("no queued phase matches (already admitted/running phases cannot be reprioritized)")
+            return 1
+        if not owned:
+            note("queued phase belongs to another uid; only its owner can reprioritize it")
+            return 3
+        if len(owned) != 1:
+            note("ambiguous queued phase; candidate pids: " + ", ".join(str(w.get("pid")) for w in owned))
+            return 2
+        waiter = owned[0]
+        previous = waiter["priority"]
+        if previous == args.priority:
+            return 0
+        priority, message = approved_priority(state, args.priority, cap)
+        waiter["priority"] = priority
+        waiter["reprioritization"] = dict(previous=previous, priority=priority, at=time.time(), uid=os.getuid())
+        # The waiter holds this inode's flock for its lifetime. Replacing the path
+        # would make it look dead. All queue readers hold the coordinator too.
+        with open(waiter_path(state, waiter["token"]), "r+") as stream:
+            stream.write(json.dumps(waiter))
+            stream.truncate()
+    if message:
+        note(message)
+    note(f"reprioritized pid={waiter.get('pid', '?')} label={waiter.get('label', '?')} priority={priority}")
+    return 0
+
+
+def observe_waiter(args, ledger, scan):
+    waiter = scan.get("waiter", {})
+    if "priority" not in waiter:
+        return
+    args.priority = waiter["priority"]
+    if ledger:
+        ledger.record["priority"] = args.priority
+        if "reprioritization" in waiter:
+            ledger.record["reprioritization"] = waiter["reprioritization"]
 
 
 def withdrawal_text(value):
@@ -2722,6 +2787,7 @@ def run(args, state, configuration, output=None):
                          deadline, lambda: bool(cancelled[0]),
                          token if waiter_fd is not None else None, PhaseConfig(heavy, integration, settings.options), admission,
                          integration if burst and admission_args.kind == "integration" else None, scan=scan)
+            observe_waiter(admission_args, ledger, scan)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
                 if ledger:
@@ -2935,6 +3001,9 @@ def main(argv=None, *, state=None, configuration=None):
     parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner")
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("status", help="show leases, queue and priority grant (never command arguments)")
+    reprioritizing = commands.add_parser("reprioritize", help="change an owned queued waiter's priority in place")
+    reprioritizing.add_argument("target", metavar="pid|label", help="exact pid or unique label owned by your uid")
+    reprioritizing.add_argument("--priority", choices=tuple(PRIORITIES), required=True)
     withdrawing = commands.add_parser("withdraw", help="withdraw a queued phase without touching running phases")
     withdrawing.add_argument("id", nargs="?", type=withdrawal_id, help="hex token prefix (at least 6 characters)")
     withdrawing.add_argument("--label")
@@ -3004,6 +3073,8 @@ def main(argv=None, *, state=None, configuration=None):
                 parser.error("--tail requires --log")
             if args.tail < 0:
                 parser.error("--tail must be nonnegative")
+        if args.action == "reprioritize":
+            return reprioritize(state, configuration, args)
         if args.action == "withdraw":
             validate_withdraw(parser, args)
             return withdraw(state, args)
