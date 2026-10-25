@@ -6,6 +6,18 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 
 ## 2026-10-25
 
+### Every decision gets an independent second review
+- **Symptom:** a lane's root cause for a failing release train ("shared names, pre-existing, flaky") was wrong on two of three points; the coordinator nearly asked for a gate exception that would have shipped a likely regression.
+- **Cause:** the claim was relayed upward without anyone checking the evidence independently.
+- **Rule:** every question or decision gets research, source verification and a mandatory second review on the other provider before it is acted on or escalated. Decide without the user when that leaves the decision confident and non-critical; escalate only the rest, with evidence and the review verdict.
+- **Enforced:** rule (`agent/AGENTS.md`, "Questions for the user") and tool (`pi-questions` `ask` requires `evidence` and `review`).
+
+### In-job test retries hide systemic failures
+- **Symptom:** an integration spec class looked intermittent over five CI rounds ("passed on two commits, failed on two").
+- **Cause:** it failed on the first attempt on every commit because of state leaking between classes through shared fixed names; the retry script re-ran only the failed classes, which passed alone, so jobs went red only above a failure threshold.
+- **Rule:** before calling a failure flaky, read first-attempt results in every job, green ones included. Integration specs use unique per-class names for shared resources, and retry passes are reported as warnings rather than counted as green.
+- **Enforced:** practice (the repository's test rules and retry threshold own the fix).
+
 ### A disk cleanup cost a release train a cold rebuild
 - **Symptom:** a broadcast at 24 GiB free asked lanes to delete `bin/`/`obj/` in idle worktrees; a release train's worktree lost its build outputs and needed a cold full gate of about 3 hours.
 - **Cause:** the cleanup did not exclude worktrees a train owner was about to gate.

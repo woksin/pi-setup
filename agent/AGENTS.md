@@ -146,6 +146,8 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 ## Questions for the user
 
+- Every question or decision (raised, decided or escalated) first gets research, source verification and a mandatory independent second review, by a reviewer on the other provider (`sol-reviewer` for Claude-written, `reviewer` for GPT-written; `second-opinion` or a deep review for security, data-loss, contract or concurrency). Decide without the user whenever the verified evidence and the reviewer's verdict make it confident and it is not critical. Only what remains goes to `user_questions`, with the evidence and the review verdict in the item (`evidence` and `review` fields).
+- A root-cause claim ("flaky", "pre-existing", "not our change") is a decision input and gets the same independent check before anyone acts on it.
 - Before asking the user anything, search: `user_questions search` (covers decided and closed items).
 - Ask with `user_questions ask`, never in chat or message files only; message files refer to items by id (Q-42).
 - A near-duplicate is refused: comment on it, add yourself to cc, or use its answer. Pass `distinctFrom` only when it is truly different.
