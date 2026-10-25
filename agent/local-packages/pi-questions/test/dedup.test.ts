@@ -4,9 +4,9 @@ import { ask } from "../src/actions.ts";
 import { candidates, linkTokens, score, tokens, WINDOW_DAYS } from "../src/dedup.ts";
 import { validateDraft } from "../src/model.ts";
 import { answerItem } from "../src/actions.ts";
-import { asker, seed, tempDir } from "./helpers.ts";
+import { asker, RESEARCH, seed, tempDir } from "./helpers.ts";
 
-const draft = (title: string, extra: Record<string, unknown> = {}) => validateDraft({ kind: "question", title, body: "", ...extra });
+const draft = (title: string, extra: Record<string, unknown> = {}) => validateDraft({ kind: "question", title, body: "", ...RESEARCH, ...extra });
 
 test("normalisation: case, punctuation, stopwords and crude stemming", () => {
 	assert.deepEqual([...tokens("Should we ship the Releases, now?!")].sort(), ["now", "releas", "ship"].sort());

@@ -39,6 +39,8 @@ export interface Answer {
 export interface Asker { sessionId: string; lane?: string; cwd: string; repo: string | null; pid: number }
 
 export interface Item {
+	evidence?: string;
+	review?: string;
 	id: string;
 	rev: number;
 	kind: Kind;
@@ -67,6 +69,8 @@ export interface Item {
 }
 
 export interface Draft {
+	evidence?: string;
+	review?: string;
 	kind: Kind;
 	title: string;
 	body: string;
@@ -141,6 +145,23 @@ function forRecipients(input: unknown): string[] | undefined {
 	return recipients.length ? recipients : undefined;
 }
 
+export function researchText(value: unknown, name: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") throw new Error(`${name} must be a string`);
+	return value.trim();
+}
+
+/** Ask-only policy: legacy items remain readable and editable without these fields. */
+export function assertAskResearch(draft: Pick<Draft, "kind" | "evidence" | "review">): void {
+	if (draft.kind === "fyi") return;
+	const missing = (["evidence", "review"] as const).filter(key => (draft[key]?.trim().length ?? 0) < 20);
+	if (missing.length) throw new Error([
+		`Not created: ${missing.join(" and ")} required (at least 20 characters each after trim).`,
+		"The global rule requires research/source verification and an independent second review on the other provider before asking.",
+		'Example: evidence: "store.ts:42; run 123456", review: "sol-reviewer: agrees, sources and verdict verified".',
+	].join(" "));
+}
+
 export function validateDraft(input: Record<string, unknown>): Draft {
 	const options = validateOptions(input.options);
 	const recommended = input.recommended === undefined ? undefined : str(input.recommended, "recommended", 20);
@@ -149,6 +170,8 @@ export function validateDraft(input: Record<string, unknown>): Draft {
 		kind: oneOf(input.kind, "kind", KINDS),
 		title: str(input.title, "title", MAX_TITLE, true),
 		body: str(input.body, "body", MAX_BODY),
+		evidence: researchText(input.evidence, "evidence"),
+		review: researchText(input.review, "review"),
 		options,
 		recommended: recommended || undefined,
 		urgency: oneOf(input.urgency, "urgency", URGENCIES, "normal"),

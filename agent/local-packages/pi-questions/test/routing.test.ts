@@ -6,7 +6,7 @@ import { main } from "../src/cli.ts";
 import * as identity from "../src/identity.ts";
 import { validateDraft } from "../src/model.ts";
 import { readItem, readSessions, receiptName, receiptNames, writeHeartbeat } from "../src/store.ts";
-import { session, tempDir } from "./helpers.ts";
+import { RESEARCH_FLAGS, session, tempDir } from "./helpers.ts";
 
 function world(t: Parameters<typeof tempDir>[0]) {
 	const root = tempDir(t);
@@ -125,7 +125,7 @@ test("ask for: validates like cc, deduplicates, limits to five, and CLI persists
 	}
 	assert.equal(validateDraft(base).for, undefined);
 	const { run, home } = world(t);
-	const result = run("ask", "--kind", "question", "--title", "On behalf CLI", "--for", "L47", "--for", "session-123");
+	const result = run("ask", ...RESEARCH_FLAGS, "--kind", "question", "--title", "On behalf CLI", "--for", "L47", "--for", "session-123");
 	assert.equal(result.code, 0, result.err);
 	assert.deepEqual(readItem(home, "Q-1")!.for, ["L47", "session-123"]);
 });

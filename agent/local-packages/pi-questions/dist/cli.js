@@ -23,7 +23,9 @@ const USAGE = `usage: pi-questions <command>
   get <id> [--record]
   ask --kind question|decision|approval|fyi --title T [--body B] [--option key=text]... [--recommended key]
       [--urgency high|normal|low] [--blocking X] [--cc ID]... [--for ID]... [--link L]... [--tag T]... [--global]
-      [--project P] [--distinct-from Q-n]...
+      [--project P] [--distinct-from Q-n]... [--evidence E] [--review R]
+      evidence: sources checked (file:line, run ids, URLs); review: reviewer agent/provider and verdict.
+      Both need at least 20 characters after trim for question, decision and approval; fyi is exempt.
   lane set <ID> (--session <id> | --pid <pid> | --tty <ttysNN>)
   lane clear --session <id>
   lane list
@@ -74,14 +76,14 @@ export function main(argv          , env                                    , io
 						kind: { type: "string" }, title: { type: "string" }, body: { type: "string" }, option: { type: "string", multiple: true },
 						recommended: { type: "string" }, urgency: { type: "string" }, blocking: { type: "string" }, cc: { type: "string", multiple: true }, for: { type: "string", multiple: true },
 						link: { type: "string", multiple: true }, tag: { type: "string", multiple: true }, global: { type: "boolean" },
-						project: { type: "string" }, "distinct-from": { type: "string", multiple: true },
+						project: { type: "string" }, "distinct-from": { type: "string", multiple: true }, evidence: { type: "string" }, review: { type: "string" },
 					},
 				});
 				const options = cliOptions(values.option ?? []);
 				const draft = validateDraft({
 					kind: values.kind, title: values.title, body: values.body, options, recommended: values.recommended, urgency: values.urgency,
 					blocking: values.blocking, cc: values.cc, for: values.for, links: values.link, tags: values.tag, global: values.global, project: values.project,
-					distinctFrom: values["distinct-from"],
+					distinctFrom: values["distinct-from"], evidence: values.evidence, review: values.review,
 				});
 				const asker        = { sessionId, lane, cwd, repo: repoOf(cwd), pid: process.pid };
 				const res = actions.ask(home, draft, asker);

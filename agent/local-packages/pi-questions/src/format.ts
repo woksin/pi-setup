@@ -111,6 +111,7 @@ export function renderItem(item: Item, now: number, duplicateOf?: string): strin
 	if (item.supersededBy) lines.push(`Superseded by: ${item.supersededBy}`);
 	if (duplicateOf) lines.push(`Possible duplicate of ${duplicateOf} (same question, created at about the same time). Resolve with supersede by ${duplicateOf}, or /close.`);
 	if (item.body) lines.push("", ...item.body.split("\n"));
+	lines.push(...researchSections(item));
 	if (item.options.length) {
 		lines.push("", "Options:");
 		for (const o of item.options) lines.push(...wrap(`  ${o.key}${o.key === item.recommended ? " (recommended)" : ""}: ${o.text}`, WIDTH, "      "));
@@ -122,6 +123,13 @@ export function renderItem(item: Item, now: number, duplicateOf?: string): strin
 	return plain(lines.flatMap(l => fit(l)));
 }
 
+function researchSections(item: Item): string[] {
+	const lines: string[] = [];
+	if (item.evidence !== undefined) lines.push("", "Evidence:", ...item.evidence.split("\n"));
+	if (item.review !== undefined) lines.push("", "Review:", ...item.review.split("\n"));
+	return lines;
+}
+
 /** A plain decision-record block for exporting by hand. */
 export function renderRecord(item: Item): string {
 	const lines = [`Decision record ${item.id}: ${item.title}`, `Kind: ${item.kind}`, `Status: ${item.status}`, `Repo: ${item.repo ?? "global"}`];
@@ -129,6 +137,7 @@ export function renderRecord(item: Item): string {
 	if (item.links.length) lines.push(`Links: ${item.links.join(", ")}`);
 	lines.push(`Asked: ${item.createdAt}`);
 	if (item.body) lines.push("", "Context:", ...item.body.split("\n"));
+	lines.push(...researchSections(item));
 	if (item.options.length) lines.push("", "Options:", ...item.options.map(o => `  ${o.key}: ${o.text}`));
 	const a = item.answer;
 	if (a) {

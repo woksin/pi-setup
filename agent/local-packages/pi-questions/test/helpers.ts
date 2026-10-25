@@ -48,9 +48,15 @@ export function asker(over: Partial<Asker> = {}): Asker {
 	return { sessionId: "sess-a", cwd: "/tmp/x", repo: "o/r", pid: process.pid, ...over };
 }
 
+export const RESEARCH = {
+	evidence: "store.ts:42; run 123456",
+	review: "sol-reviewer (Claude): agrees, sources verified",
+};
+export const RESEARCH_FLAGS = ["--evidence", RESEARCH.evidence, "--review", RESEARCH.review];
+
 /** Create an item straight through the store, bypassing nothing but the tool layer. */
 export function seed(home: string, draft: Record<string, unknown>, who: Partial<Asker> = {}, now = Date.now()): Item {
-	const res = ask(home, validateDraft({ kind: "question", body: "", ...draft }), asker(who), now);
+	const res = ask(home, validateDraft({ kind: "question", body: "", ...RESEARCH, ...draft }), asker(who), now);
 	if ("refused" in res) throw new Error("seed refused as duplicate");
 	return res.ok.item;
 }
@@ -137,7 +143,8 @@ export function session(t: { after: (fn: () => void) => void }, o: SessionOpts) 
 		get controller() {
 			return controller;
 		},
-		call: (params: any) => tools.get("user_questions").execute("c1", params, undefined, undefined, ctx),
+		// Existing scenarios use a researched ask; refusal tests explicitly override either field.
+		call: (params: any) => tools.get("user_questions").execute("c1", params.action === "ask" ? { ...RESEARCH, ...params } : params, undefined, undefined, ctx),
 		command: (name: string, args: string) => commands.get(name).handler(args, ctx),
 		type: (text: string, source = "interactive") => emit("input", { type: "input", text, source }),
 		start: () => emit("session_start", { type: "session_start", reason: "startup" }),

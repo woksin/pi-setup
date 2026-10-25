@@ -8,7 +8,7 @@ import { atomicWrite, claimReceipt, createItem, itemDir, listItems, mutateItem, 
 import { addCc, ask, closeItem, commentItem, supersedeItem, updateItem, withdrawItem } from "../src/actions.ts";
 import { possibleDuplicates } from "../src/dedup.ts";
 import { renderItem, renderList } from "../src/format.ts";
-import { seed, tempDir } from "./helpers.ts";
+import { RESEARCH, seed, tempDir } from "./helpers.ts";
 
 const run = (args: string[]) =>
 	new Promise<void>((resolve, reject) => {
@@ -142,7 +142,7 @@ test("a non-race write error (EACCES) propagates at once instead of looping", t 
 	assert.ok(Date.now() - started < 1000);
 });
 
-const raceDraft = (title: string, extra: object = {}) => validateDraft({ kind: "question", title, body: "", ...extra });
+const raceDraft = (title: string, extra: object = {}) => validateDraft({ kind: "question", title, body: "", ...RESEARCH, ...extra });
 const raceWho = (sessionId: string) => ({ sessionId, lane: sessionId, cwd: "/tmp", repo: null, pid: process.pid });
 
 test("two simultaneous identical asks both exist and are both marked as possible duplicates at read time", t => {

@@ -1,7 +1,7 @@
 /** Item operations shared by the tool, the user commands and the CLI. Policy (who may call what) lives with the callers. */
 import { candidates, uncovered,             } from "./dedup.js";
 import {
-	addHistory, assertTransition, MAX_SOURCE, parseId, validateOptions,
+	addHistory, assertAskResearch, assertTransition, MAX_SOURCE, parseId, researchText, validateOptions,
 	                                                                        
 } from "./model.js";
 import { createItem, listItems, mutateItem, readItem,                  } from "./store.js";
@@ -22,6 +22,7 @@ function routingFields(draft       )                    {
 export function ask(
 	home        , draft       , asker       , now = Date.now(), hooks              = {},
 )                                           {
+	assertAskResearch(draft);
 	const repo = draft.global ? null : asker.repo;
 	let near           = [];
 	const out = createItem         (home, existing => {
@@ -39,6 +40,7 @@ export function ask(
 					status: "open", related: found.candidates.map(c => c.item.id), history: [],
 					createdAt: at, updatedAt: at,
 				};
+				setResearch(item, draft);
 				if (draft.recommended) item.recommended = draft.recommended;
 				if (draft.project) item.project = draft.project;
 				addHistory(item, { kind: "agent", sessionId: asker.sessionId, lane: asker.lane }, "created", at,
@@ -200,7 +202,7 @@ export function commentItem(home        , id        , actor       , text        
 	}, new Date(now));
 }
 
-                                                                                                                                                                  
+                                                                                                                                                                                                      
 
 export function addLinks(home        , id        , actor       , links          , now = Date.now())       {
 	return mutateItem(home, idOf(id), item => {
@@ -208,6 +210,17 @@ export function addLinks(home        , id        , actor       , links          
 		item.links.push(...added);
 		if (added.length) addHistory(item, actor, "linked", iso(now), added.join(", "), { links: added });
 	}, new Date(now));
+}
+
+function setResearch(item      , patch                                    , changed           = [])       {
+	if (patch.evidence !== undefined) {
+		item.evidence = researchText(patch.evidence, "evidence");
+		changed.push("evidence");
+	}
+	if (patch.review !== undefined) {
+		item.review = researchText(patch.review, "review");
+		changed.push("review");
+	}
 }
 
 export function updateItem(home        , id        , actor       , patch       , now = Date.now())       {
@@ -236,6 +249,7 @@ function updateOpen(home        , id        , actor       , patch       , now   
 		};
 		if (patch.title !== undefined) set("title", patch.title.trim());
 		if (patch.body !== undefined) set("body", patch.body.trim());
+		setResearch(item, patch, changed);
 		if (patch.options !== undefined) set("options", validateOptions(patch.options));
 		if (patch.urgency !== undefined) set("urgency", patch.urgency);
 		if (patch.blocking !== undefined) set("blocking", patch.blocking.trim());

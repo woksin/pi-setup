@@ -7,7 +7,7 @@ import { readItem } from "../src/store.ts";
 import { fileURLToPath } from "node:url";
 import { answerItem } from "../src/actions.ts";
 import { main } from "../src/cli.ts";
-import { gitRepo, tempDir } from "./helpers.ts";
+import { gitRepo, RESEARCH_FLAGS, tempDir } from "./helpers.ts";
 
 function cli(env: Record<string, string>, cwd: string) {
 	return (...args: string[]) => {
@@ -23,18 +23,18 @@ test("ask creates an item with the asker from PI_SESSION_ID and PI_ORCH_ID, and 
 	const home = join(root, "home");
 	const repo = gitRepo(join(root, "r"), "git@github.com:acme/alpha.git");
 	const run = cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "sess-7", PI_ORCH_ID: "LANE-Z" }, repo);
-	const first = run("ask", "--kind", "decision", "--title", "Pick a cache", "--body", "details", "--option", "a=Redis", "--option", "b=Memcached=fast", "--recommended", "a", "--urgency", "high", "--blocking", "perf work", "--cc", "L0");
+	const first = run("ask", ...RESEARCH_FLAGS, "--kind", "decision", "--title", "Pick a cache", "--body", "details", "--option", "a=Redis", "--option", "b=Memcached=fast", "--recommended", "a", "--urgency", "high", "--blocking", "perf work", "--cc", "L0");
 	assert.equal(first.code, 0, first.err);
 	assert.match(first.out, /^Created Q-1: Pick a cache\nWait for the answer with: pi-questions wait Q-1/);
 	const item = readItem(home, "Q-1")!;
 	assert.deepEqual([item.asker.sessionId, item.asker.lane, item.asker.repo, item.repo, item.cc, item.urgency], ["sess-7", "LANE-Z", "acme/alpha", "acme/alpha", ["L0"], "high"]);
 	assert.deepEqual(item.options, [{ key: "a", text: "Redis" }, { key: "b", text: "Memcached=fast" }]);
-	const dup = run("ask", "--kind", "decision", "--title", "pick a cache!");
+	const dup = run("ask", ...RESEARCH_FLAGS, "--kind", "decision", "--title", "pick a cache!");
 	assert.equal(dup.code, 2);
 	assert.match(dup.err, /Not created: possible duplicate/);
 	assert.match(dup.err, /Q-1 \[open\] Pick a cache \(score 1\.00\)/);
 	assert.match(dup.err, /--distinct-from Q-1/);
-	const forced = run("ask", "--kind", "decision", "--title", "pick a cache!", "--distinct-from", "Q-1");
+	const forced = run("ask", ...RESEARCH_FLAGS, "--kind", "decision", "--title", "pick a cache!", "--distinct-from", "Q-1");
 	assert.equal(forced.code, 0);
 	assert.deepEqual(readItem(home, "Q-2")!.related, ["Q-1"]);
 });
@@ -43,11 +43,11 @@ test("wait exits 1 while open, then 0 once answered", t => {
 	const root = tempDir(t);
 	const home = join(root, "home");
 	const run = cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "s" }, root);
-	assert.equal(run("ask", "--kind", "question", "--title", "Wait for me").code, 0);
+	assert.equal(run("ask", ...RESEARCH_FLAGS, "--kind", "question", "--title", "Wait for me").code, 0);
 	const open = run("wait", "Q-1");
 	assert.equal(open.code, 1);
 	assert.equal(open.out, "Q-1 is open\nnot answered yet (exit 1)");
-	assert.equal(run("ask", "--kind", "question", "--title", "Something entirely unrelated about deploys").code, 0);
+	assert.equal(run("ask", ...RESEARCH_FLAGS, "--kind", "question", "--title", "Something entirely unrelated about deploys").code, 0);
 	assert.equal(run("wait", "Q-1", "Q-2").code, 1);
 	answerItem(home, "Q-1", { kind: "user", sessionId: "u" }, { text: "done now", by: "u", via: "command" });
 	const done = run("wait", "q1");
@@ -64,8 +64,8 @@ test("list output: default scope, --all with the asker lane, and warnings", t =>
 	const home = join(root, "home");
 	const repoA = gitRepo(join(root, "a"), "git@github.com:acme/alpha.git");
 	const repoB = gitRepo(join(root, "b"), "git@github.com:acme/beta.git");
-	cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "sa", PI_ORCH_ID: "LANE-A" }, repoA)("ask", "--kind", "question", "--title", "Alpha question here");
-	cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "sb", PI_ORCH_ID: "LANE-B" }, repoB)("ask", "--kind", "question", "--title", "Beta matter to decide", "--project", "p1");
+	cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "sa", PI_ORCH_ID: "LANE-A" }, repoA)("ask", ...RESEARCH_FLAGS, "--kind", "question", "--title", "Alpha question here");
+	cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "sb", PI_ORCH_ID: "LANE-B" }, repoB)("ask", ...RESEARCH_FLAGS, "--kind", "question", "--title", "Beta matter to decide", "--project", "p1");
 	const run = cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "sx" }, repoA);
 	const here = run("list");
 	assert.match(here.out, /Alpha question here/);
@@ -114,7 +114,7 @@ test("CLI ask resolves the session name without env mutation, with env and heart
 	writeFileSync(file, '{"type":"session","id":"s1"}\n{"type":"session_info","name":"OLD"}\n{"type":"session_info","name":"L0"}\n');
 	const env = { PI_SESSION_ID: "s1", PI_CODING_AGENT_DIR: agent, PI_QUESTIONS_HOME: home, ORCH_HOME: orch };
 	const snapshot = { ...process.env };
-	assert.equal(cli(env, repo)("ask", "--kind", "question", "--title", "Named lane request").code, 0);
+	assert.equal(cli(env, repo)("ask", ...RESEARCH_FLAGS, "--kind", "question", "--title", "Named lane request").code, 0);
 	assert.equal(readItem(home, "Q-1")!.asker.lane, "L0");
 	assert.equal(readItem(home, "Q-1")!.asker.sessionId, "s1");
 	mkdirSync(join(orch, "heartbeats"), { recursive: true });

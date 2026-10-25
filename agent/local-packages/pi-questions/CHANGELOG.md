@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- `ask` requires evidence of research/source verification and an independent second review on the other provider for questions, decisions and approvals; FYIs are exempt.
+- Store optional `evidence` and `review` fields, show them in text and decision records, and allow replacement on own open items. Existing items need no migration.
+- CLI `ask` accepts `--evidence` and `--review`.
+
 ## 0.1.0
 
 - `user_questions` tool: ask, list (`all`, `project`), get (text or decision record), search, update, comment, withdraw, supersede, close, record_answer.

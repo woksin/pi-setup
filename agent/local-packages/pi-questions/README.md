@@ -22,16 +22,25 @@ The repo is `Owner/Name` from the git origin, so all worktrees of one repo share
 
 One tool with an `action`:
 
-- `ask`: kind, title, body, options, recommended, urgency, blocking, links, tags, cc, for, global, project, distinctFrom. A duplicate check runs first (below).
+- `ask`: kind, title, body, evidence, review, options, recommended, urgency, blocking, links, tags, cc, for, global, project, distinctFrom. Research and review are checked before the duplicate check (below).
 - `list`: default is open and deferred-due items for the current repo, global items and your own. `all: true` shows every repo with the asker lane on each item. `project`, `repo`, `status` (or `all`), `mine` filter.
 - `get`: `format: "text"` or `"record"` (a plain decision record for exporting by hand).
 - `search`: all statuses, so agents check decided and closed items before asking again.
-- `update`: your own open or deferred items. On any item you may add links, or add yourself to cc.
+- `update`: your own open or deferred items, including setting or replacing evidence and review. On any item you may add links, or add yourself to cc.
 - `comment`: any item.
 - `withdraw`, `supersede`, `close`: your own items. `close` applies to answered or decided items, or fyi. "Own" means the same session or the same lane as the asker.
 - `record_answer`: only the user's exact words (see below).
 
 Subagents (no UI) get `list`, `get` and `search` only; mutations are refused with "report to your parent session". Subagents also get no status line, no heartbeat and no delivery.
+
+### Evidence and independent review
+
+Before asking a `question`, `decision` or `approval`, the global rule requires research/source verification and an independent second review on the other provider. Supply both fields, each at least 20 characters after trimming whitespace:
+
+- `evidence`: sources checked, with file:line, run ids or URLs. Example: `"store.ts:42; run 123456"`.
+- `review`: independent reviewer agent/provider and verdict. Example: `"sol-reviewer (Claude): agrees, sources verified"`.
+
+Missing, blank or short fields refuse the ask without creating an item. `fyi` is exempt. The fields are optional in stored items: legacy items still load and display unchanged. `get` shows Evidence and Review sections when present in both text and record formats; `list` is unchanged.
 
 ### Duplicate check
 
@@ -91,7 +100,7 @@ pi-questions list [--all] [--mine] [--status S] [--repo Owner/Name] [--project P
 pi-questions get <id> [--record]
 pi-questions ask --kind question --title T [--body B] [--option key=text]... [--recommended key]
                  [--urgency high|normal|low] [--blocking X] [--cc ID]... [--for ID]... [--link L]... [--tag T]...
-                 [--global] [--project P] [--distinct-from Q-n]...
+                 [--global] [--project P] [--distinct-from Q-n]... [--evidence E] [--review R]
 pi-questions lane set <ID> (--session <id> | --pid <pid> | --tty <ttysNN>)
 pi-questions lane clear --session <id>
 pi-questions lane list

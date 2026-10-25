@@ -67,6 +67,8 @@ const PARAMETERS = {
 		kind: { type: "string", enum: ["question", "decision", "approval", "fyi"] },
 		title: { type: "string", description: "At most 120 characters" },
 		body: { type: "string", description: "Plain text, at most 4000 characters" },
+		evidence: { type: "string", description: "Sources checked: file:line, run ids, URLs. ask: required, at least 20 characters after trim, except fyi. update: replace on own open items." },
+		review: { type: "string", description: "Independent reviewer agent/provider and verdict, on the other provider. ask: required, at least 20 characters after trim, except fyi. update: replace on own open items." },
 		options: { type: "array", items: { type: "object", properties: { key: str, text: str }, required: ["key", "text"] } },
 		recommended: { type: "string", description: "Key of the recommended option" },
 		urgency: { type: "string", enum: [...URGENCIES] },
@@ -98,6 +100,7 @@ const PARAMETERS = {
 const DESCRIPTION = [
 	"The user's queue of questions and decisions, kept in one durable store and answered back to the asking session.",
 	"Search before asking (action search, covers decided and closed items). Ask with action ask; never ask in chat only.",
+	"Before asking a question, decision or approval, the global rule requires research/source verification (evidence) and an independent second review on the other provider (review: reviewer agent/provider and verdict). Both fields need at least 20 characters after trim; fyi is exempt.",
 	"A near-duplicate is refused: comment on it, add yourself to cc, use its answer, or pass distinctFrom with all candidate ids.",
 	"After ask, end your turn: the answer arrives as a woken follow-up. Do not poll.",
 	"record_answer only with the user's exact words typed in THIS session's chat. Never paraphrase and never relay.",
@@ -362,7 +365,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 						const id = need(params.id, "id");
 						const item = actions.getItem(home, id);
 						const patch = {
-							title: params.title, body: params.body, options: params.options, urgency: params.urgency,
+							title: params.title, body: params.body, evidence: params.evidence, review: params.review, options: params.options, urgency: params.urgency,
 							blocking: params.blocking, links: params.links, tags: params.tags, cc: params.cc,
 						};
 						if (patch.urgency !== undefined && !(URGENCIES as readonly string[]).includes(patch.urgency)) throw new Error(`urgency must be one of: ${URGENCIES.join(", ")}`);

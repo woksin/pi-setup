@@ -1,7 +1,7 @@
 /** Item operations shared by the tool, the user commands and the CLI. Policy (who may call what) lives with the callers. */
 import { candidates, uncovered, type Scored } from "./dedup.ts";
 import {
-	addHistory, assertTransition, MAX_SOURCE, parseId, validateOptions,
+	addHistory, assertAskResearch, assertTransition, MAX_SOURCE, parseId, researchText, validateOptions,
 	type Actor, type Asker, type Draft, type Item, type Option, type Status,
 } from "./model.ts";
 import { createItem, listItems, mutateItem, readItem, type CreateHooks } from "./store.ts";
@@ -22,6 +22,7 @@ function routingFields(draft: Draft): Pick<Item, "for"> {
 export function ask(
 	home: string, draft: Draft, asker: Asker, now = Date.now(), hooks: CreateHooks = {},
 ): { ok: AskResult } | { refused: Refusal } {
+	assertAskResearch(draft);
 	const repo = draft.global ? null : asker.repo;
 	let near: Scored[] = [];
 	const out = createItem<Refusal>(home, existing => {
@@ -39,6 +40,7 @@ export function ask(
 					status: "open", related: found.candidates.map(c => c.item.id), history: [],
 					createdAt: at, updatedAt: at,
 				};
+				setResearch(item, draft);
 				if (draft.recommended) item.recommended = draft.recommended;
 				if (draft.project) item.project = draft.project;
 				addHistory(item, { kind: "agent", sessionId: asker.sessionId, lane: asker.lane }, "created", at,
@@ -200,7 +202,7 @@ export function commentItem(home: string, id: string, actor: Actor, text: string
 	}, new Date(now));
 }
 
-export interface Patch { title?: string; body?: string; options?: unknown; urgency?: string; blocking?: string; links?: string[]; tags?: string[]; cc?: string[] }
+export interface Patch { evidence?: string; review?: string; title?: string; body?: string; options?: unknown; urgency?: string; blocking?: string; links?: string[]; tags?: string[]; cc?: string[] }
 
 export function addLinks(home: string, id: string, actor: Actor, links: string[], now = Date.now()): Item {
 	return mutateItem(home, idOf(id), item => {
@@ -208,6 +210,17 @@ export function addLinks(home: string, id: string, actor: Actor, links: string[]
 		item.links.push(...added);
 		if (added.length) addHistory(item, actor, "linked", iso(now), added.join(", "), { links: added });
 	}, new Date(now));
+}
+
+function setResearch(item: Item, patch: Pick<Patch, "evidence" | "review">, changed: string[] = []): void {
+	if (patch.evidence !== undefined) {
+		item.evidence = researchText(patch.evidence, "evidence");
+		changed.push("evidence");
+	}
+	if (patch.review !== undefined) {
+		item.review = researchText(patch.review, "review");
+		changed.push("review");
+	}
 }
 
 export function updateItem(home: string, id: string, actor: Actor, patch: Patch, now = Date.now()): Item {
@@ -236,6 +249,7 @@ function updateOpen(home: string, id: string, actor: Actor, patch: Patch, now: n
 		};
 		if (patch.title !== undefined) set("title", patch.title.trim());
 		if (patch.body !== undefined) set("body", patch.body.trim());
+		setResearch(item, patch, changed);
 		if (patch.options !== undefined) set("options", validateOptions(patch.options));
 		if (patch.urgency !== undefined) set("urgency", patch.urgency);
 		if (patch.blocking !== undefined) set("blocking", patch.blocking.trim());
