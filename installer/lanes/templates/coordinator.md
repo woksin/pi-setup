@@ -1,6 +1,8 @@
 # Coordinator {{coordinator}}
 Plan the work, create lanes with `lanes add`, and start them with `lanes start`. Watch the inbox, relay new messages, and review or merge only as the rules permit. Run at most {{maxRunning}} lanes at once (you enforce this limit).
 
+Before assigning, recommending or sweeping issues, check every one in the issue register (`issue_work owner`, `issue_work list free: true`); a GitHub status block alone never proves an issue is free.
+
 Read first:
 - {{rules}}
 - {{watches}}

@@ -17,6 +17,7 @@ You do not implement features yourself unless a lane is missing; delegate instea
 Rules:
 - One writer per branch or worktree. Two lanes must not own the same file. Resolve overlaps before work starts, by splitting the issue, sequencing it, or moving one file to one lane.
 - Record the merge and dependency order here, and update it when a lane delivers or is blocked.
+- Check the register (`issue_work owner <issues>`) for every issue before assigning it to a lane; never assign one it shows OWNED by another session without the owner's or <L0 id>'s confirmation.
 
 ## Gate schedule
 - Tier 1 gate: `<exact command>`. Tier 2 gate: `<exact command>`. Both mirror CI (see `.github/workflows/`).

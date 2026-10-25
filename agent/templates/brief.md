@@ -9,6 +9,7 @@ Copy to `<repo>/.ai-work/<task>/brief.md`, fill every section, and pass the agen
 ## Where
 - Worktree / branch: <absolute path> (`<branch>`). Work only there.
 - First step: `git fetch origin && git merge origin/main` (or rebase if the repo does that); stop and report on conflicts you cannot resolve mechanically.
+- Issue register: <issue → FREE/OWNED per `issue_work owner`, checked by the parent>; claimed by the delegating session <session id prefix>. Work under that claim is authorized; stop and report only if the register shows the issue owned by a different session.
 - Files / areas you own: <paths>. Do not edit anything else.
 - Pass-through allowed: <dir, or none>. Only thread a parameter/collaborator through with behaviour unchanged; list these files in the report. A logic change there is a stop condition.
 - Start here (file:line ranges, so you do not re-orient): <path:Lstart-Lend — why>. Do not explore the repository beyond these and what they reference.
