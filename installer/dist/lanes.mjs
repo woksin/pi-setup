@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 0dc41d1a7e7d89462e8f8cce6458929c92c5640d5513a9557398ef70d2a76c09
+// pi-setup-source-sha256: 5db2f64e832f06e23d9a704c9ec40ed6b50b232323340b57d87d697317519dd9
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -565,15 +565,17 @@ function workCommand(command) {
   if (/^python(?:\d+(?:\.\d+)?)?$/.test(executable)) return /\s-m\s+(pytest|unittest)\b/.test(command);
   return executable === "docker" && /\s(?:build|buildx\s+build)\b/.test(command);
 }
-function helperKind(command) {
-  if (/\binbox-watch\b/.test(command)) return "inbox-watch";
-  if (/\bmcp\b|mcp-server|server-mcp/.test(command)) return "mcp";
-  if (/\bjob_watch\b|\bwatch\b/.test(command)) return "watch";
-  if (/^(?:\S*\/)?-?(?:bash|zsh|sh|fish)(?:\s|$)/.test(command)) return "shell";
-  return "other";
+function commandKind(command) {
+  const check = command.replace(/^# pi-jobs [^:]*:\s*/, "");
+  if (workCommand(check)) return "work";
+  return helperKind(check);
 }
-function helperCommand(command) {
-  return helperKind(command) !== "other";
+function helperKind(command) {
+  if (/(?:^|[\s/])inbox-watch(?:\s|$)/.test(command)) return "inbox-watch";
+  if (/(?:^|[\s/])(?:chrome-devtools-mcp|cs-mcp|mcp-server[\w.-]*|mcp-remote|@modelcontextprotocol(?:\/[\w.-]+)?)(?:@[\w.-]+)?(?:\s|$)/.test(command)) return "mcp";
+  if (/(?:^|[\s/])job_watch(?:\s|$)/.test(command) || /(?:^|[\s/])gh\s+run\s+watch\b/.test(command)) return "watch";
+  if (/^(?:\S*\/)?-?(?:bash|zsh|sh|fish)(?:\s+-[il]+)*$/.test(command.trim())) return "shell";
+  return "other";
 }
 function cpuTime(value) {
   const [days, clock] = value.includes("-") ? value.split("-") : ["0", value];
@@ -618,8 +620,9 @@ async function ownedPhase(cwd, ctx) {
 }
 async function childWork(pid, cwd, ctx) {
   const children = descendants(pid, await processInventory(ctx));
-  const helpers = children.filter((row) => !workCommand(row.command)).map((row) => helperKind(row.command));
-  if (children.some((row) => workCommand(row.command)) || await ownedPhase(cwd, ctx)) return { busy: true, helpers };
+  const kinds = children.map((row) => commandKind(row.command));
+  const helpers = kinds.filter((kind) => kind !== "work");
+  if (kinds.includes("work") || await ownedPhase(cwd, ctx)) return { busy: true, helpers };
   if (!children.length) return { busy: false, helpers };
   await (ctx.sleep ? ctx.sleep(1e3) : new Promise((done) => setTimeout(done, 1e3)));
   const second = descendants(pid, await processInventory(ctx));
@@ -668,8 +671,9 @@ async function openJobs(s, ctx) {
   const jobs = files.stdout.split("\n").filter((l) => l.startsWith("n" + join6(ctx.piAgentDir, "jobs") + "/"));
   for (const path of jobs) {
     const header = readFileSync4(path.slice(1), "utf8").split("\n", 1)[0];
-    if (helperCommand(header)) (s.helpers ??= []).push(helperKind(header));
-    else s.keeps.push("job/watch running (log open)");
+    const kind = commandKind(header);
+    if (kind === "work" || kind === "other") s.keeps.push("job/watch running (log open)");
+    else (s.helpers ??= []).push(kind);
   }
 }
 async function foreground(s, ctx) {
@@ -856,8 +860,9 @@ function currentJob(job, s, ctx) {
 }
 function runningJob(job, s, ctx) {
   if (job.status !== "running") return;
-  if (helperCommand(String(job.command || ""))) {
-    (s.helpers ??= []).push(helperKind(job.command));
+  const kind = commandKind(String(job.command || ""));
+  if (kind !== "work" && kind !== "other") {
+    (s.helpers ??= []).push(kind);
     return;
   }
   if (!job.command || !Number.isFinite(job.startedAt)) {
@@ -2865,6 +2870,15 @@ import { join as join31 } from "node:path";
 // src/lanes/legacy-prune.ts
 import { readdirSync as readdirSync9 } from "node:fs";
 import { join as join30 } from "node:path";
+
+// src/lanes/backend-files.ts
+function backendOwnedName(name) {
+  if (parseMessageName(name)) return true;
+  if (name.endsWith("-inbox.marker")) return true;
+  return /^(?:status|archive)(?:\/|$)/.test(name);
+}
+
+// src/lanes/legacy-prune.ts
 function settings({ opts, config, root, ctx }) {
   const hours = Number(opts["legacy-age"] ?? 24);
   if (!Number.isFinite(hours) || hours < 24) throw new UsageError("--legacy-age must be at least 24 hours");
@@ -2876,6 +2890,11 @@ function settings({ opts, config, root, ctx }) {
     cutoff: ctx.now().getTime() - hours * 36e5,
     dryRun: !opts.apply
   };
+}
+function legacyMessage(name) {
+  if (!name.endsWith(".md")) return false;
+  if (name.startsWith(".")) return false;
+  return !backendOwnedName(name);
 }
 var LegacyArchive = class {
   options;
@@ -2891,7 +2910,7 @@ var LegacyArchive = class {
     return info;
   }
   candidate(name) {
-    if (name.startsWith(".") || parseMessageName(name)) return [];
+    if (!legacyMessage(name)) return [];
     const path = join30(this.options.dir, name);
     const info = this.storage.stat(path);
     return info?.isFile() && info.mtimeMs < this.options.cutoff ? [{ name, path, info }] : [];
@@ -3645,6 +3664,19 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
 Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
+Reap work: an owned pi-phase run, a build/test descendant (dotnet/msbuild/vstest,
+  node/npm/yarn/pnpm test/build, vitest/jest, python -m pytest/unittest, docker build,
+  cargo or make), or >=50 ms descendant CPU over two samples ~1 second apart.
+  CPU deltas require the same process in both samples; idle helpers are context only.
+  Work classification precedes helper classification, including job logs/snapshots.
+Close persists reason, author and ISO time in lanes.json even after worktree removal;
+  an existing worktree still requires clone validation. Closed lanes are excluded
+  from status/reap; status --all lists them separately with reason, author and time.
+Legacy prune considers only regular, non-dot *.md files not owned by the bus backend.
+  --legacy previews archiving files older than 24 hours; --legacy-age HOURS (>=24)
+  changes the threshold. --apply archives (never deletes) into the configured prune
+  archive, or archive/legacy/ without retention settings. Recent files, bus messages,
+  backend state, directories and symlinks are untouched; normal prune is unchanged.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
 var OPTIONS = {
   adopt: ["messages", "coordinator", "exclude-tty", "inventory", "role", "orchestrates", "write"],

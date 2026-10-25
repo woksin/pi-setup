@@ -3,7 +3,7 @@ import { join, normalize } from "node:path";
 import type { LanesCtx } from "../ctx.ts";
 import type { Signals } from "./signals.ts";
 import { expectedForeground } from "./foreground.ts";
-import { childWork, helperCommand, helperKind } from "./work.ts";
+import { childWork, commandKind } from "./work.ts";
 export function absolute(ctx: LanesCtx, path: string): string { return normalize(ctx.realpath(path)); }
 export function requireProbe(result: { code: number; timedOut: boolean }, message: string): void { if (result.code !== 0 || result.timedOut) throw new Error(message); }
 export async function processCwd(ctx: LanesCtx, pid: number): Promise<string> {
@@ -32,8 +32,9 @@ async function openJobs(s: Signals, ctx: LanesCtx): Promise<void> {
   const jobs = files.stdout.split("\n").filter(l => l.startsWith("n" + join(ctx.piAgentDir, "jobs") + "/"));
   for (const path of jobs) {
     const header = readFileSync(path.slice(1), "utf8").split("\n", 1)[0];
-    if (helperCommand(header)) (s.helpers ??= []).push(helperKind(header));
-    else s.keeps.push("job/watch running (log open)");
+    const kind = commandKind(header);
+    if (kind === "work" || kind === "other") s.keeps.push("job/watch running (log open)");
+    else (s.helpers ??= []).push(kind);
   }
 }
 async function foreground(s: Signals, ctx: LanesCtx): Promise<void> {

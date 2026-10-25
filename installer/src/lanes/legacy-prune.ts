@@ -2,7 +2,7 @@ import { readdirSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { archiveDir, expand, UsageError, type Config } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
-import { parseMessageName } from "./names.ts";
+import { backendOwnedName } from "./backend-files.ts";
 
 interface LegacyFile { name: string; path: string; info: Stats }
 interface Storage {
@@ -21,6 +21,11 @@ function settings({ opts, config, root, ctx }: Request): Settings {
     destination: config.messages.retention ? base : join(base, "legacy"),
     cutoff: ctx.now().getTime() - hours * 3600000, dryRun: !opts.apply };
 }
+function legacyMessage(name: string): boolean {
+  if (!name.endsWith(".md")) return false;
+  if (name.startsWith(".")) return false;
+  return !backendOwnedName(name);
+}
 class LegacyArchive {
   private options: Settings;
   private storage: Storage;
@@ -32,7 +37,7 @@ class LegacyArchive {
     return info;
   }
   private candidate(name: string): LegacyFile[] {
-    if (name.startsWith(".") || parseMessageName(name)) return [];
+    if (!legacyMessage(name)) return [];
     const path = join(this.options.dir, name); const info = this.storage.stat(path);
     return info?.isFile() && info.mtimeMs < this.options.cutoff ? [{ name, path, info }] : [];
   }

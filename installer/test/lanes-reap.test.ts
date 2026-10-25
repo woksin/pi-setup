@@ -6,7 +6,7 @@ import { defaults, saveConfig } from "../src/lanes/config.ts";
 import { main } from "../src/lanes/main.ts";
 import { treeDigest } from "../src/lanes/reap/tree.ts";
 import { processEvidence } from "../src/lanes/reap/process.ts";
-import { childWork, processInventory, workCommand } from "../src/lanes/reap/work.ts";
+import { childWork, commandKind, processInventory, workCommand } from "../src/lanes/reap/work.ts";
 import { collect, type Signals } from "../src/lanes/reap/signals.ts";
 import { expectedSnapshot, readContext, validateContext } from "../src/lanes/reap/context-format.ts";
 import { verdict } from "../src/lanes/reap/verdict.ts";
@@ -446,8 +446,32 @@ test("idle helpers and sleeping job watchers are context, not busy work", async 
   assert.equal(row.verdict, "handoff"); assert.ok(!row.reason.includes("busy"));
   assert.match(row.notes.join(" "), /helpers .*inbox-watch=1.*mcp=2.*shell=1.*watch=2/);
 });
+const workSources: [string, (f: ReturnType<typeof fixture>, command: string) => void][] = [
+  ["descendant", (f, command) => f.setBusy(`102 101 ${command}`)],
+  ["open log", (f, command) => {
+    const log = f.put(join(f.ctx.piAgentDir, "jobs/work.log"), `# pi-jobs start: ${command}`); f.setFiles(`n${log}\n`);
+  }],
+  ["session snapshot", (f, command) => {
+    const snapshot = { id: "work", command, status: "running", cwd: f.cwd, startedAt: f.now.getTime() - 120000, timeoutSeconds: 3600 };
+    f.put(f.sessionFile, JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "job_start", details: snapshot } }), 120);
+  }],
+];
+for (const command of ["pnpm --filter mcp build", "npx vitest --watch=false", "dotnet watch test"]) {
+  for (const [source, setup] of workSources) test(`work before helpers: ${source}: ${command}`, async () => {
+    const f = fixture(); setup(f, command);
+    const signals = await evidence(f);
+    assert.equal(commandKind(command), "work"); assert.equal(verdict(signals).verdict, "keep");
+    assert.ok(signals.keeps.some(reason => /busy child|job\/watch running/.test(reason)));
+    assert.deepEqual(signals.helpers, []);
+  });
+}
+test("specific helper launchers and only idle shells are recognized", () => {
+  for (const command of ["node mcp-server", "npx @modelcontextprotocol/server-filesystem", "npx mcp-remote https://example.test", "cs-mcp"]) assert.equal(commandKind(command), "mcp", command);
+  assert.equal(commandKind("inbox-watch L1"), "inbox-watch"); assert.equal(commandKind("job_watch"), "watch");
+  for (const command of ["node worker.js --label mcp", "bash -c 'pnpm build'", "sh ./build.sh", "node watch.js"]) assert.equal(commandKind(command), "other", command);
+});
 test("build work in a grandchild keeps the lane busy", async () => {
-  const f = fixture(); f.setBusy("102 101 bash\n103 102 dotnet build");
+  const f = fixture(); f.setBusy("102 101 bash -c 'dotnet build'\n103 102 dotnet build");
   await f.invoke("reap", "--json"); assert.equal(f.rows()[0].verdict, "keep"); assert.match(f.rows()[0].reason, /busy child/);
 });
 test("detached pi-phase status matches only the owning worktree", async () => {

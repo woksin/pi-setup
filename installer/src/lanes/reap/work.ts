@@ -14,14 +14,18 @@ export function workCommand(command: string): boolean {
   if (/^python(?:\d+(?:\.\d+)?)?$/.test(executable)) return /\s-m\s+(pytest|unittest)\b/.test(command);
   return executable === "docker" && /\s(?:build|buildx\s+build)\b/.test(command);
 }
-export function helperKind(command: string): string {
-  if (/\binbox-watch\b/.test(command)) return "inbox-watch";
-  if (/\bmcp\b|mcp-server|server-mcp/.test(command)) return "mcp";
-  if (/\bjob_watch\b|\bwatch\b/.test(command)) return "watch";
-  if (/^(?:\S*\/)?-?(?:bash|zsh|sh|fish)(?:\s|$)/.test(command)) return "shell";
+export function commandKind(command: string): string {
+  const check = command.replace(/^# pi-jobs [^:]*:\s*/, "");
+  if (workCommand(check)) return "work";
+  return helperKind(check);
+}
+function helperKind(command: string): string {
+  if (/(?:^|[\s/])inbox-watch(?:\s|$)/.test(command)) return "inbox-watch";
+  if (/(?:^|[\s/])(?:chrome-devtools-mcp|cs-mcp|mcp-server[\w.-]*|mcp-remote|@modelcontextprotocol(?:\/[\w.-]+)?)(?:@[\w.-]+)?(?:\s|$)/.test(command)) return "mcp";
+  if (/(?:^|[\s/])job_watch(?:\s|$)/.test(command) || /(?:^|[\s/])gh\s+run\s+watch\b/.test(command)) return "watch";
+  if (/^(?:\S*\/)?-?(?:bash|zsh|sh|fish)(?:\s+-[il]+)*$/.test(command.trim())) return "shell";
   return "other";
 }
-export function helperCommand(command: string): boolean { return helperKind(command) !== "other"; }
 function cpuTime(value: string): number {
   const [days, clock] = value.includes("-") ? value.split("-") : ["0", value];
   const seconds = clock.split(":").reduce((total, part) => total * 60 + Number(part), 0);
@@ -63,8 +67,9 @@ async function ownedPhase(cwd: string, ctx: LanesCtx): Promise<boolean> {
 }
 export async function childWork(pid: number, cwd: string, ctx: LanesCtx): Promise<{ busy: boolean; helpers: string[] }> {
   const children = descendants(pid, await processInventory(ctx));
-  const helpers = children.filter(row => !workCommand(row.command)).map(row => helperKind(row.command));
-  if (children.some(row => workCommand(row.command)) || await ownedPhase(cwd, ctx)) return { busy: true, helpers };
+  const kinds = children.map(row => commandKind(row.command));
+  const helpers = kinds.filter(kind => kind !== "work");
+  if (kinds.includes("work") || await ownedPhase(cwd, ctx)) return { busy: true, helpers };
   if (!children.length) return { busy: false, helpers };
   await (ctx.sleep ? ctx.sleep(1000) : new Promise(done => setTimeout(done, 1000)));
   const second = descendants(pid, await processInventory(ctx));

@@ -1,7 +1,7 @@
 import type { LanesCtx } from "../ctx.ts";
 import type { Signals } from "./signals.ts";
 import { scanSession } from "./session-scan.ts";
-import { helperCommand, helperKind } from "./work.ts";
+import { commandKind } from "./work.ts";
 import { foldSubagentWork, type SubagentWork } from "./subagent-completions.ts";
 
 type Snapshot = Record<string, any>;
@@ -52,7 +52,8 @@ function currentJob(job: Snapshot, s: Signals, ctx: LanesCtx): boolean {
 }
 function runningJob(job: Snapshot, s: Signals, ctx: LanesCtx): void {
   if (job.status !== "running") return;
-  if (helperCommand(String(job.command || ""))) { (s.helpers ??= []).push(helperKind(job.command)); return; }
+  const kind = commandKind(String(job.command || ""));
+  if (kind !== "work" && kind !== "other") { (s.helpers ??= []).push(kind); return; }
   if (!job.command || !Number.isFinite(job.startedAt)) {
     s.asks.push(`job ${job.id} start evidence missing`); return;
   }

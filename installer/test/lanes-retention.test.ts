@@ -7,6 +7,7 @@ import { tempDir, REPO } from "./helpers/home.ts";
 import { defaults, archiveDir, saveConfig, UsageError, validate } from "../src/lanes/config.ts";
 import type { LanesCtx } from "../src/lanes/ctx.ts";
 import { FileBackend } from "../src/lanes/backend.ts";
+import { backendOwnedName } from "../src/lanes/backend-files.ts";
 import { main } from "../src/lanes/main.ts";
 import { prune } from "../src/lanes/retention.ts";
 
@@ -102,32 +103,47 @@ test("dry-run and JSON report counts without changing files, directories or mtim
   for (const args of [["messages"], ["messages", "other"], ["messages", "prune", "--json=false"], ["status", "--json"]]) assert.equal(await main(args, f.ctx), 2);
 });
 
-test("legacy prune defaults to dry-run and apply archives only old non-bus regular files", async () => {
+test("legacy prune defaults to dry-run and apply archives only old non-bus regular markdown", async () => {
   const f = fixture(); f.r.mode = "delete";
-  const old = f.put("old-note.txt", 2); const bus = f.put(); const recent = f.put("recent.txt", 0.5);
-  const boundary = f.put("boundary.txt", 1); const dotfile = f.put(".secret", 2);
-  mkdirSync(join(f.dir, "directory")); symlinkSync(old, join(f.dir, "link.txt")); saveConfig(f.root, f.c);
+  const old = f.put("old-note.md", 2); const bus = f.put(); const recent = f.put("recent.md", 0.5);
+  const boundary = f.put("boundary.md", 1); const dotfile = f.put(".secret.md", 2);
+  mkdirSync(join(f.dir, "directory")); symlinkSync(old, join(f.dir, "link.md")); saveConfig(f.root, f.c);
   const before = statSync(f.dir).mtimeMs;
   assert.equal(await main(["messages", "prune", "--legacy"], f.ctx), 0);
-  assert.ok(f.out.includes("would archive: old-note.txt")); assert.equal(statSync(f.dir).mtimeMs, before);
+  assert.ok(f.out.includes("would archive: old-note.md")); assert.equal(statSync(f.dir).mtimeMs, before);
   assert.ok(existsSync(old)); assert.ok(!existsSync(join(f.dir, "archive")));
   assert.equal(await main(["messages", "prune", "--legacy", "--apply", "--json"], f.ctx), 0);
-  assert.deepEqual(JSON.parse(f.out.at(-1)!), { dryRun: false, archived: ["old-note.txt"], skippedCollision: [] });
-  assert.ok(!existsSync(old)); assert.equal(readFileSync(join(f.dir, "archive/old-note.txt"), "utf8"), "original");
+  assert.deepEqual(JSON.parse(f.out.at(-1)!), { dryRun: false, archived: ["old-note.md"], skippedCollision: [] });
+  assert.ok(!existsSync(old)); assert.equal(readFileSync(join(f.dir, "archive/old-note.md"), "utf8"), "original");
   for (const path of [bus, recent, boundary, dotfile, join(f.dir, "directory")]) assert.ok(existsSync(path));
   assert.equal(await main(["messages", "prune", "--legacy", "--apply", "--json"], f.ctx), 0);
   assert.deepEqual(JSON.parse(f.out.at(-1)!).archived, []);
 });
+test("legacy prune never moves backend state or non-markdown files", async () => {
+  const f = fixture(); const old = f.put("hand-written.md", 2);
+  const stateNames = ["L1-inbox.marker", "status/L1.status", "status/.L1-test.tmp", "archive/already-archived.md"];
+  const protectedFiles = stateNames.map(name => f.put(name.split("/").at(-1)!, 15, join(f.dir, ...name.split("/").slice(0, -1))));
+  protectedFiles.push(f.put("unrelated.txt", 15));
+  for (const name of stateNames) assert.equal(backendOwnedName(name), true, name);
+  assert.equal(backendOwnedName("L0-to-L1-old-1200.md"), true);
+  assert.equal(backendOwnedName("hand-written.md"), false);
+  const before = protectedFiles.map(path => ({ text: readFileSync(path, "utf8"), mtime: statSync(path).mtimeMs }));
+  saveConfig(f.root, f.c);
+  assert.equal(await main(["messages", "prune", "--legacy", "--apply", "--json"], f.ctx), 0);
+  assert.deepEqual(JSON.parse(f.out.at(-1)!).archived, ["hand-written.md"]);
+  assert.ok(!existsSync(old)); assert.ok(existsSync(join(f.dir, "archive/hand-written.md")));
+  assert.deepEqual(protectedFiles.map(path => ({ text: readFileSync(path, "utf8"), mtime: statSync(path).mtimeMs })), before);
+});
 test("legacy age, collision handling and no-retention fallback preserve originals", async () => {
-  const f = fixture(); const source = f.put("old.txt", 3); f.put("younger.txt", 1.5);
-  const archived = f.put("old.txt", 5, join(f.dir, "archive")); saveConfig(f.root, f.c);
+  const f = fixture(); const source = f.put("old.md", 3); f.put("younger.md", 1.5);
+  const archived = f.put("old.md", 5, join(f.dir, "archive")); saveConfig(f.root, f.c);
   assert.equal(await main(["messages", "prune", "--legacy", "--legacy-age", "48", "--apply", "--json"], f.ctx), 0);
-  assert.deepEqual(JSON.parse(f.out.at(-1)!), { dryRun: false, archived: [], skippedCollision: ["old.txt"] });
+  assert.deepEqual(JSON.parse(f.out.at(-1)!), { dryRun: false, archived: [], skippedCollision: ["old.md"] });
   assert.ok(existsSync(source)); assert.equal(readFileSync(archived, "utf8"), "original");
   for (const age of ["0", "23", "NaN"]) assert.equal(await main(["messages", "prune", "--legacy", "--legacy-age", age], f.ctx), 2);
   delete f.c.messages.retention; saveConfig(f.root, f.c);
   assert.equal(await main(["messages", "prune", "--legacy", "--apply"], f.ctx), 0);
-  assert.ok(existsSync(join(f.dir, "archive/legacy/old.txt")));
+  assert.ok(existsSync(join(f.dir, "archive/legacy/old.md")));
 });
 test("archive expiry runs in keep mode, respects boundary and dry-run, and ignores non-messages", () => {
   const f = fixture(); f.r.mode = "keep"; f.r.archiveMaxAgeDays = 30;

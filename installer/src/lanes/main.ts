@@ -37,6 +37,19 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
 Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
+Reap work: an owned pi-phase run, a build/test descendant (dotnet/msbuild/vstest,
+  node/npm/yarn/pnpm test/build, vitest/jest, python -m pytest/unittest, docker build,
+  cargo or make), or >=50 ms descendant CPU over two samples ~1 second apart.
+  CPU deltas require the same process in both samples; idle helpers are context only.
+  Work classification precedes helper classification, including job logs/snapshots.
+Close persists reason, author and ISO time in lanes.json even after worktree removal;
+  an existing worktree still requires clone validation. Closed lanes are excluded
+  from status/reap; status --all lists them separately with reason, author and time.
+Legacy prune considers only regular, non-dot *.md files not owned by the bus backend.
+  --legacy previews archiving files older than 24 hours; --legacy-age HOURS (>=24)
+  changes the threshold. --apply archives (never deletes) into the configured prune
+  archive, or archive/legacy/ without retention settings. Recent files, bus messages,
+  backend state, directories and symlinks are untouched; normal prune is unchanged.
 --preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
 const OPTIONS: Record<string, string[]> = {
   adopt: ["messages", "coordinator", "exclude-tty", "inventory", "role", "orchestrates", "write"],
