@@ -4,6 +4,14 @@ Lessons from running many agent sessions ("lanes") in parallel on one machine. E
 
 Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.md` rule agents follow), **practice** (orchestrator habit, not yet automated).
 
+## 2026-10-25
+
+### Sessions stall after a rate limit
+- **Symptom:** five sessions stayed idle for about 80 minutes after provider recovery until someone typed into them.
+- **Cause:** restore epochs were consumed only at turn/agent boundaries, and clearing a provider mark did not start a new turn.
+- **Rule:** re-prompt an idle main session once when its last turn failed on a rate limit and that provider's limit clears; never re-prompt busy sessions or sessions the user has since prompted.
+- **Enforced:** tool (`provider-fallback`, `resumeAfterLimit: true` by default): a debounced directory watch plus a slow expiry timer, active only while stalled, restores under the existing policy and sends one user message inside pi. Subagents are excluded.
+
 ## 2026-10-24
 
 ### Waiting on events that local tools remove

@@ -4,7 +4,11 @@
 
 After provider recovery, `/provider-restore [provider]` clears one provider's mark (or all marks when omitted) and immediately restores this session's remembered original, even with expiry restoration disabled. Add `--all` to broadcast to other running sessions. The stdlib-only `provider-restore [provider] [--all-sessions]` CLI always clears and broadcasts, without restarting sessions. It honors `PI_PROVIDER_FALLBACK_STATE` and `PI_CODING_AGENT_DIR`.
 
-Broadcast epochs live in `.provider-restore.json` beside the limit state. Other sessions consume them at the next turn/agent boundary, not in a polling loop. Only sessions still on an extension-selected fallback with a remembered original restore; manual choices and sessions started on the fallback remain unchanged. A new real provider limit wins over an older restore request. Recovery does not disable future fallback.
+Broadcast epochs live in `.provider-restore.json` beside the limit state. Other sessions consume them at the next turn/agent boundary. A main session whose last turn ended in a provider rate-limit error also watches the state directory while stalled: a debounced `fs.watch` notices restores/removal, with a 60-second fallback timer for expiry or missed events. Both are stopped when the stall is invalidated or the session shuts down. No watcher runs for normal turns.
+
+`resumeAfterLimit` defaults to `true`. Once the failed provider's mark clears and `ctx.isIdle()` is true, recovery restores the original model under the usual restore policy, then sends one user message inside pi: "Provider limits have lifted (<provider>). Continue where you stopped." Set it to `false` to disable automatic re-prompting. Busy sessions are never re-prompted; a normal subsequent turn or fresh user input cancels the stalled episode. A fresh rate-limit failure starts a new episode. Unavailable errors do not trigger re-prompting.
+
+Only sessions still on an extension-selected fallback with a remembered original restore; manual choices and sessions started on the fallback remain unchanged. A new real provider limit wins over an older restore request. Recovery does not disable future fallback. Automatic resume uses the existing context-budget role detection (current-process session status, otherwise UI = main and headless = subagent); subagents are excluded. Stalled markers are in memory only, so reloading does not re-prompt an old failure.
 
 ## Context allowance
 

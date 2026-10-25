@@ -30,8 +30,8 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { ORIGINAL_ENTRY, publishFallbackState, restoreOriginal, type OriginalEntryData } from "../lib/provider-fallback-state.ts";
 
 interface FallbackConfig {
@@ -45,6 +45,8 @@ interface FallbackConfig {
 	fallbackContextRatio?: number;
 	/** Switch back to the original model once its provider's limit mark has expired. */
 	restoreWhenExpired?: boolean;
+	/** Re-prompt idle main sessions whose last turn failed on a rate limit once it clears (default true). */
+	resumeAfterLimit?: boolean;
 	/** provider id -> regex sources (case-insensitive) that identify a usage/rate-limit error. */
 	limitPatterns?: Record<string, string[]>;
 	/** Bidirectional equivalences, each as ["provider/model", "provider/model"]. */
@@ -67,6 +69,7 @@ interface LimitEntry {
 	reason?: string;
 }
 type LimitState = Record<string, LimitEntry>;
+type StalledLimit = { provider: string; since: number; ctx: ExtensionContext };
 
 const CUSTOM_TYPE = "provider-fallback";
 const MIN_LIMIT_MS = 60_000;
@@ -323,6 +326,49 @@ function refOf(model: { provider: string; id: string } | undefined): string | un
 	return model ? `${model.provider}/${model.id}` : undefined;
 }
 
+/** Directory watches survive atomic state-file replacement; the slow timer also notices expiry/missed events. */
+class LimitRecoveryWatch {
+	private watcher?: FSWatcher;
+	private debounce?: ReturnType<typeof setTimeout>;
+	private timer?: ReturnType<typeof setInterval>;
+
+	private readonly check: () => Promise<void>;
+
+	constructor(check: () => Promise<void>) { this.check = check; }
+
+	start(): void {
+		if (this.timer) return;
+		this.timer = setInterval(() => this.schedule(), 60_000);
+		this.timer.unref();
+		try {
+			this.watcher = watch(dirname(statePath()), (_event, filename) => {
+				if (!filename || [basename(statePath()), basename(restorePath())].includes(String(filename))) this.schedule();
+			});
+			this.watcher.on("error", () => { this.watcher?.close(); this.watcher = undefined; });
+			this.watcher.unref();
+		} catch {
+			// A missing/unwatchable directory is covered by the slow timer.
+		}
+	}
+
+	schedule(): void {
+		clearTimeout(this.debounce);
+		this.debounce = setTimeout(() => {
+			void this.check().catch(error => console.error("provider-fallback: limit recovery failed:", error));
+		}, 100);
+		this.debounce.unref();
+	}
+
+	stop(): void {
+		this.watcher?.close();
+		this.watcher = undefined;
+		clearTimeout(this.debounce);
+		clearInterval(this.timer);
+		this.debounce = undefined;
+		this.timer = undefined;
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	let seenRestore = readJson<Record<string, number>>(restorePath()) ?? {};
 	let fallbacksThisPrompt = 0;
@@ -376,6 +422,50 @@ export default function (pi: ExtensionAPI) {
 		);
 	}
 	let lastLimitHeaders: { at: number; provider?: string; headers: Record<string, string> } | undefined;
+	let stalledLimit: StalledLimit | undefined;
+	let checkingRecovery = false;
+	const recoveryWatch = new LimitRecoveryWatch(resumeStalled);
+
+	function clearStall(): void {
+		stalledLimit = undefined;
+		recoveryWatch.stop();
+	}
+
+	function recordStall(episode: StalledLimit, config: FallbackConfig, kind: ReturnType<typeof classifyError>): void {
+		if (kind !== "limit") return;
+		if (config.resumeAfterLimit === false || budgetRole(episode.ctx) !== "main") return;
+		stalledLimit = episode;
+		recoveryWatch.start();
+	}
+
+	function resumeEnabled(): boolean {
+		const config = loadConfig();
+		return !!config && config.resumeAfterLimit !== false;
+	}
+
+	function canResume(stalled: StalledLimit): boolean {
+		// Identity includes the episode's start time; fresh live marks always beat restore epochs.
+		return stalledLimit === stalled && stalled.ctx.isIdle() && !isLimited(stalled.provider);
+	}
+
+	async function resumeStalled(): Promise<void> {
+		const stalled = stalledLimit;
+		if (!stalled || checkingRecovery) return;
+		if (!resumeEnabled()) { clearStall(); return; }
+		if (!canResume(stalled)) return;
+		checkingRecovery = true;
+		try {
+			await checkRestore(stalled.ctx);
+			if (!canResume(stalled)) return;
+			await preempt(stalled.ctx);
+			// Input/shutdown may have invalidated this episode while model restoration was awaiting pi.
+			if (!canResume(stalled)) return;
+			clearStall(); // Consume before sending: callbacks and subsequent file events cannot resume it twice.
+			pi.sendUserMessage(`Provider limits have lifted (${stalled.provider}). Continue where you stopped.`);
+		} finally {
+			checkingRecovery = false;
+		}
+	}
 
 	/** Switch to `ref`, keeping the current thinking level (pi clamps it to the target). */
 	async function switchTo(ctx: ExtensionContext, ref: string, pending?: { ref: string; reason: string }): Promise<string | undefined> {
@@ -503,6 +593,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("turn_start", async (_event, ctx) => { await checkRestore(ctx); });
 
 	pi.on("session_start", async (_event, ctx) => {
+		clearStall();
 		fallbacksThisPrompt = 0;
 		pendingContinue = false;
 		isMain = ctx.hasUI;
@@ -531,11 +622,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		clearStall();
 		if (isMain) publishFallbackState(undefined);
 		isMain = false;
 	});
 
+	pi.on("input", async () => { clearStall(); });
+
 	pi.on("before_agent_start", async (_event, ctx) => {
+		clearStall();
 		fallbacksThisPrompt = 0;
 		pendingContinue = false;
 		await checkRestore(ctx);
@@ -555,7 +650,12 @@ export default function (pi: ExtensionAPI) {
 		pendingContinue = false;
 	});
 
+	pi.on("agent_settled", async () => {
+		if (stalledLimit) recoveryWatch.schedule();
+	});
+
 	pi.on("turn_end", async (event, ctx) => {
+		clearStall();
 		const message = event.message;
 		if (message.role !== "assistant" || message.stopReason !== "error" || !message.errorMessage) return;
 		const config = loadConfig();
@@ -577,6 +677,7 @@ export default function (pi: ExtensionAPI) {
 		);
 		const from = `${message.provider}/${message.model}`;
 		markLimited(message.provider, { until, since: now, model: from, reason: message.errorMessage.slice(0, 200) });
+		recordStall({ ctx, provider: message.provider, since: now }, config, kind);
 
 		const note = (text: string, type: "info" | "warning" | "error") => {
 			notify(ctx, text, type);

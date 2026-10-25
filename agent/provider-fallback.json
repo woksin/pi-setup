@@ -5,6 +5,7 @@
   "maxContextTokensForFallback": "auto",
   "fallbackContextRatio": 0.5,
   "restoreWhenExpired": true,
+  "resumeAfterLimit": true,
   "limitPatterns": {
     "anthropic": [
       "rate_limit_error",
