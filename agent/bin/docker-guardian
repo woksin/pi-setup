@@ -8,7 +8,8 @@
 #  - Hygiene every 15 min while healthy: remove exited/dead containers finished >20 min ago,
 #    prune unused networks older than 30 min, unused anonymous volumes, build cache above 8 GB.
 #    Images: superseded semver tags (keep newest 2), unused local build tags / dangling >24h.
-#    Local patterns: docker-guardian/local-tags.txt; versioned development tags also need >24h.
+#    Local patterns: docker-guardian/local-tags.txt; only images with empty RepoDigests qualify.
+#    Pulled images use normal semver handling; versioned development tags also need >24h.
 #    Age prefers LastTagTime over Created; pinned/in-use/recent/unversioned-floating stay.
 # Authorised (2026-10-20): "the agents need to be able to do what it needs to do".
 set -u
@@ -240,7 +241,9 @@ def main():
             continue
         for ref in actual_tags:
             repo, _, tag = ref.rpartition(':')
-            if any(fnmatch.fnmatchcase(ref if ':' in pattern else tag, pattern) for pattern in local_tags):
+            # Local patterns deliberately use the 24h policy instead of semver's keep-two policy.
+            if (not image.get('RepoDigests')
+                    and any(fnmatch.fnmatchcase(ref if ':' in pattern else tag, pattern) for pattern in local_tags)):
                 if hours > 24:
                     candidates.append((ref, iid))
                 continue

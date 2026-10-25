@@ -1,7 +1,9 @@
 # Local build tag globs. Patterns without a colon match only the tag (after the last colon).
 # Patterns containing a colon match the full repo:tag ref, including registry/namespace.
 # Copy to ~/.pi/agent/docker-guardian/local-tags.txt to replace the built-in defaults.
-# Only unused, unpinned images older than 24 hours qualify; floating aliases protect images.
+# Only unused, unpinned images older than 24 hours with empty RepoDigests qualify.
+# All patterns exclude pulled images (any RepoDigests); those still use normal semver cleanup.
+# Matched local tags use the 24-hour policy instead of semver keep-two; floating aliases protect images.
 # Blank lines and lines beginning with # are ignored; an empty file disables local tag matching.
 *-local
 stage-train-*

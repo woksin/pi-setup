@@ -381,6 +381,52 @@ class CleanupTests(GuardianCase):
                          sorted('docker rmi acme/app:' + ref for ref in refs))
         self.assertIn('images: removed acme/app:feature-local (' + image_id('1') + ')', self.log_text())
 
+    def test_pulled_images_skip_local_patterns_but_keep_semver_cleanup(self):
+        self.image_scenario()
+        self.docker_cfg['containers'] = []
+        digest = ['registry/app@sha256:' + 'a' * 64]
+        self.docker_cfg['images'] = [
+            self.image('1', ['mcr.microsoft.com/mssql/server:2022-latest'], hours=25, RepoDigests=digest),
+            self.image('2', ['mcr.microsoft.com/mssql/server:2019-latest'], hours=25, RepoDigests=digest),
+            self.image('3', ['cratis/chronicle:5230-structural'], hours=25),
+            self.image('4', ['acme/app:feature-local'], hours=25, RepoDigests=digest),
+            self.image('5', ['acme/app:1.0.0-local'], hours=25, RepoDigests=digest),
+            self.image('6', ['acme/app:1.1.0-local'], hours=25, RepoDigests=digest),
+            self.image('7', ['acme/app:1.2.0-local'], hours=25, RepoDigests=digest),
+        ]
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(sorted(self.call_lines('docker rmi')), [
+            'docker rmi acme/app:1.0.0-local', 'docker rmi cratis/chronicle:5230-structural'])
+
+    def test_custom_patterns_also_exclude_pulled_images(self):
+        self.image_scenario()
+        (self.state / 'local-tags.txt').write_text('*:*\n')
+        digest = ['registry/app@sha256:' + 'a' * 64]
+        self.docker_cfg['images'] = [
+            self.image('1', ['mcr.microsoft.com/mssql/server:2022-latest'], hours=25, RepoDigests=digest),
+            self.image('2', ['acme/app:feature-local'], hours=25, RepoDigests=digest),
+            self.image('3', ['cratis/chronicle:5230-structural'], hours=25),
+        ]
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), ['docker rmi cratis/chronicle:5230-structural'])
+
+    def test_local_versioned_matches_use_age_policy_instead_of_keep_two(self):
+        self.image_scenario()
+        (self.state / 'local-tags.txt').write_text('*:1.*\n')
+        self.docker_cfg['containers'] = []
+        self.docker_cfg['images'] = []
+        chars = iter('123456')
+        for repo, hours in [('old', 25), ('recent', 20)]:
+            for version in ['1.0.0', '1.1.0', '1.2.0']:
+                self.docker_cfg['images'].append(
+                    self.image(next(chars), [f'acme/{repo}:{version}'], hours=hours))
+        self.write_docker()
+        self.run_guardian()
+        self.assertEqual(sorted(self.call_lines('docker rmi')), [
+            'docker rmi acme/old:1.0.0', 'docker rmi acme/old:1.1.0', 'docker rmi acme/old:1.2.0'])
+
     def test_local_tags_preserve_used_pinned_and_floating_images(self):
         self.image_scenario()
         self.docker_cfg['images'] = [
