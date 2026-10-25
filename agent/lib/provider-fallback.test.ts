@@ -1,12 +1,10 @@
 /** provider-fallback: classification, selection, context veto, turn_end switch/notice. Complements model-drift.test.ts (restore/drift flows). */
 import assert from "node:assert/strict";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, test, type TestContext } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ORIGINAL_ENTRY, restoreManualPin, restoreOriginal } from "./provider-fallback-state.ts";
+import { ORIGINAL_ENTRY, restoreManualPin, restoreOriginal, type OriginalEntryData } from "./provider-fallback-state.ts";
 import fallbackExtension, { DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK, fallbackContextLimit, classifyError, equivalentOf, fallbackContextVeto, selectFallback } from "../extensions/provider-fallback.ts";
 
 const CONFIG = {
@@ -111,21 +109,20 @@ function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; tar
 	const widgets: [string, string[] | undefined][] = [];
 	const appended: any[] = [];
 	const gates: (() => void)[] = [];
-	const notify: ExtensionContext["ui"]["notify"] = (text, type) => { notices.push([text, type ?? "info"]); };
 	const ctx: any = {
 		isIdle: () => true,
 		hasUI: opts.hasUI ?? false,
 		model: opts.model ?? A,
-		ui: { notify, setWidget: (k: string, l: string[] | undefined) => widgets.push([k, l]) },
+		ui: { notify: (t: string, ty: string) => notices.push([t, ty]), setWidget: (k: string, l: string[] | undefined) => widgets.push([k, l]) },
 		sessionManager: { getBranch: () => appended.map(a => ({ type: "custom", customType: a.type, data: a.data })), getSessionId: () => "sid" },
 		getContextUsage: () => (opts.tokens === undefined ? undefined : { tokens: opts.tokens }),
 		modelRegistry: { find: (p: string, id: string) => [A, C, K, opts.target ? { ...B, ...opts.target } : B].find(m => m.provider === p && m.id === id) },
 	};
 	const pi: any = {
 		on: (name: string, h: any) => { handlers[name] = h; },
-		registerCommand: (name: string, command: any) => { commands[name] = command; },
+		registerCommand: (name: "provider-restore", command: any) => { commands[name] = command; },
 		sendUserMessage: (text: string) => { prompts.push(text); },
-		appendEntry: (type: string, data: any) => { appended.push({ type, data }); },
+		appendEntry: (type: typeof ORIGINAL_ENTRY, data: OriginalEntryData) => { appended.push({ type, data }); },
 		getThinkingLevel: () => "off",
 		setThinkingLevel: () => {},
 		setModel: async (m: any) => {
@@ -138,7 +135,7 @@ function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; tar
 	};
 	fallbackExtension(pi);
 	shutdowns.push(() => handlers.session_shutdown({}, ctx));
-	const fire = (errorMessage: AssistantMessage["errorMessage"], over: Partial<AssistantMessage> = {}) => handlers.turn_end({
+	const fire = (errorMessage: string | undefined, over: object = {}) => handlers.turn_end({
 		message: { role: "assistant", stopReason: "error", errorMessage, provider: "anthropic", model: "a", ...over },
 		entries: [{ type: "message", id: "m0" }],
 		messageEntryId: "m1",
@@ -601,13 +598,17 @@ test("manual pick while our switch is in flight leaves the user's model selected
 	s.gates.shift()!();
 	await settle();
 	assert.equal(s.gates.length, 1); // the undo setModel (back to the user's model) is gated like any switch
+	await s.select(A); // another pick while the undo is in flight also wins
+	s.gates.shift()!();
+	await settle();
+	assert.equal(s.gates.length, 1);
 	s.gates.shift()!();
 	await first;
 	await second; // queued switch was cancelled, never reached setModel
 	assert.equal(s.gates.length, 0);
-	assert.equal(s.ctx.model, K);
-	assert.deepEqual(s.switched.map((m: any) => m.id), ["b", "k"]);
-	assert.deepEqual(s.appended.filter(a => a.data.manualRef).map(a => a.data.manualRef), ["kimi/k"]);
+	assert.equal(s.ctx.model, A);
+	assert.deepEqual(s.switched.map((m: any) => m.id), ["b", "k", "a"]);
+	assert.deepEqual(s.appended.filter(a => a.data.manualRef).map(a => a.data.manualRef), ["kimi/k", "anthropic/a"]);
 	assert.equal(s.appended.filter(a => typeof a.data.originalRef === "string").length, 0);
 	// a request started after the pick (on the user's model) hitting a limit is fresh: it falls back
 	writeFileSync(stateFile, "{}");

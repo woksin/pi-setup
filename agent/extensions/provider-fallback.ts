@@ -527,14 +527,16 @@ export default function (pi: ExtensionAPI) {
 
 	/** The user picked a model while our switch was in flight: put their model back (our own select is not a new manual pick). */
 	async function reselectManual(ctx: ExtensionContext): Promise<void> {
+		const gen = selectionGen;
 		const { provider, id } = splitRef(manualRef ?? "");
 		const model = manualRef ? ctx.modelRegistry.find(provider, id) : undefined;
 		if (!model || !manualRef) return;
 		inFlight = { ref: manualRef, seen: false };
 		try {
 			await pi.setModel(model);
-		} catch {
-			// the user's model stays as pi left it
+			if (gen !== selectionGen) await reselectManual(ctx);
+		} catch (error) {
+			notify(ctx, `provider-fallback: could not reselect your model: ${String(error)}`, "warning");
 		}
 	}
 
