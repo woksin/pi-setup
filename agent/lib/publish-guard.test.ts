@@ -45,6 +45,21 @@ const http = [
 for (const [index, command] of http.entries()) test(`literal direct HTTP publication fixture ${index}`, () => assert.equal(publicationGuard(command), "http-publication"));
 for (const command of ["env -S 'gh issue create'", "env --split-string='git status'", "env --unknown git status", "env -u"]) test("unsupported env execution is fixed and conservative", () => assert.equal(publicationGuard(command), "unsupported-env"));
 
+test("time -p resolves through nested control prefixes without treating quoted prose as execution", () => {
+	for (const command of [
+		"time -p gh issue create",
+		"if true; then time -p gh issue create; fi",
+		"if true; then if true; then time -p gh issue create; fi; fi",
+		"while true; do ! time -p env gh issue create; done",
+		"if true; then time -p command gh issue create; fi",
+	]) assert.equal(publicationGuard(command), "gh-publication", command);
+	for (const command of [
+		"git commit -m 'if true; then time -p gh issue create; fi'",
+		"if true; then printf '%s' 'time -p gh issue create'; fi",
+		"if true; then time -p gh issue view 39; fi",
+	]) assert.equal(publicationGuard(command), undefined, command);
+});
+
 test("heredoc terminators are exact: premature terminator false positives and swallowed trailing publications", () => {
 	const publication = "gh issue comment 39 --repo o/r --body /Users/alice/private";
 	assert.equal(publicationGuard(`cat <<'EOF'\n  EOF\ncat <<'INNER'\nEOF\n${publication}`), "gh-publication");

@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { argsOf, expandedCommands } from "../extensions/wait-guard.ts";
 import { isGuardOff } from "./guards.ts";
-import { parseCli, toGhPlan, validateRequest } from "./publish-request.ts";
+import { parseCli, toGhPlan, validateRequest, type PublishRequest } from "./publish-request.ts";
 
 export const ACTIONS = ["push", "pr-create", "pr-merge", "issue-write", "pr-comment"] as const;
 export type Action = typeof ACTIONS[number];
@@ -306,6 +306,11 @@ function ghCommand(policy: Policy, ctx: Context, raw: string[], namedScope: bool
 	if (forbidden(policy, repo.slug, target)) return deny("Forbidden target is closed; no grant can authorize it.");
 	return permit(policy, repo, ctx, action as Action, branch, target);
 }
+/** Exact target identity from validated fields only; query text never establishes scope. */
+function publicationTarget(request: PublishRequest): string | undefined {
+	if (request.kind !== "api") return "repo" in request ? request.repo : undefined;
+	return /^\/?repos\/([^/?#]+)\/([^/?#]+)(?:[/?#]|$)/i.exec(decodeURIComponent(request.endpoint))?.slice(1, 3).join("/");
+}
 /** Typed tool/execute admission shares the raw gh authorizer, never a new grant surface. */
 export function assessPublication(value: unknown, ctx: Context, file = policyPath()): string | undefined {
 	if (isGuardOff("lane-policy")) return;
@@ -316,8 +321,8 @@ export function assessPublication(value: unknown, ctx: Context, file = policyPat
 		if (loaded.error) return "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer.";
 		const ghArgs = toGhPlan(request).authority.ghArgs;
 		// API (and any other) writes are admitted by target repository, not by the session's cwd binding.
-		const targets = ghArgs.filter(a => !a.startsWith("--") || a.startsWith("--repo="));
-		const namedScope = loaded.policy!.repositories.some(r => targets.some(a => a.toLowerCase().includes(r.slug.toLowerCase())));
+		const target = publicationTarget(request);
+		const namedScope = loaded.policy!.repositories.some(r => r.slug.toLowerCase() === target?.toLowerCase());
 		return ghCommand(loaded.policy!, ctx, ghArgs, namedScope);
 	} catch { return "Lane policy: invalid publication request."; }
 }

@@ -659,11 +659,20 @@ test("dependencies of the publish guard are protected critical enforcement, deri
 test("typed API writes are admitted by target repository for sessions unbound to it", () => {
 	grant("issue-write", "39"); store();
 	const stranger = { cwd: outside, session: "stranger-session" };
-	for (const endpoint of ["repos/Cratis/Studio/issues", "repos/cratis/studio/issues/39/comments"]) {
+	for (const endpoint of ["repos/Cratis/Studio/issues", "repos/cratis/studio/issues/39/comments", "repos/%43ratis/Studio/issues", "repos/Cratis/%53tudio/issues", "/repos/CRATIS/STUDIO/issues"]) {
 		assert.match(assessPublication({ kind: "api", endpoint, method: "POST" }, stranger)!, /Lane policy/);
 		assert.match(assessPublication({ kind: "api", endpoint, method: "DELETE", fields: [{ name: "a", value: "b" }] }, stranger)!, /Lane policy/);
 	}
 	// Non-enrolled targets remain outside this policy for an unbound session.
-	assert.equal(assessPublication({ kind: "api", endpoint: "repos/other/project/issues", method: "POST" }, stranger), undefined);
+	for (const endpoint of ["repos/other/project/issues", "repos/Cratis/StudioTools/issues", "repos/Cratis/Studio-tools/issues", "repos/Cratis/Studio-docs/issues", "repos/other/project/issues?target=Cratis/Studio", "repos/other/project/issues?target=repos/Cratis/Studio/issues"]) {
+		assert.equal(assessPublication({ kind: "api", endpoint, method: "POST" }, stranger), undefined, endpoint);
+	}
+	for (const repo of ["Cratis/Studio", "cratis/studio", "CRATIS/STUDIO"]) {
+		assert.match(assessPublication({ kind: "issue-comment", repo, number: 39, body: "draft" }, stranger)!, /Lane policy/);
+	}
+	for (const repo of ["Cratis/StudioTools", "Cratis/Studio-tools", "Cratis/Studio-docs"]) {
+		assert.equal(assessPublication({ kind: "issue-comment", repo, number: 39, body: "Cratis/Studio" }, stranger), undefined, repo);
+	}
+	assert.match(assessPublication({ kind: "api", endpoint: "repos/%ZZ/Studio/issues", method: "POST" }, stranger)!, /invalid publication request/);
 	assert.equal(assessPublication({ kind: "gist-create", files: ["draft.md"], description: "about Cratis/Studio" }, stranger), undefined);
 });

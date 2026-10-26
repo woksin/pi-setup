@@ -48,11 +48,15 @@ function wrapper(words: Words): Executable | undefined {
 	return { words: words.slice(wrapperIndex(words, name)) };
 }
 /** Shell reserved words that can precede a command in executable position; the command after them still runs. */
-const CONTROL_WORDS = new Set(["if", "then", "elif", "else", "while", "until", "do", "!", "{", "time"]);
+const CONTROL_WORDS = new Set(["if", "then", "elif", "else", "while", "until", "do", "!", "{"]);
 const prefixWord = (word: Word) => assignment(word) || CONTROL_WORDS.has(word);
 function skipPrefixes(words: Words): string[] {
 	let rest = words;
-	while (rest.length && prefixWord(rest[0])) rest = rest.slice(1);
+	while (rest.length) {
+		if (rest[0] === "time") rest = rest.slice(rest[1] === "-p" ? 2 : 1);
+		else if (prefixWord(rest[0])) rest = rest.slice(1);
+		else break;
+	}
 	return rest;
 }
 function executable(tokens: Words): Executable {
