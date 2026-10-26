@@ -317,6 +317,7 @@ The lessons behind the global rules are in [docs/operating-lessons.md](docs/oper
 | `extensions/cratis-cli-guard.ts` | Blocks state-changing `cratis chronicle` commands unless approved. |
 | `extensions/issue-work.ts` | `issue_work` tool: claim, update, list (repo/state/free filters) and query ownership (owner) of the GitHub issues sessions work on, with leases across sessions and checks for new activity (logic in `lib/issue-work.ts`); existing output unchanged except the intentional new delivery refusal on claim. |
 | `extensions/phase-priority.ts` | Asks you before an agent gets high priority in the `pi-phase` queue (`--priority high`); blocks subagents and self-granting. `/phase-priority` grants or revokes. A session you designate as orchestrator can grant priority itself, capped at 10 uses or 120 minutes (`lib/phase-priority.ts`). |
+| `extensions/stale-cwd.ts` | Warns once (and shows a status) when the process working directory went stale, with the recovery (`lib/stale-cwd.ts`). |
 | `extensions/provider-fallback.ts` | Falls back to another provider's model when a usage or rate limit is hit (`provider-fallback.json`). |
 | `extensions/lane-policy.ts`, `lib/lane-policy.ts`, `lane-policy/README.md` | **Dormant pilot.** A cooperative guard for git push and `gh` writes in repositories you enrol with `/lane-policy`. Does nothing until you enrol a repository. Read `lane-policy/README.md` before turning it on. |
 | `extensions/subagent-result-guard.ts` | Stops agents from re-reading a subagent result that was already delivered in full. |
@@ -404,6 +405,10 @@ Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subage
 - Retired profiles, `*.bak*` files, and the `fd` and `rg` binaries in `bin/`.
 - The CodeScene skills (see above).
 - `user.json`: operator identity and repositories root are local install settings, never synced into this repo.
+
+## Troubleshooting
+
+**Subagents or tools fail within milliseconds with `ENOENT: process.cwd failed`, and pi shows "stale cwd".** The pi process's working directory went stale (the directory was deleted or replaced while pi kept running), even if the path exists again. `/reload` does not change a process's cwd. Exit pi, then run `cd <project path> && pi -c`. The `stale-cwd` extension shows this warning at session start.
 
 ## Keeping it up to date
 

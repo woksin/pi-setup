@@ -21,6 +21,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
+import { safeCwd } from "./stale-cwd.ts";
 
 export type CratisConcern = "secrets" | "store-mutations";
 
@@ -38,7 +39,7 @@ function isFile(path: string): boolean {
  * The scripts directory the Cratis extension uses for this Pi process (`<base>/.cratis/ai/hooks/scripts`, base =
  * process.cwd()), provided the Cratis extension is loaded from the project (`<base>/.pi/extensions/cratis-hooks`).
  */
-function scriptsDir(base: string): string | undefined {
+function scriptsDir(base: string | undefined): string | undefined {
 	if (typeof base !== "string" || base === "") return undefined;
 	if (!isFile(join(base, ".pi", "extensions", "cratis-hooks", "index.ts"))) return undefined;
 	const dir = join(base, ".cratis", "ai", "hooks", "scripts");
@@ -50,7 +51,7 @@ export type ToolLister = () => ReadonlyArray<{ name?: string; sourceInfo?: { pat
 export const CRATIS_TOOL = "cratis_quality_gate";
 
 /** Is the Cratis hooks extension of `<base>/.cratis/ai/harnesses/pi/extensions/cratis-hooks` loaded in this Pi process? */
-export function cratisExtensionLoaded(base: string, tools: ToolLister | undefined): boolean {
+export function cratisExtensionLoaded(base: string | undefined, tools: ToolLister | undefined): boolean {
 	if (!tools || typeof base !== "string" || base === "") return false;
 	try {
 		const dir = realpathSync(join(base, ".cratis", "ai", "harnesses", "pi", "extensions", "cratis-hooks"));
@@ -70,7 +71,7 @@ export interface CratisOptions { env?: NodeJS.ProcessEnv; run?: CratisRunner; ba
 
 /** True when the Cratis hook for `concern` is installed AND its extension is proven loaded for this Pi process. */
 export function cratisHookActive(concern: CratisConcern, options: CratisOptions = {}): boolean {
-	const base = options.base ?? process.cwd();
+	const base = options.base ?? safeCwd(); // undefined (stale cwd): fail closed, not active
 	const dir = scriptsDir(base);
 	return dir !== undefined && isFile(join(dir, SCRIPT[concern])) && cratisExtensionLoaded(base, options.tools);
 }
@@ -88,7 +89,7 @@ export function cratisSwitchOn(concern: CratisConcern, env: NodeJS.ProcessEnv = 
 export function cratisReadOnlyCommands(options: CratisOptions = {}): string[] | undefined {
 	const env = options.env ?? process.env;
 	if (!cratisHookActive("store-mutations", options)) return undefined;
-	const dir = scriptsDir(options.base ?? process.cwd());
+	const dir = scriptsDir(options.base ?? safeCwd());
 	if (dir === undefined) return undefined;
 	try {
 		const data: unknown = JSON.parse(readFileSync(env.CRATIS_HOOKS_STORE_MUTATIONS || join(dir, MUTATIONS_JSON), "utf8"));
@@ -123,8 +124,8 @@ export type CratisVerdict = "blocked" | "switch" | "none";
  * No script is spawned and the switch is ignored unless the Cratis extension is proven loaded. Spawning is synchronous, which is fine because callers only ask for commands they would block anyway.
  */
 export function cratisVerdict(concern: CratisConcern, cwd: string | undefined, command: string, options: CratisOptions = {}): CratisVerdict {
-	const env = options.env ?? process.env, run = options.run ?? spawnRunner, base = options.base ?? process.cwd();
-	if (!cratisHookActive(concern, { ...options, base })) return "none";
+	const env = options.env ?? process.env, run = options.run ?? spawnRunner, base = options.base ?? safeCwd();
+	if (base === undefined || !cratisHookActive(concern, { ...options, base })) return "none";
 	if (cratisSwitchOn(concern, env)) return "switch";
 	const dir = scriptsDir(base);
 	if (dir === undefined) return "none";

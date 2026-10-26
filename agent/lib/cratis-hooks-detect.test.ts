@@ -134,3 +134,19 @@ test("cratisVerdict runs the real script only after positive registration: exit 
 		assert.equal(spawns, 0);
 	} finally { delete process.env.EXPECT_CWD; repo.cleanup(); other.cleanup(); }
 });
+
+test("stale process cwd (process.cwd() throws): hooks not detected, nothing spawned, switch ignored", () => {
+	const repo = cratisRepo();
+	const real = process.cwd;
+	process.cwd = () => { throw Object.assign(new Error("ENOENT: process.cwd failed"), { code: "ENOENT" }); };
+	try {
+		let spawns = 0;
+		const run = () => { spawns++; return { status: 2 }; };
+		for (const concern of ["secrets", "store-mutations"] as const) {
+			assert.equal(cratisHookActive(concern, { tools: loaded(repo) }), false);
+			assert.equal(cratisVerdict(concern, repo.sub, "x", { tools: loaded(repo), run, env: { CRATIS_HOOKS_ALLOW_SECRET_READS: "1", CRATIS_HOOKS_ALLOW_STORE_MUTATIONS: "1" } }), "none");
+		}
+		assert.equal(cratisReadOnlyCommands({ tools: loaded(repo) }), undefined);
+		assert.equal(spawns, 0);
+	} finally { process.cwd = real; repo.cleanup(); }
+});
