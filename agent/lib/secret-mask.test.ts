@@ -617,10 +617,12 @@ test("config flags are independent; enabled false and excluded scope disable all
 	assert.equal(f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: `sk-ant-${a}` }] }, f.ctx), undefined);
 });
 
-test("URL credentials whose password holds an apostrophe (RFC 3986 sub-delim) are still redacted", () => {
-	const out = scan("postgres://svc:" + "pa'ss9w" + "@db.internal/app");
-	assert.deepEqual(out.kinds, ["url-credentials"]);
-	assert.ok(!out.text.includes("pa'ss9w"));
+test("URL credentials whose password holds punctuation other than a double quote are still redacted", () => {
+	for (const password of ["pa'ss9w", "Ab{9x}Qz", "Ab<9x>Qz", "Ab`9x`Qz", "Ab,9x;Qz"]) {
+		const out = scan("postgres://svc:" + password + "@db.internal/app");
+		assert.deepEqual(out.kinds, ["url-credentials"], password);
+		assert.ok(!out.text.includes(password), password);
+	}
 });
 
 test("layering: with the Cratis secrets hook, local stands down only where Cratis itself blocks (redaction stays)", async () => {
