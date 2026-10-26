@@ -14,6 +14,9 @@ const writes = [
 	"/usr/bin/gh issue comment 1", "command -- gh issue create", "exec -a gh /usr/bin/gh pr create", "nohup gh pr create", "rtk proxy gh issue create",
 	"A='gh prose' gh issue create", "env -u HOME gh issue create", "env -uHOME gh issue create", "env --unset=HOME gh issue create",
 	"env -C /tmp gh issue create", "env --chdir=/tmp gh issue create", "env -i X=y -- /usr/bin/gh issue create", "env -- command gh issue create",
+	"if true; then gh issue comment 39 --repo o/r --body /Users/alice/private; fi", "if gh issue create; then :; fi", "if false; then :; elif true; then gh pr create; fi",
+	"if false; then :; else gh pr create; fi", "while true; do gh issue comment 39 --repo o/r --body x; done", "until false; do gh issue create; break; done",
+	"for n in 1 2; do gh issue create; done", "if ! gh issue create; then :; fi", "! gh issue create", "{ gh issue create; }", "time gh issue create", "if true; then A=1 env gh issue create; fi",
 	"gh is\\\nsue create", "echo safe; gh issue create", "pi-publish --help; gh issue create", "echo $(gh issue create)",
 ];
 for (const [index, command] of writes.entries()) test(`literal gh publication fixture ${index}`, () => assert.equal(publicationGuard(command), "gh-publication"));
@@ -21,6 +24,8 @@ const safe = [
 	"gh issue view 1", "gh issue close 1", "gh pr merge 1", "gh pr reopen 1", "gh issue edit 1 --add-label triaged", "gh api repos/o/r",
 	"gh api repos/o/r -XGET -fX=x", "gh api repos/o/r --method=get --input file", "gh --help", "env --help", "command -v gh",
 	"git commit -m 'Document node spawning gh issue comment'", "rg 'gh issue create' .", "env NOTE='gh issue comment' git status",
+	"if true; then echo 'gh issue create'; fi", "for word in gh issue create; do echo $word; done", "while read x; do printf '%s' $x; done", "if gh issue view 1; then :; fi",
+	"curl -sXGET https://api.github.com/repos/o/r", "curl -sH 'X-A: -d' https://api.github.com/repos/o/r", "curl -sd x https://example.invalid/api", "wget -qO out https://api.github.com/repos/o/r",
 	"cat > payload <<'EOF'\ngh issue create\nEOF", "printf '%s' 'curl -XPOST https://api.github.com'", "echo 'env -S gh issue create'",
 	"node -e 'spawn(\"gh\", [\"issue\", \"create\"])'", "bash -c 'gh issue create'", "eval 'gh issue create'", "xargs gh issue create", "./publish-script",
 	"printf '%s' `gh issue create`", "pi-publish check --file file", "pi-publish issue-comment --repo o/r --number 1 --body-file file",
@@ -29,6 +34,8 @@ const safe = [
 ];
 for (const [index, command] of safe.entries()) test(`data/read/explicit non-goal fixture ${index}`, () => assert.equal(publicationGuard(command), undefined));
 const http = [
+	"curl -sX POST -sd '{}' https://api.github.com/repos/o/r", "curl -sXPOST https://api.github.com/repos/o/r", "curl -sd'{}' https://api.github.com/repos/o/r",
+	"curl -sSd x https://api.github.com/repos/o/r", "curl -sFfile=@path https://uploads.github.com/x", "curl -sT file https://uploads.github.com/x", "curl -sH 'A: b' -d x https://api.github.com/x",
 	"curl -XPOST https://api.github.com/repos/o/r", "curl --request=PATCH https://api.github.com/repos/o/r", "curl -ddata https://api.github.com:443/repos/o/r",
 	"curl --json '{}' --url=https://api.github.com/repos/o/r", "curl -Ffile=@path https://uploads.github.com/repos/o/r/releases/1/assets",
 	"curl -Tfile https://uploads.github.com/path", "curl --data-binary=@file https://api.github.com/path", "curl -X$METHOD https://api.github.com/path",
@@ -37,6 +44,16 @@ const http = [
 ];
 for (const [index, command] of http.entries()) test(`literal direct HTTP publication fixture ${index}`, () => assert.equal(publicationGuard(command), "http-publication"));
 for (const command of ["env -S 'gh issue create'", "env --split-string='git status'", "env --unknown git status", "env -u"]) test("unsupported env execution is fixed and conservative", () => assert.equal(publicationGuard(command), "unsupported-env"));
+
+test("heredoc terminators are exact: premature terminator false positives and swallowed trailing publications", () => {
+	const publication = "gh issue comment 39 --repo o/r --body /Users/alice/private";
+	assert.equal(publicationGuard(`cat <<'EOF'\n  EOF\ncat <<'INNER'\nEOF\n${publication}`), "gh-publication");
+	assert.equal(publicationGuard(`cat <<'EOF'\n  EOF\n${publication}\nEOF`), undefined);
+	assert.equal(publicationGuard(`cat <<EOF\nEOF \n${publication}\nEOF`), undefined);
+	assert.equal(publicationGuard(`cat <<-EOF\n\tbody\n\tEOF\n${publication}`), "gh-publication");
+	assert.equal(publicationGuard(`cat <<EOF\n\tEOF\n${publication}\nEOF`), undefined);
+	assert.equal(publicationGuard(`cat <<'EOF'\nbody\nEOF\n${publication}`), "gh-publication");
+});
 
 test("job and nested tool shapes inspect only explicit command/check fields", () => {
 	assert.equal(publicationInput("job_watch", { check: "gh issue create" }), "gh-publication");

@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setGuards } from "./guards.ts";
-import waitExtension, { MAX_TIMEOUT_SECONDS, PollTracker, argsOf, assess, executableCommands, piPhaseBudget, repeatedPollMessage } from "../extensions/wait-guard.ts";
+import waitExtension, { MAX_TIMEOUT_SECONDS, PollTracker, argsOf, assess, executableCommands, piPhaseBudget, simpleCommands, repeatedPollMessage } from "../extensions/wait-guard.ts";
 
 const ENV = ["PI_GUARDS_FILE", "PI_GUARDS_OFF", "PI_ORCH_ID", "PI_ORCH_MODE_FILE", "PI_ORCH_REPO_ROOT", "PI_ORCH_MESSAGES_DIR", "PI_GUARD_DECISIONS_LOG"];
 let saved: Record<string, string | undefined>;
@@ -160,4 +160,12 @@ test("handler: orchestration allows over-limit timeout; guard off allows blocks 
 	assert.equal(off.r, undefined);
 	assert.equal((off.event.input as any).timeout, 600);
 	assert.match(off.notices[0], /^wait-guard off: allowed 'sleep 300'/);
+});
+
+test("simpleCommands heredoc terminators stay trimmed by default; exactHeredoc is opt-in", () => {
+	const text = "cat <<'EOF'\n  EOF\ngh issue create\nEOF";
+	assert.deepEqual(simpleCommands(text), [["cat"], ["gh", "issue", "create"], ["EOF"]]);
+	assert.deepEqual(simpleCommands(text, false, true), [["cat"]]);
+	assert.deepEqual(simpleCommands("cat <<-EOF\n\tbody\n\tEOF\ngh x", false, true), [["cat"], ["gh", "x"]]);
+	assert.deepEqual(simpleCommands("cat <<EOF\n\tEOF\ngh x\nEOF", false, true), [["cat"]]);
 });

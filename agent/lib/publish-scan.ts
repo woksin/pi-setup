@@ -37,7 +37,7 @@ function rootRule(root: ConfiguredRoot): PathRule | undefined {
 
 function pathRules(context: PublicationContext): PathRule[] {
 	const rules: PathRule[] = [
-		{ kind: "home-path", pattern: new RegExp(String.raw`(?:/[Uu]sers/|/home/|[A-Za-z]:[/\\]Users[/\\])(?:<(?:user|name)>|${COMPONENT})${SUFFIX}`, "g"), accepts: concreteHome },
+		{ kind: "home-path", pattern: new RegExp(String.raw`(?:/Users/|/home/|[A-Za-z]:[/\\]Users[/\\])(?:<(?:user|name)>|${COMPONENT})${SUFFIX}`, "g"), accepts: concreteHome },
 		{ kind: "volume-path", pattern: new RegExp(String.raw`/Volumes/${COMPONENT}`, "g") },
 		{ kind: "temp-path", pattern: new RegExp(String.raw`/(?:private/)?(?:var/folders|tmp)/${COMPONENT}`, "g") },
 		{ kind: "work-folder", pattern: new RegExp(String.raw`\.ai-work[/\\]${COMPONENT}`, "g") },

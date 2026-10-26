@@ -46,6 +46,14 @@ test("URLs, Markdown adjacency and code fences are not scanner exemptions", () =
 	]) refused(source, "home-path", source.includes("\n") ? 2 : 1);
 });
 
+test("lowercase /users/ URL routes are public; only POSIX /Users/ homes are concrete", () => {
+	for (const source of ["https://github.com/users/octocat/projects/1", "https://api.github.com/users/octocat", "[profile](https://github.com/users/octocat)"]) {
+		assert.equal(scanPublication(source, context).count, 0, source);
+	}
+	refused("https://api.github.com/users/octocat and /Users/alice/private", "home-path");
+	refused("https://example.invalid/?path=/Users/alice/private", "home-path");
+});
+
 test("once-decoded paths retain source lines including encoded newlines and Unicode", () => {
 	const result = refused("😀\r\nhttps://example.invalid/?q=%F0%9F%98%80%0A%2FUsers%2Falice", "home-path", 2);
 	assert.equal(result.count, 1);

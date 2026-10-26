@@ -521,7 +521,7 @@ test("reading policy/guard config and writing .ai-work messages that mention it 
 
 const livePaths = () => { const agent = join(home, ".pi/agent"); return { agent, guards: join(agent, "lib/guards.ts"), laneLib: join(agent, "lib/lane-policy.ts"), laneExt: join(agent, "extensions/lane-policy.ts"), json: join(agent, "guards.json"), store: policyPath() }; };
 
-const publicationSources = ["guards.json", "lib/guards.ts", "extensions/guards.ts", "lib/lane-policy.ts", "extensions/lane-policy.ts", "lib/candidate-guard.ts", "extensions/train-guard.ts", "lib/publisher.ts", "lib/publish-request.ts", "lib/publish-scan.ts", "lib/publish-guard.ts", "lib/secret-mask.ts", "extensions/publish.ts", "extensions/publish-guard.ts", "bin/pi-publish"];
+const publicationSources = ["extensions/wait-guard.ts", "lib/orchestration.ts", "guards.json", "lib/guards.ts", "extensions/guards.ts", "lib/lane-policy.ts", "extensions/lane-policy.ts", "lib/candidate-guard.ts", "extensions/train-guard.ts", "lib/publisher.ts", "lib/publish-request.ts", "lib/publish-scan.ts", "lib/publish-guard.ts", "lib/secret-mask.ts", "extensions/publish.ts", "extensions/publish-guard.ts", "bin/pi-publish"];
 
 test("installed publication enforcement exact paths and symlinks require operator maintenance", async () => {
 	const p = livePaths(), f = fake({ ...ctx, name: "PISETUP" }); laneExtension(f.pi);
@@ -623,4 +623,47 @@ test("setup writer may write ordinary setup files but never the operator store o
 	denied(`sed -i s/a/b/ ${p.guards}`, setup);
 	store(); grant("push", "other");
 	denied("git push origin lane:lane", setup);
+});
+
+test("ordinary paths are not critical: only exact critical files, siblings and agent-dir ancestors are", async () => {
+	const p = livePaths(), setup = { ...ctx, name: "PISETUP" }, f = fake(setup); laneExtension(f.pi);
+	mkdirSync(join(p.agent, "lib"), { recursive: true }); mkdirSync(join(p.agent, "skills"), { recursive: true });
+	for (const ordinary of [home, join(home, ".pi"), "/", join(home, "ordinary.txt"), join(p.agent, "skills"), join(p.agent, "lib/ordinary.ts"), join(p.agent, "lib/guards.test.ts"), join(p.agent, "AGENTS.md")]) {
+		assert.equal(policyStore(ordinary, repo), false, ordinary);
+		assert.equal(policyFile(ordinary, repo), false, ordinary);
+	}
+	assert.equal(await f.fire("tool_call", { toolName: "write", input: { path: join(home, "ordinary.txt"), content: "x" } }), undefined);
+	allowed(`ls '${home}'`, setup);
+	for (const critical of [p.agent, join(p.agent, "lib"), p.guards, `${p.guards}.lock`]) assert.equal(policyStore(critical, repo), true, critical);
+});
+
+test("dependencies of the publish guard are protected critical enforcement, derived from its imports", async () => {
+	const root = new URL("../", import.meta.url).pathname, seen = new Set<string>(), queue = ["lib/publish-guard.ts"];
+	while (queue.length) {
+		const rel = queue.pop()!;
+		if (seen.has(rel)) continue;
+		seen.add(rel);
+		for (const match of readFileSync(join(root, rel), "utf8").matchAll(/from\s+["'](\.[^"']+)["']/g)) queue.push(resolve(root, rel, "..", match[1]).slice(root.length));
+	}
+	assert.ok(seen.has("extensions/wait-guard.ts"), "tokenizer dependency must be discovered");
+	const p = livePaths(), setup = { ...ctx, name: "PISETUP" }, f = fake(setup); laneExtension(f.pi);
+	for (const rel of seen) {
+		const path = join(p.agent, rel);
+		assert.equal(policyFile(path, repo), true, rel); assert.equal(policyStore(path, repo), true, rel);
+		assert.ok((await f.fire("tool_call", { toolName: "edit", input: { path } }))?.block, rel);
+		denied(`rm '${path}'`, setup); denied(`cp ordinary.ts '${path}'`, setup);
+		denied(`printf x > "$HOME/.pi/agent/${rel}"`, setup);
+	}
+});
+
+test("typed API writes are admitted by target repository for sessions unbound to it", () => {
+	grant("issue-write", "39"); store();
+	const stranger = { cwd: outside, session: "stranger-session" };
+	for (const endpoint of ["repos/Cratis/Studio/issues", "repos/cratis/studio/issues/39/comments"]) {
+		assert.match(assessPublication({ kind: "api", endpoint, method: "POST" }, stranger)!, /Lane policy/);
+		assert.match(assessPublication({ kind: "api", endpoint, method: "DELETE", fields: [{ name: "a", value: "b" }] }, stranger)!, /Lane policy/);
+	}
+	// Non-enrolled targets remain outside this policy for an unbound session.
+	assert.equal(assessPublication({ kind: "api", endpoint: "repos/other/project/issues", method: "POST" }, stranger), undefined);
+	assert.equal(assessPublication({ kind: "gist-create", files: ["draft.md"], description: "about Cratis/Studio" }, stranger), undefined);
 });

@@ -33,6 +33,8 @@ mkdir -p "$fakeagent"
 for tree in lib extensions early-extensions; do
 	if [ -d "$agent/$tree" ]; then cp -R "$agent/$tree" "$fakeagent/$tree"; fi
 done
+# The publish tool suite smoke-runs the real launcher at ../bin/pi-publish; copy only that file (mode preserved).
+if [ -f "$agent/bin/pi-publish" ]; then mkdir -p "$fakeagent/bin" && cp -p "$agent/bin/pi-publish" "$fakeagent/bin/pi-publish"; fi
 ln -s "$modules" "$fakeagent/node_modules"
 # observation-mask / output-cap suites expect the efficiency config (observationMask enabled) to exist; copy it read-only.
 if [ -f "$agent/efficiency.json" ]; then cp "$agent/efficiency.json" "$fakeagent/efficiency.json"; fi

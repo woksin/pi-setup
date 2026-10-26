@@ -45,10 +45,18 @@ function wrapper(words: string[]): Executable | undefined {
 	if (wrapperHelp(words[1])) return { words: [] };
 	return { words: words.slice(wrapperIndex(words, name)) };
 }
+/** Shell reserved words that can precede a command in executable position; the command after them still runs. */
+const CONTROL_WORDS = new Set(["if", "then", "elif", "else", "while", "until", "do", "!", "{", "time"]);
+const prefixWord = (word: string) => assignment(word) || CONTROL_WORDS.has(word);
+function skipPrefixes(words: string[]): string[] {
+	let rest = words;
+	while (rest.length && prefixWord(rest[0])) rest = rest.slice(1);
+	return rest;
+}
 function executable(tokens: string[]): Executable {
 	let words = tokens;
 	for (let depth = 0; depth < 8; depth++) {
-		while (assignment(words[0] ?? "")) words = words.slice(1);
+		words = skipPrefixes(words);
 		const next = wrapper(words);
 		if (!next) return { words };
 		if (next.unsupported) return next;
@@ -94,33 +102,49 @@ function githubUrl(value: string): boolean {
 	try { return ["api.github.com", "uploads.github.com"].includes(new URL(value).hostname); }
 	catch { return false; }
 }
-const HTTP_VALUES = new Set(["-H", "--header", "-o", "--output", "-u", "--user", "-K", "--config", "-x", "--proxy", "--user-agent", "-A", "--referer", "-e", "--connect-timeout", "--max-time"]);
+const HTTP_VALUES = new Set(["--header", "--output", "--user", "--config", "--proxy", "--user-agent", "--referer", "--connect-timeout", "--max-time"]);
+/** Short options that consume a value (rest of the cluster or the next word), per tool. */
+const SHORT_VALUES: Record<string, string> = { curl: "AbcCdDeEFHKmoPQrTuUwxXyYzt", wget: "OoaeiBPTtwQUlIXDRAY" };
 function httpPayload(word: string): boolean {
-	return /^--(?:data(?:-[a-z]+)?|json|form|upload-file|post-data|post-file|body-data|body-file)(?:=|$)|^-[dFT]/.test(word);
+	return /^--(?:data(?:-[a-z]+)?|json|form|upload-file|post-data|post-file|body-data|body-file)(?:=|$)/.test(word);
 }
-function attachedHttpValue(word: string): boolean {
-	return /^--[^=]+=|^-[dFTX].+/.test(word);
+interface HttpState { tool: string; target: boolean; write: boolean }
+const readMethod = (value: string) => ["GET", "HEAD"].includes(value.toUpperCase());
+function clusterEffect(state: HttpState, flag: string, value: string): void {
+	if (state.tool !== "curl") return;
+	if (flag === "X") state.write ||= !readMethod(value);
+	else if ("dFT".includes(flag)) state.write = true;
 }
-interface HttpState { target: boolean; write: boolean }
+/** Parses a `-sXPOST`-style cluster left to right; the first value option ends it. Returns words consumed. */
+function httpCluster(state: HttpState, word: string, next: string): number {
+	const valued = SHORT_VALUES[state.tool] ?? "";
+	const found = [...word.slice(1)].findIndex(flag => valued.includes(flag));
+	if (found < 0) return 1;
+	const attached = word.slice(found + 2);
+	clusterEffect(state, word[found + 1], attached || next);
+	return attached ? 1 : 2;
+}
 function httpMethod(state: HttpState, word: string, next: string): number {
-	if (["--request", "-X", "--method"].includes(word)) { state.write ||= !["GET", "HEAD"].includes(next.toUpperCase()); return 2; }
-	if (/^(?:--(?:request|method)=|-X.)/.test(word)) {
-		state.write ||= !["GET", "HEAD"].includes(word.replace(/^(?:--(?:request|method)=|-X)/, "").toUpperCase()); return 1;
-	}
-	return 0;
+	if (["--request", "--method"].includes(word)) { state.write ||= !readMethod(next); return 2; }
+	if (!/^--(?:request|method)=/.test(word)) return 0;
+	state.write ||= !readMethod(word.replace(/^--(?:request|method)=/, ""));
+	return 1;
 }
-function httpArgument(cursor: { words: string[]; index: number; state: HttpState }): number {
-	const { words, index, state } = cursor, word = words[index];
-	const method = httpMethod(state, word, words[index + 1] ?? "");
+function httpLong(state: HttpState, word: string, next: string): number {
+	const method = httpMethod(state, word, next);
 	if (method) return method;
-	if (httpPayload(word)) { state.write = true; return attachedHttpValue(word) ? 1 : 2; }
+	if (httpPayload(word)) { state.write = true; return word.includes("=") ? 1 : 2; }
 	if (HTTP_VALUES.has(word)) return 2;
-	if (word === "--url") { state.target ||= githubUrl(words[index + 1] ?? ""); return 2; }
+	if (word === "--url") { state.target ||= githubUrl(next); return 2; }
 	state.target ||= githubUrl(word.replace(/^--url=/, ""));
 	return 1;
 }
+function httpArgument(cursor: { words: string[]; index: number; state: HttpState }): number {
+	const { words, index, state } = cursor, word = words[index], next = words[index + 1] ?? "";
+	return /^-[^-]/.test(word) ? httpCluster(state, word, next) : httpLong(state, word, next);
+}
 function httpWrite(words: string[]): boolean {
-	const state: HttpState = { target: false, write: false };
+	const state: HttpState = { tool: basename(words[0] ?? ""), target: false, write: false };
 	for (let index = 1; index < words.length;) index += httpArgument({ words, index, state });
 	return state.target && state.write;
 }
@@ -132,7 +156,7 @@ function executablePublication(command: Executable): PublicationCode | undefined
 }
 /** Literal top-level commands only: no interpreter/eval/script/xargs/substitution inspection. */
 export function publicationGuard(command: string): PublicationCode | undefined {
-	for (const tokens of simpleCommands(command.replace(/\\\r?\n/g, ""), false)) {
+	for (const tokens of simpleCommands(command.replace(/\\\r?\n/g, ""), false, true)) {
 		const code = executablePublication(executable(tokens));
 		if (code) return code;
 	}

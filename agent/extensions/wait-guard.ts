@@ -59,19 +59,27 @@ export function piPhaseBudget(command: string): number | undefined {
 	return total + PHASE_SLACK_SECONDS;
 }
 
+/** The delimiter a line closes: trimmed for legacy callers, shell-exact (tabs only for `<<-`) when `exact`. */
+function heredocTerminator(line: string, mode: { exact: boolean; dash: boolean }): string {
+	if (!mode.exact) return line.replace(/^\t+/, "").trim();
+	return mode.dash ? line.replace(/^\t+/, "") : line;
+}
+
 /**
  * Split a shell command into simple commands (on unquoted `;`, `&`, `|`, parentheses, newlines) and
  * each into words, honouring single/double quotes and backslash escapes. Heredoc bodies and quoted
  * text are data, not commands. Approximate, not a full shell parser: it only has to find real
- * `gh`/`git` invocations without matching text that merely mentions them.
+ * `gh`/`git` invocations without matching text that merely mentions them. Heredoc terminators are
+ * trimmed by default (existing callers); `exactHeredoc` opts in to shell-exact matching (whole line, leading
+ * tabs stripped only for `<<-`) for callers where a swallowed command matters.
  */
-export function simpleCommands(command: string, includeSubstitutions = false): string[][] {
+export function simpleCommands(command: string, includeSubstitutions = false, exactHeredoc = false): string[][] {
 	const out: string[][] = [];
 	let words: string[] = [];
 	let word = "";
 	let inWord = false;
 	let quote: string | null = null;
-	let heredoc: string | null = null;
+	let heredoc: string | null = null, heredocDash = false;
 	const endWord = () => {
 		if (inWord) words.push(word);
 		word = "";
@@ -84,7 +92,7 @@ export function simpleCommands(command: string, includeSubstitutions = false): s
 	};
 	for (const line of command.replace(/\\\r?\n/g, " ").split("\n")) {
 		if (heredoc !== null && !quote) {
-			if (line.replace(/^\t+/, "").trim() === heredoc) heredoc = null;
+			if (heredocTerminator(line, { exact: exactHeredoc, dash: heredocDash }) === heredoc) heredoc = null;
 			continue;
 		}
 		for (let i = 0; i < line.length; i++) {
@@ -112,9 +120,9 @@ export function simpleCommands(command: string, includeSubstitutions = false): s
 				word += line[++i];
 				inWord = true;
 			} else if (c === "<" && line[i + 1] === "<" && line[i + 2] !== "<") {
-				const m = /^<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line.slice(i));
+				const m = /^<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.exec(line.slice(i));
 				if (m) {
-					heredoc = m[2];
+					[heredoc, heredocDash] = [m[3], m[1] === "-"];
 					i += m[0].length - 1;
 					endWord();
 				} else {

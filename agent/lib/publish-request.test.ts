@@ -20,7 +20,9 @@ const cases: PublishRequest[] = [
 	{ kind: "release-create", repo: target.repo, tag: "v1.0", body: "Notes", target: "main", prerelease: true },
 	{ kind: "release-notes", repo: target.repo, tag: "v1.0", title: "Updated" },
 	{ kind: "gist-create", files: ["one/file.md", "two/file.md"], description: "Description", public: true },
-	{ kind: "gist-edit", gistId: "abc123", files: ["file.md"], removeFiles: ["old.md"] },
+	{ kind: "gist-edit", gistId: "abc123", files: ["file.md"] },
+	{ kind: "gist-edit", gistId: "abc123", removeFiles: ["old.md"] },
+	{ kind: "gist-edit", gistId: "abc123", description: "New description" },
 	{ kind: "api", endpoint: "repos/owner/repo/issues", method: "POST", body: "{}", fields: [{ name: "literal", value: "@not-a-file" }, { name: "count", value: 2 }, { name: "enabled", value: true }, { name: "empty", value: null }, { name: "file", file: "input.json" }] },
 	{ kind: "check", files: ["draft.md"] },
 ];
@@ -63,6 +65,9 @@ const bad = [
 	{ kind: "gist-create", files: [] }, { kind: "gist-create", files: ["dir/-flag"] },
 	{ kind: "gist-edit", gistId: "-bad", description: "Body" },
 	{ kind: "gist-edit", gistId: "abc", files: [], removeFiles: [] },
+	{ kind: "gist-edit", gistId: "abc", files: ["a.md", "b.md"] }, { kind: "gist-edit", gistId: "abc", removeFiles: ["a.md", "b.md"] },
+	{ kind: "gist-edit", gistId: "abc", files: ["a.md"], removeFiles: ["b.md"] }, { kind: "gist-edit", gistId: "abc", files: ["a.md"], description: "d" },
+	{ kind: "gist-edit", gistId: "abc", removeFiles: ["b.md"], description: "d" }, { kind: "gist-edit", gistId: "abc" },
 	{ kind: "gist-edit", gistId: "abc", removeFiles: ["../file"] },
 	{ kind: "check", files: [] }, { kind: "check", files: ["a"], scanOverride: true },
 ];
@@ -159,4 +164,13 @@ test("CLI mechanically maps repeatable arrays, booleans and field JSON without s
 });
 for (const argv of [[], ["--help", "issue-close"], ["check", "--help"], ["check", "--file=a"], ["check", "-f", "a"], ["check", "--file"], ["check", "--file", "a", "extra"], ["issue-close", "--repo", target.repo, "--repo", target.repo, "--number", "1"], ["issue-close", "--repo", target.repo, "--number", "1e2"], ["api", "--endpoint", "repos/o/r", "--method", "POST", "--field-json", "invalid"]]) test("CLI refuses malformed/combined/unknown flags and nonstandalone help", () => {
 	assert.throws(() => parseCli(argv), InvalidRequest);
+});
+
+test("gist-edit plans exactly one single-valued gh operation (--add, --remove or --desc)", () => {
+	const gist = (extra: object) => toGhPlan(validateRequest({ kind: "gist-edit", gistId: "abc123", ...extra })).argv;
+	assert.deepEqual(gist({ removeFiles: ["old.md"] }), ["gist", "edit", "abc123", "--remove=old.md"]);
+	assert.deepEqual(gist({ description: "New" }), ["gist", "edit", "abc123", "--desc=New"]);
+	assert.deepEqual(gist({ files: ["file.md"] }), ["gist", "edit", "abc123", { payload: 0, use: "file", prefix: "--add=" }]);
+	const edit = publishRequestSchema.oneOf.find(shape => shape.properties.kind.const === "gist-edit")! as any;
+	assert.equal(edit.allOf.at(-1).oneOf.length, 3);
 });

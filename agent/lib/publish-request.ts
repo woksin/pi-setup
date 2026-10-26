@@ -122,6 +122,13 @@ const contracts: Record<PublishRequest["kind"], Contract> = {
 };
 const REQUIRED_BODY_KINDS = ["issue-create", "pr-create", "issue-comment", "pr-comment", "release-create"];
 const EDIT_KINDS = ["issue-edit", "pr-edit", "release-notes"];
+/** `gh gist edit` takes single-valued --add/--remove/--desc, so one edit means exactly one operation with one value. */
+const GIST_EDIT_OPERATIONS = ["description", "files", "removeFiles"];
+function gistOperationSchema(key: string): RecordValue {
+	const others = GIST_EDIT_OPERATIONS.filter(other => other !== key).map(other => ({ required: [other] }));
+	const properties = key === "description" ? {} : { properties: { [key]: { minItems: 1, maxItems: 1 } } };
+	return { required: [key], ...properties, not: { anyOf: others } };
+}
 const requiredOne = (...keys: string[]) => ({ anyOf: keys.map(key => ({ required: [key] })) });
 function schemaConstraints(kind: string): RecordValue[] {
 	const constraints: RecordValue[] = [{ not: { required: ["body", "bodyFile"] } }];
@@ -133,7 +140,7 @@ function schemaConstraints(kind: string): RecordValue[] {
 function conditionalSchema(kind: string): RecordValue[] {
 	if (kind === "pr-review") return [{ anyOf: [{ properties: { event: { const: "approve" } } }, ...requiredOne("body", "bodyFile").anyOf] }];
 	if (kind.endsWith("-comment")) return [{ if: { required: ["createIfNone"], properties: { createIfNone: { const: true } } }, then: { required: ["editLast"], properties: { editLast: { const: true } } } }];
-	if (kind === "gist-edit") return [{ anyOf: [{ required: ["description"] }, ...["files", "removeFiles"].map(key => ({ required: [key], properties: { [key]: { minItems: 1 } } }))] }];
+	if (kind === "gist-edit") return [{ oneOf: GIST_EDIT_OPERATIONS.map(key => gistOperationSchema(key)) }];
 	return [];
 }
 export const publishRequestSchema = { type: "object", additionalProperties: false, properties: {
@@ -167,7 +174,9 @@ function validateEdit(input: RecordValue): void {
 	if (!["title", "body", "bodyFile"].some(key => own(input, key))) invalid();
 }
 function gistChanges(input: RecordValue): boolean {
-	return own(input, "description") || ["files", "removeFiles"].some(key => (input[key] as unknown[] | undefined)?.length);
+	const present = GIST_EDIT_OPERATIONS.filter(key => own(input, key));
+	if (present.length !== 1) return false;
+	return present[0] === "description" || (input[present[0]] as unknown[]).length === 1;
 }
 function validateGist(input: RecordValue): void {
 	if (!["gist-create", "gist-edit"].includes(input.kind as string)) return;

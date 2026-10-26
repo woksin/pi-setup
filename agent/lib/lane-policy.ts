@@ -105,15 +105,18 @@ function canonical(path: string): string {
 }
 const CRITICAL_SOURCES = ["guards.json", "lib/guards.ts", "extensions/guards.ts", "lib/lane-policy.ts", "extensions/lane-policy.ts",
 	"lib/candidate-guard.ts", "extensions/train-guard.ts", "lib/publisher.ts", "lib/publish-request.ts", "lib/publish-scan.ts",
-	"lib/publish-guard.ts", "lib/secret-mask.ts", "extensions/publish.ts", "extensions/publish-guard.ts", "bin/pi-publish"];
+	"lib/publish-guard.ts", "lib/secret-mask.ts", "extensions/publish.ts", "extensions/publish-guard.ts", "bin/pi-publish",
+	// publish-guard.ts imports its shell tokenizer from wait-guard, which loads guards.ts and orchestration.ts.
+	"extensions/wait-guard.ts", "lib/orchestration.ts"];
 function criticalPaths(): string[] {
 	const agent = dirname(dirname(policyPath()));
 	return CRITICAL_SOURCES.map(path => canonical(join(agent, path)));
 }
+/** Exact critical path, its lock/temp siblings (`<path>.*`), or a directory between the agent dir and it (rm/mv of lib/). Never `~`, `~/.pi` or `/`. */
 function criticalTarget(candidate: string, target: string): boolean {
-	if (candidate === target) return true;
-	if (target.startsWith(`${candidate}${sep}`)) return true;
-	return candidate.startsWith(`${target}.`);
+	if (candidate === target || candidate.startsWith(`${target}.`)) return true;
+	const agent = canonical(dirname(dirname(policyPath())));
+	return (candidate === agent || candidate.startsWith(`${agent}${sep}`)) && target.startsWith(`${candidate}${sep}`);
 }
 function criticalReference(path: string, cwd: string): boolean {
 	const targets = [canonical(policyPath()), ...criticalPaths()];
@@ -311,7 +314,11 @@ export function assessPublication(value: unknown, ctx: Context, file = policyPat
 		if (request.kind === "check") return;
 		const loaded = loadPolicy(file);
 		if (loaded.error) return "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer.";
-		return ghCommand(loaded.policy!, ctx, toGhPlan(request).authority.ghArgs, false);
+		const ghArgs = toGhPlan(request).authority.ghArgs;
+		// API (and any other) writes are admitted by target repository, not by the session's cwd binding.
+		const targets = ghArgs.filter(a => !a.startsWith("--") || a.startsWith("--repo="));
+		const namedScope = loaded.policy!.repositories.some(r => targets.some(a => a.toLowerCase().includes(r.slug.toLowerCase())));
+		return ghCommand(loaded.policy!, ctx, ghArgs, namedScope);
 	} catch { return "Lane policy: invalid publication request."; }
 }
 function publicationArguments(words: string[]): string[] | undefined {
@@ -344,7 +351,8 @@ function publicationToken(text: string): boolean {
 	return /\b(?:push|send-pack|http-push|gh|pi-publish)\b|\bpr\s+(?:create|merge|edit|close|reopen|comment|review|ready)\b|\bissue\s+(?:create|edit|close|reopen|comment|delete|transfer|pin|unpin|lock|unlock|develop)\b|\brelease\s+(?:create|edit|delete|upload)\b|\bworkflow\s+(?:run|disable|enable)\b|\brun\s+(?:rerun|cancel|delete)\b/i.test(text)
 		|| /(?:alias\.[\w.-]+\s*(?:=|\s)|remote\.[^\s]+\.pushurl|url\.[^\s]+\.pushInsteadOf)/i.test(text);
 }
-const AUTHORITY_TEXT = /\.pi\/agent\/(?:lane-policy|guards\.json|lib\/(?:lane-policy|candidate-guard|guards|publisher|publish-request|publish-scan|publish-guard|secret-mask)\.ts|extensions\/(?:lane-policy|train-guard|guards|publish|publish-guard)\.ts|bin\/pi-publish)/;
+const escapeText = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const AUTHORITY_TEXT = new RegExp(String.raw`\.pi/agent/(?:lane-policy|${CRITICAL_SOURCES.map(escapeText).join("|")})`);
 // Shell programs that only read their file operands (output redirection is checked separately).
 const SHELL_READERS = ["cat", "head", "tail", "wc", "stat", "ls", "grep", "rg", "echo", "printf", "pwd", "readlink", "jq", "diff", "cmp", "shasum", "sha256sum", "md5", "file", "sort", "uniq", "cut"];
 // Commands that may sit next to a heredoc whose body merely mentions an authority path.
