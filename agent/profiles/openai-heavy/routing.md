@@ -10,6 +10,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - Sonnet 5.5 low/medium had zero regressions across 100 real changes; use `careful-implementer` when preserving existing behaviour, UI or user-facing text matters, or tests are weak.
 - Opus 5.5 is the main orchestrator and judgement model; Opus/Fable lead source synthesis evidence, while Astra leads science and harder cross-file review evidence.
 - Kimi K3 vendor results are strong, but independent evidence is mixed and local Pi behaviour is unverified; use it as capacity, not final authority.
+- GPT-6.1 Terra (released 2026-10-26) runs the bounded, high-volume roles (Explore, grunt, prose-editor, scout). On Artificial Analysis it scores 4–6 points below Sol (Coding Agent Index 48 vs 54) at about 44% lower cost per task. It cuts its hallucination rate from 88% to 38%, and the ChatGPT/Codex allowance covers substantially more Terra work than Sol work. OpenAI keeps Sol and Astra for the hardest coding, so implementers, reviewers and planners stay on Sol, Astra and Opus.
 
 ### Agent routing
 - `careful-implementer`: GPT-6 Astra, medium
@@ -17,16 +18,16 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `content-writer`: GPT-6 Astra, high
 - `cratis-cli`: GPT-6.1 Sol, high
 - `doc-writer`: GPT-6 Astra, medium
-- `Explore`: GPT-6.1 Sol, low
+- `Explore`: GPT-6.1 Terra, low
 - `general-purpose`: GPT-6.1 Sol, high
-- `grunt`: GPT-6.1 Sol, low
+- `grunt`: GPT-6.1 Terra, low
 - `implementer`: GPT-6.1 Sol, high
 - `opus-implementer`: GPT-6 Astra, high
 - `Plan`: GPT-6 Astra, high
 - `planner`: GPT-6 Astra, high
-- `prose-editor`: GPT-6.1 Sol, medium
+- `prose-editor`: GPT-6.1 Terra, medium
 - `reviewer`: Claude Opus 5.5, medium
-- `scout`: GPT-6.1 Sol, medium
+- `scout`: GPT-6.1 Terra, medium
 - `second-opinion`: GPT-6 Astra, xhigh
 - `sol-reviewer`: GPT-6.1 Sol, high
 

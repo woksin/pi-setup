@@ -1,6 +1,6 @@
 ---
 name: dev-machine-performance
-description: Diagnose slow gates, long phase queues, swap and Docker memory pressure with bounded, read-only dev-doctor checks.
+description: Use when local gates or phase queues are slow, the machine is swapping, or Docker shows memory pressure. Not for application-runtime performance tuning.
 ---
 
 # Development-machine performance

@@ -1,9 +1,9 @@
 ---
 name: grunt
 display_name: Grunt
-description: Worker (GPT-6.1 Sol, low) for mechanical, well-specified work — renames, boilerplate, formatting, simple edits, bulk changes to named files, log triage, summarising given text. Give it exact files and exact instructions. Do NOT use it for design decisions, debugging, anything security-sensitive, or factual questions — it is tuned for speed, not judgment.
+description: Worker (GPT-6.1 Terra, low) for mechanical, well-specified work — renames, boilerplate, formatting, simple edits, bulk changes to named files, log triage, summarising given text. Give it exact files and exact instructions. Do NOT use it for design decisions, debugging, anything security-sensitive, or factual questions — it is tuned for speed, not judgment.
 color: gray
-model: openai-codex/gpt-6.1-sol
+model: openai-codex/gpt-6.1-terra
 thinking: low
 extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, observation-mask]
 skills: false

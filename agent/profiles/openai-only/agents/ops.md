@@ -1,9 +1,9 @@
 ---
 name: ops
 display_name: Ops
-description: 'Read-only repository and CI legwork (GPT-6.1 Sol, low) — git/gh state (status, log, diffs, PR/issue/check state, failing CI job logs), reading and summarising code or long logs, locating files and symbols, drafting PR notes or handoff text for the parent to write. Returns a compact digest so the main session never ingests raw output. Must not change any state (no fetch, commits, pushes, gh mutations, comments, labels, merges); it has bash, so this is a prompt rule rather than a sandbox — do not give it tasks that need writes.'
+description: 'Read-only repository and CI legwork (GPT-6.1 Terra, low) — git/gh state (status, log, diffs, PR/issue/check state, failing CI job logs), reading and summarising code or long logs, locating files and symbols, drafting PR notes or handoff text for the parent to write. Returns a compact digest so the main session never ingests raw output. Must not change any state (no fetch, commits, pushes, gh mutations, comments, labels, merges); it has bash, so this is a prompt rule rather than a sandbox — do not give it tasks that need writes.'
 color: blue
-model: openai-codex/gpt-6.1-sol
+model: openai-codex/gpt-6.1-terra
 thinking: low
 tools: read, bash, grep, find, ls
 extensions: [cratis-cli-guard, provider-fallback, output-cap, observation-mask]

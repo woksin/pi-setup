@@ -1,0 +1,18 @@
+{
+  "note": "Human-reviewed routing intent. Deterministic tests check schema and coverage only; they do not model an LLM.",
+  "cases": [
+    { "request": "sol loop", "load": ["sol-loop"], "notLoad": [], "rationale": "Explicit invocation phrase." },
+    { "request": "Run a sol loop on this branch before I publish", "load": ["sol-loop"], "notLoad": [], "rationale": "The user asks for the loop by name." },
+    { "request": "Please review my diff", "load": [], "notLoad": ["sol-loop"], "rationale": "An ordinary review request does not name the loop." },
+    { "request": "Why is the sol-loop skill description so short?", "load": [], "notLoad": ["sol-loop"], "rationale": "Discussing the skill is not invoking it." },
+    { "request": "Before I run this build, where should its disposable output go?", "load": ["ai-work-lifecycle"], "notLoad": ["sol-loop"], "rationale": "Disposable verification output is the lifecycle trigger." },
+    { "request": "I'm wrapping up; clean up the temporary artifacts from this task", "load": ["ai-work-lifecycle"], "notLoad": [], "rationale": "Closing a task with temporary artifacts." },
+    { "request": "Add a retry option to the HTTP client", "load": [], "notLoad": ["ai-work-lifecycle", "dev-machine-performance", "github-issue-hygiene"], "rationale": "An unrelated feature edit." },
+    { "request": "The pi-phase queue has been stuck for ten minutes and the machine is swapping", "load": ["dev-machine-performance"], "notLoad": [], "rationale": "Slow phase queues and swap." },
+    { "request": "Docker keeps getting OOM-killed during tests", "load": ["dev-machine-performance"], "notLoad": [], "rationale": "Docker memory pressure." },
+    { "request": "Optimise the slow query in the orders endpoint", "load": [], "notLoad": ["dev-machine-performance"], "rationale": "Application-runtime tuning is the near miss the description excludes." },
+    { "request": "I'm about to start work on issue 60; set it up", "load": ["github-issue-hygiene"], "notLoad": [], "rationale": "Starting work on a GitHub issue." },
+    { "request": "The work is done, close the duplicate issues", "load": ["github-issue-hygiene"], "notLoad": [], "rationale": "Post-work cleanup of duplicate issues." },
+    { "request": "Rename this variable", "load": [], "notLoad": ["github-issue-hygiene"], "rationale": "No issue involved." }
+  ]
+}
