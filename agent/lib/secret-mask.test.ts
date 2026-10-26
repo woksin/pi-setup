@@ -27,6 +27,27 @@ test("diagnostic scan keeps legacy shape and reports only selected start lines",
 	assert.equal(many.findings!.length, 20);
 });
 
+test("outbound mode refuses caller-written markers without changing default masking", () => {
+	const token = ["gh", "p_", "a1".repeat(20)].join("");
+	const aws = ["AK", "IA", "Z1".repeat(8)].join("");
+	for (const value of [token, aws]) {
+		for (const source of [`[REDACTED:${value}]`, `[REDACTED:${value}`, `[REDACTED:aws-key]${value}`]) {
+			const result = scan(source, [], { diagnostics: true, mode: "outbound" });
+			assert.ok(result.kinds.includes("untrusted-redaction-marker"));
+			assert.ok(result.kinds.includes(value === token ? "github-token" : "aws-key"));
+		}
+	}
+	for (const source of ["[REDACTED:aws-key]", "[REDACTED:", "password='[REDACTED:connection-string]'"]) {
+		assert.equal(scan(source, [], { mode: "outbound" }).count > 0, true);
+	}
+	const source = "password='Syn7thetic!only'";
+	const masked = scan(source).text;
+	assert.equal(scan(masked).count, 0);
+	assert.equal(scan(masked, [], { mode: "outbound" }).count > 0, true);
+	assert.equal(scan(token, [".*"]).count, 0);
+	assert.equal(scan(token, [".*"], { mode: "outbound" }).count, 1);
+});
+
 test("operational labels retain indistinguishable numeric and punctuation credentials", () => {
 	for (const key of ["secret-mask", "secret-sweep", "SECRET-MASK", "secret_mask", "secretSweep", "secret-mask-password"]) {
 		for (const value of ["123456789", "syn!thetic-value", "synthetic-service-label"]) {

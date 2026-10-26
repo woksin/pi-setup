@@ -407,12 +407,22 @@ function kubeCandidates(text: string, out: Candidate[]): void {
 	}
 }
 
-export function scan(text: string, allowlist: readonly string[] = [], options: { diagnostics?: boolean } = {}): Scan {
+export interface ScanOptions { diagnostics?: boolean; mode?: "outbound" }
+
+function outboundMarkers(text: string, mode: ScanOptions["mode"]): Candidate[] {
+	if (mode !== "outbound") return [];
+	return [...text.matchAll(/\[REDACTED:/g)].map(match => ({
+		start: match.index, end: match.index + match[0].length, kind: "untrusted-redaction-marker",
+	}));
+}
+
+export function scan(text: string, allowlist: readonly string[] = [], options: ScanOptions = {}): Scan {
 	const result: Scan = { text, kinds: [], count: 0, skipped: false };
 	if (options.diagnostics) result.findings = [];
 	if (Buffer.byteLength(text, "utf8") > MAX_BYTES) return { ...result, skipped: true };
-	const out: Candidate[] = [];
-	const protectedSpans = [...text.matchAll(/\[REDACTED:[A-Za-z0-9-]{1,64}\]/g)].map(m => ({ start: m.index, end: m.index + m[0].length }));
+	const out = outboundMarkers(text, options.mode);
+	const protectedSpans = options.mode === "outbound" ? []
+		: [...text.matchAll(/\[REDACTED:[A-Za-z0-9-]{1,64}\]/g)].map(m => ({ start: m.index, end: m.index + m[0].length }));
 	privateKeys(text, out);
 	for (const [kind, pattern] of TOKEN_PATTERNS) {
 		for (const match of text.matchAll(pattern)) {
@@ -430,7 +440,7 @@ export function scan(text: string, allowlist: readonly string[] = [], options: {
 	connections(text, out);
 	envAssignments(text, out);
 	const allowed: RegExp[] = [];
-	for (const pattern of allowlist) { try { allowed.push(new RegExp(pattern)); } catch { /* invalid exemptions do not allow anything */ } }
+	for (const pattern of options.mode === "outbound" ? [] : allowlist) { try { allowed.push(new RegExp(pattern)); } catch { /* invalid exemptions do not allow anything */ } }
 	// Prefer the whole containing value, then the more specific earlier recognizer on ties.
 	out.sort((a, b) => a.start - b.start || b.end - a.end);
 	let until = 0, renderedUntil = 0, protectedIndex = 0;
