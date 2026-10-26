@@ -379,6 +379,9 @@ The lessons behind the global rules are in [docs/operating-lessons.md](docs/oper
 - `ai-work-lifecycle`: managing temporary AI task outputs without leaving large caches behind.
 - `dev-machine-performance`: diagnosing slow gates and queues, with safe machine advice and CI-parity lane habits.
 - `github-issue-hygiene`: keeping issues current and closing them when done (includes `issue-status.py`).
+- `sol-loop`: a bounded review loop with the native `sol-reviewer` agent. Invoked by saying "sol loop"; ships its upstream MIT `LICENSE`.
+
+Descriptions are invocation hints only. Source lives here in `skills/` and the installer copies it to `~/.agents/skills/`; `sync.sh` is an optional live-to-repository snapshot and does not cover `sol-loop`. See [`docs/authoring-skills.md`](docs/authoring-skills.md), [`docs/skill-template.md`](docs/skill-template.md) and [`docs/skills-adoption.md`](docs/skills-adoption.md).
 
 ### `tools/` → `~/.local/`
 
