@@ -2633,7 +2633,70 @@ def exited_unreaped(pid, producer_exit=None):
     return status is not None
 
 
-def stop_group(pgid):
+def cleanup_snapshot_row(line):
+    """Validate a single value-free ps row before accepting any field."""
+    parts = line.split()
+    if len(parts) != 5:
+        return None
+    if not all(re.fullmatch(r"[0-9]{1,10}", value) for value in parts[:4]):
+        return None
+    identities = tuple(map(int, parts[:4]))
+    if max(identities) > 4294967295:
+        return None
+    if not re.fullmatch(r"[RSDTtXZWIUKP][<NLsl+EXV-]{0,7}", parts[4]):
+        return None
+    return (*identities, parts[4])
+
+
+def cleanup_snapshot_rows(listing, pgid):
+    """Accept only bounded numeric identities and ps state tokens, never raw text."""
+    if len(listing) > 262144 or len(listing.encode("utf-8")) > 262144:
+        return [], 0, 0, "oversized"
+    parsed = [cleanup_snapshot_row(line) for line in listing.splitlines()]
+    malformed = parsed.count(None)
+    rows = [row for row in parsed if row is not None and row[2] == pgid]
+    status = "incomplete" if malformed or len(rows) > 32 else "complete"
+    return rows[:32], len(rows), malformed, status
+
+
+def cleanup_snapshot_observation(pgid):
+    """One read-only, non-atomic observation; never used for safety decisions."""
+    try:
+        result = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,uid=,stat="],
+                                capture_output=True, text=True, timeout=1, check=False)
+        if result.returncode != 0:
+            return [], f"completeness=unknown failure=nonzero returncode={int(result.returncode)}", "unknown"
+        rows, matched, malformed, status = cleanup_snapshot_rows(result.stdout, pgid)
+        presence = "present" if any(row[0] == pgid for row in rows) else "absent_at_snapshot"
+        if status != "complete" and presence != "present":
+            presence = "unknown"
+        return rows, (f"completeness={status} matched={matched} omitted={max(0, matched - 32)} "
+                      f"malformed={malformed}"), presence
+    except subprocess.TimeoutExpired:
+        return [], "completeness=unknown failure=timeout", "unknown"
+    except OSError as exc:
+        number = exc.errno if type(exc.errno) is int else "unknown"
+        return [], f"completeness=unknown failure=oserror errno={number}", "unknown"
+
+
+def cleanup_snapshot(pgid, sig, leader_observation=None):
+    """Best effort, at most 32 rows / 8 KiB emitted; failures never escape."""
+    try:
+        rows, status, presence = cleanup_snapshot_observation(pgid)
+        source, observed_exit = leader_observation or ("unknown", None)
+        if source not in ("waitid_wnowait", "ps_zombie"):
+            source = "unknown"
+        exit_value = observed_exit if type(observed_exit) is int else "unknown"
+        failure_note(f"cleanup_snapshot pgid={pgid} signal={sig.name} observer=ps non_atomic=1 "
+                     f"{status} leader_presence={presence} leader_observation={source} producer_exit={exit_value}")
+        for pid, ppid, group, uid, state in rows:
+            failure_note(f"cleanup_snapshot pid={pid} ppid={ppid} pgid={group} uid={uid} state={state}")
+    except Exception:
+        failure_note("cleanup_snapshot completeness=unknown failure=observer_error")
+
+
+def stop_group(pgid, leader_observation=None):
+    snapshot_taken = False
     for sig, delay in ((signal.SIGTERM, 0.6), (signal.SIGKILL, 0.2)):
         try:
             os.killpg(pgid, sig)
@@ -2641,6 +2704,9 @@ def stop_group(pgid):
             pass
         except PermissionError:
             live = group_liveness(pgid, CLEANUP_PROBE_TIMEOUTS)
+            if not snapshot_taken:
+                snapshot_taken = True
+                cleanup_snapshot(pgid, sig, leader_observation)
             if live is not False:
                 failure_note(f"killpg signal={sig.name} pgid={pgid} liveness={'live' if live else 'unknown'}")
                 raise
@@ -2833,6 +2899,7 @@ def run(args, state, configuration, output=None):
     shim_dir = None
     detector_stopped = threading.Event()
     producer_exit = [None]
+    leader_observation = None
     operation = "prepare"
     primary = None
     fingerprint = test_fingerprint(os.getcwd(), original_command)
@@ -3001,6 +3068,7 @@ def run(args, state, configuration, output=None):
                 break
             operation = "waitid"
             if exited_unreaped(proc.pid, producer_exit):
+                leader_observation = ("waitid_wnowait" if hasattr(os, "waitid") else "ps_zombie", producer_exit[0])
                 break
             operation = "supervise"
             now = time.monotonic()
@@ -3026,7 +3094,7 @@ def run(args, state, configuration, output=None):
         # Keep the group leader unreaped through both signals so its PGID cannot
         # be reused by an unrelated process, even when it exited first.
         operation = "stop_group"
-        stop_group(proc.pid)
+        stop_group(proc.pid, leader_observation)
         try:
             operation = "wait"
             proc.wait(timeout=2)
@@ -3065,7 +3133,7 @@ def run(args, state, configuration, output=None):
         # Do not reap if signals fail: the leader still reserves its PGID.
         if proc is not None and proc.returncode is None:
             before_stop = len(errors)
-            cleanup_step(errors, "stop_group", proc, lambda: stop_group(proc.pid))
+            cleanup_step(errors, "stop_group", proc, lambda: stop_group(proc.pid, leader_observation))
             if len(errors) == before_stop:
                 cleanup_step(errors, "wait", proc, lambda: proc.wait(timeout=2))
             alive = cleanup_step(errors, "group_alive", proc,
