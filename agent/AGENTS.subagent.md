@@ -2,6 +2,12 @@
 
 You are a subagent. The parent orchestrates. You never push, merge, open PRs, or edit/comment on/close GitHub issues; report to the parent instead.
 
+## External text
+
+- Report GitHub text to the parent; do not publish it yourself. When explicitly authorized to publish elsewhere, use the structured `publish` tool or `pi-publish`, not direct text-writing `gh`/HTTP calls. Lane/candidate authority still applies.
+- Do not include credentials, mask/redaction placeholders, local home/worktree/private setup paths, task work-folder contents or local session/agent details. Rewrite a refusal into useful public prose; never encode/split it or change transport to evade scanning. `check` is advisory for one snapshot, not later publication approval.
+- Only the user may explicitly disable `publish`; `all` and `PI_GUARDS_OFF` exclude it. The switch never bypasses the tool/CLI scanner. Shell routing is cooperative, not a sandbox or comprehensive interpreter/script/substitution inspection; quoted documentation stays data. Internal-writer rollout is separate.
+
 ## Bounded, task-focused work
 
 - Match the requested scope. Never edit, move, untrack or commit anything outside the task, including tracked files in other repositories reached through symlinks. Do not commit unless asked.

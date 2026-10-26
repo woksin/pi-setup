@@ -117,8 +117,9 @@ function criticalTarget(candidate: string, target: string): boolean {
 }
 function criticalReference(path: string, cwd: string): boolean {
 	const targets = [canonical(policyPath()), ...criticalPaths()];
-	const meta = path.search(/[*?\[]/);
-	if (meta > 0) return targets.some(target => storeWord(path, cwd, target));
+	const meta = path.search(/[*?\[{$`]/);
+	// Assignment/option values are inspected separately by authority(); they are not path prefixes.
+	if (meta > 0 && !path.includes("=")) return targets.some(target => storeWord(path, cwd, target));
 	const candidate = canonical(resolve(cwd, path.replace(/^~(?=\/)/, homedir())));
 	return targets.some(target => criticalTarget(candidate, target));
 }
@@ -154,7 +155,7 @@ export function isSetupWriter(ctx: Context | undefined, file = setupWritersPath(
 export function policyStore(path: string, cwd: string): boolean {
 	const candidate = canonical(resolve(cwd, path.replace(/^~(?=\/)/, homedir())));
 	const store = canonical(policyPath());
-	return [store, ...criticalPaths()].some(path => candidate === path || candidate.startsWith(`${path}.`));
+	return [store, ...criticalPaths()].some(path => criticalTarget(candidate, path));
 }
 export function tamperReason(ctx: Context, file = policyPath()): string {
 	const loaded = loadPolicy(file);

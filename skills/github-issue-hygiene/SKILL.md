@@ -7,6 +7,18 @@ description: Use when starting work on, creating, commenting on, updating the de
 
 An issue is read later by people who were not in the session. Every visible change must make sense to them on its own.
 
+## Outbound text
+
+Use the structured `publish` tool or `pi-publish` for issue/PR text, comments and closing comments. Keep the hygiene and ownership rules below; this route does not grant publication authority. For example:
+
+```json
+{"kind":"issue-comment","repo":"OWNER/REPO","number":123,"body":"A concise public decision and next step."}
+```
+
+CLI equivalent: `pi-publish issue-comment --repo OWNER/REPO --number 123 --body-file .ai-work/issue-comment.md`. File inputs are captured and scanned before publication. The manual `gh`/status-script examples below express workflow intent, not permission to bypass scanning; automatic internal status writers require their separate rollout integration.
+
+Refused text must be rewritten, not encoded, split, masked or sent by another transport. Remove credentials and mask placeholders, private/local paths, work-folder contents and session/agent details. Scanner diagnostics are value-free. `publish check` is advisory for captured files only and gives no later-send approval. Only the user may explicitly disable the cooperative `publish` routing guard; `all` and environment opt-outs exclude it, and the tool/CLI scanner still runs. Opaque execution and trusted internal writers are not a sandboxed boundary.
+
 ## Ownership: one writer per issue
 
 - Only the **session that owns the work** (normally the main session) edits an issue body, posts comments, or closes it. Subagents never touch issues; they report findings to their parent, which decides what goes on the issue. The one exception: the parent may explicitly hand a subagent (for example `cleanup-steward`) ownership of named issues for the rest of the task, and then must not edit them itself meanwhile.

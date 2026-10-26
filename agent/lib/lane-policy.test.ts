@@ -521,6 +521,40 @@ test("reading policy/guard config and writing .ai-work messages that mention it 
 
 const livePaths = () => { const agent = join(home, ".pi/agent"); return { agent, guards: join(agent, "lib/guards.ts"), laneLib: join(agent, "lib/lane-policy.ts"), laneExt: join(agent, "extensions/lane-policy.ts"), json: join(agent, "guards.json"), store: policyPath() }; };
 
+const publicationSources = ["guards.json", "lib/guards.ts", "extensions/guards.ts", "lib/lane-policy.ts", "extensions/lane-policy.ts", "lib/candidate-guard.ts", "extensions/train-guard.ts", "lib/publisher.ts", "lib/publish-request.ts", "lib/publish-scan.ts", "lib/publish-guard.ts", "lib/secret-mask.ts", "extensions/publish.ts", "extensions/publish-guard.ts", "bin/pi-publish"];
+
+test("installed publication enforcement exact paths and symlinks require operator maintenance", async () => {
+	const p = livePaths(), f = fake({ ...ctx, name: "PISETUP" }); laneExtension(f.pi);
+	for (const source of publicationSources) {
+		const path = join(p.agent, source);
+		mkdirSync(resolve(path, ".."), { recursive: true }); writeFileSync(path, "fixture");
+		const alias = join(home, source.replaceAll("/", "-")); symlinkSync(path, alias);
+		for (const target of [path, alias, `${path}.bak`]) {
+			assert.equal(policyFile(target, repo), true, target); assert.equal(policyStore(target, repo), true, target);
+			assert.ok((await f.fire("tool_call", { toolName: "write", input: { path: target, content: "x" } }))?.block);
+			assert.ok((await f.fire("tool_call", { toolName: "edit", input: { path: target } }))?.block);
+		}
+		denied(`printf x > '${alias}'`, { ...ctx, name: "PISETUP" });
+		allowed(`cat '${path}'`, { ...ctx, name: "PISETUP" });
+		assert.equal(readFileSync(path, "utf8"), "fixture");
+	}
+});
+
+test("publication enforcement ancestor, glob and directory symlink writes are protected", async () => {
+	const p = livePaths(), setup = { ...ctx, name: "PISETUP" }, f = fake(setup); laneExtension(f.pi);
+	mkdirSync(join(p.agent, "lib"), { recursive: true });
+	const alias = join(home, "lib-alias"); symlinkSync(join(p.agent, "lib"), alias);
+	for (const target of [p.agent, join(p.agent, "lib"), join(p.agent, "extensions"), join(p.agent, "bin"), alias]) {
+		assert.equal(policyFile(target, repo), true); assert.equal(policyStore(target, repo), true);
+		assert.ok((await f.fire("tool_call", { toolName: "write", input: { path: target, content: "x" } }))?.block);
+		denied(`rm -rf '${target}'`, setup);
+	}
+	for (const target of [`${p.agent}/lib/publish*`, `${p.agent}/extensions/publish?.ts`, `${p.agent}/lib/[ps]*.ts`, `${p.agent}/bin/pi-*`, `${alias}/publish*`, `${p.agent}/lib/{publisher,guards}.ts`]) {
+		denied(`rm ${target}`, setup); denied(`cp ordinary.ts ${target}`, setup);
+	}
+	assert.equal(policyStore(join(p.agent, "lib/ordinary.ts"), repo), false);
+});
+
 test("read-only commands on authority files are never policy writes", () => {
 	const p = livePaths();
 	for (const c of [
@@ -557,18 +591,19 @@ test("round 1: strict sed/git read-only allowlists", () => {
 	for (const c of [`sed -n '/error/p' ${p.json}`, `sed -n '1,40p;$=' ${p.guards}`, `sed -En '/a\\/b/,/c/p' ${p.guards}`, `sed -s -n -e '5q' -e '$p' ${p.guards}`, `sed --quiet 3p ${p.guards}`, `git -C ${p.agent} diff lib/guards.ts`]) { allowed(c); allowed(c, { ...ctx, name: "PISETUP" }); }
 });
 
-test("setup writer may write setup files but never the operator policy store, however spelled", async () => {
+test("setup writer may write ordinary setup files but never the operator store or enforcement sources", async () => {
 	const p = livePaths(), setup = { ...ctx, name: "PISETUP" }, dir = join(p.agent, "lane-policy");
 	mkdirSync(dir, { recursive: true });
-	for (const c of [`sed -i s/a/b/ ${p.guards}`, `printf x > ${p.json}`, `cp /tmp/x ${p.laneLib}`, `perl -pi -e s/a/b/ ${p.laneExt}`, `printf x > ${dir}/README.md`, `cp /tmp/x ${dir}/setup-writers.json`, `rm ${p.guards}`, `cd ${p.agent}/lib && sed -i s/a/b/ guards.ts`]) allowed(c, setup);
+	for (const c of [`printf x > ${dir}/README.md`, `cp /tmp/x ${dir}/setup-writers.json`, `cp /tmp/x ${p.agent}/lib/ordinary.ts`]) allowed(c, setup);
 	for (const c of [
+		`sed -i s/a/b/ ${p.guards}`, `printf x > ${p.json}`, `cp /tmp/x ${p.laneLib}`, `perl -pi -e s/a/b/ ${p.laneExt}`, `rm ${p.guards}`, `cd ${p.agent}/lib && sed -i s/a/b/ guards.ts`,
 		`printf x > ${p.store}`, `sed -i s/a/b/ ${p.store}`, `rm -rf ${dir}`, `rm -rf ${dir}/`, `rm ${dir}/policy.json`, `rm '${dir}/pol'icy.json`, `rm ${dir}/pol\\icy.json`, `rm ${dir}/pol*`, `rm ${dir}/*.json`, `rm ${dir}/p?licy.json`, `rm ${dir}/{policy,x}.json`,
 		`rm -rf ${p.agent}/lane-poli*`, `rm -rf ${p.agent}/*`, `rm -rf ${p.agent}`, `rm $HOME/.pi/agent/lane-policy/policy.json`, `rm "$X"`, `mv ${p.store} /tmp/x`, `mv /tmp/x ${p.store}`, `cp /tmp/x ${p.store}`, `ln -sf /tmp/x ${p.store}`,
 		`cd ${p.agent} && rm -rf lane-policy`, `cd ${p.agent}/lane-policy && rm policy.json`, `cd ${p.agent}/lane-policy && rm *`, `cd $SOMEWHERE && rm policy.json`, `find ${p.agent} -delete`, `find ${dir} -exec rm {} +`, `dd if=/tmp/x of=${p.store}`, `echo x | tee ${p.store}`, `printf x >> ${p.store}`,
 		`python3 -c "import shutil; shutil.rmtree('/Users/x/.pi/agent/lane-policy')"`, `python3 -c "import os; os.remove(os.path.expanduser('~/.pi/agent/lane-' + 'policy/policy.json'))"`, `node -e "require('fs').rmSync('/Users/x/.pi/agent/lane-policy/policy.json')"`, `bash -c 'rm ${p.store}'`, `eval "rm ~/.pi/agent/lane-policy/policy.json"`, `perl -e 'unlink "/Users/x/.pi/agent/lane-policy/policy.json"'`,
 		`apply_patch ${JSON.stringify({ patch: `*** Delete File: ${p.store}` })}`,
 	]) denied(c, setup);
-	assert.equal(policyStore(p.store, repo), true); assert.equal(policyStore(p.guards, repo), false);
+	assert.equal(policyStore(p.store, repo), true); assert.equal(policyStore(p.guards, repo), true);
 	for (const c of [
 		`sed -n -e 'w ${p.store}' /tmp/x`, `sed -n 'w${p.store}' /tmp/x`, `sed --expression='w ${p.store}' /tmp/x`, `sed -n '1p\\;w${p.store}' /tmp/x`, `sed 's/x/y/w ${p.store}' /tmp/x`,
 		`sed -n 'w ~/.pi/agent/lane-policy/policy.json' /tmp/x`, `sed -n 'w $HOME/.pi/agent/lane-policy/policy.json' /tmp/x`,
@@ -576,12 +611,14 @@ test("setup writer may write setup files but never the operator policy store, ho
 	for (const c of [`cat ${p.store}`, `grep -n x ${p.store}`, `sed -n p ${p.store}`, `sed -n '/rev/p' ${p.store}`, `cat ${p.store}; wc -l ${p.store}`]) allowed(c, setup);
 	for (const name of [undefined, "", "pisetup", "PISETUP "]) denied(`sed -i s/a/b/ ${p.guards}`, { ...ctx, name });
 	const named = (name: string | undefined) => { const f = fake(); f.extCtx.sessionManager.getSessionName = () => name; laneExtension(f.pi); return f; };
-	assert.equal(await named("PISETUP").fire("tool_call", { toolName: "write", input: { path: p.guards, content: "x" } }), undefined);
-	assert.ok((await named("PISETUP").fire("tool_call", { toolName: "write", input: { path: p.store, content: "x" } }))?.block);
+	assert.equal((await named("PISETUP").fire("tool_call", { toolName: "write", input: { path: p.guards, content: "x" } })).block, true);
+	assert.equal(await named("PISETUP").fire("tool_call", { toolName: "write", input: { path: join(dir, "README.md"), content: "x" } }), undefined);
+	assert.equal((await named("PISETUP").fire("tool_call", { toolName: "write", input: { path: p.store, content: "x" } })).block, true);
 	assert.ok((await named("lane-one").fire("tool_call", { toolName: "write", input: { path: p.guards, content: "x" } }))?.block);
 	assert.ok((await named(undefined).fire("tool_call", { toolName: "edit", input: { path: p.guards } }))?.block);
 	writeFileSync(join(dir, "setup-writers.json"), JSON.stringify(["SETUP2"]));
-	denied(`sed -i s/a/b/ ${p.guards}`, setup); allowed(`sed -i s/a/b/ ${p.guards}`, { ...ctx, name: "SETUP2" });
+	denied(`sed -i s/a/b/ ${p.guards}`, setup); denied(`sed -i s/a/b/ ${p.guards}`, { ...ctx, name: "SETUP2" });
+	allowed(`sed -i s/a/b/ ${dir}/README.md`, { ...ctx, name: "SETUP2" });
 	writeFileSync(join(dir, "setup-writers.json"), "bad");
 	denied(`sed -i s/a/b/ ${p.guards}`, setup);
 	store(); grant("push", "other");
