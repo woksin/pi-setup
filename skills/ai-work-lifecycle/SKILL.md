@@ -1,6 +1,6 @@
 ---
 name: ai-work-lifecycle
-description: Manage temporary AI task outputs without leaving large caches behind. Use before creating disposable build outputs, running verification commands, or closing a task with local artifacts.
+description: Use before creating disposable task outputs, running verification that leaves local artifacts, or closing a task with temporary artifacts.
 license: MIT
 compatibility: Local POSIX Git checkout with a reviewed ai-work-lifecycle CLI installed.
 ---

@@ -1,6 +1,6 @@
 ---
 name: github-issue-hygiene
-description: Keep GitHub issues readable, current and closed when done. Use whenever starting work on, creating, commenting on, updating the description of, or finishing work on a GitHub issue, and during post-work cleanup to close completed, duplicate or obsolete issues. Covers when to edit the issue description versus comment, single-writer status updates, and closing with a reason.
+description: Use when starting work on, creating, commenting on, updating the description of, or finishing work on a GitHub issue, and during post-work cleanup to close completed, duplicate or obsolete issues.
 ---
 
 # GitHub issue hygiene
