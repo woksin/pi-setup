@@ -20,14 +20,14 @@ function issueView(f: Fixture): string {
 		body: f.body, labels: [], assignees: f.assignees, comments: [], updatedAt: now });
 }
 function apiResponse(endpoint: string): string {
-	if (endpoint === "user") return "woksin\n";
+	if (endpoint === "user") return "fixture-user\n";
 	if (endpoint.endsWith("/comments")) return "[]";
 	return JSON.stringify({ user: { login: "opener" }, author_association: "OWNER", labels: [] });
 }
 function githubResponse(f: Fixture, args: string[]): string {
 	if (args[0] === "api") return apiResponse(args[1]);
 	if (args[1] === "view") return issueView(f);
-	if (args[1] === "edit") { f.assignees = [{ login: "woksin" }]; return ""; }
+	if (args[1] === "edit") { f.assignees = [{ login: "fixture-user" }]; return ""; }
 	throw new Error("unexpected-fixture-call");
 }
 function fixture(t: TestContext): Fixture {
