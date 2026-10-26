@@ -24,6 +24,11 @@ approval and is not a full cross-provider review.
   Failed, cancelled and mandatory-policy review passes count. There is no
   force flag, no fifth round and no extra review after the budget is spent.
 - Pause all edits to the scope while a review is running.
+- If Sol or another GPT model wrote any code in scope, including fixes made
+  during this loop, a Sol-only loop is never its review. Run the `review`
+  workflow with `author: "gpt"` (§9) so a non-GPT provider reviews it, within
+  the same three-attempt budget. Without that review the result is
+  **Incomplete**, not Approved.
 
 ## 2. Reviewer identity
 
@@ -104,13 +109,16 @@ Record usage only when it is exposed. No secrets, no whole transcripts.
 - A dispute that survives two replies, or an exhausted budget: show both
   positions with evidence and ask the user. No approval.
 - Errors, silence or unknown identity: Incomplete.
+- `sol-reviewer` disabled, unavailable or replaced by fallback: report the loop
+  **blocked**. Do not substitute another reviewer under the Sol name.
 - Never push during the loop. Publication needs separate user authorisation and
   the repository's normal gates.
 
 ## 9. When a full review is required
 
 The standalone Sol result cannot seed the `review` workflow cache and is not full
-assurance. If policy already requires a full cross-provider review, run the
+assurance. If policy already requires a full cross-provider review, or Sol or GPT
+wrote any code in scope (§1), run the
 `review` workflow from the start as the carrier. Put this protocol's scope,
 read-only rules, budget and ledger instructions in `context`. It already runs one
 Sol reviewer, an independent Opus reviewer and finding verifiers. Count each
