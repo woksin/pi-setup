@@ -426,7 +426,7 @@ export function scan(text: string, allowlist: readonly string[] = [], options: {
 	values(text, /(\baws_secret_access_key\s*=\s*)(\S+)/gi, "aws-key", out);
 	envJson(text, out);
 	kubeCandidates(text, out);
-	values(text, /(\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]+:)([^\s@/"'`{}<>]{3,})@/gi, "url-credentials", out);
+	values(text, /(\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]+:)([^\s@/"`{}<>]{3,})@/gi, "url-credentials", out);
 	connections(text, out);
 	envAssignments(text, out);
 	const allowed: RegExp[] = [];
