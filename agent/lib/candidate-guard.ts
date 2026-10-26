@@ -3,12 +3,15 @@ import { tokenizeShell } from './issue-work.ts';
 import { listManifests, repoKey } from './train-manifest.mjs';
 import { scanRepository } from './train-concurrency.mjs';
 import { nativeGuardGit, changedDirectory, commandTokens } from './train-guard.ts';
+import { parseCli, toGhPlan, validateRequest } from './publish-request.ts';
 
 type Git = typeof nativeGuardGit;
 type Decision = { block?: string; warn?: string; log?: string };
 type Segment = { tokens: string[]; cwd: string; git: Git; exception: boolean; exceptionName: string };
 const dynamic = (value: string) => /[$`*?{}<>\n]/.test(value);
-const unparsed = (error: unknown) => `Candidate guard: unparsed, allowed (${(error as Error).message})`;
+const unparsed = (error: unknown, publication = false) => publication
+  ? 'Candidate guard: unparsed publication, allowed.'
+  : `Candidate guard: unparsed, allowed (${(error as Error).message})`;
 const prCreate = (tokens: string[]) => basename(tokens[0] ?? '') === 'gh' && tokens[1] === 'pr' && tokens[2] === 'create';
 const valueFlags = new Set(['-a', '--assignee', '-B', '--base', '-b', '--body', '-F', '--body-file',
   '-H', '--head', '-l', '--label', '-m', '--milestone', '-p', '--project', '-R', '--repo',
@@ -95,16 +98,40 @@ async function decidePR(segment: Segment, env: NodeJS.ProcessEnv, orchestrated: 
   return warn ? { warn } : {};
 }
 
+function publicationSegment(segment: Segment): Segment {
+  if (basename(segment.tokens[0] ?? '') !== 'pi-publish') return segment;
+  const request = parseCli(segment.tokens.slice(1));
+  const tokens = request.kind === 'help' ? [] : ['gh', ...toGhPlan(request).authority.ghArgs];
+  return { ...segment, tokens };
+}
+
+export interface PublicationDecisionContext { cwd: string; env?: NodeJS.ProcessEnv; git?: Git; orchestrated?: boolean }
+/** Trusted process env supplies named exceptions; request fields cannot supply them. */
+export async function publicationDecision(value: unknown, context: PublicationDecisionContext): Promise<Decision> {
+  let request;
+  try { request = validateRequest(value); }
+  catch { return { block: 'Candidate guard: invalid publication request.' }; }
+  if (request.kind !== 'pr-create') return {};
+  const env = context.env ?? process.env, exceptionName = env.PI_CANDIDATE_EXCEPTION ?? '';
+  const segment: Segment = { tokens: ['gh', ...toGhPlan(request).authority.ghArgs], cwd: context.cwd,
+    git: context.git ?? nativeGuardGit, exceptionName, exception: ['major', 'urgent-fix'].includes(exceptionName) };
+  try { return await decidePR(segment, env, context.orchestrated ?? false); }
+  catch { return { warn: 'Candidate guard: unparsed publication, allowed.' }; }
+}
+
 export async function prCreateDecision(command: string, cwd: string, env = process.env, git: Git = nativeGuardGit, orchestrated = false): Promise<Decision> {
+  let publication = false;
   try {
     const result: Decision = {};
-    for (const segment of segments(command, cwd, git).filter(s => prCreate(s.tokens))) {
+    const commands = segments(command, cwd, git);
+    publication = commands.some(segment => basename(segment.tokens[0] ?? '') === 'pi-publish');
+    for (const segment of commands.map(publicationSegment).filter(s => prCreate(s.tokens))) {
       const decision = await decidePR(segment, env, orchestrated);
       if (decision.block) return decision;
       Object.assign(result, decision);
     }
     return result;
-  } catch (error) { return { warn: unparsed(error) }; }
+  } catch (error) { return { warn: unparsed(error, publication) }; }
 }
 
 function gateRun(tokens: string[]) {

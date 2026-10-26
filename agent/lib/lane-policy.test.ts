@@ -3,7 +3,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { ACTIONS, acknowledge, assessCommand, emptyPolicy, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyPath, policyStore, savePolicy, validatePolicy, type Policy, type Context } from "./lane-policy.ts";
+import { ACTIONS, acknowledge, assessCommand, assessPublication, emptyPolicy, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyPath, policyStore, savePolicy, validatePolicy, type Policy, type Context } from "./lane-policy.ts";
 import laneExtension from "../extensions/lane-policy.ts";
 import guardsExtension from "../extensions/guards.ts";
 import { setGuards } from "./guards.ts";
@@ -54,6 +54,54 @@ function fake(context = ctx, mode = "tui") {
 		command: (text: string) => commands.get("lane-policy").handler(text, extCtx),
 	};
 }
+
+test("typed publication and CLI reuse exact gh grants without granting unsupported actions", () => {
+	store();
+	const request = { kind: "issue-comment", repo: "Cratis/Studio", number: 39, body: "Safe" };
+	assert.ok(assessPublication(request, ctx));
+	denied("pi-publish issue-comment --repo Cratis/Studio --number 39 --body Safe");
+	grant("issue-write", "39"); store();
+	assert.equal(assessPublication(request, ctx), undefined);
+	allowed("/trusted/bin/pi-publish issue-comment --repo Cratis/Studio --number 39 --body Safe");
+	allowed("sh -c 'pi-publish issue-comment --repo Cratis/Studio --number 39 --body Safe'");
+	assert.ok(assessPublication(request, { ...ctx, session: "other" }));
+	assert.ok(assessPublication({ ...request, number: 40 }, ctx));
+	for (const request of [
+		{ kind: "api", endpoint: "repos/Cratis/Studio/issues", method: "POST" },
+		{ kind: "gist-create", files: ["draft.md"] },
+		{ kind: "release-create", repo: "Cratis/Studio", tag: "v1", body: "Safe" },
+		{ kind: "pr-merge", repo: "Cratis/Studio", number: 39, strategy: "squash" },
+	]) assert.ok(assessPublication(request, ctx));
+});
+
+test("typed PR create shares head binding and grants; forbidden targets and revisions still apply", () => {
+	grant("pr-create", "lane"); grant("pr-comment", "39"); store();
+	assert.equal(assessPublication({ kind: "pr-create", repo: "Cratis/Studio", head: "lane", base: "main", title: "Title", body: "Safe" }, ctx), undefined);
+	assert.ok(assessPublication({ kind: "pr-create", repo: "Cratis/Studio", head: "other", title: "Title", body: "Safe" }, ctx));
+	policy.forbidden.push("Cratis/Studio/#39"); store();
+	assert.ok(assessPublication({ kind: "pr-comment", repo: "Cratis/Studio", number: 39, body: "Safe" }, ctx));
+	policy.forbidden = []; policy.revision++; store();
+	assert.ok(assessPublication({ kind: "pr-comment", repo: "Cratis/Studio", number: 39, body: "Safe" }, ctx));
+});
+
+test("unreadable/malformed policy denies every typed or CLI write, only validated check/help are read-only", () => {
+	mkdirSync(policyPath(), { recursive: true });
+	for (const request of [{ kind: "api", endpoint: "repos/o/r", method: "POST" }, { kind: "gist-create", files: ["a"] }, { kind: "issue-close", repo: "Cratis/Studio", number: 39 }]) assert.match(assessPublication(request, ctx)!, /publication denied/);
+	assert.equal(assessPublication({ kind: "check", files: ["draft.md"] }, ctx), undefined);
+	for (const command of ["pi-publish --help", "pi-publish check --file draft.md"]) allowed(command);
+	for (const command of ["pi-publish api --endpoint repos/o/r --method POST", "pi-publish gist-create --file a", "pi-publish --help; pi-publish gist-create --file a", "pi-publish check --file a --method POST", "pi-publish --help gist-create --file a", "pi-publish unknown"]) denied(command);
+	assert.match(assessPublication({ kind: "check", files: [], body: "private-value" }, ctx)!, /^Lane policy: invalid publication request\.$/);
+});
+
+test("lane extension dispatches publish before opaque/MCP, including nested children", async () => {
+	store(); const host = fake(); laneExtension(host.pi);
+	const input = { kind: "issue-comment", repo: "Cratis/Studio", number: 39, body: "private-value" };
+	const direct = await host.fire("tool_call", { toolName: "publish", input });
+	assert.equal(direct.block, true); assert.ok(!direct.reason.includes("private-value"));
+	const nested = await host.fire("tool_call", { toolName: "multi_tool_use.parallel", input: { tool_uses: [{ recipient_name: "functions.publish", parameters: input }] } });
+	assert.equal(nested.block, true);
+	assert.equal(await host.fire("tool_call", { toolName: "publish", input: { kind: "check", files: ["a"] } }), undefined);
+});
 
 test("missing policy is dormant, including unrelated opaque workflows", () => {
 	assert.equal(loadPolicy().policy?.repositories.length, 0);

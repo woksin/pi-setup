@@ -2,7 +2,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
 import { isGuardOff } from "../lib/guards.ts";
-import { ACTIONS, acknowledge, assessCommand, identity, isSetupWriter, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyStore, savePolicy, tamperReason, type Context } from "../lib/lane-policy.ts";
+import { ACTIONS, acknowledge, assessCommand, assessPublication, identity, isSetupWriter, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyStore, savePolicy, tamperReason, type Context } from "../lib/lane-policy.ts";
 
 const HELP = `Lane policy (operator TUI command only; all writes require confirmation):
 status | help | ack current-revision
@@ -19,6 +19,10 @@ const clean = (text: string) => text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 const record = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
 
 /** Inspect known wrapper shapes without executing tools or trusting declared parent identity. */
+function publicationToolReason(name: string, value: unknown, actor: Context, depth = 0): string | undefined {
+	if (name === "publish") return assessPublication(value, actor);
+	return toolReason(name, value, actor, depth);
+}
 function toolReason(name: string, value: unknown, actor: Context, depth = 0): string | undefined {
 	const input = record(value) ? value : {};
 	if (name === "multi_tool_use.parallel" || name === "multi_tool_use") {
@@ -29,7 +33,7 @@ function toolReason(name: string, value: unknown, actor: Context, depth = 0): st
 				if (reason) return reason;
 				continue;
 			}
-			const reason = toolReason(child.recipient_name.replace(/^functions\./, ""), child.parameters, actor, depth + 1);
+			const reason = publicationToolReason(child.recipient_name.replace(/^functions\./, ""), child.parameters, actor, depth + 1);
 			if (reason) return reason;
 		}
 		return;
@@ -109,7 +113,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", (event, ctx) => {
 		refresh(ctx);
 		if (isGuardOff("lane-policy")) return;
-		const reason = toolReason(event.toolName, event.input, context(ctx));
+		const reason = publicationToolReason(event.toolName, event.input, context(ctx));
 		if (reason) return { block: true, reason };
 	});
 	pi.on("user_bash", (event, ctx) => {

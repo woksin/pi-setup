@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { isGuardOff } from '../lib/guards.ts';
 import { trainPushDecision } from '../lib/train-guard.ts';
-import { prCreateDecision, gateRunNotice } from '../lib/candidate-guard.ts';
+import { prCreateDecision, publicationDecision, gateRunNotice } from '../lib/candidate-guard.ts';
 import { isOrchestrated, orchLog } from '../lib/orchestration.ts';
 
 async function pushDecision(command: string, ctx: ExtensionContext) {
@@ -30,16 +30,26 @@ async function candidateDecision(command: string, ctx: ExtensionContext, id: str
   if (notice) remember(warnings, id, notice, ctx);
 }
 
+async function typedCandidate(input: unknown, ctx: ExtensionContext, id: string, warnings: Map<string, string>) {
+  const orchestrated = isOrchestrated(process.env, ctx.cwd);
+  const result = await publicationDecision(input, { cwd: ctx.cwd, env: process.env, orchestrated });
+  logDecision(result, orchestrated, result.warn);
+  if (result.block) return { block: true as const, reason: result.block };
+  if (result.warn) remember(warnings, id, result.warn, ctx);
+}
+
 function callHandler(warnings: Map<string, string>) {
   return async (event: { toolName: string; input: unknown; toolCallId: string }, ctx: ExtensionContext) => {
-    if (event.toolName !== 'bash' || isGuardOff('trains')) return;
+    if (isGuardOff('trains')) return;
+    if (event.toolName === 'publish') return typedCandidate(event.input, ctx, event.toolCallId, warnings);
+    if (event.toolName !== 'bash') return;
     const command = (event.input as { command?: unknown }).command;
     if (typeof command !== 'string') return;
     if (command.includes('push')) {
       const blocked = await pushDecision(command, ctx);
       if (blocked) return blocked;
     }
-    if (/\bgh\b[\s\S]*\bpr\b[\s\S]*\bcreate\b|pi-phase/.test(command)) {
+    if (/\bgh\b[\s\S]*\bpr\b[\s\S]*\bcreate\b|pi-phase|pi-publish/.test(command)) {
       return candidateDecision(command, ctx, event.toolCallId, warnings);
     }
   };

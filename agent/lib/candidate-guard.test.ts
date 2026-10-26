@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { prCreateDecision, gateRunNotice } from './candidate-guard.ts';
+import { prCreateDecision, publicationDecision, gateRunNotice } from './candidate-guard.ts';
 import { manifestPath, saveManifest } from './train-manifest.mjs';
 import extension from '../extensions/train-guard.ts';
 import outputCap from '../extensions/output-cap.ts';
@@ -29,6 +29,28 @@ function gitOutput(args: string[]) {
   if (args[0] === 'rev-list') return '1';
   return '';
 }
+
+test('typed and CLI PR create share head/repo, candidate and trusted exception rules', async t => {
+  const f = await fixture(t), request = { kind: 'pr-create', repo: 'acme/widget', head: 'fix/local', base: 'main', title: 'Title', body: 'private-value' };
+  const context = { cwd: '/repo', env: f.env, git: f.git };
+  assert.match((await publicationDecision(request, context)).block!, /PR refused/);
+  assert.match((await f.decide('pi-publish pr-create --repo acme/widget --head fix/local --title Title --body Safe')).block!, /PR refused/);
+  assert.deepEqual(await publicationDecision({ ...request, head: 'train/test' }, context), {});
+  assert.deepEqual(await f.decide('/trusted/pi-publish pr-create --repo acme/widget --head train/test --title Title --body Safe'), {});
+  assert.equal((await publicationDecision(request, { ...context, env: { ...f.env, PI_CANDIDATE_EXCEPTION: 'major' } })).log, 'exception major for fix/local');
+  assert.equal((await f.decide('PI_CANDIDATE_EXCEPTION=urgent-fix pi-publish pr-create --repo acme/widget --head fix/local --title Title --body Safe')).log, 'exception urgent-fix for fix/local');
+  assert.match((await publicationDecision(request, { ...context, orchestrated: true })).warn!, /PR refused/);
+  assert.deepEqual(await publicationDecision({ kind: 'issue-comment', repo: 'acme/widget', number: 1, body: 'Safe' }, context), {});
+  const invalid = await publicationDecision({ ...request, env: { PI_CANDIDATE_EXCEPTION: 'major' } }, context);
+  assert.equal(invalid.block, 'Candidate guard: invalid publication request.');
+  assert.ok(!JSON.stringify(invalid).includes('private-value'));
+});
+
+test('typed candidate fallback remains fail-open but value-free on native metadata errors', async t => {
+  const f = await fixture(t);
+  const decision = await publicationDecision({ kind: 'pr-create', repo: 'acme/widget', title: 'Title', body: 'Safe' }, { cwd: '/repo', env: f.env, git: () => { throw new Error('private-value'); } });
+  assert.equal(decision.warn, 'Candidate guard: unparsed publication, allowed.');
+});
 
 test('exact open candidate evidence blocks only non-candidate PRs, exceptions logged and orchestration warns', async t => {
   const f = await fixture(t);
@@ -121,6 +143,10 @@ test('extension: block, exception, orchestrated result warning chains after real
   const ctx = { cwd: repo, hasUI: false, sessionManager: { getSessionId: () => 'candidate-test' } };
   const event = { toolName: 'bash', toolCallId: 'one', input: { command: 'gh pr create' } };
   assert.equal((await handler(event, ctx)).block, true);
+  const typed = { toolName: 'publish', toolCallId: 'typed', input: { kind: 'pr-create', repo: 'acme/widget', title: 'Title', body: 'Safe' } };
+  assert.equal((await handler(typed, ctx)).block, true);
+  assert.equal((await handler({ ...event, input: { command: 'pi-publish pr-create --repo acme/widget --title Title --body Safe' } }, ctx)).block, true);
+  assert.equal(await handler({ ...typed, input: { kind: 'check', files: ['a'] } }, ctx), undefined);
   assert.equal(await handler({ ...event, input: { command: 'PI_CANDIDATE_EXCEPTION=urgent-fix gh pr create' } }, ctx), undefined);
   assert.match(await readFile(process.env.PI_GUARD_DECISIONS_LOG!, 'utf8'), /exception urgent-fix/);
   process.env.PI_ORCH_ID = 'lane';
@@ -142,6 +168,7 @@ test('extension: block, exception, orchestrated result warning chains after real
   assert.equal(await train.handlers.get('tool_result')![0](resultEvent), undefined);
   await writeFile(process.env.PI_GUARDS_FILE!, JSON.stringify({ off: { trains: true } }));
   assert.equal(await handler(event, ctx), undefined);
+  assert.equal(await handler(typed, ctx), undefined);
   await writeFile(process.env.PI_GUARDS_FILE!, JSON.stringify({ off: { trains: false } }));
   process.env.PI_ORCH_ID = '';
   assert.equal(await handler({ ...event, input: { command: 'echo hello' } }, ctx), undefined);

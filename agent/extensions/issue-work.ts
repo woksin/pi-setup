@@ -16,7 +16,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-	activeCount, check, claim, detectIssueCommands, foldRegistry, heldBy, list, owner, parseIssueRefs, readEvents, recordDetected,
+	activeCount, check, claim, detectIssueCommands, detectPublicationIssues, foldRegistry, heldBy, list, owner, parseIssueRefs, readEvents, recordDetected,
 	removeLease, repoFromRemote, SETTABLE_STATES, update, writeLease,
 	type Deps, type IssueState, type Runner, type SessionInfo,
 } from "../lib/issue-work.ts";
@@ -31,6 +31,20 @@ const run: Runner = (cmd, args, opts) => new Promise((resolve, reject) => {
 
 /** `onBackground` receives background work (close confirmation) so tests can await it. */
 export interface IssueWorkOptions { deps?: Partial<Deps>; git?: Runner; onBackground?: (work: Promise<void>) => void }
+
+interface PassiveEvent { toolName: string; input: unknown; details?: unknown }
+function publishedIssue(ev: PassiveEvent): boolean {
+	const details = ev.details as { code?: unknown } | undefined;
+	return details?.code === "published" && detectPublicationIssues(ev.input).length > 0;
+}
+function passivePublication(ev: PassiveEvent): unknown {
+	if (ev.toolName === "publish") return publishedIssue(ev) ? ev.input : undefined;
+	if (ev.toolName !== "bash") return;
+	const command = (ev.input as { command?: unknown })?.command;
+	if (typeof command !== "string") return;
+	if (!/issue-status\.py|\bgh\b|\bpi-publish\b/.test(command)) return;
+	if (detectIssueCommands(command).length) return command;
+}
 
 export default function issueWork(pi: ExtensionAPI, options: IssueWorkOptions = {}) {
 	const deps: Deps = {
@@ -111,13 +125,12 @@ export default function issueWork(pi: ExtensionAPI, options: IssueWorkOptions = 
 
 	// Passive detection: record successful bash commands that touch issues. Never blocks or alters them.
 	pi.on("tool_result", async (ev, ctx) => {
-		if (!ctx.hasUI || ev.toolName !== "bash" || ev.isError) return;
-		const command = (ev.input as { command?: unknown })?.command;
-		if (typeof command !== "string" || !/issue-status\.py|\bgh\b/.test(command)) return;
+		if (!ctx.hasUI || ev.isError) return;
 		try {
-			if (!detectIssueCommands(command).length) return; // avoid git calls for unrelated commands
+			const publication = passivePublication(ev);
+			if (publication === undefined) return;
 			const s = await sessionInfo(ctx);
-			const { recorded, confirm } = await recordDetected(deps, s, command, s.repo);
+			const { recorded, confirm } = await recordDetected(deps, s, publication, s.repo);
 			if (!recorded) return;
 			await refreshStatus(ctx, s.repo);
 			// A detected close is confirmed against GitHub in the background; never block the turn on it.

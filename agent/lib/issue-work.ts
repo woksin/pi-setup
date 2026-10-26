@@ -7,6 +7,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { parseCli, toGhPlan, validateRequest } from "./publish-request.ts";
+import { scanPublication } from "./publish-scan.ts";
 import { claimDelivery, filterRegister, ownerResult, type IssueRef } from "./issue-work-register.ts";
 export { parseIssueRefs, ownershipOf, deliveries, formatOwnership, RECENT_DAYS, type IssueRef, type Ownership, type RecentSession } from "./issue-work-register.ts";
 
@@ -227,6 +229,25 @@ function parseIssueRef(token: string): { repo?: string; issue: number } | undefi
 	return m ? { repo: m[1], issue: Number(m[2]) } : undefined;
 }
 
+/** Read only validated target metadata; never infer issue identity from public body text. */
+export function detectPublicationIssues(value: unknown): DetectedIssueCommand[] {
+	try {
+		const metadata = toGhPlan(validateRequest(value)).authority;
+		if (!metadata.kind.startsWith("issue-")) return [];
+		if (!metadata.repo || !metadata.number) return [];
+		const verb = metadata.kind.slice("issue-".length);
+		return [{ repo: metadata.repo, issue: metadata.number, verb, state: verb === "close" ? "done" : verb === "reopen" ? "unknown" : undefined }];
+	} catch { return []; }
+}
+function cliIssues(tokens: string[]): DetectedIssueCommand[] {
+	try {
+		const request = parseCli(tokens);
+		return request.kind === "help" ? [] : detectPublicationIssues(request);
+	} catch { return []; }
+}
+function cliIssueSegment(tokens: string[], index: number): DetectedIssueCommand[] {
+	return basename(tokens[index] ?? "") === "pi-publish" ? cliIssues(tokens.slice(index + 1)) : [];
+}
 /** Find issue-touching commands in a bash command line. `repo` is undefined when not given. */
 export function detectIssueCommands(command: string): DetectedIssueCommand[] {
 	const found: DetectedIssueCommand[] = [];
@@ -237,6 +258,7 @@ export function detectIssueCommands(command: string): DetectedIssueCommand[] {
 		if (/^python3?$/.test(basename(seg[i] ?? ""))) i++;
 		{
 			const t = seg[i] ?? "";
+			found.push(...cliIssueSegment(seg, i));
 			if (basename(t) === "gh" && seg[i + 1] === "issue" && GH_ISSUE_VERBS.has(seg[i + 2])) {
 				const verb = seg[i + 2];
 				let repo: string | undefined;
@@ -1035,6 +1057,7 @@ async function planReminder(d: Deps, s: SessionInfo, repo: string, issue: number
  */
 export async function claim(d: Deps, s: SessionInfo, a: ClaimArgs): Promise<string> {
 	validate(a.repo, a.issue);
+	assertIssuePublication(s, a);
 	// Hold the per-issue lock across the holder check, the GitHub writes and the registry append.
 	let release: Release;
 	try { release = await (d.lock ?? defaultLocker(d))(a.repo, a.issue); }
@@ -1086,6 +1109,7 @@ export interface UpdateArgs { repo: string; issue: number; state: IssueState; no
 
 export async function update(d: Deps, s: SessionInfo, a: UpdateArgs): Promise<string> {
 	validate(a.repo, a.issue);
+	assertIssuePublication(s, a);
 	if (!(SETTABLE_STATES as readonly string[]).includes(a.state)) throw new Error(`state must be one of ${SETTABLE_STATES.join(", ")}`);
 	if (a.pr && !PR_RE.test(a.pr)) throw new Error("pr must be a full GitHub pull request URL");
 	const now = () => (d.now?.() ?? new Date());
@@ -1096,7 +1120,7 @@ export async function update(d: Deps, s: SessionInfo, a: UpdateArgs): Promise<st
 	const { data, text, out } = await writeRewritten(d, s, a.repo, a.issue, fetched, { state: a.state, branch: s.branch, note: a.note, pr: a.pr, plan: a.plan });
 	await appendEvent(d, event(s, now(), { repo: a.repo, issue: a.issue, url: data.url, title: data.title, state: a.state, note: a.note, pr: a.pr }));
 	await mergeCache(d, a.repo, a.issue, { ...infoFrom(data, now()), statusState: statusStateOf(text) });
-	const closeHint = a.state === "done" && data.state === "OPEN" ? " The issue is still open: close it explicitly with gh issue close (--reason completed and a closing comment) when its scope is delivered." : "";
+	const closeHint = a.state === "done" && data.state === "OPEN" ? " The issue is still open: close it explicitly with the publish tool (kind issue-close, reason completed and a closing body) when its scope is delivered." : "";
 	const recorded = await recordActivity(d, s, a.repo, a.issue, activity);
 	return `Updated ${a.repo}#${a.issue} to ${STATE_LABEL[a.state]}. ${out}${closeHint}\n${activity.text}${recorded}`;
 }
@@ -1105,6 +1129,15 @@ async function mergeCache(d: Deps, repo: string, issue: number, info: GitHubInfo
 	try { const c = await readCache(d); c[issueKey(repo, issue)] = info; await writeCache(d, c); } catch { /* cache is best effort */ }
 }
 
+function assertIssuePublication(s: SessionInfo, fields: { note?: string; plan?: string; pr?: string }): void {
+	const sources = { note: fields.note, plan: fields.plan, branch: s.branch, pr: fields.pr };
+	for (const [source, text] of Object.entries(sources)) {
+		if (text === undefined) continue;
+		if (typeof text !== "string") throw new Error(`issue_work publication: invalid-field source=${source}.`);
+		const scan = scanPublication(text, { home: homedir(), repoRoot: s.cwd });
+		if (scan.count) throw new Error(`issue_work publication: scan-refused source=${source} kind=${scan.findings[0].kind} line=${scan.findings[0].line} count=${scan.count}.`);
+	}
+}
 function validate(repo: string, issue: number): void {
 	if (!REPO_RE.test(repo ?? "")) throw new Error("repo must be OWNER/REPO");
 	if (!Number.isInteger(issue) || issue <= 0) throw new Error("issue must be a positive integer");
@@ -1125,10 +1158,10 @@ export function event(s: SessionInfo, now: Date, fields: Partial<RegistryEvent> 
  * as a touch only; `confirm` (not meant to be awaited by callers that must not block) checks
  * the issue's state on GitHub and records `done` only when it is CLOSED. Failures are ignored.
  */
-export async function recordDetected(d: Deps, s: SessionInfo, command: string, fallbackRepo: string | undefined): Promise<{ recorded: number; confirm: Promise<void> }> {
+export async function recordDetected(d: Deps, s: SessionInfo, command: unknown, fallbackRepo: string | undefined): Promise<{ recorded: number; confirm: Promise<void> }> {
 	const pending: Promise<void>[] = [];
 	let recorded = 0;
-	for (const h of detectIssueCommands(command)) {
+	for (const h of typeof command === "string" ? detectIssueCommands(command) : detectPublicationIssues(command)) {
 		const repo = h.repo ?? fallbackRepo;
 		if (!repo) continue;
 		const state = h.verb === "close" ? undefined : h.state;

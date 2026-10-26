@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { argsOf, expandedCommands } from "../extensions/wait-guard.ts";
 import { isGuardOff } from "./guards.ts";
+import { parseCli, toGhPlan, validateRequest } from "./publish-request.ts";
 
 export const ACTIONS = ["push", "pr-create", "pr-merge", "issue-write", "pr-comment"] as const;
 export type Action = typeof ACTIONS[number];
@@ -284,9 +285,45 @@ function ghCommand(policy: Policy, ctx: Context, raw: string[], namedScope: bool
 	if (forbidden(policy, repo.slug, target)) return deny("Forbidden target is closed; no grant can authorize it.");
 	return permit(policy, repo, ctx, action as Action, branch, target);
 }
+/** Typed tool/execute admission shares the raw gh authorizer, never a new grant surface. */
+export function assessPublication(value: unknown, ctx: Context, file = policyPath()): string | undefined {
+	if (isGuardOff("lane-policy")) return;
+	try {
+		const request = validateRequest(value);
+		if (request.kind === "check") return;
+		const loaded = loadPolicy(file);
+		if (loaded.error) return "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer.";
+		return ghCommand(loaded.policy!, ctx, toGhPlan(request).authority.ghArgs, false);
+	} catch { return "Lane policy: invalid publication request."; }
+}
+function publicationArguments(words: string[]): string[] | undefined {
+	const gh = argsOf(words, "gh");
+	if (gh) return gh;
+	const cli = argsOf(words, "pi-publish");
+	if (!cli) return;
+	try {
+		const request = parseCli(cli);
+		return request.kind === "help" ? [] : toGhPlan(request).authority.ghArgs;
+	} catch { return ["publication"]; }
+}
+function invalidPublicationCli(commands: string[][]): boolean {
+	try { for (const words of commands) { const cli = argsOf(words, "pi-publish"); if (cli) parseCli(cli); } }
+	catch { return true; }
+	return false;
+}
+function fallbackPublication(command: string, commands: string[][]): boolean {
+	if (!/\bpi-publish\b/.test(command)) return publicationToken(command);
+	return commands.some(words => {
+		const cli = argsOf(words, "pi-publish");
+		if (!cli) return publicationToken(words.join(" "));
+		const request = parseCli(cli);
+		return !["help", "check"].includes(request.kind);
+	});
+}
+const ghPublication = (args: string[]) => args.length > 0 && !!ghAction(ghArguments(args));
 /** Lexical cooperative coverage: script bodies/files and dynamically constructed tokens are not a sandbox. */
 function publicationToken(text: string): boolean {
-	return /\b(?:push|send-pack|http-push|gh)\b|\bpr\s+(?:create|merge|edit|close|reopen|comment|review|ready)\b|\bissue\s+(?:create|edit|close|reopen|comment|delete|transfer|pin|unpin|lock|unlock|develop)\b|\brelease\s+(?:create|edit|delete|upload)\b|\bworkflow\s+(?:run|disable|enable)\b|\brun\s+(?:rerun|cancel|delete)\b/i.test(text)
+	return /\b(?:push|send-pack|http-push|gh|pi-publish)\b|\bpr\s+(?:create|merge|edit|close|reopen|comment|review|ready)\b|\bissue\s+(?:create|edit|close|reopen|comment|delete|transfer|pin|unpin|lock|unlock|develop)\b|\brelease\s+(?:create|edit|delete|upload)\b|\bworkflow\s+(?:run|disable|enable)\b|\brun\s+(?:rerun|cancel|delete)\b/i.test(text)
 		|| /(?:alias\.[\w.-]+\s*(?:=|\s)|remote\.[^\s]+\.pushurl|url\.[^\s]+\.pushInsteadOf)/i.test(text);
 }
 const AUTHORITY_TEXT = /\.pi\/agent\/(?:lane-policy|guards\.json|lib\/(?:lane-policy|guards)\.ts|extensions\/(?:lane-policy|guards)\.ts)/;
@@ -445,12 +482,17 @@ function storeAtRisk(command: string, ctx: Context): boolean {
 	}
 	return false;
 }
+function commandAdmission(command: string, ctx: Context, file: string): string | undefined {
+	if (isSetupWriter(ctx) ? storeAtRisk(command, ctx) : tampering(command, ctx)) return tamperReason(ctx, file);
+	if (invalidPublicationCli(expandedCommands(command, 0, true))) return "Lane policy: invalid publication request.";
+}
 export function assessCommand(command: string, ctx: Context, file = policyPath(), depth = 0): string | undefined {
 	if (isGuardOff("lane-policy")) return;
-	if (isSetupWriter(ctx) ? storeAtRisk(command, ctx) : tampering(command, ctx)) return tamperReason(ctx, file);
+	const admission = commandAdmission(command, ctx, file);
+	if (admission) return admission;
 	const commands = expandedCommands(command, 0, true);
 	const loaded = loadPolicy(file);
-	if (loaded.error) return publicationToken(command) ? "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer." : undefined;
+	if (loaded.error) return fallbackPublication(command, commands) ? "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer." : undefined;
 	const policy = loaded.policy!;
 	if (!policy.repositories.length) return;
 	const namedScope = commands.some(words => {
@@ -459,7 +501,7 @@ export function assessCommand(command: string, ctx: Context, file = policyPath()
 			const target = gitTarget(raw, ctx.cwd);
 			return !!target.error && gitPublication(raw) || target.targeted && policy.repositories.some(r => r.common === identity(target.cwd)?.common);
 		}
-		const gh = argsOf(words, "gh");
+		const gh = publicationArguments(words);
 		return !!gh && policy.repositories.some(r => gh.some(a => a.toLowerCase().includes(r.slug.toLowerCase())));
 	});
 	if (publicationToken(command) && /\|\s*(?:\S*\/)?(?:sh|bash|zsh|dash|node|python[\d.]*|perl|ruby|sed|xargs|env)\b/.test(command) && (scopedRepository(policy, ctx) || namedScope)) return denial(policy, scopedRepository(policy, ctx), ctx, /\bpush\b/.test(command) ? "push" : "publication", identity(ctx.cwd)?.branch ?? "", "Piped execution contains a publication token; use an attributable direct command.");
@@ -473,11 +515,11 @@ export function assessCommand(command: string, ctx: Context, file = policyPath()
 			else actor.cwd = resolve(actor.cwd, paths[0]);
 			continue;
 		}
-		const gitArgs = argsOf(words, "git"), ghArgs = argsOf(words, "gh");
+		const gitArgs = argsOf(words, "git"), ghArgs = publicationArguments(words);
 		const scoped = !!scopedRepository(policy, actor) || namedScope;
 		const action = /\bpush\b/.test(words.join(" ")) ? "push" : /\bpr\s+create\b/.test(words.join(" ")) ? "pr-create" : /\bpr\s+merge\b/.test(words.join(" ")) ? "pr-merge" : "publication";
 		const deny = (why: string) => denial(policy, scopedRepository(policy, actor), actor, action, identity(actor.cwd)?.branch ?? "", why);
-		const directPublication = gitArgs ? gitPublication(gitArgs) : ghArgs ? !!ghAction(ghArguments(ghArgs)) : false;
+		const directPublication = gitArgs ? gitPublication(gitArgs) : ghArgs ? ghPublication(ghArgs) : false;
 		if (directPublication) {
 			if (unresolvedCwd || words.some(w => /^(?:GIT_[\w]+|GH_REPO|GH_HOST)=/.test(w)) || /\benv\b.*(?:--chdir|\s-C)/.test(command) || /[$`<>]/.test(command)) return deny("Publication has unresolved cwd/environment/expansion/redirection; use an attributable direct command.");
 			const reason = gitArgs ? gitCommand(policy, actor, gitArgs, namedScope) : ghCommand(policy, actor, ghArgs!, namedScope);
@@ -493,7 +535,7 @@ export function assessCommand(command: string, ctx: Context, file = policyPath()
 		const payload = shell?.find((w, i) => i > 0 && /^-[a-z]*c[a-z]*$/.test(shell[i - 1])) ?? evalArgs?.join(" ");
 		if (payload && depth < 4) {
 			const inner = expandedCommands(payload, 0, true);
-			if (inner.some(w => argsOf(w, "git") || argsOf(w, "gh"))) {
+			if (inner.some(w => argsOf(w, "git") || publicationArguments(w))) {
 				const reason = assessCommand(payload, actor, file, depth + 1);
 				if (reason) return reason;
 				continue;
