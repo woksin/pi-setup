@@ -103,12 +103,29 @@ function canonical(path: string): string {
 	while (!existsSync(at) && dirname(at) !== at) { suffix.unshift(basename(at)); at = dirname(at); }
 	try { return join(realpathSync(at), ...suffix); } catch { return resolve(path); }
 }
+const CRITICAL_SOURCES = ["guards.json", "lib/guards.ts", "extensions/guards.ts", "lib/lane-policy.ts", "extensions/lane-policy.ts",
+	"lib/candidate-guard.ts", "extensions/train-guard.ts", "lib/publisher.ts", "lib/publish-request.ts", "lib/publish-scan.ts",
+	"lib/publish-guard.ts", "lib/secret-mask.ts", "extensions/publish.ts", "extensions/publish-guard.ts", "bin/pi-publish"];
+function criticalPaths(): string[] {
+	const agent = dirname(dirname(policyPath()));
+	return CRITICAL_SOURCES.map(path => canonical(join(agent, path)));
+}
+function criticalTarget(candidate: string, target: string): boolean {
+	if (candidate === target) return true;
+	if (target.startsWith(`${candidate}${sep}`)) return true;
+	return candidate.startsWith(`${target}.`);
+}
+function criticalReference(path: string, cwd: string): boolean {
+	const targets = [canonical(policyPath()), ...criticalPaths()];
+	const meta = path.search(/[*?\[]/);
+	if (meta > 0) return targets.some(target => storeWord(path, cwd, target));
+	const candidate = canonical(resolve(cwd, path.replace(/^~(?=\/)/, homedir())));
+	return targets.some(target => criticalTarget(candidate, target));
+}
 export function policyFile(path: string, cwd: string): boolean {
 	const candidate = canonical(resolve(cwd, path.replace(/^~(?=\/)/, homedir())));
 	const dir = canonical(dirname(policyPath()));
-	const agent = dirname(dir);
-	const sources = ["guards.json", "lib/lane-policy.ts", "lib/guards.ts", "extensions/lane-policy.ts", "extensions/guards.ts"].map(p => canonical(join(agent, p)));
-	return candidate === dir || candidate.startsWith(`${dir}${sep}`) || sources.includes(candidate);
+	return candidate === dir || candidate.startsWith(`${dir}${sep}`) || criticalReference(path, cwd);
 }
 function scopedRepository(policy: Policy, ctx?: Context): Repository | undefined {
 	const id = ctx && identity(ctx.cwd);
@@ -133,11 +150,11 @@ export function isSetupWriter(ctx: Context | undefined, file = setupWritersPath(
 		return strings(names) && names.includes(ctx.name);
 	} catch (error: any) { return error.code === "ENOENT" && ctx.name === "PISETUP"; }
 }
-/** The operator-only policy store (policy.json plus its lock/temp files): never writable by a setup writer. */
+/** Operator policy store and critical installed enforcement: never writable by a setup writer. */
 export function policyStore(path: string, cwd: string): boolean {
 	const candidate = canonical(resolve(cwd, path.replace(/^~(?=\/)/, homedir())));
 	const store = canonical(policyPath());
-	return candidate === store || candidate.startsWith(`${store}.`);
+	return [store, ...criticalPaths()].some(path => candidate === path || candidate.startsWith(`${path}.`));
 }
 export function tamperReason(ctx: Context, file = policyPath()): string {
 	const loaded = loadPolicy(file);
@@ -326,7 +343,7 @@ function publicationToken(text: string): boolean {
 	return /\b(?:push|send-pack|http-push|gh|pi-publish)\b|\bpr\s+(?:create|merge|edit|close|reopen|comment|review|ready)\b|\bissue\s+(?:create|edit|close|reopen|comment|delete|transfer|pin|unpin|lock|unlock|develop)\b|\brelease\s+(?:create|edit|delete|upload)\b|\bworkflow\s+(?:run|disable|enable)\b|\brun\s+(?:rerun|cancel|delete)\b/i.test(text)
 		|| /(?:alias\.[\w.-]+\s*(?:=|\s)|remote\.[^\s]+\.pushurl|url\.[^\s]+\.pushInsteadOf)/i.test(text);
 }
-const AUTHORITY_TEXT = /\.pi\/agent\/(?:lane-policy|guards\.json|lib\/(?:lane-policy|guards)\.ts|extensions\/(?:lane-policy|guards)\.ts)/;
+const AUTHORITY_TEXT = /\.pi\/agent\/(?:lane-policy|guards\.json|lib\/(?:lane-policy|candidate-guard|guards|publisher|publish-request|publish-scan|publish-guard|secret-mask)\.ts|extensions\/(?:lane-policy|train-guard|guards|publish|publish-guard)\.ts|bin\/pi-publish)/;
 // Shell programs that only read their file operands (output redirection is checked separately).
 const SHELL_READERS = ["cat", "head", "tail", "wc", "stat", "ls", "grep", "rg", "echo", "printf", "pwd", "readlink", "jq", "diff", "cmp", "shasum", "sha256sum", "md5", "file", "sort", "uniq", "cut"];
 // Commands that may sit next to a heredoc whose body merely mentions an authority path.
@@ -450,16 +467,17 @@ function storeWord(word: string, cwd: string | undefined, store: string): boolea
  * Opaque interpreters whose targets cannot be determined are denied if the command mentions the store in any form.
  */
 function storeAtRisk(command: string, ctx: Context): boolean {
-	const store = canonical(policyPath());
+	const stores = [canonical(policyPath()), ...criticalPaths()];
+	const risk = (word: string, cwd: string | undefined) => stores.some(store => storeWord(word, cwd, store));
 	if (/^apply_patch /.test(command)) {
 		const targets = [...command.matchAll(/\*\*\* (?:Update File|Add File|Delete File|Move to): ?([^\\"\n]+)/g)].map(m => m[1].trim());
-		return targets.some(t => storeWord(t, ctx.cwd, store));
+		return targets.some(t => risk(t, ctx.cwd));
 	}
 	// Structural rule: any word naming the policy dir or policy.json (raw, unquoted, ~/$HOME-expanded) means every segment must be strictly read-only.
 	const plain = (w: string) => w.replace(/[\\'"]/g, "").replace(/^(?:[^/=]*=)?~(?=\/)/, m => m.replace("~", homedir())).replace(/\$\{?HOME\}?/g, homedir());
 	const segments = expandedCommands(command, 0, true);
 	const benign = (x: string) => x.split(`${dirname(policyPath())}/README.md`).join("").split(`${dirname(policyPath())}/setup-writers.json`).join("");
-	const names = (w: string) => [w, plain(w)].map(benign).some(x => x.includes(dirname(policyPath())) || x.includes(".pi/agent/lane-policy") || x.includes("policy.json"));
+	const names = (w: string) => [w, plain(w)].map(benign).some(x => x.includes(dirname(policyPath())) || x.includes(".pi/agent/lane-policy") || x.includes("policy.json") || AUTHORITY_TEXT.test(x) || criticalPaths().some(path => x.includes(path)));
 	if (segments.some(words => words.some(names))) {
 		return !segments.every(words => !words.includes(">") && (words.length === 0 || argsOf(words, "cd") !== undefined || SHELL_READERS.some(r => argsOf(words, r)) || readOnlyForm(words.filter(w => w !== "<")) ));
 	}
@@ -473,11 +491,11 @@ function storeAtRisk(command: string, ctx: Context): boolean {
 			continue;
 		}
 		const rest = words.filter((w, k) => w !== ">" && w !== "<" && words[k - 1] !== "<" && words[k - 1] !== ">");
-		if (words.some((w, k) => w === ">" && words[k + 1] !== undefined && storeWord(words[k + 1], cwd, store))) return true;
+		if (words.some((w, k) => w === ">" && words[k + 1] !== undefined && risk(words[k + 1], cwd))) return true;
 		const i = rest.findIndex(w => !/^[A-Za-z_]\w*=/.test(w));
 		const name = rest[i]?.split("/").pop() ?? "";
-		if (name === "git" && rest.some(w => w === "clean" || w === "rm") && cwd !== undefined && store.startsWith(cwd)) return true;
-		if (PATH_WRITERS.includes(name)) { if (!readOnlyForm(rest.slice(i)) && rest.slice(i + 1).some(w => storeWord(w, cwd, store))) return true; continue; }
+		if (name === "git" && rest.some(w => w === "clean" || w === "rm") && cwd !== undefined && stores.some(store => store.startsWith(cwd!))) return true;
+		if (PATH_WRITERS.includes(name)) { if (!readOnlyForm(rest.slice(i)) && rest.slice(i + 1).some(w => risk(w, cwd))) return true; continue; }
 		if (OPAQUE.test(name) && mention) return true;
 	}
 	return false;

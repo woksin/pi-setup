@@ -182,14 +182,32 @@ test("precedence is session over persisted over env, including explicit on", () 
 	assert.deepEqual(entry("cratis"), { name: "cratis", off: true, source: "session" });
 });
 
-test("all expands in env and session, and on reverses off", () => {
+test("all expands in env and session but excludes publish, and on reverses off", () => {
 	process.env.PI_GUARDS_OFF = " all ";
-	assert.ok(guardStatus().every(status => status.off && status.source === "env"));
+	assert.ok(guardStatus().filter(status => status.name !== "publish").every(status => status.off && status.source === "env"));
+	assert.equal(isGuardOff("publish"), false);
 	setGuards("all", false);
-	assert.ok(guardStatus().every(status => !status.off && status.source === "session"));
+	assert.ok(guardStatus().filter(status => status.name !== "publish").every(status => !status.off && status.source === "session"));
 	setGuards(["all"], true);
-	assert.ok(guardStatus().every(status => status.off));
+	assert.ok(guardStatus().every(status => status.off === (status.name !== "publish")));
 	assert.equal(existsSync(file), false);
+});
+
+test("publish ignores explicit env opt-out; explicit session and persistent switches survive all", () => {
+	process.env.PI_GUARDS_OFF = "publish,wait";
+	assert.equal(isGuardOff("publish"), false);
+	assert.equal(isGuardOff("wait"), true);
+	setGuards(["publish", "all"], true);
+	assert.equal(isGuardOff("publish"), true);
+	setGuards("all", false);
+	assert.equal(isGuardOff("publish"), true);
+	setGuards("publish", false);
+	assert.equal(isGuardOff("publish"), false);
+	setGuards("publish", true, { persist: true });
+	setGuards("all", false, { persist: true });
+	assert.equal(isGuardOff("publish"), true);
+	setGuards("publish", false, { persist: true });
+	assert.equal(isGuardOff("publish"), false);
 });
 
 test("unknown guard throws a clear error before changing any state", () => {
@@ -242,7 +260,7 @@ test("persist round-trip merges settings, replaces selected session values and r
 	assert.equal(result.status, 0, result.stderr);
 	assert.deepEqual(JSON.parse(result.stdout), guardStatus());
 	setGuards("all", true, { persist: true });
-	assert.ok(guardStatus().every(status => status.off && status.source === "persisted"));
+	assert.ok(guardStatus().every(status => status.off === (status.name !== "publish") && status.source === "persisted"));
 	setGuards("all", false, { persist: true });
 	assert.ok(guardStatus().every(status => !status.off && status.source === "persisted"));
 });
@@ -290,7 +308,7 @@ test("persistent named updates retain only persisted values and fill omissions w
 
 test("first persisted write fills every guard with on rather than inheriting env", () => {
 	process.env.PI_GUARDS_OFF = "all";
-	assert.ok(guardStatus().every(status => status.off));
+	assert.ok(guardStatus().every(status => status.off === (status.name !== "publish")));
 	setGuards("wait", false, { persist: true });
 	assert.deepEqual(offOnly(), stored());
 	assert.ok(guardStatus().every(status => !status.off));
@@ -554,9 +572,10 @@ test("/guards status, default all, named lists, persist parsing and footer set/c
 	await app.fire("session_start");
 	assert.deepEqual(app.statuses.at(-1), { key: "guards", text: undefined });
 	await command.handler("", app.ctx);
-	assert.equal(app.notices.at(-1)?.text, GUARD_NAMES.map(name => `${name}: on (default)`).join("\n"));
+	assert.equal(app.notices.at(-1)?.text, `${GUARD_NAMES.map(name => `${name}: on (default)`).join("\n")}\nall excludes publish`);
 	await command.handler("off", app.ctx);
-	assert.ok(guardStatus().every(status => status.off && status.source === "session"));
+	assert.ok(guardStatus().filter(status => status.name !== "publish").every(status => status.off && status.source === "session"));
+	assert.equal(isGuardOff("publish"), false);
 	assert.equal(app.statuses.at(-1)?.text, undefined, "session-only offs are not shown");
 	assert.equal(existsSync(file), false);
 	await command.handler("on all", app.ctx);

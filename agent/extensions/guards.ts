@@ -14,7 +14,7 @@ interface ApprovalRequest {
 	args?: unknown;
 	claim(handler: () => "allow_once" | "deny"): boolean;
 }
-const USAGE = `Usage: /guards [off|on [${GUARD_NAMES.join("|")}|all] [--persist [--reason "text"]]]`;
+const USAGE = `Usage: /guards [off|on [${GUARD_NAMES.join("|")}|all] [--persist [--reason "text"]]] (all excludes publish)`;
 
 /** Whitespace-separated tokens; '…' and "…" group, a backslash escapes the next character. Unmatched quote/trailing backslash → usage error. */
 export function tokenize(input: string): string[] {
@@ -52,12 +52,12 @@ export default function (pi: ExtensionAPI) {
 		const notes = new Map(persistedOffGuards().map(entry => [entry.name, persistedNote(entry)]));
 		const text = guardStatus().map(({ name, off, source }) =>
 			`${name}: ${off ? "off" : "on"} (${source}${notes.has(name) ? `, ${notes.get(name)}` : ""})`).join("\n");
-		if (ctx.hasUI) ctx.ui.notify(text, "info");
-		else console.log(text);
+		if (ctx.hasUI) ctx.ui.notify(`${text}\nall excludes publish`, "info");
+		else console.log(`${text}\nall excludes publish`);
 	};
 
 	pi.registerCommand("guards", {
-		description: `Show or switch agent approval guards: off|on [${GUARD_NAMES.join("|")}|all] [--persist [--reason "text"]]`,
+		description: `Show or switch agent approval guards: off|on [${GUARD_NAMES.join("|")}|all] [--persist [--reason "text"]]; all excludes publish`,
 		getArgumentCompletions: prefix => {
 			const match = /^(.*\s)?(\S*)$/.exec(prefix);
 			if (!match) return null;

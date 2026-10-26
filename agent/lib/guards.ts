@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-export const GUARD_NAMES = ["cratis", "mcp", "wait", "subagent-results", "context", "lane-policy", "secrets", "dotnet", "trains"] as const;
+export const GUARD_NAMES = ["cratis", "mcp", "wait", "subagent-results", "context", "lane-policy", "secrets", "dotnet", "trains", "publish"] as const;
 export type GuardName = (typeof GUARD_NAMES)[number];
 type Values = Partial<Record<GuardName, boolean>>;
 export interface GuardMeta { at?: string; reason?: string }
@@ -33,7 +33,7 @@ function namesOf(names: string | readonly string[]): GuardName[] {
 			throw new Error(`Unknown guard '${name}'. Expected ${GUARD_NAMES.join(", ")} or all.`);
 		}
 	}
-	return supplied.includes("all") ? [...GUARD_NAMES] : [...new Set(supplied)] as GuardName[];
+	return [...new Set(supplied.flatMap(name => name === "all" ? GUARD_NAMES.filter(guard => guard !== "publish") : [name]))] as GuardName[];
 }
 
 function warn(state: State, message: string): void {
@@ -49,7 +49,9 @@ function state(): State {
 		shared[STATE_KEY] = initial;
 		if (process.env.PI_GUARDS_OFF?.trim()) {
 			try {
-				for (const name of namesOf(process.env.PI_GUARDS_OFF)) initial.env[name] = true;
+				const names = namesOf(process.env.PI_GUARDS_OFF);
+				if (names.includes("publish")) warn(initial, "PI_GUARDS_OFF cannot disable publish; only the user may use /guards off publish. all excludes publish.");
+				for (const name of names.filter(name => name !== "publish")) initial.env[name] = true;
 			} catch (error) {
 				warn(initial, `${(error as Error).message} Ignoring PI_GUARDS_OFF; guards default to on.`);
 			}

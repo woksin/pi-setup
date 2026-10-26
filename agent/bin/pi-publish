@@ -1,0 +1,14 @@
+#!/usr/bin/env node
+import { cliMain } from '../extensions/publish.ts';
+const controller = new AbortController();
+const abort = () => controller.abort();
+process.once('SIGINT', abort);
+process.once('SIGTERM', abort);
+try {
+  const result = await cliMain(process.argv.slice(2), { signal: controller.signal });
+  process.stdout.write(`${result.text.trimEnd()}\n`);
+  process.exitCode = result.exitCode;
+} finally {
+  process.removeListener('SIGINT', abort);
+  process.removeListener('SIGTERM', abort);
+}
