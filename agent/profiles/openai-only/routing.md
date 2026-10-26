@@ -6,7 +6,7 @@ Delegate by agent type; each type pins its model and thinking level. Never pass 
 
 ### Practical defaults
 - Main session: **GPT-6.1 Sol, high** for coding and orchestration. Use medium for straightforward questions; escalate to **GPT-6 Astra, high** for named hard design, debugging or reasoning tasks.
-- Routine search and mechanical work: Sol low. Synthesis, operations and cleanup: Sol medium/low. Implementation: Sol high with explicit scope and test gates.
+- Routine search, mechanical work, operations legwork, copy editing and source gathering: GPT-6.1 Terra (low, or medium for prose-editor and scout). Terra scores 4–6 points below Sol on Artificial Analysis (Coding Agent Index 48 vs 54) at about 44% lower cost per task. It has a much lower hallucination rate (38%, down from 88%), and the ChatGPT/Codex allowance covers substantially more Terra work than Sol work. OpenAI keeps Sol and Astra for the hardest coding. Synthesis, operations and cleanup: Sol medium/low. Implementation: Sol high with explicit scope and test gates.
 - Behaviour-preserving implementation, architecture and substantial writing: Astra medium/high. Reserve xhigh for a specific hard reasoning problem or deep review, not every task.
 - Keep model IDs explicit. Do not choose a newer-looking alias solely by name or assert benchmark advantages without evidence. GPT-6 Luna remains an optional manually selected alternative, not an unvalidated default worker.
 
@@ -16,17 +16,17 @@ Delegate by agent type; each type pins its model and thinking level. Never pass 
 - `content-writer`: GPT-6 Astra, high
 - `cratis-cli`: GPT-6.1 Sol, high
 - `doc-writer`: GPT-6 Astra, medium
-- `Explore`: GPT-6.1 Sol, low
+- `Explore`: GPT-6.1 Terra, low
 - `general-purpose`: GPT-6.1 Sol, high
-- `grunt`: GPT-6.1 Sol, low
+- `grunt`: GPT-6.1 Terra, low
 - `implementer`: GPT-6.1 Sol, high
-- `ops`: GPT-6.1 Sol, low
+- `ops`: GPT-6.1 Terra, low
 - `opus-implementer`: GPT-6 Astra, high (legacy agent name retained for compatibility)
 - `Plan`: GPT-6 Astra, high
 - `planner`: GPT-6 Astra, high
-- `prose-editor`: GPT-6.1 Sol, medium
+- `prose-editor`: GPT-6.1 Terra, medium
 - `reviewer`: GPT-6 Astra, high
-- `scout`: GPT-6.1 Sol, medium
+- `scout`: GPT-6.1 Terra, medium
 - `second-opinion`: GPT-6 Astra, xhigh
 - `sol-reviewer`: GPT-6.1 Sol, high
 

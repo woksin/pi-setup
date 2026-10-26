@@ -9,7 +9,8 @@
     "anthropic/claude-haiku-5-5",
     "openai-codex/gpt-6.1-sol",
     "openai-codex/gpt-6-astra",
-    "openai-codex/gpt-6-luna"
+    "openai-codex/gpt-6-luna",
+    "openai-codex/gpt-6.1-terra"
   ],
   "compaction": {
     "enabled": false,
@@ -41,7 +42,8 @@
     "openai-codex/gpt-6-astra": "high",
     "openai-codex/gpt-6-luna": "low",
     "anthropic/claude-sonnet-5-5": "medium",
-    "openai-codex/gpt-6.1-sol": "high"
+    "openai-codex/gpt-6.1-sol": "high",
+    "openai-codex/gpt-6.1-terra": "medium"
   },
   "collapseChangelog": true,
   "cacheWarming": "off",

@@ -5,7 +5,7 @@ description: 'Fast read-only search agent for locating code. Use it to find file
 tools: read, bash, grep, find, ls
 extensions: [cratis-cli-guard, provider-fallback, output-cap, observation-mask]
 skills: false
-model: openai-codex/gpt-6.1-sol
+model: openai-codex/gpt-6.1-terra
 thinking: low
 prompt_mode: replace
 ---
