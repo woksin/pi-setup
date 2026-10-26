@@ -82,6 +82,7 @@ class PhaseTests(unittest.TestCase):
             for name, value in (("PhaseLedger", None), ("work_identity", identity),
                                 ("test_fingerprint", "synthetic")):
                 stack.enter_context(patch.object(pi_phase, name, return_value=value))
+            stack.enter_context(patch.object(pi_phase, "cleanup_snapshot"))
             alive = stack.enter_context(patch.object(pi_phase, "group_alive", return_value=True))
             stack.enter_context(patch.object(pi_phase.subprocess, "Popen", return_value=producer))
             stack.enter_context(patch.object(pi_phase.os, "write", return_value=1))
@@ -198,6 +199,7 @@ class PhaseTests(unittest.TestCase):
     def test_eperm_probe_live_unknown_and_zombie_distinctions(self):
         cases = (("12 99 S\n", True), ("12 99 Z\n", False), ("", False))
         with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")), \
+                patch.object(pi_phase, "cleanup_snapshot"), \
                 patch.object(pi_phase.time, "sleep"):
             for listing, live in cases:
                 with self.subTest(listing=listing), patch.object(pi_phase.subprocess, "run",
@@ -254,6 +256,7 @@ class PhaseTests(unittest.TestCase):
                 patch.object(pi_phase.subprocess, "run", side_effect=[
                     subprocess.TimeoutExpired("ps", 2), SimpleNamespace(stdout="12 99 Z\n"),
                     SimpleNamespace(stdout="12 99 Z+\n")]) as probe, \
+                patch.object(pi_phase, "cleanup_snapshot"), \
                 patch.object(pi_phase.time, "sleep"):
             pi_phase.stop_group(99)
         self.assertEqual([entry.kwargs["timeout"] for entry in probe.call_args_list], [2, 5, 2])
@@ -263,6 +266,7 @@ class PhaseTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")) as kill, \
                 patch.object(pi_phase.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 2)) as probe, \
+                patch.object(pi_phase, "cleanup_snapshot"), \
                 patch.object(pi_phase.time, "sleep"), redirect_stdout(output):
             with self.assertRaises(PermissionError):
                 pi_phase.stop_group(99)
@@ -274,6 +278,7 @@ class PhaseTests(unittest.TestCase):
     def test_eperm_live_probe_does_not_retry(self):
         with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")) as kill, \
                 patch.object(pi_phase.subprocess, "run", return_value=SimpleNamespace(stdout="12 99 S\n")) as probe, \
+                patch.object(pi_phase, "cleanup_snapshot"), \
                 patch.object(pi_phase.time, "sleep"):
             with self.assertRaises(PermissionError):
                 pi_phase.stop_group(99)
@@ -307,6 +312,7 @@ class PhaseTests(unittest.TestCase):
                     stack.enter_context(patch.object(pi_phase, "work_identity", return_value=identity))
                     stack.enter_context(patch.object(pi_phase, "test_fingerprint", return_value="synthetic"))
                     stack.enter_context(patch.object(pi_phase.subprocess, "Popen", return_value=producer))
+                    stack.enter_context(patch.object(pi_phase, "cleanup_snapshot"))
                     probe = stack.enter_context(patch.object(pi_phase.subprocess, "run", side_effect=listings))
                     stack.enter_context(patch.object(pi_phase.os, "write", return_value=1))
                     stack.enter_context(patch.object(pi_phase.os, "waitid", return_value=SimpleNamespace(
