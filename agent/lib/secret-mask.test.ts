@@ -254,6 +254,20 @@ test("loopback exemption permits only known database paths and benign query opti
 test("URL redaction preserves scheme, username, host and path", () => {
 	assert.equal(scan("mongodb://admin:abc@local/db").text, "mongodb://admin:[REDACTED:url-credentials]@local/db");
 });
+test("C# verbatim identifiers after interpolated URLs are not URL credentials", () => {
+	for (const text of [
+		'var u = $"http://localhost:{port}",@event;',
+		'Get($"http://localhost:{port}",@event)',
+		'new Uri($"http://h:{port}"+@event)',
+		'x($"http://localhost:{port}",@event => 1)',
+		'Get("http://localhost:8080",@event)',
+	]) assert.deepEqual(scan(text), { text, count: 0, kinds: [], skipped: false }, text);
+});
+test("URL credentials next to C# code are still redacted", () => {
+	const out = scan('var u = new Uri("mongodb://admin:abc@local/db"); Handle(@event);');
+	assert.equal(out.text, 'var u = new Uri("mongodb://admin:[REDACTED:url-credentials]@local/db"); Handle(@event);');
+	assert.deepEqual(out.kinds, ["url-credentials"]);
+});
 test("connection redaction preserves key, quotes, separators and unrelated values", () => {
 	assert.equal(scan('"MONGODB_PASSWORD": "' + MIX + '", "name": "local"').text,
 		'"MONGODB_PASSWORD": "[REDACTED:connection-string]", "name": "local"');
