@@ -4,20 +4,22 @@ import { simpleCommands } from "../extensions/wait-guard.ts";
 
 export type PublicationCode = "gh-publication" | "http-publication" | "unsupported-env";
 export const PUBLICATION_REASON = "publish guard: use the publish tool for GitHub text. It scans the exact captured payload before sending. Rewrite refused text; do not evade checks. Only the user may disable this guard with /guards off publish.";
-interface Executable { words: string[]; unsupported?: boolean }
-const assignment = (word: string) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(word);
-const help = (word: string) => ["--help", "--version"].includes(word);
-function envOperand(word: string): boolean { return ["-u", "--unset", "-C", "--chdir"].includes(word); }
-function envSkip(word: string): boolean {
+type Word = string;
+type Words = Word[];
+interface Executable { words: Words; unsupported?: boolean }
+const assignment = (word: Word) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(word);
+const help = (word: Word) => ["--help", "--version"].includes(word);
+function envOperand(word: Word): boolean { return ["-u", "--unset", "-C", "--chdir"].includes(word); }
+function envSkip(word: Word): boolean {
 	return assignment(word) || ["-i", "--ignore-environment"].includes(word) || /^(?:--(?:unset|chdir)=|-[uC].+)/.test(word);
 }
-function envStep(word: string, remaining: number): number {
+function envStep(word: Word, remaining: number): number {
 	if (envSkip(word)) return 1;
 	if (envOperand(word)) return remaining > 1 ? 2 : -1;
 	// Unknown flags (notably -S/--split-string) are deliberately not interpreted.
 	return word.startsWith("-") ? -1 : 0;
 }
-function envCommand(words: string[]): Executable {
+function envCommand(words: Words): Executable {
 	let index = 1;
 	while (index < words.length) {
 		const word = words[index];
@@ -30,14 +32,14 @@ function envCommand(words: string[]): Executable {
 	}
 	return { words: [] };
 }
-function wrapperHelp(word: string): boolean { return help(word) || ["-v", "-V"].includes(word); }
-function wrapperIndex(words: string[], name: string): number {
+function wrapperHelp(word: Word): boolean { return help(word) || ["-v", "-V"].includes(word); }
+function wrapperIndex(words: Words, name: string): number {
 	let index = 1;
 	while (["--", "-p", "-c", "-l"].includes(words[index])) index++;
 	if (name === "exec" && words[index] === "-a") index += 2;
 	return index;
 }
-function wrapper(words: string[]): Executable | undefined {
+function wrapper(words: Words): Executable | undefined {
 	const name = basename(words[0] ?? "");
 	if (name === "env") return envCommand(words);
 	if (name === "rtk" && words[1] === "proxy") return { words: words.slice(2) };
@@ -47,13 +49,13 @@ function wrapper(words: string[]): Executable | undefined {
 }
 /** Shell reserved words that can precede a command in executable position; the command after them still runs. */
 const CONTROL_WORDS = new Set(["if", "then", "elif", "else", "while", "until", "do", "!", "{", "time"]);
-const prefixWord = (word: string) => assignment(word) || CONTROL_WORDS.has(word);
-function skipPrefixes(words: string[]): string[] {
+const prefixWord = (word: Word) => assignment(word) || CONTROL_WORDS.has(word);
+function skipPrefixes(words: Words): string[] {
 	let rest = words;
 	while (rest.length && prefixWord(rest[0])) rest = rest.slice(1);
 	return rest;
 }
-function executable(tokens: string[]): Executable {
+function executable(tokens: Words): Executable {
 	let words = tokens;
 	for (let depth = 0; depth < 8; depth++) {
 		words = skipPrefixes(words);
@@ -64,7 +66,7 @@ function executable(tokens: string[]): Executable {
 	}
 	return { words: [], unsupported: true };
 }
-function ghCommand(words: string[]): { args: string[]; unknown?: boolean } {
+function ghCommand(words: Words): { args: Words; unknown?: boolean } {
 	let index = 1;
 	while (words[index]?.startsWith("-")) {
 		const word = words[index++];
@@ -75,8 +77,8 @@ function ghCommand(words: string[]): { args: string[]; unknown?: boolean } {
 	}
 	return { args: words.slice(index) };
 }
-const textFlag = (word: string) => /^--(?:title|body|body-file|comment|subject)(?:=|$)/.test(word) || /^-[^-]*[tbFc]/.test(word);
-function apiWrite(args: string[]): boolean {
+const textFlag = (word: Word) => /^--(?:title|body|body-file|comment|subject)(?:=|$)/.test(word) || /^-[^-]*[tbFc]/.test(word);
+function apiWrite(args: Words): boolean {
 	let method: string | undefined, payload = false;
 	for (let index = 1; index < args.length; index++) {
 		const word = args[index];
@@ -87,7 +89,7 @@ function apiWrite(args: string[]): boolean {
 	}
 	return method === undefined ? payload : method.toUpperCase() !== "GET";
 }
-function ghWrite(words: string[]): boolean {
+function ghWrite(words: Words): boolean {
 	const { args, unknown } = ghCommand(words);
 	if (unknown) return true;
 	const [family, verb] = args;
@@ -98,25 +100,25 @@ function ghWrite(words: string[]): boolean {
 	if (["create", "comment"].includes(verb)) return true;
 	return ["edit", "review", "close", "reopen", "merge"].includes(verb) && args.slice(2).some(textFlag);
 }
-function githubUrl(value: string): boolean {
+function githubUrl(value: Word): boolean {
 	try { return ["api.github.com", "uploads.github.com"].includes(new URL(value).hostname); }
 	catch { return false; }
 }
 const HTTP_VALUES = new Set(["--header", "--output", "--user", "--config", "--proxy", "--user-agent", "--referer", "--connect-timeout", "--max-time"]);
 /** Short options that consume a value (rest of the cluster or the next word), per tool. */
 const SHORT_VALUES: Record<string, string> = { curl: "AbcCdDeEFHKmoPQrTuUwxXyYzt", wget: "OoaeiBPTtwQUlIXDRAY" };
-function httpPayload(word: string): boolean {
+function httpPayload(word: Word): boolean {
 	return /^--(?:data(?:-[a-z]+)?|json|form|upload-file|post-data|post-file|body-data|body-file)(?:=|$)/.test(word);
 }
 interface HttpState { tool: string; target: boolean; write: boolean }
-const readMethod = (value: string) => ["GET", "HEAD"].includes(value.toUpperCase());
-function clusterEffect(state: HttpState, flag: string, value: string): void {
+const readMethod = (value: Word) => ["GET", "HEAD"].includes(value.toUpperCase());
+function clusterEffect(state: HttpState, flag: Word, value: Word): void {
 	if (state.tool !== "curl") return;
 	if (flag === "X") state.write ||= !readMethod(value);
 	else if ("dFT".includes(flag)) state.write = true;
 }
 /** Parses a `-sXPOST`-style cluster left to right; the first value option ends it. Returns words consumed. */
-function httpCluster(state: HttpState, word: string, next: string): number {
+function httpCluster(state: HttpState, word: Word, next: Word): number {
 	const valued = SHORT_VALUES[state.tool] ?? "";
 	const found = [...word.slice(1)].findIndex(flag => valued.includes(flag));
 	if (found < 0) return 1;
@@ -124,13 +126,13 @@ function httpCluster(state: HttpState, word: string, next: string): number {
 	clusterEffect(state, word[found + 1], attached || next);
 	return attached ? 1 : 2;
 }
-function httpMethod(state: HttpState, word: string, next: string): number {
+function httpMethod(state: HttpState, word: Word, next: Word): number {
 	if (["--request", "--method"].includes(word)) { state.write ||= !readMethod(next); return 2; }
 	if (!/^--(?:request|method)=/.test(word)) return 0;
 	state.write ||= !readMethod(word.replace(/^--(?:request|method)=/, ""));
 	return 1;
 }
-function httpLong(state: HttpState, word: string, next: string): number {
+function httpLong(state: HttpState, word: Word, next: Word): number {
 	const method = httpMethod(state, word, next);
 	if (method) return method;
 	if (httpPayload(word)) { state.write = true; return word.includes("=") ? 1 : 2; }
@@ -139,11 +141,11 @@ function httpLong(state: HttpState, word: string, next: string): number {
 	state.target ||= githubUrl(word.replace(/^--url=/, ""));
 	return 1;
 }
-function httpArgument(cursor: { words: string[]; index: number; state: HttpState }): number {
+function httpArgument(cursor: { words: Words; index: number; state: HttpState }): number {
 	const { words, index, state } = cursor, word = words[index], next = words[index + 1] ?? "";
 	return /^-[^-]/.test(word) ? httpCluster(state, word, next) : httpLong(state, word, next);
 }
-function httpWrite(words: string[]): boolean {
+function httpWrite(words: Words): boolean {
 	const state: HttpState = { tool: basename(words[0] ?? ""), target: false, write: false };
 	for (let index = 1; index < words.length;) index += httpArgument({ words, index, state });
 	return state.target && state.write;
