@@ -25,10 +25,15 @@ export function probeCwd(options: ProbeOptions = {}): CwdProbe {
 	}
 }
 
+/** POSIX shell single-quoting, so the recovery command can be pasted as is for any path. Plain paths stay unquoted. */
+export function shellQuote(path: string): string {
+	return /^[A-Za-z0-9_@%+=:,./-]+$/.test(path) ? path : `'${path.replaceAll("'", `'\\''`)}'`;
+}
+
 /** One line naming the cause and the recovery. */
 export function recoveryText(sessionCwd: string | undefined, sessionCwdExists = true): string {
 	const cause = "pi's working directory is stale (process.cwd() fails with ENOENT), so subagents and tools that read it will fail.";
 	if (!sessionCwd) return `${cause} Exit pi and start it again from an existing directory (\`/reload\` does not fix it).`;
 	if (!sessionCwdExists) return `${cause} The session directory ${sessionCwd} no longer exists: exit pi and start it from another directory (\`/reload\` does not fix it).`;
-	return `${cause} Exit pi, then: cd ${sessionCwd} && pi -c (\`/reload\` does not fix it).`;
+	return `${cause} Exit pi, then: cd ${shellQuote(sessionCwd)} && pi -c (\`/reload\` does not fix it).`;
 }

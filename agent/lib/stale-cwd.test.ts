@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { probeCwd, recoveryText, safeCwd } from "./stale-cwd.ts";
+import { probeCwd, recoveryText, safeCwd, shellQuote } from "./stale-cwd.ts";
 
 const enoent = () => { throw Object.assign(new Error("ENOENT: process.cwd failed"), { code: "ENOENT" }); };
 
@@ -16,6 +16,13 @@ test("cwd throws and the session path exists: stale, recovery names the path", (
 	assert.match(text, /exit pi/i);
 	assert.match(text, /\/reload/);
 	assert.ok(!text.includes("\n"));
+});
+
+test("the recovery command quotes paths with spaces or quotes so it can be pasted", () => {
+	assert.equal(shellQuote("/work/a-b_c.1"), "/work/a-b_c.1");
+	assert.equal(shellQuote("/work/my repo"), "'/work/my repo'");
+	assert.equal(shellQuote("/work/it's"), "'/work/it'\\''s'");
+	assert.match(recoveryText("/work/my repo", true), /cd '\/work\/my repo' && pi -c/);
 });
 
 test("cwd throws and the session path is missing: stale, text says the directory is gone", () => {
