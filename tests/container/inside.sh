@@ -62,7 +62,7 @@ step "S3b fresh-HOME PATH: pi resolves in a new login shell"
 bash -lic 'pi --version' 2>&1 | tee "$HOME/pi-version.log"
 grep -qE "[0-9]+\.[0-9]+\.[0-9]+" "$HOME/pi-version.log" || fail "S3b: pi --version did not resolve in a new login shell"
 ls "$HOME"/.bashrc.pi-setup-bak-* >/dev/null 2>&1 || ls "$HOME"/.bashrc >/dev/null 2>&1 || fail "S3b: no shell profile"
-node_major="$(node -p 'process.versions.node.split(".")[0]')"
+node_major="$("$HOME/.local/bin/node" -p 'process.versions.node.split(".")[0]')"
 [ "$node_major" -ge 26 ] || fail "S3b: Node $node_major does not satisfy @woksin/pi-orch (needs >=26)"
 
 step "S4 re-run: safe, fast, quiet"
