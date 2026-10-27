@@ -1890,10 +1890,17 @@ class WorktreeLease:
             self.info["pgid"] = pgid
             save(self.path.with_suffix(".json"), self.info)
 
+    def retire_group(self):
+        if not self.inherited:
+            # The caller verified this producer group empty: its numeric id can be reused.
+            self.info.pop("pgid", None)
+            save(self.path.with_suffix(".json"), self.info)
+        self.group_path.unlink(missing_ok=True)
+
     def close(self, safe):
         try:
             if safe:
-                self.group_path.unlink(missing_ok=True)
+                self.retire_group()
         finally:
             # Descendants can still own the description and need the holder identity.
             # Leave holder metadata for the next successful independent claimant.

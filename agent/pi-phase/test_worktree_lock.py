@@ -291,6 +291,33 @@ while not (root/'escaped.started').exists(): time.sleep(.01)
         code, output = self.done(self.phase("C", command=self.job("C", .01)))
         self.assertEqual(code, 0, output)
 
+    def test_safe_completion_ignores_modeled_reuse_of_retired_producer_pgid(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        dead.wait(timeout=3)
+        path, info_path, _ = pi_phase.worktree_paths(self.state, os.path.realpath(self.repo))
+        info = dict(token="retired", root=os.path.realpath(self.repo), label="retired")
+        lease = pi_phase.WorktreeLease(path, pi_phase.lock_file(path), info)
+        lease.publish(dead.pid)
+        safe = pi_phase.group_alive(pi_phase.metadata(info_path)) is False
+        self.assertTrue(safe)
+        lease.close(safe)
+        self.assertFalse(pi_phase.readonly_busy(path))
+        self.assertEqual(list(pi_phase.worktree_group_paths(path)), [])
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(5)"], start_new_session=True)
+        self.children.append(unrelated)
+        original_probe = pi_phase.group_alive
+
+        def recycled_probe(record):
+            if record.get("pgid") == dead.pid:
+                return original_probe(dict(pgid=unrelated.pid))
+            return original_probe(record)
+
+        with patch.object(pi_phase, "group_alive", side_effect=recycled_probe):
+            self.assertFalse(pi_phase.worktree_groups_alive(path, pi_phase.metadata(info_path)))
+        retained = pi_phase.metadata(info_path)
+        self.assertEqual((retained["token"], retained["root"]), (info["token"], info["root"]))
+        self.assertNotIn("pgid", retained)
+
     def test_unknown_nested_group_is_guarded_without_parent_metadata(self):
         path, _ = self.hold()
         directory = path.with_suffix(".groups")
@@ -352,10 +379,11 @@ while not (root/'escaped.started').exists(): time.sleep(.01)
         self.assert_independent_waits(self.descriptor_hints(path, separate), (separate,))
 
     def test_inherited_close_does_not_unlock_parent(self):
-        path, fd = self.hold()
+        path, fd = self.hold(pgid=os.getpgrp())
         b = self.phase("B", env=self.descriptor_hints(path, fd), pass_fds=(fd,), command=self.job("B", .01))
         code, output = self.done(b)
         self.assertEqual(code, 0, output)
         self.assertIn("worktree lock inherited", output)
         self.assertTrue(pi_phase.readonly_busy(path))
         self.assertEqual(self.holder()["token"], "external")
+        self.assertEqual(self.holder()["pgid"], os.getpgrp())
