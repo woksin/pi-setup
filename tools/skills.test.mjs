@@ -24,6 +24,7 @@ const { parseFrontmatter, loadSkillsFromDir } = pi;
 
 // Reviewed trigger hints. A regression guard against restoring summary prefixes, not semantic certification.
 const EXPECTED = {
+  "report-setup-issue": "Use when a reproducible defect or misleading output comes from the pi setup, its bundled tools, skills, guards, profiles or packages, rather than project code or user error.",
   "sol-loop": 'Use when the user says "sol loop".',
   "ai-work-lifecycle": "Use before creating disposable task outputs, running verification that leaves local artifacts, or closing a task with temporary artifacts.",
   "dev-machine-performance": "Use when local gates or phase queues are slow, the machine is swapping, or Docker shows memory pressure. Not for application-runtime performance tuning.",
@@ -55,6 +56,12 @@ test("descriptions equal the reviewed invocation hints", () => {
   for (const [name, description] of Object.entries(EXPECTED)) {
     assert.equal(skills.find((s) => s.name === name)?.description, description, name);
   }
+});
+
+test("report-setup-issue keeps ownership, authorization and redaction explicit", () => {
+  const { body } = readSkill("report-setup-issue");
+  for (const owner of ["woksin/pi-setup", "woksin/pi-jobs", "woksin/pi-recover", "woksin/pi-context-budget", "woksin/pi-orch", "gotgenes/pi-anthropic-auth", "tintinweb/pi-subagents", "vigolium/piolium", "dondai44423/donsetch", "0xPlayerOne/pi-browser-use", "nicobailon/pi-mcp-adapter", "nicobailon/pi-web-access", "earendil-works/pi", "codescene-oss/codescene-mcp-server"]) assert.ok(body.includes(owner), owner);
+  for (const text of ["gh issue list", "--state all", "gh issue comment", "standing user", "explicit", "secrets", "tokens", "personal paths", "private repo names", "session content", "Never patch the live install", "## What happened", "## Expected", "## Versions"]) assert.ok(body.includes(text), text);
 });
 
 test("the sol-loop trigger is verbatim and its license ships with it", () => {

@@ -60,6 +60,13 @@ test("flags that do not belong to the command are errors", () => {
   }
 });
 
+test("report accepts its component and open flags only", () => {
+  const o = ok(["install", "report", "--component", "pi-jobs", "--open"]);
+  assert.deepEqual([o.command, o.component, o.open], ["report", "pi-jobs", true]);
+  assert.equal(ok(["report"]).component, "pi-setup");
+  for (const argv of [["report", "--component"], ["report", "--fix"], ["report", "--json"], ["--open"], ["--component", "pi-jobs"], ["doctor", "--open"]]) assert.equal(parseArgs(argv, "/w").ok, false, argv.join(" "));
+});
+
 test("--keep needs a non-negative integer and --ref cannot look like an option", () => {
   for (const argv of [["backups", "prune", "--keep", "-1"], ["backups", "prune", "--keep", "x"], ["backups", "prune", "--keep"], ["update", "--ref", "-x"], ["update", "--ref"]]) {
     assert.ok(!parseArgs(argv, "/w").ok, argv.join(" "));

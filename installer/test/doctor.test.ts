@@ -48,6 +48,16 @@ test("exit mapping includes skips", () => {
   for (const [status, code] of [["ok", 0], ["skip", 0], ["warn", 1], ["fail", 2]] as const) assert.equal(doctorExitCode([{ id: "a", title: "a", status, detail: "a" }]), code);
 });
 
+test("doctor points setup failures to report, without adding a pointer to green output", async () => {
+  const f = fixture();
+  assert.equal(await main(["doctor"], f.ctx), 0);
+  assert.doesNotMatch(f.out.join("\n"), /Setup defect\?/);
+  f.out.length = 0;
+  unlinkSync(f.file);
+  assert.equal(await main(["doctor"], f.ctx), 2);
+  assert.match(f.out.join("\n"), /Setup defect\?.*report.*https:\/\/github.com\/woksin\/pi-setup\/issues/);
+});
+
 test("green JSON is one object; calls are bounded and restricted; HOME and guards stay untouched", async () => {
   const f = fixture();
   f.put("guards.json", '{"off":{"mcp":true}}'); f.put("guards.meta.json", "canary");

@@ -439,6 +439,10 @@ Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subage
 - The CodeScene skills (see above).
 - `user.json`: operator identity and repositories root are local install settings, never synced into this repo.
 
+## Reporting problems
+
+Run `./install.sh report` for local versions and the target repository (default: [woksin/pi-setup](https://github.com/woksin/pi-setup/issues)). Use `--component pi-jobs` (or another package name) to select its owner; `--open` opens a prefilled issue in your browser via `gh`. Without `--open`, no network calls are made. Search for duplicates first and remove secrets, tokens, personal paths, private repo names and session content before sharing. The installed `report-setup-issue` skill guides agents through this; `woksin/*` reports are standing-authorized, while third-party/upstream reports need your OK.
+
 ## Troubleshooting
 
 **Subagents or tools fail within milliseconds with `ENOENT: process.cwd failed`, and pi shows "stale cwd".** The pi process's working directory went stale (the directory was deleted or replaced while pi kept running), even if the path exists again. `/reload` does not change a process's cwd. Exit pi, then run `cd <project path> && pi -c`. The `stale-cwd` extension shows this warning at session start.
