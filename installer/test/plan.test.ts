@@ -100,6 +100,12 @@ test("a dangling skills symlink does not crash the plan", () => {
   assert.ok(!plan(h).some((a) => a.op === "symlink" && a.path.endsWith("/skills/ai-work-lifecycle")));
 });
 
+test("report-setup-issue is copied to ~/.agents/skills", async () => {
+  const h = home();
+  await apply(ctxFor(h), plan(h), opts);
+  assert.equal(readFileSync(join(h, ".agents/skills/report-setup-issue/SKILL.md"), "utf8"), readFileSync(join(REPO, "skills/report-setup-issue/SKILL.md"), "utf8"));
+});
+
 test("sol-loop ships SKILL.md and its LICENSE to ~/.agents/skills", async () => {
   const h = home();
   await apply(ctxFor(h), plan(h), opts);

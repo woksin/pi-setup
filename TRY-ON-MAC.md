@@ -124,6 +124,7 @@ It asks which repositories and issues or goals to work on, prepares a separate w
 
 - **`command not found` after step 4:** quit Terminal completely (`⌘ Q`), open it again and retry. If it still fails, run step 4 again, then `cd ~/pi-setup && ./install.sh`.
 - Run `cd ~/pi-setup && ./install.sh doctor`. It tells you what is missing and how to fix it.
+- For setup bugs, run `cd ~/pi-setup && ./install.sh report` and open an issue at https://github.com/woksin/pi-setup/issues. Search for duplicates first; remove secrets, tokens, personal paths, private repo names and session content before sharing.
 - Re-running `./install.sh` is always safe: it continues where it stopped.
 - The installer writes a log to `~/.local/state/pi-setup/install.log`. Send it, together with the doctor output, to whoever shared this guide with you.
 
