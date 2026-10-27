@@ -59,6 +59,8 @@ function gitProbe({ ctx, args }: Probe): RunResult {
 function runProbe(probe: Probe): RunResult {
   const { cmd, args } = probe;
   if (args.length === 1 && args[0] === "--version") return result({ stdout: cmd === "python3" ? "Python 3.12.0" : "1.4.0" });
+  if (cmd === "id") return result({ stdout: "1000\n" });
+  if (cmd === "npm" && args[0] === "prefix") return result({ stdout: "/nonexistent/prefix\n" });
   if (cmd === "gh") return githubProbe(probe);
   if (cmd === "pi") return piProbe(probe);
   if (cmd === "git") return gitProbe(probe);

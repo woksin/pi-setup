@@ -3,7 +3,8 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import type { Ctx } from "./types.ts";
 
 export function missingBinDirs(ctx: Ctx): string[] {
-  const paths = (ctx.env.PATH ?? "").split(delimiter).map(p => resolve(ctx.cwd, p));
+  // The bootstrap may have prepended directories for this run only; the user's own shell does not have them.
+  const paths = (ctx.env.PI_SETUP_USER_PATH ?? ctx.env.PATH ?? "").split(delimiter).map(p => resolve(ctx.cwd, p));
   return [".local/bin", ".pi/agent/bin"].filter(p => !paths.includes(join(ctx.home, p)));
 }
 

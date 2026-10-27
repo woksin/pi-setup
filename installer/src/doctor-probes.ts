@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { installHint, listModels, parseAuthStatus, probeProvider } from "./detect.ts";
+import { listModels, parseAuthStatus, probeProvider } from "./detect.ts";
+import { installCommand } from "./prereqs.ts";
 import { readJson, setupCmd } from "./doctor-checks.ts";
 import type { DoctorFacts } from "./doctor-checks.ts";
 import type { DoctorCheck } from "./doctor.ts";
@@ -15,7 +16,7 @@ const skippedRun: RunResult = { code: null, stdout: "", stderr: "", timedOut: fa
 export function pythonVersionCheck(ctx: Ctx, version?: string): DoctorCheck {
   const match = /^Python (\d+)\.(\d+)\b/.exec(version ?? "");
   const supported = match && (Number(match[1]) > 3 || (Number(match[1]) === 3 && Number(match[2]) >= 9));
-  return result("python", supported ? "ok" : "warn", `${version || "Python version unknown"}; pi-phase requires Python >=3.9 on macOS/Linux`, installHint(ctx.platform, "python3"));
+  return result("python", supported ? "ok" : "warn", `${version || "Python version unknown"}; pi-phase requires Python >=3.9 on macOS/Linux`, installCommand(ctx, "python3"));
 }
 
 async function python(ctx: Ctx): Promise<DoctorCheck> {
@@ -103,12 +104,12 @@ export async function gatherFacts(baseCtx: Ctx, manifest?: Manifest): Promise<{ 
     python(ctx),
   ]);
   let pi: DoctorCheck;
-  if (!hasPi) pi = result("pi", "fail", "not on PATH", installHint(ctx.platform, "pi"));
+  if (!hasPi) pi = { ...result("pi", "fail", "not on PATH", installCommand(ctx, "pi")), fixable: "prereq" };
   else if (models.timedOut || version.timedOut) pi = result("pi", "warn", "timed out", `${setupCmd(ctx)} doctor`);
   else if (models.code !== 0 || version.code !== 0) pi = result("pi", "fail", models.stderr.split("\n")[0] || version.stderr.split("\n")[0] || "pi did not load", "run `pi` and read the startup errors");
   else pi = result("pi", "ok", `pi ${version.stdout.trim().split("\n")[0]}`);
   const github = parseAuthStatus(`${gh.stdout}\n${gh.stderr}`);
-  const ghCheck = !ctx.which("gh") ? result("gh", "warn", "not on PATH", installHint(ctx.platform, "gh")) : !github.host ? result("gh", "warn", "not logged in", "gh auth login") : result("gh", "ok", `${github.login}@${github.host}`);
+  const ghCheck = !ctx.which("gh") ? { ...result("gh", "warn", "not on PATH", installCommand(ctx, "gh")), fixable: "prereq" as const } : !github.host ? result("gh", "warn", "not logged in", "gh auth login") : result("gh", "ok", `${github.login}@${github.host}`);
   return {
     facts: { providers: Object.fromEntries(PROVIDER_IDS.map((id, i) => [id, providers[i]])), catalog: models.catalog, head: head.code === 0 && !head.timedOut ? head.stdout.trim() : undefined, checkoutClean: checkout.code === 0 && !checkout.timedOut ? !checkout.stdout.trim() : undefined, github: { ...github, orgs: [] }, summary: false },
     checks: [pi, ghCheck, pythonCheck, ...disks, ...(launchd.length ? launchd : [result("launchd", "skip", "no managed launch agents")]), docker ? result("docker", docker.code === 0 && !docker.timedOut ? "ok" : "warn", docker.code === 0 && !docker.timedOut ? docker.stdout.trim() : "not reachable", ctx.platform === "darwin" ? "open -a Docker" : "systemctl --user start docker") : result("docker", "skip", "no docker guardian"), updates],

@@ -184,7 +184,7 @@ test("a missing pi shows the install command; after installing it, Check again r
   let probes = 0;
   const run = ctx.run;
   ctx.run = (cmd, args, o) => { if (cmd === "pi" && args[0] === "auth") probes++; return run(cmd, args, o); };
-  const s = scripted({ "How do you": ["custom"], "Install pi first": ["login"] });
+  const s = scripted({ "How do you": ["custom"], "Install pi first": ["login"], "Continue?": [false] });
   selectHook(s.p, (message, answer) => { if (message === "Install pi first" && answer === "login") installed = true; });
   assert.equal(await main(flags(b), ctx, s.p), 0);
   const asked = s.selects.filter((x) => /^(Install pi first|Log in to your)/.test(x.message)).map((x) => x.message);

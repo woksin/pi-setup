@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { PACKAGE_BINS, npmPackageCheck } from "./packages.ts";
+import { installCommand } from "./prereqs.ts";
 import { missingBinDirs, shellPath } from "./shell-path.ts";
 import { fileSha, fromHomeRel, symlinkTarget, readManifest, validateManifest } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
@@ -198,13 +199,13 @@ function prerequisites(s: State): DoctorCheck[] {
     tmux: "optional lanes terminal backend unavailable; macOS Terminal remains an alternative",
   };
   const tools = [...required, ...Object.keys(optional)];
-  const brew: Record<string, string> = { rg: "ripgrep", python3: "python", npm: "node" };
-  const apt: Record<string, string> = { rg: "ripgrep", fd: "fd-find" };
   return tools.map(tool => {
     const found = s.ctx.which(tool);
-    const fix = tool === "pi" ? "npm install -g @earendil-works/pi-coding-agent" : s.ctx.platform === "darwin" ? `brew install ${brew[tool] ?? tool}` : `sudo apt install ${apt[tool] ?? tool}${tool === "fd" ? "; expose fdfind as fd on PATH" : ""}`;
-    const missingStatus = required.includes(tool) ? "fail" : "warn";
-    return check(`tool:${tool}`, found ? "ok" : missingStatus, found ? `${tool} is on PATH` : `${tool} is missing`, found ? undefined : optional[tool] ?? fix);
+    const fix = installCommand(s.ctx, tool);
+    const isRequired = required.includes(tool);
+    const fixHint = isRequired || tool === "gitleaks" || tool === "tmux" ? fix : optional[tool];
+    const base = check(`tool:${tool}`, found ? "ok" : isRequired ? "fail" : "warn", found ? `${tool} is on PATH` : `${tool} is missing`, found ? undefined : fixHint);
+    return !found && isRequired ? { ...base, fixable: "prereq" as const } : base;
   });
 }
 

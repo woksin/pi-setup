@@ -91,6 +91,8 @@ export interface NextSteps {
   pathEdited: boolean;
   logins: string[];
   lanesOffered: boolean;
+  /** Path of a Homebrew the bootstrap just installed; the shell profile needs its shellenv line. */
+  brewShellenv?: string;
 }
 
 /** The guided flow's "What's next" note, one action per line. */
@@ -99,6 +101,7 @@ export function whatsNextLines(next: NextSteps): string[] {
   if (next.pathMissing) {
     lines.push(next.pathEdited ? "Open a new terminal so the PATH change takes effect." : "Add ~/.local/bin and ~/.pi/agent/bin to PATH, then open a new terminal.");
   }
+  if (next.brewShellenv) lines.push(`Add to your shell profile: eval "$(${next.brewShellenv} shellenv)"`);
   lines.push("Start pi: pi");
   if (next.logins.length) lines.push(`Log in: in pi, type /login for ${next.logins.join(", ")}`);
   lines.push("Switch profile: pi-profile list, or ./install.sh --profile <name>");

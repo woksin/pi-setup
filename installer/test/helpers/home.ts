@@ -78,6 +78,19 @@ for spec in "$@"; do
   esac
 done
 : > node_modules/.package-lock.json`);
+  // Package managers and downloaders are stubs too: a test must never reach the host's brew, apt, dnf, sudo or network.
+  // An install "succeeds" by writing a stub of each requested tool next to the stub itself.
+  const installs = `dir="$(dirname "$0")"
+case "$1" in install) shift ;; *) exit 0 ;; esac
+for pkg in "$@"; do
+  case "$pkg" in -*) continue ;; ripgrep) tool=rg ;; python) tool=python3 ;; fd-find) tool=fdfind ;; node) tool=node ;; *) tool="$pkg" ;; esac
+  printf '#!/bin/sh\\nexit 0\\n' > "$dir/$tool"; chmod +x "$dir/$tool"
+done`;
+  script(box.stubs, "brew", `echo "brew $*" >> "$STUB_LOG"\n${installs}\nexit 0`);
+  script(box.stubs, "apt-get", `echo "apt-get $*" >> "$STUB_LOG"\n${installs}\nexit 0`);
+  script(box.stubs, "dnf", `echo "dnf $*" >> "$STUB_LOG"\n${installs}\nexit 0`);
+  script(box.stubs, "sudo", `echo "sudo $*" >> "$STUB_LOG"\nif [ "$1" = "-n" ]; then shift; fi\nexec "$@"`);
+  script(box.stubs, "curl", `echo "curl $*" >> "$STUB_LOG"\nexit 22`);
   // Never the real service managers: record the call and report "not loaded".
   for (const name of ["launchctl", "systemctl"]) script(box.stubs, name, `echo "${name} $*" >> "$STUB_LOG"\nexit 0`);
   script(box.stubs, "python3", `echo "python3 $*" >> "$STUB_LOG"\nexec "${realPython()}" "$@"`);

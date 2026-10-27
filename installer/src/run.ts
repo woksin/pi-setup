@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { runLanesFlow } from "./lanes-flow.ts";
 import { applyGuided, applyPlain, guidedNotes, lanesOffered, offerLanesSetup } from "./finish.ts";
@@ -7,13 +8,15 @@ import { describe, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
 import { isInteractive, parseArgs, USAGE } from "./args.ts";
 import type { Options } from "./args.ts";
-import { detect, installHint, probeProvider, readyProviders, toolPath } from "./detect.ts";
+import { detect, probeProvider, readyProviders, toolPath } from "./detect.ts";
 import { buildPlan } from "./plan.ts";
 import { backupsCommand } from "./backups.ts";
 import { readManifest } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
 import { applyTakes, diffText, reconcile } from "./reconcile.ts";
 import type { KeepAction } from "./reconcile.ts";
+import { EXTRA_TOOLS, installCommand } from "./prereqs.ts";
+import { ensurePrereqs, linkNotes } from "./prereqs-run.ts";
 import { runUninstall } from "./uninstall.ts";
 import { available, codesceneNotes, COMPONENTS, currentState, WEB_PACKAGES, detectDefaults, hintFor, resolveComponents } from "./components.ts";
 import type { ComponentChoice } from "./components.ts";
@@ -63,7 +66,7 @@ function requiredToolErrors(ctx: Ctx, detection: Detection, options: Options, gu
   const needed = ["python3", ...(options.skipNpm ? [] : ["npm"])];
   const errors = needed
     .filter((tool) => !toolPath(detection, tool))
-    .map((tool) => `${tool} is required but was not found on PATH; install it with: ${installHint(ctx.platform, tool)}`);
+    .map((tool) => `${tool} is required but was not found on PATH; install it with: ${installCommand(ctx, tool)}`);
   const python = detection.tools.find(tool => tool.name === "python3");
   if (!python?.path) return errors;
   const check = pythonVersionCheck(ctx, python.version);
@@ -221,7 +224,7 @@ export async function main(argv: string[], baseCtx: Ctx, injected?: Prompter): P
 
 async function runCommand(ctx: Ctx, options: Options, prompter: Prompter | undefined, baseCtx: Ctx): Promise<number> {
   if (options.command === "lanes") return runLanesFlow(ctx, options, prompter);
-  if (options.command === "doctor") return runDoctor(ctx, options, baseCtx);
+  if (options.command === "doctor") return runDoctor(ctx, options, baseCtx, prompter);
   if (options.command === "uninstall") return runUninstall(ctx, options, prompter);
   if (options.command === "update") return runUpdate(ctx, options, prompter);
   return backupsCommand(ctx, options.sub, options.keep, options.dryRun);
@@ -248,7 +251,7 @@ interface GuidedInput {
 
 function addToolWarnings(r: Resolved, detection: Detection, toolErrors: string[], ctx: Ctx): void {
   r.warnings.push(...toolErrors);
-  if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
+  if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installCommand(ctx, "pi")}`);
 }
 
 async function guidedResolution({ ctx, options, detection, saved, manifest, p, toolErrors }: GuidedInput): Promise<{ r: Resolved; editPath: boolean } | typeof CANCEL> {
@@ -292,6 +295,9 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     throw new SetupError(`unknown profile '${options.profile}'. available: ${names.join(", ")}`);
   }
   prompter?.intro("pi-setup");
+  const fresh = !manifest && !existsSync(piDir);
+  const required = ["gh", "jq", "rg", "fd", "python3", "git", ...(options.skipNpm ? [] : ["npm"])];
+  await ensurePrereqs(ctx, options, prompter, { tools: required, pi: true, fresh });
   const spin = prompter?.spinner();
   spin?.start("Looking around…");
   const known = Boolean(options.user || savedString(saved, "githubUser"));
@@ -317,6 +323,9 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   }
   if (!prompter) addToolWarnings(r, detection, toolErrors, ctx);
   const summary = summarize(r, detection, options, Boolean(prompter));
+  const chosen = Object.keys(r.components).filter((id) => r.components[id].on);
+  await ensurePrereqs(ctx, options, prompter, { tools: chosen.flatMap((id) => EXTRA_TOOLS[id] ?? []), pi: false, fresh });
+  for (const note of linkNotes(ctx, chosen)) ctx.err(`note: ${note}`);
   if (options.plan) {
     configureShellPath(ctx, options.editShellProfile, true);
     return finish({ ctx, baseCtx, options, r, detection, lines: summary, code: 0 });
