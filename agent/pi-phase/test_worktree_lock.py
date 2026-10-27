@@ -214,6 +214,91 @@ class WorktreeLockTests(Harness):
         escaped, bi = self.intervals("escaped", "B")
         self.assertLessEqual(escaped[1], bi[0])
 
+    def test_escaped_holder_can_nest_after_outer_completion_while_contender_waits(self):
+        escaped_pid = self.root / "escaped.pid"
+        self.addCleanup(self.stop_recorded_group, escaped_pid)
+        nested = self.cli("run", "--kind", "test", "--label", "inner", "--policy", "direct",
+                          "--timeout", "3", "--queue-timeout", "1", "--", *self.job("inner", .01))
+        escaped = """import json,os,pathlib,subprocess,sys,time
+root=pathlib.Path(sys.argv[1]); start=time.time()
+(root/'escaped.started').touch()
+while not (root/'go').exists():
+    assert time.time()-start < 5
+    time.sleep(.01)
+fd=json.loads(os.environ['PI_PHASE_WORKTREE_HELD'])['fd']
+result=subprocess.run(sys.argv[2:],pass_fds=(fd,),capture_output=True,text=True,timeout=5)
+(root/'result.json').write_text(json.dumps([result.returncode,result.stdout+result.stderr]))
+(root/'escaped.json').write_text(json.dumps([start,time.time()]))
+"""
+        launch = """import json,os,pathlib,subprocess,sys,time
+root=pathlib.Path(sys.argv[1]); fd=json.loads(os.environ['PI_PHASE_WORKTREE_HELD'])['fd']
+p=subprocess.Popen(sys.argv[2:],pass_fds=(fd,),start_new_session=True,
+                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+(root/'escaped.pid').write_text(str(p.pid))
+while not (root/'escaped.started').exists(): time.sleep(.01)
+"""
+        command = [sys.executable, "-c", launch, str(self.root), sys.executable,
+                   "-c", escaped, str(self.root), *nested]
+        a = self.phase("outer", command=command)
+        self.started("escaped")
+        self.assertEqual(self.done(a)[0], 0)
+        b = self.phase("B")
+        self.wait_for(lambda: bool(self.waiting()))
+        self.assertFalse((self.root / "B.started").exists())
+        (self.root / "go").touch()
+        code, output = self.done(b)
+        self.assertEqual(code, 0, output)
+        nested_code, nested_output = json.loads((self.root / "result.json").read_text())
+        self.assertEqual(nested_code, 0, nested_output)
+        self.assertIn("worktree lock inherited from parent phase outer", nested_output)
+        escaped_interval, bi = self.intervals("escaped", "B")
+        self.assertLessEqual(escaped_interval[1], bi[0])
+
+    def stop_recorded_group(self, path):
+        if path.exists():
+            pgid = int(path.read_text())
+            if pi_phase.group_alive({"pgid": pgid}):
+                os.killpg(pgid, signal.SIGKILL)
+            self.wait_for(lambda: pi_phase.group_alive({"pgid": pgid}) is False, seconds=3)
+
+    def test_killed_nested_supervisor_guards_descriptor_closing_producer(self):
+        producer_pid = self.root / "orphan.pid"
+        inner_pid = self.root / "inner.pid"
+        self.addCleanup(self.stop_recorded_group, producer_pid)
+        producer = ("import os,json,pathlib,sys,time; "
+                    "os.close(json.loads(os.environ['PI_PHASE_WORKTREE_HELD'])['fd']); "
+                    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(6)")
+        inner = self.cli("run", "--kind", "test", "--label", "inner", "--policy", "direct",
+                         "--timeout", "8", "--queue-timeout", "1", "--", sys.executable,
+                         "-c", producer, str(producer_pid))
+        outer = ("import os,json,pathlib,subprocess,sys; "
+                 "fd=json.loads(os.environ['PI_PHASE_WORKTREE_HELD'])['fd']; "
+                 "p=subprocess.Popen(sys.argv[2:],pass_fds=(fd,),stdout=subprocess.DEVNULL,"
+                 "stderr=subprocess.DEVNULL); pathlib.Path(sys.argv[1]).write_text(str(p.pid)); p.wait()")
+        a = self.phase("outer", command=[sys.executable, "-c", outer, str(inner_pid), *inner])
+        self.wait_for(producer_pid.exists)
+        os.kill(int(inner_pid.read_text()), signal.SIGKILL)
+        self.assertEqual(self.done(a)[0], 0)
+        self.assertTrue(pi_phase.group_alive({"pgid": int(producer_pid.read_text())}))
+        b = self.phase("B", extra=("--queue-timeout", "1"))
+        code, output = self.done(b)
+        self.assertEqual(code, 75, output)
+        self.assertFalse((self.root / "B.started").exists())
+        code, output = self.done(self.start_in(self.repo, "status"))
+        self.assertEqual(code, 0, output)
+        self.assertIn("orphan-group", output)
+        self.stop_recorded_group(producer_pid)
+        code, output = self.done(self.phase("C", command=self.job("C", .01)))
+        self.assertEqual(code, 0, output)
+
+    def test_unknown_nested_group_is_guarded_without_parent_metadata(self):
+        path, _ = self.hold()
+        directory = path.with_suffix(".groups")
+        directory.mkdir()
+        pi_phase.save(directory / "nested.json", dict(pgid=2147483647))
+        with patch.object(pi_phase, "group_alive", side_effect=lambda info: None if info else False):
+            self.assertTrue(pi_phase.worktree_groups_alive(path, {}))
+
     def test_status_preserves_phase_status_parser(self):
         a = self.phase("A")
         self.started("A")

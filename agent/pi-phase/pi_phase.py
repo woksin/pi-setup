@@ -1863,25 +1863,41 @@ def worktree_paths(state, root):
     return directory / f"{key}.lock", directory / f"{key}.json", key
 
 
+def worktree_group_paths(path):
+    return path.with_suffix(".groups").glob("*.json")
+
+
+def worktree_groups_alive(path, info):
+    groups = [info, *(metadata(group) for group in worktree_group_paths(path))]
+    return any(group_alive(group) is not False for group in groups)
+
+
 class WorktreeLease:
-    """Own a close-only reference; inherited leases never edit holder metadata."""
+    """Close-only lock reference with an independent guard for this producer group."""
     def __init__(self, path, fd, info, inherited=False):
         self.path, self.fd, self.info, self.inherited = path, fd, info, inherited
+        self.group_path = path.with_suffix(".groups") / f"{uuid.uuid4().hex}.json"
 
     def environment(self, state):
         return {WORKTREE_HELD_ENV: json.dumps(dict(fd=self.fd, state=os.path.realpath(state),
                                                   root=self.info["root"], token=self.info["token"]))}
 
     def publish(self, pgid):
+        self.group_path.parent.mkdir(mode=0o700, exist_ok=True)
+        # Each invocation has its own record: nested publishers cannot overwrite peers.
+        save(self.group_path, dict(token=self.info["token"], pgid=pgid))
         if not self.inherited:
             self.info["pgid"] = pgid
             save(self.path.with_suffix(".json"), self.info)
 
-    def close(self, state, safe):
-        if self.inherited:
+    def close(self, safe):
+        try:
+            if safe:
+                self.group_path.unlink(missing_ok=True)
+        finally:
+            # Descendants can still own the description and need the holder identity.
+            # Leave holder metadata for the next successful independent claimant.
             os.close(self.fd)
-        else:
-            release(state, [(self.path, self.fd)], self.info["token"], safe)
 
 
 def worktree_hint(state, root):
@@ -1971,7 +1987,7 @@ class WorktreeAdmission:
             return None
         try:
             info = metadata(self.info_path)
-            if group_alive(info) is not False:
+            if worktree_groups_alive(self.path, info):
                 return None
             self.publish_holder(fd, info)
             fd = None
@@ -1981,6 +1997,8 @@ class WorktreeAdmission:
                 os.close(fd)
 
     def publish_holder(self, fd, previous):
+        for group in worktree_group_paths(self.path):
+            group.unlink(missing_ok=True)
         if previous:
             note(f"recovered stale worktree lock (was {previous.get('label', '?')} pid {previous.get('pid', '?')})")
         info = dict(token=self.token, pid=os.getpid(), label=self.args.label, kind=self.args.kind,
@@ -2065,7 +2083,7 @@ class WorktreeAdmission:
 
     def close(self, safe):
         if self.lease:
-            self.lease.close(self.state, safe)
+            self.lease.close(safe)
 
 
 def worktree_status(state):
@@ -2073,7 +2091,7 @@ def worktree_status(state):
     for path in sorted((state / "worktrees").glob("*.lock")):
         info = metadata(path.with_suffix(".json"))
         busy = readonly_busy(path)
-        if busy or group_alive(info) is not False:
+        if busy or worktree_groups_alive(path, info):
             owners.append((info, not busy))
     now = time.time()
     lines = []
