@@ -3471,8 +3471,19 @@ def add_worktree_arguments(runner):
     runner.add_argument("--no-worktree-lock", action="store_true", help="opt out of worktree admission (not build)")
 
 
+HELP_EPILOG = """Examples:
+  pi-phase status                                      # read-only: leases and queue
+  pi-phase run --kind test --label unit -- npm test    # state-changing: runs the command as a bounded phase
+Exit codes:
+  run: the command's own exit code, or 75 queue timeout, 76 RSS cap, 77 withdrawn, 124 timeout, 125 wrapper failure
+  other commands: 0 ok, 1 no match, 2 usage error, 3 refused (see README.md)
+See also: docs/reference.md, agent/pi-phase/README.md, cratis-local-run --help
+"""
+
+
 def main(argv=None, *, state=None, configuration=None):
-    parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner")
+    parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner",
+                                     formatter_class=argparse.RawDescriptionHelpFormatter, epilog=HELP_EPILOG)
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("status", help="show leases, queue and priority grant (never command arguments)")
     reprioritizing = commands.add_parser("reprioritize", help="change an owned queued waiter's priority in place")

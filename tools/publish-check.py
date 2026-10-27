@@ -107,7 +107,23 @@ def secret_mask(stage, library, texts):
     return findings
 
 
+HELP = """Usage: publish-check.py STAGE [SECRET_MASK_TS]
+Check a staged copy of the published tree before sync.sh writes it into the checkout (maintainer tool, read-only).
+
+Examples:
+  publish-check.py /tmp/stage                       # check a staged tree
+  publish-check.py /tmp/stage agent/lib/secret-mask.ts
+Exit codes:
+  0 no findings
+  1 findings (offending relative paths are printed)
+See also: docs/reference.md, tools/release-check.sh
+"""
+
+
 def main():
+    if sys.argv[1:2] and sys.argv[1] in ("-h", "--help", "help"):
+        print(HELP, end="")
+        return
     stage = Path(sys.argv[1]).resolve()
     library = sys.argv[2] if len(sys.argv) > 2 else None
     problems, texts = [], []

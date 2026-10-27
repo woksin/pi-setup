@@ -13,6 +13,26 @@
 #    Age prefers LastTagTime over Created; pinned/in-use/recent/unversioned-floating stay.
 # Authorised (2026-10-20): "the agents need to be able to do what it needs to do".
 set -u
+case "${1:-}" in -h|--help|help)
+    cat <<'HELP'
+Usage: docker-guardian [-h|--help]
+Keep local Docker Desktop usable: health check, restart when stuck, and hygiene pruning.
+Meant to run every 2 minutes from launchd. Without -h/--help it ACTS (may restart Docker
+Desktop and remove containers, networks, volumes, build cache and images). Other arguments are ignored.
+
+Environment:
+  DOCKER_GUARDIAN_STATE     state directory (default: ~/.pi/agent/docker-guardian)
+  DOCKER_GUARDIAN_LOG       log file (default: ~/.pi/agent/logs/docker-guardian.log)
+  DOCKER_GUARDIAN_MESSAGES  directory for lane announcements (optional)
+Examples:
+  docker-guardian --help    # this text, no side effects
+  docker-guardian           # one guard pass (state-changing)
+Exit codes:
+  0 pass finished (help shown, or healthy/handled)
+See also: docs/reference.md, dev-doctor --help, pi-cleanup --help
+HELP
+    exit 0 ;;
+esac
 # DOCKER_GUARDIAN_TEST_PATH/_STATE/_LOG exist only for the dry-run harness (docker-guardian/test/run-scenarios.sh).
 export PATH=${DOCKER_GUARDIAN_TEST_PATH:+$DOCKER_GUARDIAN_TEST_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 S=${DOCKER_GUARDIAN_STATE:-$HOME/.pi/agent/docker-guardian}; mkdir -p "$S"

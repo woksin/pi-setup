@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 # Release step: every test suite must pass and the whole git history must scan clean.
 set -euo pipefail
+case "${1:-}" in -h|--help|help)
+    cat <<'HELP'
+Usage: tools/release-check.sh [-h|--help]
+Maintainer release gate: skills tests, pi-setup-tests, unit tests, installer build and a full-history secret scan.
+Running it without a help flag executes the whole gate (including npm ci).
+
+Examples:
+  tools/release-check.sh --help   # this text, no side effects
+  tools/release-check.sh          # run the full gate (slow)
+Exit codes:
+  0 every step passed
+  non-zero: the first failing step's exit code
+See also: docs/reference.md, agent/bin/pi-setup-tests, agent/bin/secret-sweep
+HELP
+    exit 0 ;;
+esac
 cd "$(dirname "$0")/.."
 node --test --test-timeout=30000 tools/skills.test.mjs
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s skills/github-issue-hygiene/scripts -p 'test_*.py'

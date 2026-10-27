@@ -4,6 +4,28 @@
 # Usage: cratis-local-run [--priority low|normal|high] <kind> <label> -- <cmd...>
 # Priority defaults to $CRATIS_LOCAL_RUN_PRIORITY, else normal. High priority still needs pi-phase's grant.
 set -euo pipefail
+case "${1:-}" in -h|--help|help)
+    cat <<'HELP'
+Usage: cratis-local-run [--priority low|normal|high] <kind> <label> -- <cmd...>
+Run a build or test command through pi-phase (bounded, queued, one at a time).
+
+Options:
+  --priority P   low|normal|high (default: $CRATIS_LOCAL_RUN_PRIORITY, else normal).
+                 High priority still needs pi-phase's grant.
+Environment:
+  CRATIS_LOCAL_RUN_PRIORITY       default priority
+  CRATIS_LOCAL_RUN_TIMEOUT        run timeout in seconds (default 900)
+  CRATIS_LOCAL_RUN_QUEUE_TIMEOUT  queue wait in seconds (default 3600)
+Examples:
+  cratis-local-run test unit -- dotnet test      # runs the command through pi-phase
+  cratis-local-run --priority low build web -- npm run build
+Exit codes:
+  0 help shown, or the command's own exit code via pi-phase
+  2 usage error or invalid priority
+See also: docs/reference.md, pi-phase --help
+HELP
+    exit 0 ;;
+esac
 usage() { printf 'Usage: cratis-local-run [--priority low|normal|high] <kind> <label> -- <cmd...>\n' >&2; exit 2; }
 priority=${CRATIS_LOCAL_RUN_PRIORITY:-normal}
 if [ "${1:-}" = --priority ]; then

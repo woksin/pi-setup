@@ -118,5 +118,22 @@ def main(run=subprocess.run, setpriority=os.setpriority, target: int = TARGET_NI
     return 0
 
 
+HELP = """Usage: renice-builders [-h|--help]
+Lower the CPU priority of shared .NET build servers (Roslyn, MSBuild nodes, test workers) to nice 10.
+Without -h/--help it ACTS: it renices matching processes of the current user. Other arguments are ignored.
+Never raises a priority, never kills, needs no sudo.
+
+Examples:
+  renice-builders --help   # this text, no side effects
+  renice-builders          # lower build servers now (state-changing); prints a line only if something changed
+Exit codes:
+  0 always (also when nothing matched or ps failed)
+See also: docs/reference.md, docker-guardian --help, pi-phase --help
+"""
+
+
 if __name__ == "__main__":
+    if any(arg in ("-h", "--help", "help") for arg in sys.argv[1:2]):
+        print(HELP, end="")
+        sys.exit(0)
     sys.exit(main())
