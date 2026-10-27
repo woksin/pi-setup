@@ -12,27 +12,21 @@ This guide is for someone who has never used pi. It takes about 10 minutes. The 
 
 Press `⌘ Space`, type **Terminal** and press Return.
 
-## 2. Get the setup
+## 2. Install
 
 Paste this line and press Return:
 
 ```sh
-git clone https://github.com/woksin/pi-setup ~/pi-setup && cd ~/pi-setup
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh
 ```
 
-If macOS says it needs the **command line developer tools**, click **Install**. When that finishes, paste the same line again.
-
-## 3. Run the installer
-
-```sh
-./install.sh
-```
+If macOS asks to install the **command line developer tools**, click **Install**.
 
 It shows what your Mac already has and what it will install (Homebrew, Node.js, a few command-line tools and pi), then asks `Continue? [Y/n]`. Press Return to accept. Homebrew may ask for your Mac password; that is normal.
 
 The installer asks a few questions. When you are unsure, press Return to take the recommended answer.
 
-## 4. Log in
+## 3. Log in
 
 At the end, the installer prints a short numbered list of what is left. Usually that is:
 
@@ -41,7 +35,7 @@ At the end, the installer prints a short numbered list of what is left. Usually 
 3. **AI:** run `pi`, type `/login`, pick Claude or ChatGPT and log in in the browser. Type `/quit` to leave pi.
 4. **Finish:** run `cd ~/pi-setup && ./install.sh --profile auto`. This picks the right setup for the logins you have.
 
-## 5. Try it
+## 4. Try it
 
 Go to any project folder and start pi:
 
