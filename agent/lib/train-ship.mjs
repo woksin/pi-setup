@@ -3,7 +3,8 @@ import { join, resolve } from 'node:path';
 import { loadManifest, saveManifest, slug, withManifestLock } from './train-manifest.mjs';
 import { selectTrain } from './train-resolve.mjs';
 import { checkBody, checkPackageLeaks, checkShip, gateEvidence, shipConfig } from './train-ship-check.mjs';
-import { linkFoldedPRs, notesMarker, reviewerNotes, shipBody, shipLabel, upsertTrainPR } from './train-ship-pr.mjs';
+import { linkFoldedPRs, notesMarker, reviewerNotes, shipBody, shipLabel, shipTitle, upsertTrainPR } from './train-ship-pr.mjs';
+import { preflight, publishText } from './train-publish.mjs';
 
 async function pushTrain(api, manifest) {
   const remote = (await api.git(manifest.worktree, ['ls-remote', 'origin', `refs/heads/${manifest.train}`])).stdout.trim().split(/\s+/)[0];
@@ -17,16 +18,17 @@ async function publish(ctx, api, operation) {
   if (options.dryRun) { ctx.out(`would open or update train PR for ${manifest.train}`); return; }
   manifest.shippedHead = manifest.head;
   await save();
-  const pr = await upsertTrainPR(api, manifest, options, files);
+  const session = { ctx, api, manifest, options };
+  const pr = await upsertTrainPR(session, files);
   manifest.pr = pr.number;
   await save();
   const marker = notesMarker(manifest, files.notes);
   if (manifest.shipComment !== marker && !(pr.comments ?? []).some(comment => comment.body?.includes(marker))) {
-    await api.gh(manifest.repo, ['pr', 'comment', String(pr.number), '--body-file', files.notesFile], { mutate: true });
+    await publishText(ctx, options, { kind: 'pr-comment', repo: manifest.repo, number: pr.number, body: files.notesComment }, manifest);
   }
   manifest.shipComment = marker;
   await save();
-  await linkFoldedPRs(api, manifest, prs, save);
+  await linkFoldedPRs(session, prs, save);
   manifest.state = 'shipped';
   manifest.label = files.label;
   await save();
@@ -36,7 +38,7 @@ async function publish(ctx, api, operation) {
 async function writeShipFiles(directory, manifest, files) {
   await mkdir(directory, { recursive: true });
   await writeFile(files.bodyFile, files.body);
-  await writeFile(files.notesFile, `${files.notes}\n${notesMarker(manifest, files.notes)}\n`);
+  await writeFile(files.notesFile, files.notesComment);
 }
 
 export async function shipTrain(ctx, api, options, repo) {
@@ -51,7 +53,10 @@ export async function shipTrain(ctx, api, options, repo) {
     const summary = options.summaryFile ? await readFile(resolve(ctx.cwd, options.summaryFile), 'utf8') : '';
     const body = shipBody(manifest, summary), notes = reviewerNotes(manifest, evidence);
     const directory = join(manifest.worktree, '.ai-work', 'trains', slug(manifest.train));
-    const files = { body, notes, label, bodyFile: join(directory, 'pr-body.md'), notesFile: join(directory, 'pr-notes.md') };
+    const notesComment = `${notes}\n${notesMarker(manifest, notes)}\n`;
+    const files = { body, notes, notesComment, label, bodyFile: join(directory, 'pr-body.md'), notesFile: join(directory, 'pr-notes.md') };
+    // Fail before any file, check or push; the bytes sent later are these in-memory strings, never the files.
+    preflight(ctx, manifest, { title: shipTitle(options, manifest), body, notes: notesComment, train: manifest.train });
     if (!options.dryRun) await writeShipFiles(directory, manifest, files);
     await checkBody(ctx, manifest, config, { files, dryRun: options.dryRun });
     const save = () => saveManifest(selected.path, manifest);

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { TrainError } from './train-gh.mjs';
 import { baseBranch } from './train-init.mjs';
 import { renderNotes } from './train-notes.mjs';
+import { publishText } from './train-publish.mjs';
 
 const RELEASE_LABELS = ['major', 'minor', 'patch', 'no-release'];
 export function shipLabel(options, prs) {
@@ -30,31 +31,46 @@ export function reviewerNotes(manifest, evidence) {
   return `## Folded items\n\n${lines.join('\n')}\n\n## Verification\n\n${evidence}\n`;
 }
 
-function editArguments(pr, files) {
-  const args = ['pr', 'edit', String(pr.number)];
-  if (pr.body !== files.body) args.push('--body-file', files.bodyFile);
-  if (!(pr.labels ?? []).some(label => label.name === files.label)) args.push('--add-label', files.label);
-  const obsolete = (pr.labels ?? []).filter(label => RELEASE_LABELS.includes(label.name) && label.name !== files.label);
-  for (const label of obsolete) args.push('--remove-label', label.name);
-  return args;
+function labelChanges(pr, files) {
+  const labels = pr.labels ?? [];
+  const add = labels.some(label => label.name === files.label) ? [] : [files.label];
+  const remove = labels.filter(label => RELEASE_LABELS.includes(label.name) && label.name !== files.label).map(label => label.name);
+  return { add, remove };
 }
 
-export async function upsertTrainPR(api, manifest, options, files) {
+export function shipTitle(options, manifest) {
+  return options.title ?? `Release train: ${manifest.items.filter(item => item.kind === 'folded').slice(0, 4)
+    .map(item => item.pr ? `#${item.pr}` : item.branch).join(', ')}`;
+}
+
+async function editTrainPR(session, pr, files) {
+  const { ctx, manifest, options } = session;
+  const { add, remove } = labelChanges(pr, files);
+  if (![pr.body !== files.body, add.length, remove.length].some(Boolean)) return;
+  const request = { kind: 'pr-edit', repo: manifest.repo, number: pr.number, body: files.body };
+  if (add.length) request.addLabels = add;
+  if (remove.length) request.removeLabels = remove;
+  await publishText(ctx, options, request, manifest);
+}
+
+async function createTrainPR(session, files) {
+  const { ctx, api, manifest, options } = session;
+  await publishText(ctx, options, { kind: 'pr-create', repo: manifest.repo, title: shipTitle(options, manifest), body: files.body,
+    labels: [files.label], base: baseBranch(manifest), head: manifest.train }, manifest);
+  // The publisher never returns gh output, so the new PR number is re-read.
+  const found = await api.json(manifest.repo, ['pr', 'list', '--head', manifest.train, '--state', 'open', '--json', 'number']);
+  if (found.length !== 1) throw new TrainError('train PR created but not found; rerun ship', 2);
+  return { number: found[0].number, comments: [] };
+}
+
+export async function upsertTrainPR(session, files) {
+  const { api, manifest } = session;
   const prs = await api.json(manifest.repo, ['pr', 'list', '--head', manifest.train, '--state', 'open', '--json', 'number,body,labels,comments']);
   if (prs.length > 1) throw new TrainError('multiple open train PRs');
   const pr = prs[0];
-  if (pr) {
-    const args = editArguments(pr, files);
-    if (args.length > 3) await api.gh(manifest.repo, args, { mutate: true });
-    return pr;
-  }
-  const title = options.title ?? `Release train: ${manifest.items.filter(item => item.kind === 'folded').slice(0, 4)
-    .map(item => item.pr ? `#${item.pr}` : item.branch).join(', ')}`;
-  const result = await api.gh(manifest.repo, ['pr', 'create', '--base', baseBranch(manifest), '--head', manifest.train,
-    '--title', title, '--body-file', files.bodyFile, '--label', files.label], { mutate: true });
-  const match = result.stdout.trim().match(/\/(\d+)\/?$/);
-  if (!match) throw new TrainError('could not read created train PR number', 2);
-  return { number: Number(match[1]), comments: [] };
+  if (!pr) return createTrainPR(session, files);
+  await editTrainPR(session, pr, files);
+  return pr;
 }
 
 export function notesMarker(manifest, notes) {
@@ -62,12 +78,13 @@ export function notesMarker(manifest, notes) {
   return `<!-- pi-train:ship ${manifest.train} ${hash} -->`;
 }
 
-export async function linkFoldedPRs(api, manifest, prs, save) {
+export async function linkFoldedPRs(session, prs, save) {
+  const { ctx, manifest, options } = session;
   for (const pr of prs) {
     const marker = `<!-- pi-train:train-pr ${manifest.train} pr=${manifest.pr} -->`;
     const item = manifest.items.find(item => item.pr === pr.number);
     if (item.trainPR === manifest.pr || (pr.comments ?? []).some(comment => comment.body?.includes(marker))) continue;
-    await api.gh(manifest.repo, ['pr', 'comment', String(pr.number), '--body', `Train PR: #${manifest.pr}\n\n${marker}`], { mutate: true });
+    await publishText(ctx, options, { kind: 'pr-comment', repo: manifest.repo, number: pr.number, body: `Train PR: #${manifest.pr}\n\n${marker}` }, manifest);
     item.trainPR = manifest.pr;
     await save();
   }

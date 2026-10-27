@@ -3,12 +3,15 @@ import { mkdtemp, readFile, readdir, rm, writeFile, mkdir, utimes } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { main, realContext } from './pi-train.mjs';
 import { cancellable, isBot, RUN_FIELDS } from './train-gh.mjs';
 import { loadManifest, manifestPath, repoKey, saveManifest, withManifestLock } from './train-manifest.mjs';
 import { copyBullets, extractBullets, renderNotes } from './train-notes.mjs';
 import { shipLabel } from './train-ship-pr.mjs';
+import { publish } from './publisher.ts';
 
 const BASE = 'a'.repeat(40), SHA = 'b'.repeat(40), MERGE = 'c'.repeat(40);
 const REPO = 'acme/widget', TRAIN = 'train/test';
@@ -28,7 +31,7 @@ async function setup(t: any, init = true) {
   const state = { pr: prFixture() as any, runs: [runFixture()] as any[], branchExists: init, head: BASE,
     fetched: SHA, ancestor: false, conflict: false, dirty: false, onBranch: TRAIN, defaultBranch: 'main',
     openPRs: [] as any[], failBefore: '', failAfter: '', closed: 0, comments: 0, merges: 0, aborts: 0,
-    localBranches: {} as Record<string, string>, branchPR: true, unknownAncestor: false, checkedOut: true, trainPR: null as any, creates: 0, edits: 0, pushes: 0, remoteHead: '' };
+    raw: [] as string[][], localBranches: {} as Record<string, string>, branchPR: true, unknownAncestor: false, checkedOut: true, trainPR: null as any, creates: 0, edits: 0, pushes: 0, remoteHead: '' };
   const env = { HOME: root, USER: 'me', PI_TRAIN_DIR: join(root, 'store') };
   const path = manifestPath(env, REPO, TRAIN);
   const manifest = { v: 1, repo: REPO, train: TRAIN, base: { ref: 'origin/main', sha: BASE },
@@ -119,6 +122,21 @@ async function setup(t: any, init = true) {
       if (state.failAfter === key) { state.failAfter = ''; throw new Error('simulated crash after mutation'); }
       return result;
     } };
+  // Real publisher core; only gh resolution and the process boundary are faked. `--flag=value` is split so the routes stay readable.
+  const split = (argv: string[]) => argv.flatMap(arg => /^--[a-z-]+=/.test(arg) ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)] : [arg]);
+  const adapters = {
+    io: { realpath: async () => '/trusted/gh', stat: async () => ({ size: 1, isFile: () => true }), access: async () => {} },
+    spawn: (_executable: string, argv: string[]) => {
+      const child: any = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true });
+      state.raw.push(argv);
+      const args = split(argv), repo = args[args.indexOf('--repo') + 1];
+      const finish = (code: number) => { child.stdout.end(); child.stderr.end(); child.emit('close', code); };
+      Promise.resolve().then(() => (ctx as any).run('gh', [...args.filter((_, i) => args[i] !== '--repo' && args[i - 1] !== '--repo'), '--repo', repo]))
+        .then((result: any) => finish(result.status), () => finish(1));
+      return child;
+    },
+  };
+  (ctx as any).publish = (request: unknown, context: unknown) => publish(request, context as any, adapters as any);
   return { root, path, state, ctx, calls, output, errors, manifest,
     invoke: (...args: string[]) => main(args, ctx), read: () => loadManifest(path) };
 }
@@ -833,4 +851,109 @@ test('realContext executes an injected PATH shim, never GitHub', async t => {
   await writeFile(shim, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
   const result = realContext().run('gh', ['pr', 'view', '7'], { cwd: f.root, env: { ...process.env, PATH: bin } });
   assert.equal(result.status, 0); assert.equal(result.stdout, 'pr\nview\n7\n');
+});
+
+const leakPath = () => ['', 'Users', 'alice', 'secret-notes.md'].join('/');
+const leakToken = () => 'ghp_' + 'a1B2c3D4'.repeat(5);
+const gh = (f: Fixture, group: string) => f.calls.filter(call => call.command === 'gh' && call.args.slice(0, 2).join(' ') === group);
+function assertNoSideEffects(f: Fixture) {
+  assert.equal(f.state.pushes, 0); assert.equal(f.state.creates, 0); assert.equal(f.state.edits, 0); assert.equal(f.state.comments, 0);
+  assert.equal(f.state.raw.length, 0);
+}
+function assertValueFree(f: Fixture) {
+  const text = [...f.errors, ...f.output].join('\n');
+  assert.doesNotMatch(text, /alice|secret-notes|ghp_|\/trusted\/gh|--body/);
+  return text;
+}
+
+test('ship refuses a leaking summary file before push, create, edit or comment, with value-free diagnostics', async t => {
+  const f = await readyToShip(t), summary = join(f.root, 'summary.md');
+  await writeFile(summary, `See ${leakPath()}\n`);
+  assert.equal(await f.invoke('ship', '--summary-file', summary), 1);
+  assertNoSideEffects(f);
+  assert.match(assertValueFree(f), /body: line 1 home-path/);
+  assert.match(f.errors.join('\n'), /findings: 1/);
+});
+
+test('ship refuses a leak inside folded-PR bullets and a leaking title before push', async t => {
+  const f = await readyToShip(t), manifest = await f.read();
+  manifest.notes = { Fixed: [{ text: `- Fix ${leakToken()}` }] }; await saveManifest(f.path, manifest);
+  assert.equal(await f.invoke('ship'), 1);
+  assertNoSideEffects(f); assertValueFree(f);
+  assert.match(f.errors.join('\n'), /body: line \d+ /);
+  manifest.notes = {}; await saveManifest(f.path, manifest); f.errors.length = 0;
+  assert.equal(await f.invoke('ship', '--title', `Release ${leakPath()}`), 1);
+  assertNoSideEffects(f); assert.match(assertValueFree(f), /title: line 1 home-path/);
+});
+
+test('ship dry run with a leak fails with no side effects', async t => {
+  const f = await readyToShip(t), summary = join(f.root, 'summary.md'), before = await readFile(f.path, 'utf8');
+  await writeFile(summary, `See ${leakPath()}\n`);
+  assert.equal(await f.invoke('ship', '--dry-run', '--summary-file', summary), 1);
+  assertNoSideEffects(f); assertValueFree(f);
+  assert.equal(await readFile(f.path, 'utf8'), before);
+});
+
+test('ship sends the in-memory generated bytes, not files a checker rewrote after generation', async t => {
+  const f = await readyToShip(t), summary = join(f.root, 'summary.md');
+  await writeFile(summary, '## Summary\n\nGenerated.\n');
+  await writeFile(join(f.root, 'store/config.json'), JSON.stringify({ checkPr: ['body-check', '{bodyFile}', '{label}'] }));
+  const original = f.ctx.run; let generated = '';
+  f.ctx.run = async (command, args) => {
+    if (command === 'body-check') {
+      generated = await readFile(args[0], 'utf8');
+      await writeFile(args[0], `rewritten ${leakPath()}\n`); await writeFile(join(args[0], '..', 'pr-notes.md'), `rewritten ${leakPath()}\n`);
+      return ok();
+    }
+    return original(command, args);
+  };
+  assert.equal(await f.invoke('ship', '--summary-file', summary), 0, f.errors.join('\n'));
+  assert.match(generated, /^## Summary\n\nGenerated\.\n\n## Fixed/);
+  assert.equal(f.state.trainPR.body, generated);
+  assert.doesNotMatch(JSON.stringify(f.state.trainPR), /rewritten|alice/);
+  assert.equal(gh(f, 'pr create').length, 1);
+  // Raw argv: snapshot body file, forced flags, no free text on argv.
+  const create = f.state.raw.find(argv => argv[1] === 'create')!;
+  assert.ok(create.some(arg => arg.startsWith('--body-file=')) && !create.includes('--body'));
+  assert.ok(create.includes('--label=minor') && create.includes('--head=train/test') && create.includes('--base=main'));
+});
+
+test('ship routes create, notes comment and link comment through gh with exact generated text and no direct free text', async t => {
+  const f = await readyToShip(t);
+  assert.equal(await f.invoke('ship'), 0, f.errors.join('\n'));
+  const pr = f.state.trainPR, linkBody = f.state.pr.comments.at(-1).body;
+  assert.match(pr.comments[0].body, /^## Folded items\n\n- #7: /); assert.match(pr.comments[0].body, /<!-- pi-train:ship train\/test [0-9a-f]{64} -->\n$/);
+  assert.equal(linkBody, `Train PR: #42\n\n<!-- pi-train:train-pr train/test pr=42 -->`);
+  // Every free-text write reached gh via the publisher's private body file; none carries --body or --title text on argv.
+  const writes = f.state.raw.filter(argv => ['create', 'edit', 'comment'].includes(argv[1]));
+  assert.equal(writes.length, 3);
+  for (const argv of writes) assert.ok(argv.some(arg => arg.startsWith('--body-file=')) && !argv.some(arg => /^--body(=|$)/.test(arg)));
+});
+
+test('ship label-only update sends pr-edit with the unchanged body and the label operations', async t => {
+  const f = await readyToShip(t);
+  assert.equal(await f.invoke('ship'), 0, f.errors.join('\n'));
+  const body = f.state.trainPR.body; f.state.raw.length = 0;
+  assert.equal(await f.invoke('ship', '--label', 'major'), 0, f.errors.join('\n'));
+  assert.equal(f.state.edits, 1); assert.equal(f.state.trainPR.body, body);
+  const edit = f.state.raw.find(argv => argv[1] === 'edit')!;
+  assert.ok(edit.includes('--add-label=major') && edit.includes('--remove-label=minor') && edit.some(arg => arg.startsWith('--body-file=')));
+  assert.deepEqual(f.state.trainPR.labels, [{ name: 'major' }]);
+});
+
+test('ship fails clearly when the created train PR cannot be found afterwards', async t => {
+  const f = await readyToShip(t), original = f.ctx.run;
+  f.ctx.run = async (command, args) => {
+    const result = await original(command, args);
+    if (command === 'gh' && args[1] === 'create') f.state.trainPR = null;
+    return result;
+  };
+  assert.equal(await f.invoke('ship'), 2); assert.match(f.errors.join('\n'), /created but not found; rerun ship/);
+});
+
+test('ship maps publisher failures to fixed value-free errors', async t => {
+  const f = await readyToShip(t), original = f.ctx.run;
+  f.ctx.run = async (command, args) => command === 'gh' && args[1] === 'create' ? bad('boom ' + leakPath()) : original(command, args);
+  assert.equal(await f.invoke('ship'), 2);
+  assert.match(f.errors.join('\n'), /publish: gh-failed/); assertValueFree(f);
 });
