@@ -12,7 +12,18 @@ Usage:
   pi-profile use <name>      activate a profile (refuses if live files were edited; --force overrides)
   pi-profile save            copy the live files back into the active profile
 
+Also accepts -h, --help or help.
+
 Changes take effect for new sessions (and new subagents; restart pi to be sure).
+
+Examples:
+  pi-profile                 # read-only status
+  pi-profile list            # read-only
+  pi-profile use <name>      # state-changing: replaces live agent files
+Exit codes:
+  0 success (or help)
+  1 unknown command or bad arguments, or an error message (e.g. no active profile)
+See also: docs/reference.md, README.md
 """
 import filecmp
 import shutil
@@ -115,6 +126,9 @@ def cmd_save():
 
 
 def main(argv):
+    if argv and argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
     if not argv:
         return cmd_status()
     if argv[0] == "list":

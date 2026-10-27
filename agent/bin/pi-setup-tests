@@ -5,6 +5,24 @@
 # lib/extensions/early-extensions trees are copied into a temp overlay that has a node_modules symlink. Tests run
 # with an isolated HOME / PI_CODING_AGENT_DIR so they never touch the real ~/.pi/agent/*.json. Exits non-zero on any failure.
 set -euo pipefail
+case "${1:-}" in -h|--help)
+	cat <<'HELP'
+Usage: pi-setup-tests [AGENT_DIR]
+Run every lib/*.test.ts of a pi agent dir with node:test in an isolated temp HOME.
+
+Arguments:
+  AGENT_DIR   agent directory to test (default: ~/.pi/agent)
+Examples:
+  pi-setup-tests                # tests the installed agent dir
+  pi-setup-tests agent          # tests this repository's agent/ tree (copies to a temp overlay)
+Exit codes:
+  0 all suites passed
+  2 node_modules with @earendil-works/pi-coding-agent or lib/*.test.ts not found
+  other non-zero: a suite failed
+See also: docs/reference.md, tools/release-check.sh
+HELP
+	exit 0 ;;
+esac
 
 agent="${1:-$HOME/.pi/agent}"
 agent="$(cd "$agent" && pwd)"

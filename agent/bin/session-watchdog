@@ -633,8 +633,19 @@ def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS,
     return stuck
 
 
+EPILOG = """Examples:
+  session-watchdog --dry-run   # print what would be notified; writes nothing
+  session-watchdog --once      # one pass (state-changing: may post notices)
+Exit codes:
+  0 pass finished (errors are logged, never break the caller)
+  1 with --dry-run: an error occurred
+  2 usage error
+See also: docs/reference.md, docker-guardian --help, inbox-watch --help
+"""
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="pi stuck-session detector (notify-only)")
+    ap = argparse.ArgumentParser(description="pi stuck-session detector (notify-only)", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=EPILOG)
     ap.add_argument("--dry-run", action="store_true", help="print what would be notified; no notification, no state write")
     ap.add_argument("--once", action="store_true", help="single pass (default and only mode)")
     ap.add_argument("--no-memory", action="store_true", help="skip the memory notices")

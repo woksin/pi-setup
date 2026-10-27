@@ -100,6 +100,8 @@ Useful to know:
 - Run `pi -c` to continue your last session in that folder.
 - pi can change files and run commands, so try it first in a project that is in git, where every change can be reviewed and undone.
 
+Next: [Getting started](docs/getting-started.md) and [Daily workflow](docs/daily-workflow.md).
+
 ## 7. Optional: parallel sessions
 
 When you are comfortable with one session, you can let one pi session coordinate several others working in parallel, each on its own issue or goal:
@@ -114,6 +116,7 @@ It asks which repositories and issues or goals to work on, prepares a separate w
 
 - **`command not found` after step 3:** quit Terminal completely (`⌘ Q`), open it again and retry. If it still fails, run step 3 again, then `cd ~/pi-setup && ./install.sh --with lanes`.
 - Run `cd ~/pi-setup && ./install.sh doctor`. It tells you what is missing and how to fix it.
+- For setup bugs, run `cd ~/pi-setup && ./install.sh report` and open an issue at https://github.com/woksin/pi-setup/issues. Search for duplicates first; remove secrets, tokens, personal paths, private repo names and session content before sharing.
 - Re-running `./install.sh --with lanes` is always safe: it continues where it stopped.
 - The installer writes a log to `~/.local/state/pi-setup/install.log`. Send it, together with the doctor output, to whoever shared this guide with you.
 

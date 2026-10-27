@@ -34,6 +34,7 @@ Prerequisites: none. Run `./install.sh`. It checks what your machine has, shows 
 - [Related repositories](#related-repositories)
 - [What is deliberately not included](#what-is-deliberately-not-included)
 - [Keeping it up to date](#keeping-it-up-to-date)
+- Guides: [Getting started](docs/getting-started.md), [Daily workflow](docs/daily-workflow.md), [Tool reference](docs/reference.md)
 
 ## Highlights
 
@@ -466,6 +467,10 @@ Third-party packages I use (see `agent/npm-package.json`): `@tintinweb/pi-subage
 - Retired profiles, `*.bak*` files, and the `fd` and `rg` binaries in `bin/`.
 - The CodeScene skills (see above).
 - `user.json`: operator identity and repositories root are local install settings, never synced into this repo.
+
+## Reporting problems
+
+Run `./install.sh report` for local versions and the target repository (default: [woksin/pi-setup](https://github.com/woksin/pi-setup/issues)). Use `--component pi-jobs` (or another package name) to select its owner; `--open` opens a prefilled issue in your browser via `gh`. Without `--open`, no network calls are made. Search for duplicates first and remove secrets, tokens, personal paths, private repo names and session content before sharing. The installed `report-setup-issue` skill guides agents through this; `woksin/*` reports are standing-authorized, while third-party/upstream reports need your OK.
 
 ## Troubleshooting
 
