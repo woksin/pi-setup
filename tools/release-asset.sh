@@ -63,7 +63,7 @@ main() {
   case "${1:-}" in
     build)
       shift
-      [ "$#" -ge 2 ] && [ "$#" -le 3 ] || die 'Usage: release-asset.sh build <tag> <outdir> [<tree-ish>]'
+      if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then die 'Usage: release-asset.sh build <tag> <outdir> [<tree-ish>]'; fi
       build "$@"
       ;;
     render)
