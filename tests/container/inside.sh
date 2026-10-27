@@ -45,7 +45,8 @@ echo "$out" | grep -q -- "--install-prereqs" || fail "S2: message does not name 
 if command -v node >/dev/null 2>&1; then fail "S2: node was installed without consent"; fi
 
 step "S3 first-time install: one command"
-./install.sh --yes --install-prereqs --user ci-bot --repos-root "$HOME/repos" 2>&1 | tee "$HOME/s3.log"
+if ! ./install.sh --yes --install-prereqs --user ci-bot --repos-root "$HOME/repos" 2>&1 | tee "$HOME/s3.log"; then :; fi
+if ! grep -q "Setup finished" "$HOME/s3.log"; then echo "--- install.log tail ---"; tail -n 30 "$HOME/.local/state/pi-setup/install.log" 2>&1; ls -l "$HOME/.local/bin" 2>&1; "$HOME/.local/bin/node" --version 2>&1; fi
 grep -q "gh auth login" "$HOME/s3.log" || fail "S3: no gh auth login in the next steps"
 grep -q "/login" "$HOME/s3.log" || fail "S3: no /login in the next steps"
 grep -q "Setup finished. Next: follow steps" "$HOME/s3.log" || fail "S3: no closing line"

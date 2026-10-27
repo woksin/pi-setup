@@ -281,6 +281,7 @@ Or by hand: install it from https://nodejs.org, with brew install node, or with 
     Darwin) ps_darwin_node ;;
     Linux) ps_linux_node ;;
   esac
+  if ! ps_node_ok node; then ps_log "node check failed: $(command -v node 2>&1) -> $(node --version 2>&1)"; fi
   ps_node_ok node || ps_die "Node.js was installed but is still not usable on PATH. Open a new terminal and re-run ./install.sh."
   ps_say "✓ Node.js $(node -p process.versions.node) ready"
 }
