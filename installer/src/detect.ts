@@ -141,8 +141,3 @@ export function toolPath(detection: Detection, name: string): string | undefined
   return detection.tools.find((t) => t.name === name)?.path;
 }
 
-export function installHint(platform: string, tool: string): string {
-  if (tool === "pi") return "npm i -g @earendil-works/pi-coding-agent";
-  const brewName = tool === "python3" ? "python" : tool;
-  return platform === "darwin" ? `brew install ${brewName}` : `apt install ${tool === "npm" ? "npm" : tool}`;
-}

@@ -24,7 +24,7 @@ describe("install (e2e)", () => {
     const box = fresh();
     const run = install(box, ARGS(box));
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /^Doctor: /m);
+    assert.match(run.stdout, /^Health check: /m);
     const user = JSON.parse(readFileSync(piPath(box, "user.json"), "utf8"));
     assert.deepEqual(user, { githubUser: "einari", reposRoot: join(box.root, "repos") });
     assert.match(readFileSync(piPath(box, "AGENTS.md"), "utf8"), /--add-assignee einari/);
@@ -32,7 +32,7 @@ describe("install (e2e)", () => {
     assert.ok(readdirSync(join(box.home, ".agents/skills")).includes("github-issue-hygiene"));
     const npm = stubLog(box).filter((l) => l.startsWith("npm install"));
     assert.equal(npm.length, 1);
-    assert.match(npm[0], /^npm install @woksin\/pi-jobs@0\.3\.1 @woksin\/pi-context-budget@0\.5\.0 @woksin\/pi-recover@0\.1\.1 @woksin\/pi-orch@0\.1\.1 --save-exact --legacy-peer-deps cwd=/);
+    assert.match(npm[0], /^npm install @woksin\/pi-jobs@0\.3\.1 @woksin\/pi-context-budget@0\.5\.0 @woksin\/pi-recover@0\.1\.1 @woksin\/pi-orch@0\.1\.1 --save-exact --legacy-peer-deps --no-audit --no-fund --loglevel=error cwd=/);
     assert.equal(realpathSync(npm[0].split("cwd=")[1]), realpathSync(piPath(box, "npm")));
     const checks = stubLog(box).filter((l) => l.startsWith("pi auth check"));
     assert.equal(checks.length, 3);
@@ -47,7 +47,9 @@ describe("install (e2e)", () => {
     const box = fresh();
     const run = install(box, ARGS(box), { entry: "node", env: { CI: "" } });
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /Done\. Restart pi/);
+    assert.match(run.stdout, /^Setup finished\. Next: follow steps 1–\d above\.$/m);
+    assert.doesNotMatch(run.stdout, /above\. log in with/);
+    assert.match(run.stdout, /Next steps:\n(  \d\. .*\n)+.*Start with: pi/);
   });
 
   test("(c) a re-run is a no-op", () => {
@@ -56,12 +58,11 @@ describe("install (e2e)", () => {
     const before = stubLog(box).length;
     const again = install(box, []);
     assert.equal(again.status, 0, again.stdout + again.stderr);
-    assert.deepEqual(installLines(again.stdout), []);
+    assert.doesNotMatch(again.stdout, /Installed \d+ files/);
     assert.deepEqual(findBackups(piPath(box)), []);
     const newCalls = stubLog(box).slice(before);
     assert.ok(!newCalls.some((l) => l.startsWith("npm install")), newCalls.join("\n"));
     assert.deepEqual(profileCalls(box), []);
-    assert.match(again.stdout, /npm packages up to date/);
     assert.match(again.stdout, /Everything up to date/);
   });
 
@@ -85,21 +86,21 @@ describe("install (e2e)", () => {
     }
   });
 
-  test("(f) node missing or too old: one line, exit 1, nothing written", () => {
+  test("(f) node missing or too old: names Node first, exit 1, nothing written, nothing installed", () => {
     const box = fresh();
     const fake = join(box.root, "fakenode");
     mkdirSync(fake);
     writeFileSync(join(fake, "node"), '#!/bin/sh\ncase "$1" in -e) exit 1 ;; -p) echo 20.0.0 ;; esac\n');
     chmodSync(join(fake, "node"), 0o755);
-    const old = install(box, ARGS(box), { path: `${fake}:/usr/bin:/bin` });
+    const noInstall = [...ARGS(box), "--no-install-prereqs"];
+    const old = install(box, noInstall, { path: `${fake}:/usr/bin:/bin` });
     assert.equal(old.status, 1);
-    assert.equal(old.stderr.trim().split("\n").length, 1);
     assert.match(old.stderr, /Node\.js >= 22\.19.*found 20\.0\.0/);
     const empty = join(box.root, "empty");
     mkdirSync(empty);
-    const missing = install(box, ARGS(box), { path: empty });
+    const missing = install(box, noInstall, { path: empty });
     assert.equal(missing.status, 1);
-    assert.equal(missing.stderr.trim().split("\n").length, 1);
+    assert.match(missing.stderr, /Node\.js >= 22\.19/);
     assert.deepEqual(homeEntries(box), []);
   });
 
@@ -119,7 +120,7 @@ describe("install (e2e)", () => {
     assert.equal(JSON.parse(readFileSync(piPath(box, ".pi-setup/backups", runs[0], "user.json"), "utf8")).githubUser, "old");
     assert.deepEqual(readdirSync(piPath(box)).filter((n) => n.includes(".tmp-")), []);
     const again = install(box, []);
-    assert.deepEqual(installLines(again.stdout), []);
+    assert.doesNotMatch(again.stdout, /Installed \d+ files/);
     assert.equal(readFileSync(piPath(box, "user.json"), "utf8"), text);
   });
 
@@ -134,7 +135,7 @@ describe("install (e2e)", () => {
     }
     assert.match(run.stdout, /Kimi is not logged in|openai-only/);
     const again = install(box, [], { ready: "openai-codex" });
-    assert.deepEqual(installLines(again.stdout), []);
+    assert.doesNotMatch(again.stdout, /Installed \d+ files/);
     assert.deepEqual(profileCalls(box), []);
   });
 
@@ -146,7 +147,7 @@ describe("install (e2e)", () => {
     assert.deepEqual(profileCalls(box), []);
     assert.equal(readFileSync(piPath(box, "profiles/ACTIVE"), "utf8"), "openai-only\n");
     const again = install(box, ["--yes"]);
-    assert.deepEqual(installLines(again.stdout), []);
+    assert.doesNotMatch(again.stdout, /Installed \d+ files/);
     assert.deepEqual(profileCalls(box), []);
   });
 

@@ -5,7 +5,8 @@ import { localChecks, setupCmd } from "./doctor-checks.ts";
 import { gatherFacts } from "./doctor-probes.ts";
 import { fileSha, fromHomeRel, readManifest, validateManifest } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
-import type { Ctx, Detection } from "./types.ts";
+import { ensurePrereqs } from "./prereqs-run.ts";
+import type { Ctx, Detection, Prompter } from "./types.ts";
 import { componentChecks } from "./doctor-components.ts";
 
 export { setupCmd } from "./doctor-checks.ts";
@@ -16,7 +17,7 @@ export interface DoctorCheck {
   status: "ok" | "warn" | "fail" | "skip";
   detail: string;
   fix?: string;
-  fixable?: "npm" | "restore" | "chmod";
+  fixable?: "npm" | "restore" | "chmod" | "prereq";
   items?: string[];
 }
 export function doctorExitCode(checks: DoctorCheck[]): number {
@@ -42,11 +43,18 @@ async function inspect(ctx: Ctx) {
   return { ...local, facts: gathered.facts, checks: [...local.checks, ...gathered.checks, ...extras] };
 }
 
-export async function runDoctor(ctx: Ctx, options: Options, baseCtx: Ctx): Promise<number> {
+export async function runDoctor(ctx: Ctx, options: Options, baseCtx: Ctx, prompter?: Prompter): Promise<number> {
   let report = await inspect(ctx);
   const fixed: string[] = [];
   if (options.fix) {
     const fixable = new Set(report.checks.map(c => c.fixable));
+    if (fixable.has("prereq")) {
+      const tools = report.checks.filter(c => c.fixable === "prereq" && c.id.startsWith("tool:")).map(c => c.id.slice(5));
+      const wantPi = report.checks.some(c => c.fixable === "prereq" && c.id === "pi");
+      if (report.checks.some(c => c.fixable === "prereq" && c.id === "gh")) tools.push("gh");
+      const result = await ensurePrereqs(ctx, { ...options, yes: false }, prompter, { tools: [...new Set(tools)], pi: wantPi, fresh: false });
+      if (result.ran) fixed.push("prereqs");
+    }
     if (fixable.has("npm")) {
       const r = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 120000 });
       if (r.code === 0 && !r.timedOut) fixed.push("npm");
@@ -76,7 +84,7 @@ export async function runDoctor(ctx: Ctx, options: Options, baseCtx: Ctx): Promi
     if (fixed.length) ctx.out(`Fixed: ${fixed.join(", ")}`);
     for (const line of render(report.checks)) ctx.out(line);
     const names = [...new Set(report.checks.map(c => c.fixable).filter(Boolean))];
-    ctx.out(`${counts(report.checks)}.${!options.fix && names.length ? ` \`${setupCmd(ctx)} doctor --fix\` can fix: ${names.join(", ")}.` : ""}`);
+    ctx.out(`${counts(report.checks)}.${!options.fix && names.length ? ` \`${setupCmd(ctx)} doctor --fix\` can fix: ${names.map(n => n === "prereq" ? "missing tools (asks first; --install-prereqs to skip the question)" : n).join(", ")}.` : ""}`);
   }
   return exitCode;
 }

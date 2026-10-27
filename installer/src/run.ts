@@ -1,3 +1,4 @@
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { runLanesFlow } from "./lanes-flow.ts";
 import { applyGuided, applyPlain, guidedNotes, lanesOffered, offerLanesSetup } from "./finish.ts";
@@ -7,13 +8,16 @@ import { describe, needsNpm, readActive } from "./apply.ts";
 import type { ApplyOptions } from "./apply.ts";
 import { isInteractive, parseArgs, USAGE } from "./args.ts";
 import type { Options } from "./args.ts";
-import { detect, installHint, probeProvider, readyProviders, toolPath } from "./detect.ts";
+import { detect, probeProvider, readyProviders, toolPath } from "./detect.ts";
 import { buildPlan } from "./plan.ts";
 import { backupsCommand } from "./backups.ts";
-import { readManifest } from "./manifest.ts";
+import { backupsDir, readManifest } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
 import { applyTakes, diffText, reconcile } from "./reconcile.ts";
 import type { KeepAction } from "./reconcile.ts";
+import { EXTRA_TOOLS, installCommand } from "./prereqs.ts";
+import { ensurePrereqs, linkNotes } from "./prereqs-run.ts";
+import { missingLogins } from "./profiles.ts";
 import { runUninstall } from "./uninstall.ts";
 import { available, codesceneNotes, COMPONENTS, currentState, WEB_PACKAGES, detectDefaults, hintFor, resolveComponents } from "./components.ts";
 import type { ComponentChoice } from "./components.ts";
@@ -21,7 +25,9 @@ import { wasOn } from "./retire.ts";
 import { isService, planServices } from "./services.ts";
 import type { ComponentRecord } from "./manifest.ts";
 import type { ExtraRow } from "./wizard.ts";
-import { installSummary, runDoctor } from "./doctor.ts";
+import { installChecks, runDoctor, setupCmd } from "./doctor.ts";
+import { finishHealth } from "./doctor-compact.ts";
+import { logPath } from "./install-log.ts";
 import { pythonVersionCheck } from "./doctor-probes.ts";
 import { runUpdate } from "./update.ts";
 import {
@@ -36,7 +42,7 @@ import type { Action, Ctx, Detection, ProfileMeta, Prompter } from "./types.ts";
 
 import { resolveConflicts } from "./wizard.ts";
 import { runRails } from "./rails.ts";
-import { configureShellPath, missingBinDirs, pathEditLine, PATH_EDIT_DEFAULT } from "./shell-path.ts";
+import { configureShellPath, missingBinDirs, pathEditLine, pathFixCommand, PATH_EDIT_DEFAULT, shellPath } from "./shell-path.ts";
 
 const savedString = (saved: Record<string, unknown>, key: string): string =>
   typeof saved[key] === "string" ? (saved[key] as string) : "";
@@ -63,12 +69,12 @@ function requiredToolErrors(ctx: Ctx, detection: Detection, options: Options, gu
   const needed = ["python3", ...(options.skipNpm ? [] : ["npm"])];
   const errors = needed
     .filter((tool) => !toolPath(detection, tool))
-    .map((tool) => `${tool} is required but was not found on PATH; install it with: ${installHint(ctx.platform, tool)}`);
+    .map((tool) => `${tool} is required but was not found on PATH; install it with: ${installCommand(ctx, tool)}`);
   const python = detection.tools.find(tool => tool.name === "python3");
   if (!python?.path) return errors;
   const check = pythonVersionCheck(ctx, python.version);
   if (check.status !== "ok" && !options.json) ctx.err(`warning: ${check.detail}; install it with: ${check.fix}`);
-  if (check.status === "ok" && !options.json && !guided) ctx.out(check.detail);
+  if (check.status === "ok" && !options.json && !guided) ctx.out(`✓ ${/^Python \d+\.\d+/.exec(check.detail)?.[0] ?? check.detail}`);
   return errors;
 }
 
@@ -221,7 +227,7 @@ export async function main(argv: string[], baseCtx: Ctx, injected?: Prompter): P
 
 async function runCommand(ctx: Ctx, options: Options, prompter: Prompter | undefined, baseCtx: Ctx): Promise<number> {
   if (options.command === "lanes") return runLanesFlow(ctx, options, prompter);
-  if (options.command === "doctor") return runDoctor(ctx, options, baseCtx);
+  if (options.command === "doctor") return runDoctor(ctx, options, baseCtx, prompter);
   if (options.command === "uninstall") return runUninstall(ctx, options, prompter);
   if (options.command === "update") return runUpdate(ctx, options, prompter);
   return backupsCommand(ctx, options.sub, options.keep, options.dryRun);
@@ -248,7 +254,7 @@ interface GuidedInput {
 
 function addToolWarnings(r: Resolved, detection: Detection, toolErrors: string[], ctx: Ctx): void {
   r.warnings.push(...toolErrors);
-  if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installHint(ctx.platform, "pi")}`);
+  if (!toolPath(detection, "pi")) r.warnings.push(`pi was not found on PATH; install it with: ${installCommand(ctx, "pi")}`);
 }
 
 async function guidedResolution({ ctx, options, detection, saved, manifest, p, toolErrors }: GuidedInput): Promise<{ r: Resolved; editPath: boolean } | typeof CANCEL> {
@@ -292,6 +298,9 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     throw new SetupError(`unknown profile '${options.profile}'. available: ${names.join(", ")}`);
   }
   prompter?.intro("pi-setup");
+  const fresh = !manifest && !existsSync(piDir);
+  const required = ["gh", "jq", "rg", "fd", "python3", "git", ...(options.skipNpm ? [] : ["npm"])];
+  await ensurePrereqs(ctx, options, prompter, { tools: required, pi: true, fresh });
   const spin = prompter?.spinner();
   spin?.start("Looking around…");
   const known = Boolean(options.user || savedString(saved, "githubUser"));
@@ -310,42 +319,99 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const guided = prompter ? await guidedResolution({ ctx, options, detection, saved, manifest, p: prompter, toolErrors }) : undefined;
   if (guided === CANCEL) return cancelled(ctx);
   const r = guided?.r ?? resolveAll(ctx, options, detection, saved, {}, manifest);
-  const editPath = guided ? guided.editPath : options.editShellProfile;
+  // A fresh machine gets the PATH line by default (the profile is backed up first); an update never edits it unasked.
+  const editPath = !options.noEditShellProfile && (guided ? guided.editPath : options.editShellProfile || fresh);
   const better = detection.candidates[0]?.path;
   if (!prompter && r.settings.rootSource === "default" && better && better !== r.settings.reposRoot) {
     ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
   }
   if (!prompter) addToolWarnings(r, detection, toolErrors, ctx);
   const summary = summarize(r, detection, options, Boolean(prompter));
+  const chosen = Object.keys(r.components).filter((id) => r.components[id].on);
+  await ensurePrereqs(ctx, options, prompter, { tools: chosen.flatMap((id) => EXTRA_TOOLS[id] ?? []), pi: false, fresh });
+  for (const note of linkNotes(ctx, chosen)) ctx.err(`note: ${note}`);
   if (options.plan) {
-    configureShellPath(ctx, options.editShellProfile, true);
+    configureShellPath(ctx, editPath, true);
     return finish({ ctx, baseCtx, options, r, detection, lines: summary, code: 0 });
   }
   const off = offComponents(ctx, r, manifest);
 
+  const plainReal = !prompter && !options.json && !options.dryRun;
   const applyOptions: ApplyOptions = {
     dryRun: options.dryRun,
     skipNpm: options.skipNpm || options.dryRun,
     reinstallNpm: options.reinstallNpm,
-    inheritNpm: !prompter && !options.json,
+    inheritNpm: !prompter && !options.json && !plainReal,
     profile: r.choice.name,
     activeBefore: r.activeBefore,
     components: r.records,
-    quiet: Boolean(prompter),
+    quiet: Boolean(prompter) || plainReal,
   };
   const pathMissing = missingBinDirs(ctx).length > 0;
   const run: ApplyRun = { ctx, options, r, applyOptions, manifest, off, editPath };
   const result = prompter ? await applyGuided(run, prompter) : await applyPlain(run);
-  const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l));
-  if (result.code === 0 && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...await installSummary(ctx, detection, piDir));
+  const noLogins = plainReal && r.ready.size === 0;
+  const shown = prompter || options.json ? [] : summary
+    .filter((l) => l.startsWith("Profile:") || (l.startsWith("Kimi") && !noLogins) || (l.startsWith("warning:") && !(noLogins && l.includes("no models yet"))) || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l))
+    .map((l) => (l.startsWith("Profile:") && noLogins && !r.choice.source.startsWith("flag") ? `Profile: ${r.choice.name} (final choice after you log in)` : l));
+  let done: string | undefined;
+  if (result.code === 0 && plainReal && !options.plan) {
+    const end = plainFinish({ ctx, options, detection, r, wrote: result.wrote, editPath, pathMissing, piDir });
+    shown.push(...end.lines);
+    done = end.done;
+  }
   const offer = lanesOffered(r, options, result.code === 0);
   let pending = 0;
   if (prompter && result.code === 0 && !options.dryRun) {
     pending = guidedNotes(prompter, { ctx, options, detection, profile: r.profile, ready: r.ready, pathMissing, editPath, offerLanes: offer });
   }
   if (prompter && offer) await offerLanesSetup(ctx, options, prompter);
-  return finish({ ctx, baseCtx, options, r, detection, lines: shown, code: result.code, prompter, wrote: result.wrote, pending });
+  return finish({ ctx, baseCtx, options, r, detection, lines: shown, code: result.code, prompter, wrote: result.wrote, pending, done });
 }
+
+interface PlainEnd { ctx: Ctx; options: Options; detection: Detection; r: Resolved; wrote: boolean; editPath: boolean; pathMissing: boolean; piDir: string }
+
+const pathInProfile = (ctx: Ctx): boolean => {
+  try { return readFileSync(shellPath(ctx).file, "utf8").split("\n").includes(shellPath(ctx).snippet); } catch { return false; }
+};
+
+/** The unattended finish: one health line, what is left for the person (numbered, each with the exact command), and one closing line. */
+function plainFinish(e: PlainEnd): { lines: string[]; done: string } {
+  const { ctx, detection, r } = e;
+  const home = setupCmd(ctx);
+  const kept = r.actions.filter((a) => a.op === "keep").length;
+  const health = finishHealth(installChecks(ctx, detection), { home: ctx.home, skipNpm: e.options.skipNpm, pathEdited: false, githubLogin: Boolean(detection.github.host), pathTodo: e.pathMissing });
+  const logins = [...new Set([...missingLogins(r.profile, r.ready), ...health.logins])];
+  const steps: string[] = [];
+  if (e.pathMissing) {
+    steps.push(e.editPath || pathInProfile(ctx)
+      ? "Open a new terminal (or run: exec $SHELL -l) so pi is on your PATH."
+      : `Put the tools on your PATH: ${pathFixCommand(ctx)}, then open a new terminal.`);
+  }
+  if (ctx.env.PI_SETUP_BREW_SHELLENV) steps.push(`Add to your shell profile: eval "$(${ctx.env.PI_SETUP_BREW_SHELLENV} shellenv)"`);
+  if (!detection.github.host) steps.push("Log in to GitHub: gh auth login");
+  if (health.npmSkipped) steps.push(`Install the pi packages you skipped: ${home}`);
+  if (health.pending) steps.push(`Review the files you changed: each has a new version next to it ending in .pi-setup-new`);
+  if (logins.length) {
+    steps.push(`Log in to your AI providers: start pi, then type /login for ${logins.join(", ")}`);
+    steps.push(`After logging in, run: ${home} --profile auto`);
+  }
+  steps.push("Start with: pi");
+  const backups = readdirSyncSafe(backupsDir(e.piDir));
+  const lines = [
+    e.wrote ? (backups.length ? `Replaced files are backed up in ~/.pi/agent/.pi-setup/backups/. Undo any time: ${home} uninstall` : `Nothing needed backing up. Undo any time: ${home} uninstall`) : "",
+    health.line, ...health.problems.map((p) => `  ✖ ${p}`),
+    ...(health.optional.length ? [`Optional, not installed: ${health.optional.join(", ")} (${home} doctor for how)`] : []),
+    ...(e.wrote || health.todos ? ["", "Next steps:", ...steps.map((s, i) => `  ${i + 1}. ${s}`)] : []),
+    "", `Full log: ${logPath(ctx).replace(ctx.home, "~")}`,
+  ].filter((l, i, all) => l !== "" || (i > 0 && all[i - 1] !== ""));
+  const done = health.problems.length ? `Setup is in place, but ${health.problems.length} problem(s) need attention (see above).`
+    : e.wrote ? (steps.length > 1 ? `Setup finished. Next: follow steps 1–${steps.length} above.` : "Setup finished. Start with: pi")
+      : `Everything up to date.${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
+  return { lines, done };
+}
+
+const readdirSyncSafe = (dir: string): string[] => { try { return readdirSync(dir); } catch { return []; } };
 
 function cancelled(ctx: Ctx): number {
   ctx.err("Cancelled; nothing written.");
@@ -354,10 +420,10 @@ function cancelled(ctx: Ctx): number {
 
 interface FinishInput {
   ctx: Ctx; baseCtx: Ctx; options: Options; r: Resolved; detection: Detection; lines: string[]; code: number;
-  prompter?: Prompter; wrote?: boolean; pending?: number;
+  prompter?: Prompter; wrote?: boolean; pending?: number; done?: string;
 }
 
-function finish({ ctx, baseCtx, options, r, detection, lines, code, prompter, wrote = true, pending = 0 }: FinishInput): number {
+function finish({ ctx, baseCtx, options, r, detection, lines, code, prompter, wrote = true, pending = 0, done: closing }: FinishInput): number {
   if (options.json) {
     baseCtx.out(jsonReport(r, detection, code));
     return code;
@@ -367,8 +433,8 @@ function finish({ ctx, baseCtx, options, r, detection, lines, code, prompter, wr
     const readOnly = options.plan || options.dryRun;
     const kept = r.actions.filter((a) => a.op === "keep").length;
     const upToDate = `${prompter ? "Everything is up to date." : "Everything up to date."}${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
-    const done = readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate;
-    const hint = r.choice.provisional && !readOnly && wrote ? ` ${r.choice.reason}.` : "";
+    const done = closing ?? (options.dryRun ? `Dry run: nothing changed. Next: ${setupCmd(ctx)}` : readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate);
+    const hint = !closing && r.choice.provisional && !readOnly && wrote ? ` ${r.choice.reason}.` : "";
     if (prompter && pending && !readOnly) prompter.outro(`Installed, with ${pending} ${pending === 1 ? "thing" : "things"} to finish: see "Still to finish" above.`);
     else if (prompter) prompter.outro(`${done}${hint}`);
     else ctx.out(`${done}${hint}`);

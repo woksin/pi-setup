@@ -88,7 +88,7 @@ export function guidedNotes(p: Prompter, e: GuidedEnd): number {
   const compact = compactChecks(installChecks(e.ctx, e.detection), { home: e.ctx.home, skipNpm: e.options.skipNpm, pathEdited });
   if (compact.lines.length) p.note(compact.lines.join("\n"), "Still to finish");
   const logins = [...new Set([...missingLogins(e.profile, e.ready), ...compact.logins])];
-  p.note(whatsNextLines({ pathMissing: e.pathMissing, pathEdited, logins, lanesOffered: e.offerLanes }).join("\n"), "What's next");
+  p.note(whatsNextLines({ pathMissing: e.pathMissing, pathEdited, logins, lanesOffered: e.offerLanes, brewShellenv: e.ctx.env.PI_SETUP_BREW_SHELLENV }).join("\n"), "What's next");
   return compact.count;
 }
 

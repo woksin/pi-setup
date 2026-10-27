@@ -2,6 +2,7 @@ import {
   chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { appendLog } from "./install-log.ts";
 import { npmSpec, selectedPins, pinsMissing, packageBinLinks, pinnedNpmManifest } from "./packages.ts";
 import { atomicWrite } from "./fsx.ts";
 import { BackupRun, prune } from "./backups.ts";
@@ -283,7 +284,9 @@ export async function apply(ctx: Ctx, actions: Action[], options: ApplyOptions, 
     applyProfile(options, piDir, run);
     if (options.quiet) {
       const installs = actions.filter((a): a is Extract<Action, { op: "install" }> => a.op === "install");
-      if (installs.length) ctx.out(`Wrote ${installs.length} files (${installs.filter((a) => a.existed).length} changed, ${run.backedUp} backed up)`);
+      const detail = actions.map(describe).filter(Boolean).join("\n");
+      if (detail && installs.length) appendLog(ctx, `\n# files written ${ctx.now().toISOString()}\n${detail}\n`);
+      if (installs.length) ctx.out(options.spinner ? `Wrote ${installs.length} files (${installs.filter((a) => a.existed).length} changed, ${run.backedUp} backed up)` : `✓ Installed ${installs.length} files into ~/.pi/agent`);
     }
     if (options.components) run.next.components = options.components;
     if (code === 0) {
@@ -316,14 +319,19 @@ async function runNpm(ctx: Ctx, actions: Action[], options: ApplyOptions, piDir:
   if (options.skipNpm) return { code: 0, ran: false };
   const selected = selectedPins(piDir);
   if (!npmChanged(actions, piDir, manifest, options.reinstallNpm)) {
-    ctx.out("npm packages up to date");
+    if (!options.quiet || options.spinner) ctx.out("npm packages up to date");
     return { code: 0, ran: false };
   }
-  const args = ["install", ...selected.map(npmSpec), "--save-exact", "--legacy-peer-deps"];
+  const args = ["install", ...selected.map(npmSpec), "--save-exact", "--legacy-peer-deps", "--no-audit", "--no-fund", "--loglevel=error"];
   const cwd = join(piDir, "npm");
   options.spinner?.message?.("Installing npm packages");
+  if (!options.spinner && options.quiet) ctx.out("→ Installing pi packages…");
   const result = await installPinnedNpm(ctx, args, cwd, { inherit: options.inheritNpm, selected });
-  if (result.code === 0) return { code: 0, ran: true };
+  if (!options.inheritNpm) appendLog(ctx, `\n$ npm ${args.join(" ")}\n${result.stdout}${result.stderr}\n[exit ${result.code}]\n`);
+  if (result.code === 0) {
+    if (!options.spinner && options.quiet) ctx.out("✓ Installed pi packages");
+    return { code: 0, ran: true };
+  }
   if (!options.inheritNpm) ctx.err((result.stdout + result.stderr).trim().split("\n").slice(-15).join("\n"));
   ctx.err("Files installed; npm install failed: (cd ~/.pi/agent/npm && npm install --legacy-peer-deps)");
   return { code: 1, ran: true };

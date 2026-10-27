@@ -27,7 +27,7 @@ test("fresh install pins and fetches all four packages and links all shipped CLI
     return { code: 0, stdout: "", stderr: "", timedOut: false };
   } });
   assert.equal(await main(args, ctx), 0);
-  assert.deepEqual(calls[0], ["install", ...PINNED_PACKAGES.map(npmSpec), "--save-exact", "--legacy-peer-deps"]);
+  assert.deepEqual(calls[0], ["install", ...PINNED_PACKAGES.map(npmSpec), "--save-exact", "--legacy-peer-deps", "--no-audit", "--no-fund", "--loglevel=error"]);
   const settings = JSON.parse(readFileSync(join(pi, "settings.json"), "utf8"));
   for (const p of PINNED_PACKAGES) assert.ok(settings.packages.includes(`npm:${npmSpec(p)}`));
   for (const [pkg, cmd] of [["pi-context-budget", "pi-session"], ["pi-orch", "orch"], ["pi-orch", "orch-poll"]]) assert.equal(readlinkSync(join(home, ".local/bin", cmd)), join(pi, "npm/node_modules/@woksin", pkg, "bin", cmd));
@@ -200,7 +200,7 @@ test("explicit npm versions, filtered package objects and arbitrarily named loca
   } });
   assert.equal(await main([...args, "--without", "web"], ctx), 0);
   assert.deepEqual(JSON.parse(readFileSync(join(pi, "settings.json"), "utf8")).packages, [...packages, "./local-packages/pi-questions"]);
-  assert.deepEqual(calls, [["install", "--save-exact", "--legacy-peer-deps"]]);
+  assert.deepEqual(calls, [["install", "--save-exact", "--legacy-peer-deps", "--no-audit", "--no-fund", "--loglevel=error"]]);
 });
 
 test("foreign launcher files and links survive installation", async () => {
@@ -227,8 +227,8 @@ exit 0
 `);
   chmodSync(node, 0o755);
   for (const version of ["22.19.0", "24.1.0", "26.8.0", "30.0.0", "22.18.0", "20.19.0"]) {
-    const result = spawnSync("/bin/bash", [join(REPO, "install.sh"), "--help"], { encoding: "utf8", env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, REAL_NODE: process.execPath, TEST_NODE_VERSION: version } });
     const supported = !["22.18.0", "20.19.0"].includes(version);
+    const result = spawnSync("/bin/bash", [join(REPO, "install.sh"), ...(supported ? ["--help"] : ["--no-install-prereqs"])], { encoding: "utf8", env: { HOME: home, PI_SETUP_SYSTEM_BIN_DIRS: join(home, "no-system-bin"), PATH: `${bin}:/usr/bin:/bin`, REAL_NODE: process.execPath, TEST_NODE_VERSION: version } });
     assert.equal(result.status, supported ? 0 : 1, version);
     assert.equal(result.stderr.includes("needs Node.js"), !supported, version);
   }

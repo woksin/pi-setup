@@ -84,3 +84,55 @@ export function compactChecks(all: DoctorCheck[], options: CompactOptions): Comp
   const shown = lines.length > MAX_HEALTH_LINES ? [...lines.slice(0, MAX_HEALTH_LINES - 1), `and ${lines.length - MAX_HEALTH_LINES + 1} more: ./install.sh doctor`] : lines;
   return { lines: shown, count: lines.length, logins };
 }
+
+export interface Health {
+  /** One line: how the machine is, in words a first-time user can read. */
+  line: string;
+  /** Real problems, one line each; empty when nothing is wrong. */
+  problems: string[];
+  /** Optional tools that are not installed. */
+  optional: string[];
+  /** Providers the user still has to log in to. */
+  logins: string[];
+  /** Things for the person to do that are not failures (logins, PATH). */
+  todos: number;
+  /** Pi packages are not installed because npm was skipped. */
+  npmSkipped: boolean;
+  /** Files you changed that have a new version waiting (`.pi-setup-new`). */
+  pending: boolean;
+}
+
+/** Tools the setup works without; their absence is information, not a failure. */
+const OPTIONAL_TOOLS = new Set(["gitleaks", "rtk", "docker", "tmux"]);
+
+/** Warnings that are things to do or to know, not things that are broken. */
+const informational = (c: DoctorCheck, skipNpm: boolean, loginTodo: boolean): boolean =>
+  // A fallback or profile that fails only because a provider has no login is the login to-do, not a separate problem.
+  (loginTodo && (c.id === "profile" || c.id.startsWith("fallback:")) && / has no login/.test(c.detail)) ||
+  (skipNpm && (c.id === "npm" || c.id.startsWith("package:"))) ||
+  (c.status === "warn" && (
+    c.id === "profile" || c.id === "gh" || c.id === "models" || c.id === "pending" || c.id === "update" ||
+    c.id.startsWith("fallback:") || c.id.startsWith("provider:") || c.id.startsWith("path") ||
+    (c.id.startsWith("tool:") && OPTIONAL_TOOLS.has(c.id.slice(5)))
+  ));
+
+/**
+ * The finish screen's single health line. A missing login or PATH entry is a to-do, never a failure:
+ * "Everything up to date" and "Setup finished" may only be said when `problems` is empty.
+ */
+export function finishHealth(all: DoctorCheck[], options: CompactOptions & { githubLogin: boolean; pathTodo: boolean }): Health {
+  const bad = all.filter((c) => c.status === "warn" || c.status === "fail");
+  const logins = loginLabels(bad);
+  const optional = bad.filter((c) => c.id.startsWith("tool:") && OPTIONAL_TOOLS.has(c.id.slice(5))).map((c) => c.id.slice(5));
+  const problems = bad
+    .filter((c) => !informational(c, options.skipNpm, logins.length > 0))
+    .map((c) => `${c.id}: ${c.detail}`.split(options.home).join("~"));
+  const npmSkipped = options.skipNpm && bad.some((c) => c.id === "npm" || c.id.startsWith("package:"));
+  const pending = bad.some((c) => c.id === "pending");
+  const todos = (logins.length ? 1 : 0) + (options.githubLogin ? 0 : 1) + (options.pathTodo ? 1 : 0) + (npmSkipped ? 1 : 0) + (pending ? 1 : 0);
+  const extra = optional.length ? `, ${plural(optional.length, "optional tool")} not installed` : "";
+  const line = problems.length
+    ? `Health check: ${plural(problems.length, "problem")} to fix:`
+    : `Health check: ok (${plural(todos, "to-do")}${extra})`;
+  return { line, problems, optional, logins, todos, npmSkipped, pending };
+}

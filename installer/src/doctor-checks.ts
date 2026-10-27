@@ -1,7 +1,8 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { PACKAGE_BINS, npmPackageCheck } from "./packages.ts";
-import { missingBinDirs, shellPath } from "./shell-path.ts";
+import { installCommand } from "./prereqs.ts";
+import { missingBinDirs, pathFixCommand, shellPath } from "./shell-path.ts";
 import { fileSha, fromHomeRel, symlinkTarget, readManifest, validateManifest } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
 import { chooseProfile, loadProfiles } from "./profiles.ts";
@@ -27,6 +28,7 @@ interface State {
 
 export function setupCmd(ctx: Ctx): string {
   if (ctx.which("pi-setup")) return "pi-setup";
+  if (ctx.cwd === ctx.repoDir) return "./install.sh";
   const path = join(ctx.repoDir, "install.sh");
   return path.startsWith(`${ctx.home}/`) ? `~/${path.slice(ctx.home.length + 1)}` : path;
 }
@@ -175,15 +177,14 @@ function guards(s: State): DoctorCheck {
 }
 function path(s: State): DoctorCheck[] {
   const missing = missingBinDirs(s.ctx);
-  const { file, snippet } = shellPath(s.ctx);
-  const result = [check("path", missing.length ? "warn" : "ok", missing.length ? `${missing.map(p => `~/${p}`).join(", ")} not on PATH` : "~/.local/bin and ~/.pi/agent/bin are on PATH", `add ${snippet} to ${file}`)];
+  const result = [check("path", missing.length ? "warn" : "ok", missing.length ? `${missing.map(p => `~/${p}`).join(", ")} not on PATH` : "~/.local/bin and ~/.pi/agent/bin are on PATH", pathFixCommand(s.ctx))];
   for (const [pkg, cmd] of PACKAGE_BINS) {
     if (!packages(s).some(p => p.includes(pkg))) continue;
     const target = `~/.pi/agent/npm/node_modules/@woksin/${pkg}/bin/${cmd}`;
     const fix = existsSync(join(s.ctx.home, target.slice(2))) ? `ln -s ${target} ~/.local/bin/${cmd}` : `https://github.com/woksin/${pkg}#readme`;
     const link = join(s.ctx.home, ".local/bin", cmd);
     if (s.ctx.which(cmd)) result.push(check(`path:${cmd}`, "ok", `${cmd} found`, fix));
-    else if (present(link) && missing.includes(".local/bin")) result.push(check(`path:${cmd}`, "warn", `${cmd} is installed at ~/.local/bin/${cmd}, but ~/.local/bin is not on PATH`, `add ${snippet} to ${file} (or reinstall with --edit-shell-profile)`));
+    else if (present(link) && missing.includes(".local/bin")) result.push(check(`path:${cmd}`, "warn", `${cmd} is installed at ~/.local/bin/${cmd}, but ~/.local/bin is not on PATH`, `${pathFixCommand(s.ctx)} (or reinstall with --edit-shell-profile)`));
     else result.push(check(`path:${cmd}`, "warn", `${cmd} is missing`, fix));
   }
   return result;
@@ -198,13 +199,13 @@ function prerequisites(s: State): DoctorCheck[] {
     tmux: "optional lanes terminal backend unavailable; macOS Terminal remains an alternative",
   };
   const tools = [...required, ...Object.keys(optional)];
-  const brew: Record<string, string> = { rg: "ripgrep", python3: "python", npm: "node" };
-  const apt: Record<string, string> = { rg: "ripgrep", fd: "fd-find" };
   return tools.map(tool => {
     const found = s.ctx.which(tool);
-    const fix = tool === "pi" ? "npm install -g @earendil-works/pi-coding-agent" : s.ctx.platform === "darwin" ? `brew install ${brew[tool] ?? tool}` : `sudo apt install ${apt[tool] ?? tool}${tool === "fd" ? "; expose fdfind as fd on PATH" : ""}`;
-    const missingStatus = required.includes(tool) ? "fail" : "warn";
-    return check(`tool:${tool}`, found ? "ok" : missingStatus, found ? `${tool} is on PATH` : `${tool} is missing`, found ? undefined : optional[tool] ?? fix);
+    const fix = installCommand(s.ctx, tool);
+    const isRequired = required.includes(tool);
+    const fixHint = isRequired || tool === "gitleaks" || tool === "tmux" ? fix : optional[tool];
+    const base = check(`tool:${tool}`, found ? "ok" : isRequired ? "fail" : "warn", found ? `${tool} is on PATH` : `${tool} is missing`, found ? undefined : fixHint);
+    return !found && isRequired ? { ...base, fixable: "prereq" as const } : base;
   });
 }
 

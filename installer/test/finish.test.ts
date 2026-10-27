@@ -1,9 +1,9 @@
 import { strict as assert } from "node:assert";
-import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { main } from "../src/run.ts";
-import { compactChecks } from "../src/doctor-compact.ts";
+import { compactChecks, finishHealth } from "../src/doctor-compact.ts";
 import type { DoctorCheck } from "../src/doctor.ts";
 import { PATH_EDIT_DEFAULT } from "../src/shell-path.ts";
 import { sandbox } from "./helpers/home.ts";
@@ -57,6 +57,12 @@ test("Review shows the PATH line pre-ticked and Install appends the snippet once
   assert.equal(readFileSync(rc(b), "utf8"), `\n# pi-setup tools\n${SNIPPET}\n`);
 });
 
+test("--no-edit-shell-profile wins over the wizard: the ticked PATH line is not applied", async () => {
+  const b = box(); const s = scripted();
+  assert.equal(await main([...flags(b), "--no-edit-shell-profile"], zsh(b), s.p), 0);
+  assert.ok(!existsSync(rc(b)));
+});
+
 test("an existing snippet is not appended again", async () => {
   const b = box(); writeFileSync(rc(b), `${SNIPPET}\n`);
   assert.equal(await main(flags(b), zsh(b), scripted().p), 0);
@@ -80,12 +86,20 @@ test("no PATH line and no new-terminal advice when both directories are on PATH"
   assert.ok(!existsSync(rc(b)));
 });
 
-test("non-interactive runs still need --edit-shell-profile", async () => {
-  for (const edit of [false, true]) {
+test("non-interactive: a fresh install edits the profile by default (with a backup), an update never does unasked", async () => {
+  const run = async (extra: string[], existing: boolean) => {
     const b = box(); const ctx = zsh(b); ctx.stdinTTY = false; ctx.stdoutTTY = false;
-    assert.equal(await main([...flags(b), "--yes", "--user", "alice", ...(edit ? ["--edit-shell-profile"] : [])], ctx), 0);
-    assert.equal(existsSync(rc(b)), edit);
-  }
+    if (existing) mkdirSync(join(b.home, ".pi/agent"), { recursive: true });
+    writeFileSync(rc(b), "# mine\n");
+    assert.equal(await main([...flags(b), "--yes", "--user", "alice", ...extra], ctx), 0);
+    return { text: readFileSync(rc(b), "utf8"), backups: readdirSync(b.home).filter((n) => n.startsWith(".zshrc.pi-setup-bak-")) };
+  };
+  const fresh = await run([], false);
+  assert.ok(fresh.text.includes(SNIPPET));
+  assert.equal(fresh.backups.length, 1);
+  assert.ok(!(await run(["--no-edit-shell-profile"], false)).text.includes(SNIPPET));
+  assert.ok(!(await run([], true)).text.includes(SNIPPET));
+  assert.ok((await run(["--edit-shell-profile"], true)).text.includes(SNIPPET));
 });
 
 test("the finish says what is left, never up to date or done, and What's next lists the actions", async () => {
@@ -171,4 +185,14 @@ test("a truly missing command is kept and counted; only installed-off-PATH ones 
   const kept = compactChecks(checks, { home: "/h", skipNpm: false, pathEdited: false });
   assert.equal(kept.count, 2);
   assert.match(kept.lines[1], /2 commands missing or not on PATH: rtk, pi-profile/);
+});
+
+test("failing fallbacks that only lack a login are the login to-do, not problems", () => {
+  const checks: DoctorCheck[] = [
+    { id: "profile", status: "fail", detail: "balanced: Claude, ChatGPT has no login" },
+    { id: "fallback:anthropic/claude-haiku-5-5", status: "fail", detail: "Explore pin anthropic/claude-haiku-5-5 but Claude has no login: no ready target" },
+  ] as DoctorCheck[];
+  const h = finishHealth(checks, { home: "/h", skipNpm: false, githubLogin: true, pathTodo: false } as Parameters<typeof finishHealth>[1]);
+  assert.deepEqual(h.problems, []);
+  assert.match(h.line, /^Health check: ok/);
 });

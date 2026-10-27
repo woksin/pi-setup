@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { COMPONENTS, hintFor } from "../src/components.ts";
 import { main } from "../src/run.ts";
-import { install, installLines, sandbox } from "./helpers/home.ts";
+import { install, installLines, loggedInstalls, sandbox } from "./helpers/home.ts";
 import { ctxFor, scripted } from "./helpers/prompter.ts";
 import type { Sandbox } from "./helpers/home.ts";
 
@@ -46,7 +46,9 @@ test("(c) the guided flow prints a count line, not one line per file", async () 
   assert.ok(lines.some((l) => /^Wrote \d+ files \(0 changed, 0 backed up\)$/.test(l)), lines.join("\n"));
   const plain = box();
   const out = install(plain, ["--yes", ...base(plain)]);
-  assert.ok(installLines(out.stdout).length > 100);
+  assert.doesNotMatch(out.stdout, /^install /m);
+  assert.match(out.stdout, /^✓ Installed \d{3} files into ~\/\.pi\/agent$/m);
+  assert.ok(loggedInstalls(plain).length > 100);
 });
 
 /** Both pi-setup bin directories on PATH, so a rerun has no pending PATH edit and Review can be skipped. */
@@ -77,7 +79,7 @@ test("(e) the Python OK line is printed only without a prompter", async () => {
   const plain = box();
   // Under heavy load the version probe can time out; then the same line is a stderr warning instead.
   const r = install(plain, ["--yes", ...base(plain)]);
-  assert.match(`${r.stdout}\n${r.stderr}`, /^(warning: )?Python (\d|version unknown)/m);
+  assert.match(`${r.stdout}\n${r.stderr}`, /^(warning: |✓ )?Python (\d|version unknown)/m);
 });
 
 test("(f) every extras row has a hint", () => {

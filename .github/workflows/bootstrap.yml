@@ -1,0 +1,51 @@
+name: bootstrap
+
+# First-time-install acceptance: ./install.sh on a clean machine with nothing installed.
+on:
+  pull_request:
+    paths:
+      - install.sh
+      - installer/**
+      - tests/container/**
+      - .github/workflows/bootstrap.yml
+  schedule:
+    # Weekly: catches upstream drift in apt, npm and nodejs.org.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: shellcheck -s sh install.sh installer/bootstrap/preflight.sh tests/container/inside.sh
+      - run: shellcheck tests/container/run.sh
+
+  ubuntu-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash tests/container/run.sh
+
+  # Manual only: the runner already has Homebrew and Node, so this proves the macOS paths with brew present.
+  macos:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install into a throwaway HOME
+        run: |
+          set -eu
+          HOME="$(mktemp -d)"
+          export HOME
+          ./install.sh --yes --install-prereqs --no-launchd --user ci-bot --repos-root "$HOME/repos"
+          ./install.sh --yes --no-launchd --user ci-bot --repos-root "$HOME/repos" | tee rerun.log
+          grep -q "Everything up to date" rerun.log
+          ./install.sh doctor --json > doctor.json || test $? -le 2
+          python3 tests/container/assert-doctor.py doctor.json

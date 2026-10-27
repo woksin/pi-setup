@@ -1,9 +1,11 @@
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, readFileSync } from "node:fs";
+import { timestamp } from "./fsx.ts";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import type { Ctx } from "./types.ts";
 
 export function missingBinDirs(ctx: Ctx): string[] {
-  const paths = (ctx.env.PATH ?? "").split(delimiter).map(p => resolve(ctx.cwd, p));
+  // The bootstrap may have prepended directories for this run only; the user's own shell does not have them.
+  const paths = (ctx.env.PI_SETUP_USER_PATH ?? ctx.env.PATH ?? "").split(delimiter).map(p => resolve(ctx.cwd, p));
   return [".local/bin", ".pi/agent/bin"].filter(p => !paths.includes(join(ctx.home, p)));
 }
 
@@ -23,19 +25,32 @@ export function pathEditLine(ctx: Ctx): string | undefined {
   return `Add ~/.local/bin and ~/.pi/agent/bin to PATH in ${shellPath(ctx).file.replace(ctx.home, "~")}`;
 }
 
+const tilde = (ctx: Ctx, path: string): string => path.replace(ctx.home, "~");
+
+/** The one command that puts the tools on PATH for this user's shell; printed wherever PATH is missing. */
+export function pathFixCommand(ctx: Ctx): string {
+  const { file, snippet } = shellPath(ctx);
+  return `echo '${snippet}' >> ${tilde(ctx, file)}`;
+}
+
 /** Shell startup files are user-owned: append only on explicit opt-in, never replace them. */
 export function configureShellPath(ctx: Ctx, edit: boolean, dryRun: boolean, guided = false): void {
   if (!missingBinDirs(ctx).length) return;
   const { file, snippet } = shellPath(ctx);
   if (guided && !edit) return;
-  if (!guided) ctx.out(`PATH: add this to ${file}, then restart your shell:\n${snippet}`);
-  if (!edit) { ctx.out("Shell profile unchanged (opt in with --edit-shell-profile)."); return; }
-  if (dryRun) { ctx.out(`would append PATH snippet to ${file}`); return; }
+  if (!edit) {
+    // A real run leaves the how-to to the finish screen's numbered steps; plan and dry-run show it here.
+    if (!guided && dryRun) ctx.out(`PATH: not set up. To fix it: ${pathFixCommand(ctx)}`);
+    return;
+  }
+  if (dryRun) { ctx.out(`would append PATH snippet to ${tilde(ctx, file)} (the file is backed up first)`); return; }
   let text = "";
   try { text = readFileSync(file, "utf8"); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   if (text.split("\n").includes(snippet)) return;
   mkdirSync(dirname(file), { recursive: true });
+  const backup = text ? `${file}.pi-setup-bak-${timestamp(ctx.now())}` : undefined;
+  if (backup) copyFileSync(file, backup);
   appendFileSync(file, `\n# pi-setup tools\n${snippet}\n`);
-  if (!guided) ctx.out(`Appended PATH snippet to ${file}`);
+  if (!guided) ctx.out(`✓ Added ~/.local/bin and ~/.pi/agent/bin to PATH in ${tilde(ctx, file)}${backup ? ` (backup: ${tilde(ctx, backup)})` : ""}`);
 }

@@ -21,10 +21,14 @@ export interface Options {
   reinstallNpm: boolean;
   noLaunchd: boolean;
   editShellProfile: boolean;
+  /** `--no-edit-shell-profile`: never touch the shell profile, even on a fresh install. */
+  noEditShellProfile: boolean;
   preapproveMcp: boolean;
   plan: boolean;
   json: boolean;
   fix: boolean;
+  /** `--install-prereqs` (true) / `--no-install-prereqs` (false); undefined: ask, or the `--yes` default. */
+  installPrereqs: boolean | undefined;
   /** `--with <id>` (install only). */
   with: string[];
   /** `--without <id>` (install only). */
@@ -48,11 +52,14 @@ export const USAGE = `Usage: ./install.sh [install] [options]
   --profile <name|auto> profile to apply (default: the active one, else chosen from your logins)
   --with <id> / --without <id>  turn an extra on or off: ${COMPONENT_IDS.join(", ")}
   --preapprove-mcp      trust project MCP server definitions for new lanes folders (default: off)
-  --yes                 never prompt
-  --skip-npm            do not run npm install in ~/.pi/agent/npm
+  --yes                 never prompt; on a fresh machine this also installs missing prerequisites and pi
+  --install-prereqs     install missing prerequisites and pi without asking (apt shows its sudo command)
+  --no-install-prereqs  only check and report prerequisites, never install them
+  --skip-npm            do not run npm install in ~/.pi/agent/npm; also installs no prerequisites, even with --install-prereqs
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --no-launchd          do not load or unload launchd jobs
-  --edit-shell-profile  append the suggested PATH snippet to your shell profile
+  --edit-shell-profile  append the PATH snippet to your shell profile (a fresh install does this by default)
+  --no-edit-shell-profile  never touch your shell profile
   --help                this text`;
 
 const VALUE_FLAGS = new Set(["--dir", "--user", "--repos-root", "--profile", "--ref", "--keep", "--with", "--without"]);
@@ -60,7 +67,7 @@ const COMMON = ["--help", "--dry-run"];
 const ALLOWED: Record<Command, string[] | undefined> = {
   install: undefined,
   lanes: ["--help", "--dir"],
-  doctor: ["--help", "--json", "--fix"],
+  doctor: ["--help", "--json", "--fix", "--install-prereqs", "--no-install-prereqs"],
   uninstall: [...COMMON, "--yes", "--no-launchd"],
   update: [...COMMON, "--yes", "--skip-npm", "--ref"],
   backups: [...COMMON, "--keep"],
@@ -72,6 +79,7 @@ const BOOLEAN_FLAGS: Record<string, keyof Options> = {
   "--reinstall-npm": "reinstallNpm",
   "--no-launchd": "noLaunchd",
   "--edit-shell-profile": "editShellProfile",
+  "--no-edit-shell-profile": "noEditShellProfile",
   "--preapprove-mcp": "preapproveMcp",
   "--plan": "plan",
   "--json": "json",
@@ -86,7 +94,7 @@ function isAbsoluteOrHome(value: string): boolean {
 export function parseArgs(argv: string[], cwd: string): Parsed {
   const options: Options = {
     command: "install", sub: "list", keep: 10, ref: "", help: false, dryRun: false, user: "", reposRoot: "", dir: "", profile: "",
-    yes: false, skipNpm: false, reinstallNpm: false, noLaunchd: false, editShellProfile: false, preapproveMcp: false, plan: false, json: false, fix: false, with: [], without: [],
+    yes: false, skipNpm: false, reinstallNpm: false, noLaunchd: false, editShellProfile: false, noEditShellProfile: false, preapproveMcp: false, plan: false, json: false, fix: false, installPrereqs: undefined, with: [], without: [],
   };
   let args = argv[0] === "install" ? argv.slice(1) : argv;
   if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor" || args[0] === "lanes") {
@@ -105,7 +113,12 @@ export function parseArgs(argv: string[], cwd: string): Parsed {
     if (allowed && (arg in BOOLEAN_FLAGS || VALUE_FLAGS.has(arg)) && !allowed.includes(arg)) {
       return { ok: false, error: `${arg} is not valid for ${options.command}` };
     }
-    if (arg in BOOLEAN_FLAGS) {
+    if (arg === "--install-prereqs" || arg === "--no-install-prereqs") {
+      if (allowed && !allowed.includes(arg)) return { ok: false, error: `${arg} is not valid for ${options.command}` };
+      const value = arg === "--install-prereqs";
+      if (options.installPrereqs !== undefined && options.installPrereqs !== value) return { ok: false, error: "--install-prereqs and --no-install-prereqs cannot be used together" };
+      options.installPrereqs = value;
+    } else if (arg in BOOLEAN_FLAGS) {
       (options as unknown as Record<string, unknown>)[BOOLEAN_FLAGS[arg]] = true;
     } else if (VALUE_FLAGS.has(arg)) {
       const value = args[i + 1];
@@ -136,6 +149,7 @@ export function parseArgs(argv: string[], cwd: string): Parsed {
       return { ok: false, error: `Unknown argument: ${arg}` };
     }
   }
+  if (options.command === "doctor" && options.installPrereqs !== undefined && !options.fix) return { ok: false, error: `--${options.installPrereqs ? "" : "no-"}install-prereqs needs --fix for doctor` };
   const both = options.with.filter((id) => options.without.includes(id));
   if (both.length) return { ok: false, error: `${both.join(", ")} is in both --with and --without; valid ids: ${COMPONENT_IDS.join(", ")}` };
   return { ok: true, options };

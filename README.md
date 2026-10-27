@@ -21,7 +21,7 @@ git clone https://github.com/woksin/pi-setup && cd pi-setup
 ./install.sh             # guided setup; overwritten files are backed up first
 ```
 
-In a terminal, `./install.sh` is a guided setup (see [The guided installer](#the-guided-installer)). It needs Node.js 22.19 or newer and Python 3.9 or newer (macOS/Linux). The full installer reference follows below.
+Prerequisites: none. Run `./install.sh`. It checks what your machine has, shows what it will install and asks once before it starts. It sets up Node.js, the tools below and pi itself. The full installer reference follows below (see [The guided installer](#the-guided-installer)).
 
 ## Contents
 
@@ -43,10 +43,27 @@ In a terminal, `./install.sh` is a guided setup (see [The guided installer](#the
 
 ### New machine prerequisites
 
+**Prerequisites: none. Run `./install.sh`. Done.** On a new machine it installs what is missing, after showing you every command and asking `Continue? [Y/n]`. It never runs anything you have not seen first.
+
+What it installs, and with which command:
+
+- **macOS:** Node.js with `brew install node` (it offers the official Homebrew installer first if Homebrew is missing), then `brew install gh jq ripgrep fd python git` for whatever is missing.
+- **Debian/Ubuntu:** `sudo apt-get install -y gh jq ripgrep fd-find python3 git` (and `apt-get update` first), plus a `fd` link in `~/.local/bin`. Fedora and similar: `sudo dnf install -y ...`.
+- **Node.js on Linux:** the official nodejs.org tarball (latest v26: the pinned `@woksin/pi-orch` needs Node 26 or newer; Homebrew's `node` is 26 too), checked against its SHA-256 and unpacked into `~/.local/lib/nodejs`, with `node`, `npm` and `npx` linked in `~/.local/bin`. No sudo is needed for Node itself.
+- **pi:** `npm install -g @earendil-works/pi-coding-agent@<the version this setup pins>`, into `~/.local` when the global npm directory is not yours. Never with sudo.
+- **Windows:** use WSL2 and run `./install.sh` inside it; native Windows shells are not supported.
+
+When it asks: in a terminal it always asks. `--install-prereqs` skips the question and installs, `--no-install-prereqs` only reports what is missing. `--yes` takes the defaults: on a fresh machine it installs, but when you already have a pi-setup install (an update) it only reports what is missing and prints the command to fix it, and `--skip-npm` never installs anything, not even with `--install-prereqs` or an answer of yes (it names what it skipped). `--dry-run` prints the commands it would run and changes nothing. If a step fails, it names the command, the log (`~/.local/state/pi-setup/install.log`) and says to re-run `./install.sh`, which continues from where it stopped.
+
+<details>
+<summary>Manual setup (fallback)</summary>
+
 Use Node.js **22.19 or newer** (including current Node 24/26 releases), npm, Python **3.9 or newer** (macOS/Linux), Git, GitHub CLI (`gh`), `jq`, ripgrep (`rg`) and `fd` on PATH. Install pi with `npm install -g @earendil-works/pi-coding-agent`.
 
 - macOS (Homebrew): `brew install node python git gh jq ripgrep fd`
 - Debian/Ubuntu: `sudo apt install python3 git gh jq ripgrep fd-find`; install a current Node.js/npm from [nodejs.org](https://nodejs.org) if the distro version is too old. Debian calls fd `fdfind`: expose it as `fd` in `~/.local/bin`.
+
+</details>
 
 | Prerequisite | Required? | Without it |
 | --- | --- | --- |
@@ -59,7 +76,7 @@ Use Node.js **22.19 or newer** (including current Node 24/26 releases), npm, Pyt
 | `tmux` | Optional (`brew install tmux` / `sudo apt install tmux`) | No tmux lanes backend; macOS Terminal is an alternative. |
 | `CS_ACCESS_TOKEN` + `cs-mcp` | Optional, for CodeScene | No authenticated CodeScene analysis; doctor warns when CodeScene is enabled. [Setup](https://github.com/codescene-oss/codescene-mcp-server#readme). Never store the token in this repo. |
 
-Doctor fails missing required tools/packages and warns about missing optional tools. It never installs system prerequisites.
+Doctor fails missing required tools/packages and warns about missing optional tools. Only `./install.sh doctor --fix` can install them, and only after asking (see Doctor).
 
 ### The guided installer
 
@@ -80,9 +97,9 @@ A rerun with nothing to change ends with "Everything is up to date." Non-interac
 
 ### First ten minutes: pi, login, then install
 
-1. Install prerequisites and pi: `npm install -g @earendil-works/pi-coding-agent`.
-2. Start `pi`, then use `/login` for the providers/subscriptions you have; exit pi afterwards. Also run `gh auth login` for GitHub access.
-3. From this checkout, run `./install.sh` and follow the prompts (rerun it after adding a login, or use `./install.sh --profile auto` to recompute the profile). Use `--user <GitHub-login> --yes` for an unattended install.
+1. From this checkout, run `./install.sh` and answer the few questions. It installs the prerequisites and pi for you (with your consent). Use `--user <GitHub-login> --yes` for an unattended install.
+2. Log in: the finish screen lists what is left. Run `gh auth login` for GitHub, start `pi` and use `/login` for the providers you have. Rerun `./install.sh` after adding a login, or use `./install.sh --profile auto` to recompute the profile.
+3. Start pi with `pi`.
 4. Restart your shell/pi and run `./install.sh doctor`. Review the selected profile with `pi-profile list`; select another with `./install.sh --profile <name>`.
 
 | Profile | Required logins/subscriptions | Optional provider |
@@ -106,9 +123,9 @@ git clone https://github.com/woksin/pi-setup && cd pi-setup
 ./install.sh             # overwritten files are backed up to ~/.pi/agent/.pi-setup/backups/<timestamp>/
 ```
 
-Install needs Node.js 22.19 or newer (pi needs it too) and Python 3.9 or newer (macOS/Linux). `install.sh` is a thin shim around the committed bundle `installer/dist/pi-setup.mjs`; it detects your setup first and asks only what it could not find out. In a terminal it runs a short wizard; with `--yes`, `CI` set or no terminal it never prompts. It detects your GitHub login (saved, then `gh`), your repositories root (saved, then the best match among the usual places such as `~/repos` and the parent of this checkout, then `$HOME/repos`), which providers you are logged in to, and picks a profile from `agent/profiles/<name>/profile.json` (an already active profile is kept on re-runs; `--profile <name>` switches). It then runs npm install in pi's global package store, `~/.pi/agent/npm`, when inputs change or a pinned package is missing/wrong. New installs register and fetch `npm:@woksin/pi-jobs@0.3.1`, `npm:@woksin/pi-context-budget@0.5.0`, `npm:@woksin/pi-recover@0.1.1` and `npm:@woksin/pi-orch@0.1.1` (with `--save-exact --legacy-peer-deps`). Existing explicit package versions and local overrides are kept. `--skip-npm` skips fetching; doctor then reports missing packages. Launchers `pi-session`, `orch` and `orch-poll` are linked into `~/.local/bin` on the first install; existing files/foreign links there are left alone.
+Install needs Node.js 22.19 or newer (pi needs it too) and Python 3.9 or newer (macOS/Linux); `./install.sh` installs them for you when they are missing. `install.sh` is a thin shim around the committed bundle `installer/dist/pi-setup.mjs`; it detects your setup first and asks only what it could not find out. In a terminal it runs a short wizard; with `--yes`, `CI` set or no terminal it never prompts. It detects your GitHub login (saved, then `gh`), your repositories root (saved, then the best match among the usual places such as `~/repos` and the parent of this checkout, then `$HOME/repos`), which providers you are logged in to, and picks a profile from `agent/profiles/<name>/profile.json` (an already active profile is kept on re-runs; `--profile <name>` switches). It then runs npm install in pi's global package store, `~/.pi/agent/npm`, when inputs change or a pinned package is missing/wrong. New installs register and fetch `npm:@woksin/pi-jobs@0.3.1`, `npm:@woksin/pi-context-budget@0.5.0`, `npm:@woksin/pi-recover@0.1.1` and `npm:@woksin/pi-orch@0.1.1` (with `--save-exact --legacy-peer-deps`). Existing explicit package versions and local overrides are kept. `--skip-npm` skips fetching; doctor then reports missing packages. Launchers `pi-session`, `orch` and `orch-poll` are linked into `~/.local/bin` on the first install; existing files/foreign links there are left alone.
 
-Flags, in any order: `--user <login>`, `--repos-root <dir>`, `--profile <name|auto>`, `--yes` (never prompt), `--skip-npm`, `--dry-run` (writes nothing), `--plan` (print detection, profile and actions, write nothing) and `--json` (one JSON object on stdout). The operator settings are saved in `~/.pi/agent/user.json` (`githubUser` and `reposRoot`; other keys are kept) and reused on later installs unless flags override them. Without a login from any source, a real install fails and asks for `--user`; `--plan` and `--dry-run` use the placeholder `<you>` instead. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. A re-run that has nothing to change prints `Everything up to date`, no `install` lines, and creates no backups.
+Flags, in any order: `--install-prereqs` (install missing prerequisites and pi without asking), `--no-install-prereqs` (only report them), `--user <login>`, `--repos-root <dir>`, `--profile <name|auto>`, `--yes` (never prompt), `--skip-npm`, `--dry-run` (writes nothing), `--plan` (print detection, profile and actions, write nothing) and `--json` (one JSON object on stdout). The operator settings are saved in `~/.pi/agent/user.json` (`githubUser` and `reposRoot`; other keys are kept) and reused on later installs unless flags override them. Without a login from any source, a real install fails and asks for `--user`; `--plan` and `--dry-run` use the placeholder `<you>` instead. Repo templates use `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`; install renders them for you. A re-run that has nothing to change prints `Everything up to date`, no `install` lines, and creates no backups.
 
 ### Update, uninstall and backups
 
@@ -123,7 +140,7 @@ Each install records what it wrote in `~/.pi/agent/.pi-setup/manifest.json` (HOM
 ### Doctor
 
 Run `./install.sh doctor [--fix] [--json]` (or `pi-setup doctor`): exit 0 means green, 1 warnings, 2 failures or invalid arguments.
-`--fix` only reinstalls missing npm dependencies, restores missing tracked files/links when the checkout still matches the installed commit, and restores modes of unchanged files; it never changes logins, guards, profiles, PATH, services or edited files.
+`--fix` installs missing prerequisites and pi after asking (`--install-prereqs` skips the question; it prints the exact command first), reinstalls missing npm dependencies, restores missing tracked files/links when the checkout still matches the installed commit, and restores modes of unchanged files; it never changes logins, guards, profiles, PATH, services or edited files.
 Doctor runs `pi --version`, `pi auth check --provider <id> --no-refresh --json` (no token refresh), and `pi --offline --list-models` (no model call or network). pi may perform its normal one-time migrations; extension errors that do not crash pi are not visible.
 The update check is cached once a day; `PI_OFFLINE=1` skips it. Otherwise doctor is read-only, and `--json` emits one object on stdout.
 For build performance and disk cleanup, use `~/.pi/agent/bin/dev-doctor`; doctor delegates its disk check to that tool.

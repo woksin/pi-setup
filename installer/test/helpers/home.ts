@@ -77,7 +77,24 @@ for spec in "$@"; do
       printf '{"version":"%s"}\\n' "$version" > "node_modules/$name/package.json" ;;
   esac
 done
+# Like a real npm: every dependency in package.json ends up in node_modules.
+for name in $(grep -o '"[@a-z][^"]*": *"[^"]*"' package.json 2>/dev/null | sed 's/": *".*//; s/^"//' | grep -v '^name$' | grep -v '^version$' | grep -v '^private$'); do
+  [ -f "node_modules/$name/package.json" ] || { mkdir -p "node_modules/$name"; printf '{"version":"1.0.0"}\\n' > "node_modules/$name/package.json"; }
+done
 : > node_modules/.package-lock.json`);
+  // Package managers and downloaders are stubs too: a test must never reach the host's brew, apt, dnf, sudo or network.
+  // An install "succeeds" by writing a stub of each requested tool next to the stub itself.
+  const installs = `dir="$(dirname "$0")"
+case "$1" in install) shift ;; *) exit 0 ;; esac
+for pkg in "$@"; do
+  case "$pkg" in -*) continue ;; ripgrep) tool=rg ;; python) tool=python3 ;; fd-find) tool=fdfind ;; node) tool=node ;; *) tool="$pkg" ;; esac
+  printf '#!/bin/sh\\nexit 0\\n' > "$dir/$tool"; chmod +x "$dir/$tool"
+done`;
+  script(box.stubs, "brew", `echo "brew $*" >> "$STUB_LOG"\n${installs}\nexit 0`);
+  script(box.stubs, "apt-get", `echo "apt-get $*" >> "$STUB_LOG"\n${installs}\nexit 0`);
+  script(box.stubs, "dnf", `echo "dnf $*" >> "$STUB_LOG"\n${installs}\nexit 0`);
+  script(box.stubs, "sudo", `echo "sudo $*" >> "$STUB_LOG"\nif [ "$1" = "-n" ]; then shift; fi\nexec "$@"`);
+  script(box.stubs, "curl", `echo "curl $*" >> "$STUB_LOG"\nexit 22`);
   // Never the real service managers: record the call and report "not loaded".
   for (const name of ["launchctl", "systemctl"]) script(box.stubs, name, `echo "${name} $*" >> "$STUB_LOG"\nexit 0`);
   script(box.stubs, "python3", `echo "python3 $*" >> "$STUB_LOG"\nexec "${realPython()}" "$@"`);
@@ -107,6 +124,8 @@ export function install(box: Sandbox, args: string[], options: RunOptions = {}):
     TMPDIR: box.root,
     PATH: options.path ?? [box.stubs, process.env.PATH ?? "/usr/bin:/bin"].join(delimiter),
     STUB_LOG: box.log,
+    // The preflight must never look at the host's Homebrew or /usr/local.
+    PI_SETUP_SYSTEM_BIN_DIRS: join(box.root, "no-system-bin"),
     STUB_READY: options.ready ?? "anthropic,openai-codex,kimi-coding",
     ...options.env,
   };
@@ -132,6 +151,13 @@ export function piPath(box: Sandbox, ...parts: string[]): string {
 
 export function installLines(stdout: string): string[] {
   return stdout.split("\n").filter((l) => l.startsWith("install "));
+}
+
+/** The file paths the last install run logged (per-file lines go to ~/.local/state/pi-setup/install.log, not the screen). */
+export function loggedInstalls(box: Sandbox): string[] {
+  const log = readFileSync(join(box.home, ".local/state/pi-setup/install.log"), "utf8");
+  const last = log.split("# files written").at(-1) ?? "";
+  return last.split("\n").filter((l) => l.startsWith("install "));
 }
 
 export function findBackups(dir: string): string[] {
