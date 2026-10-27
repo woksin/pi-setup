@@ -286,8 +286,18 @@ def run(now=None, free_bytes=None, env=os.environ, notifier=osascript_notify, pr
     return status
 
 
+EPILOG = """Examples:
+  disk-growth --dry-run   # sample and report, write nothing
+  disk-growth --once      # one sample (state-changing: writes state/log, may post an alert)
+Exit codes:
+  0 sample taken
+  2 sampling failed (logged unless --dry-run)
+See also: docs/reference.md, dev-doctor --help, pi-cleanup --help
+"""
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog=EPILOG)
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)

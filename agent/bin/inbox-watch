@@ -12,6 +12,27 @@
 # INBOX_DIR overrides user.json's orchMessagesDir, then ~/.pi/agent/inbox.
 # Marker advances to scan START only after output, so concurrent edits stay new.
 set -eu
+case "${1:-}" in -h|--help)
+    cat <<'HELP'
+Usage: inbox-watch [--alias NAME]... LANE [GROUP]
+Print the names of inbound message files (*.md) that are new since the last check.
+
+Options:
+  --alias NAME   also treat NAME as this lane (repeatable)
+Environment:
+  INBOX_ALIASES  comma-separated aliases (same as --alias)
+  INBOX_DIR      inbox directory (default: ~/.pi/agent/inbox)
+Examples:
+  inbox-watch L15              # first run creates the marker and exits 1
+  inbox-watch --alias R-AI L15 team   # changes the marker after printing names
+Exit codes:
+  0 filenames printed
+  1 no inbound changes
+  2 usage or I/O error
+See also: docs/reference.md, lane-status --help
+HELP
+    exit 0 ;;
+esac
 aliases=()
 while (( $# > 0 )) && [[ $1 == --alias ]]; do
     (( $# >= 2 )) || { printf 'Usage: inbox-watch [--alias NAME]... LANE [GROUP]\n' >&2; exit 2; }

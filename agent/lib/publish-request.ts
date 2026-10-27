@@ -311,7 +311,7 @@ function cliOption(state: { result: RecordValue; argv: readonly string[]; index:
 }
 export function parseCli(argv: readonly string[]): PublishRequest | { kind: "help" } {
 	try {
-		if (argv.length === 1 && argv[0] === "--help") return Object.freeze({ kind: "help" });
+		if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")) return Object.freeze({ kind: "help" });
 		const result: RecordValue = { kind: argv[0] };
 		for (let index = 1; index < argv.length;) index += cliOption({ result, argv, index });
 		return validateRequest(result);

@@ -34,6 +34,7 @@ Prerequisites: none. Run `./install.sh`. It checks what your machine has, shows 
 - [Related repositories](#related-repositories)
 - [What is deliberately not included](#what-is-deliberately-not-included)
 - [Keeping it up to date](#keeping-it-up-to-date)
+- Guides: [Getting started](docs/getting-started.md), [Daily workflow](docs/daily-workflow.md), [Tool reference](docs/reference.md)
 
 ## Highlights
 

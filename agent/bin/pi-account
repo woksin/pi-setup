@@ -12,6 +12,17 @@ Usage:
 Switching is always user-initiated; nothing here rotates automatically.
 Tokens are never printed. Saved logins live in ~/.pi/agent/accounts/anthropic/ (0600).
 Running pi sessions re-read auth.json per request, so a switch applies to their next request.
+
+Environment:
+  PI_CODING_AGENT_DIR   agent directory (default ~/.pi/agent)
+Examples:
+  pi-account list            # read-only
+  pi-account save work       # state-changing: stores the current login as "work"
+  pi-account use work        # state-changing: switches pi's login
+Exit codes:
+  0 success (or help)
+  1 error (unknown account, unknown command, bad arguments)
+See also: docs/reference.md, provider-restore --help, gpt-meter --help
 """
 import json, os, sys, time, hashlib, shutil
 from datetime import datetime

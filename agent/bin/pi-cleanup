@@ -1984,7 +1984,12 @@ def budget_seconds(value):
 def parse_args(argv):
     ap = argparse.ArgumentParser(prog="pi-cleanup", description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
-                                 epilog="See the header of this file for the safety rules.")
+                                 epilog="Examples:\n  pi-cleanup                       # dry run: print the plan, change nothing\n"
+                                       "  pi-cleanup --only docker --json  # dry run of one step\n"
+                                       "  pi-cleanup --apply               # state-changing: executes the plan\n"
+                                       "Exit codes:\n  0 ok\n  1 error\n  2 partial (some deletions failed)\n"
+                                       "See the header of this file for the safety rules.\n"
+                                       "See also: docs/reference.md, dev-doctor --help, docker-guardian --help")
     ap.error = lambda msg: (ap.print_usage(sys.stderr), print(f"pi-cleanup: error: {msg}", file=sys.stderr),
                             sys.exit(1))  # exit 2 is reserved for "partial"
     ap.add_argument("--apply", action="store_true", help="execute (default is a dry run)")

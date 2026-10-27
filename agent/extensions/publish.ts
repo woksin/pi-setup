@@ -45,7 +45,26 @@ export default function publishExtension(pi: ExtensionAPI, services: PublishServ
 		execute: (_id: string, value: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) => executePublication(value, signal, ctx, services),
 	} as any);
 }
-export const PUBLISH_HELP = "Usage: pi-publish KIND --repo OWNER/REPO --number N --body-file FILE ...\npi-publish check --file FILE\nUse the publish tool from pi. CLI requests use the same typed validator and captured-byte scanner; shell lane/candidate admission is separate.\n";
+export const PUBLISH_HELP = [
+	"Usage: pi-publish KIND --repo OWNER/REPO --number N --body-file FILE ...",
+	"       pi-publish check --file FILE",
+	"Publish GitHub issue and PR text (create, comment, edit, close, reopen) through the same typed validator and captured-byte scanner as the pi publish tool.",
+	"Shell lane/candidate admission is separate. Use the publish tool from pi where possible.",
+	"",
+	"Examples:",
+	"  pi-publish --help                      # this text, nothing is published",
+	"  pi-publish check --file body.md        # scan a body file; publishes nothing",
+	"  pi-publish issue-comment --repo OWNER/REPO --number 39 --body-file body.md   # state-changing: posts a comment",
+	"Exit codes:",
+	"  0 ok",
+	"  2 invalid request",
+	"  3 secret scan refused the body",
+	"  4 payload unreadable, cleanup failed or adapter failed",
+	"  5 gh unavailable, failed, timed out or over the output limit",
+	"  130 cancelled",
+	"See also: docs/reference.md, README.md",
+	"",
+].join("\n");
 function exitCode(result: PublishResult): number {
 	if (!result.isError) return 0;
 	if (result.code === "invalid-request") return 2;
