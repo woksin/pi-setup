@@ -106,7 +106,9 @@ export interface Health {
 const OPTIONAL_TOOLS = new Set(["gitleaks", "rtk", "docker", "tmux"]);
 
 /** Warnings that are things to do or to know, not things that are broken. */
-const informational = (c: DoctorCheck, skipNpm: boolean): boolean =>
+const informational = (c: DoctorCheck, skipNpm: boolean, loginTodo: boolean): boolean =>
+  // A fallback or profile that fails only because a provider has no login is the login to-do, not a separate problem.
+  (loginTodo && (c.id === "profile" || c.id.startsWith("fallback:")) && / has no login/.test(c.detail)) ||
   (skipNpm && (c.id === "npm" || c.id.startsWith("package:"))) ||
   (c.status === "warn" && (
     c.id === "profile" || c.id === "gh" || c.id === "models" || c.id === "pending" || c.id === "update" ||
@@ -123,7 +125,7 @@ export function finishHealth(all: DoctorCheck[], options: CompactOptions & { git
   const logins = loginLabels(bad);
   const optional = bad.filter((c) => c.id.startsWith("tool:") && OPTIONAL_TOOLS.has(c.id.slice(5))).map((c) => c.id.slice(5));
   const problems = bad
-    .filter((c) => !informational(c, options.skipNpm))
+    .filter((c) => !informational(c, options.skipNpm, logins.length > 0))
     .map((c) => `${c.id}: ${c.detail}`.split(options.home).join("~"));
   const npmSkipped = options.skipNpm && bad.some((c) => c.id === "npm" || c.id.startsWith("package:"));
   const pending = bad.some((c) => c.id === "pending");

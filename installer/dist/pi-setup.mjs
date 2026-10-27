@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 704968b43ddaae1c7b3874cf3147f81129e94c786e4e2aabee7d1a5c653b515b
+// pi-setup-source-sha256: feb8149226f909564f489514d5c3ef7df6e3d2b52c5c8849f942e964eafd03c9
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -6916,7 +6916,7 @@ function finishHealth(all, options) {
   const bad = all.filter((c2) => c2.status === "warn" || c2.status === "fail");
   const logins2 = loginLabels(bad);
   const optional = bad.filter((c2) => c2.id.startsWith("tool:") && OPTIONAL_TOOLS.has(c2.id.slice(5))).map((c2) => c2.id.slice(5));
-  const problems = bad.filter((c2) => !informational(c2, options.skipNpm)).map((c2) => `${c2.id}: ${c2.detail}`.split(options.home).join("~"));
+  const problems = bad.filter((c2) => !informational(c2, options.skipNpm, logins2.length > 0)).map((c2) => `${c2.id}: ${c2.detail}`.split(options.home).join("~"));
   const npmSkipped = options.skipNpm && bad.some((c2) => c2.id === "npm" || c2.id.startsWith("package:"));
   const pending2 = bad.some((c2) => c2.id === "pending");
   const todos = (logins2.length ? 1 : 0) + (options.githubLogin ? 0 : 1) + (options.pathTodo ? 1 : 0) + (npmSkipped ? 1 : 0) + (pending2 ? 1 : 0);
@@ -6946,7 +6946,10 @@ var init_doctor_compact = __esm({
     offPath = (c2) => c2.id.startsWith("path:") && c2.detail.includes("is not on PATH");
     consumed = (c2) => c2.id === "npm" || c2.id.startsWith("package:") || c2.id.startsWith("tool:") || c2.id === "path" || c2.id.startsWith("path:") || c2.id.startsWith("fallback:") || c2.id === "profile";
     OPTIONAL_TOOLS = /* @__PURE__ */ new Set(["gitleaks", "rtk", "docker", "tmux"]);
-    informational = (c2, skipNpm) => skipNpm && (c2.id === "npm" || c2.id.startsWith("package:")) || c2.status === "warn" && (c2.id === "profile" || c2.id === "gh" || c2.id === "models" || c2.id === "pending" || c2.id === "update" || c2.id.startsWith("fallback:") || c2.id.startsWith("provider:") || c2.id.startsWith("path") || c2.id.startsWith("tool:") && OPTIONAL_TOOLS.has(c2.id.slice(5)));
+    informational = (c2, skipNpm, loginTodo) => (
+      // A fallback or profile that fails only because a provider has no login is the login to-do, not a separate problem.
+      loginTodo && (c2.id === "profile" || c2.id.startsWith("fallback:")) && / has no login/.test(c2.detail) || skipNpm && (c2.id === "npm" || c2.id.startsWith("package:")) || c2.status === "warn" && (c2.id === "profile" || c2.id === "gh" || c2.id === "models" || c2.id === "pending" || c2.id === "update" || c2.id.startsWith("fallback:") || c2.id.startsWith("provider:") || c2.id.startsWith("path") || c2.id.startsWith("tool:") && OPTIONAL_TOOLS.has(c2.id.slice(5)))
+    );
   }
 });
 

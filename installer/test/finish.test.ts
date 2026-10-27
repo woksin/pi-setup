@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, writeFileSync
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { main } from "../src/run.ts";
-import { compactChecks } from "../src/doctor-compact.ts";
+import { compactChecks, finishHealth } from "../src/doctor-compact.ts";
 import type { DoctorCheck } from "../src/doctor.ts";
 import { PATH_EDIT_DEFAULT } from "../src/shell-path.ts";
 import { sandbox } from "./helpers/home.ts";
@@ -179,4 +179,14 @@ test("a truly missing command is kept and counted; only installed-off-PATH ones 
   const kept = compactChecks(checks, { home: "/h", skipNpm: false, pathEdited: false });
   assert.equal(kept.count, 2);
   assert.match(kept.lines[1], /2 commands missing or not on PATH: rtk, pi-profile/);
+});
+
+test("failing fallbacks that only lack a login are the login to-do, not problems", () => {
+  const checks: DoctorCheck[] = [
+    { id: "profile", status: "fail", detail: "balanced: Claude, ChatGPT has no login" },
+    { id: "fallback:anthropic/claude-haiku-5-5", status: "fail", detail: "Explore pin anthropic/claude-haiku-5-5 but Claude has no login: no ready target" },
+  ] as DoctorCheck[];
+  const h = finishHealth(checks, { home: "/h", skipNpm: false, githubLogin: true, pathTodo: false } as Parameters<typeof finishHealth>[1]);
+  assert.deepEqual(h.problems, []);
+  assert.match(h.line, /^Health check: ok/);
 });
