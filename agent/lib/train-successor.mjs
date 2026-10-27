@@ -33,7 +33,11 @@ export async function untrackedCandidates(ctx, api, repo, base = DEFAULT_BASE) {
   return found;
 }
 
-export const adoptCommand = candidate => `pi-train init --adopt ${candidate.dir} ${candidate.branch} --base ${candidate.base}`;
+// Paste-safe: each argument is left bare only when it holds no shell metacharacters, else single-quoted.
+const quote = value => /^[\w./:@=+-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+
+export const adoptCommand = candidate =>
+  ['pi-train', 'init', '--adopt', candidate.dir, candidate.branch, '--base', candidate.base].map(quote).join(' ');
 
 export function printCandidates(ctx, found, prefix) {
   for (const candidate of found) ctx.out(`${prefix}untracked candidate ${candidate.branch} (ahead ${candidate.ahead})`);
