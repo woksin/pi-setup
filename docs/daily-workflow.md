@@ -78,6 +78,6 @@ Always read the `pi-cleanup` dry run before using `--apply`. See [ai-work-lifecy
 
 ## 9. Several sessions at once (optional)
 
-Lanes let you run several coordinated sessions. They are opt-in; see [Lanes](../README.md#lanes-opt-in).
+Lanes let you run several coordinated sessions. They are opt-in; see [Lanes](../README.md#parallel-sessions-lanes).
 
 More guides are planned as part of [#34](https://github.com/woksin/pi-setup/issues/34).
