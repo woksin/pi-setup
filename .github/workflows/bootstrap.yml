@@ -5,6 +5,10 @@ on:
   pull_request:
     paths:
       - install.sh
+      - bootstrap.sh
+      - tools/release-asset.sh
+      - tests/test_bootstrap.py
+      - .github/workflows/release-assets.yml
       - installer/**
       - tests/container/**
       - .github/workflows/bootstrap.yml
@@ -22,8 +26,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - run: shellcheck -s sh install.sh installer/bootstrap/preflight.sh tests/container/inside.sh
+      - run: shellcheck -s sh install.sh bootstrap.sh tools/release-asset.sh installer/bootstrap/preflight.sh tests/container/inside.sh
       - run: shellcheck tests/container/run.sh
+
+  bootstrap-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 -m unittest tests.test_bootstrap -v
 
   ubuntu-container:
     runs-on: ubuntu-latest
