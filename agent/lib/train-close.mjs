@@ -1,6 +1,7 @@
-import { TrainError } from './train-gh.mjs';
+import { TrainError, client } from './train-gh.mjs';
 import { loadManifest, saveManifest, withManifestLock } from './train-manifest.mjs';
 import { selectTrain } from './train-resolve.mjs';
+import { hintSuccessor } from './train-successor.mjs';
 
 function closeRequest(options) {
   if (options.abandoned && (options.shipped || options.head)) throw new TrainError('--abandoned cannot be combined with --shipped/--head', 2);
@@ -31,5 +32,8 @@ export async function closeTrain(ctx, repo, options) {
   const selected = await selectTrain(ctx, repo, options.train, ['open', 'shipped']);
   const perform = () => markClosed(ctx, selected, options, request);
   if (options.dryRun) await perform();
-  else await withManifestLock(selected.path, perform);
+  else {
+    await withManifestLock(selected.path, perform);
+    await hintSuccessor(ctx, client(ctx, options), repo, selected.manifest.base?.ref);
+  }
 }

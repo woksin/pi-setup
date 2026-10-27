@@ -3,6 +3,7 @@ import { activeRuns, defaultBranch } from './train-gh.mjs';
 import { listManifests } from './train-manifest.mjs';
 import { gateEstimate } from './train-gate.mjs';
 import { cutRecommendation } from './train-eta.mjs';
+import { printCandidates, untrackedCandidates } from './train-successor.mjs';
 
 const needsClosing = (item, liveState) => item.pr && (!item.closedAt || liveState === 'OPEN');
 
@@ -75,10 +76,19 @@ function display(ctx, status) {
   for (const run of status.activeRuns) ctx.out(`  ${run.manual ? 'manual' : 'active'} run: ${run.databaseId} ${run.headBranch} (${run.workflowName}, ${run.status})`);
 }
 
-function printStatuses(ctx, trains, json) {
-  if (json) { ctx.out(JSON.stringify({ v: 1, trains })); return; }
-  if (!trains.length) { ctx.out('no open trains'); return; }
+function printStatuses(ctx, trains, json, candidates) {
+  if (json) { ctx.out(JSON.stringify({ v: 1, trains, untrackedCandidates: candidates })); return; }
+  if (!trains.length) ctx.out('no open trains');
   for (const status of trains) display(ctx, status);
+  if (candidates === null) ctx.out('warning: candidate lookup failed');
+  else printCandidates(ctx, candidates, 'warning: ');
+}
+
+// Read-only hint; a failed lookup is reported as null and never changes the status result.
+async function candidatesFor(ctx, api, repo, entries) {
+  if (!repo) return [];
+  try { return await untrackedCandidates(ctx, api, repo, entries.find(entry => entry.manifest.base?.ref)?.manifest.base.ref); }
+  catch { return null; }
 }
 
 function matches(manifest, options) {
@@ -106,6 +116,6 @@ export async function statusTrains(ctx, api, options, repo) {
     const gate = await gateEstimate(ctx, api, entry.manifest, options.gate);
     trains.push({ ...status, ...gate, ...cutRecommendation(status.items, gate, ctx.now()) });
   }
-  printStatuses(ctx, trains, options.json);
+  printStatuses(ctx, trains, options.json, await candidatesFor(ctx, api, repo, entries));
   return trains.some(anomalous) ? 1 : 0;
 }

@@ -31,7 +31,7 @@ async function setup(t: any, init = true) {
   const state = { pr: prFixture() as any, runs: [runFixture()] as any[], branchExists: init, head: BASE,
     fetched: SHA, ancestor: false, conflict: false, dirty: false, onBranch: TRAIN, defaultBranch: 'main',
     openPRs: [] as any[], failBefore: '', failAfter: '', closed: 0, comments: 0, merges: 0, aborts: 0,
-    raw: [] as string[][], localBranches: {} as Record<string, string>, branchPR: true, unknownAncestor: false, checkedOut: true, trainPR: null as any, creates: 0, edits: 0, pushes: 0, remoteHead: '' };
+    raw: [] as string[][], localBranches: {} as Record<string, string>, branchPR: true, unknownAncestor: false, checkedOut: true, trainPR: null as any, creates: 0, edits: 0, pushes: 0, remoteHead: '', candidates: {} as Record<string, number>, failCandidates: false, wtBranch: '' };
   const env = { HOME: root, USER: 'me', PI_TRAIN_DIR: join(root, 'store') };
   const path = manifestPath(env, REPO, TRAIN);
   const manifest = { v: 1, repo: REPO, train: TRAIN, base: { ref: 'origin/main', sha: BASE },
@@ -82,7 +82,7 @@ async function setup(t: any, init = true) {
       return sha ? ok(sha) : bad();
     },
     fetch: () => ok(),
-    worktree: (args: string[]) => ok(args[1] === 'list' && state.checkedOut ? `worktree ${manifest.worktree}\nHEAD ${state.head}\nbranch refs/heads/${TRAIN}\n\n` : ''),
+    worktree: (args: string[]) => ok(args[1] === 'list' && state.checkedOut ? `worktree ${manifest.worktree}\nHEAD ${state.head}\nbranch refs/heads/${state.wtBranch || TRAIN}\n\n` : ''),
     log: () => ok('abcd Fold widgets\n'),
     push: () => { state.pushes++; state.remoteHead = state.head; return ok(); },
     branch: (args: string[]) => {
@@ -104,7 +104,8 @@ async function setup(t: any, init = true) {
       if (state.conflict) return bad('conflict');
       state.merges++; state.head = MERGE; state.ancestor = true; return ok();
     },
-    'rev-list': () => ok('0\t2\n'),
+    'for-each-ref': () => state.failCandidates ? bad('boom') : ok(Object.keys(state.candidates).map(name => `${name}\n`).join('')),
+    'rev-list': (args: string[]) => args[1] === '--count' ? ok(`${state.candidates[args[2].split('..')[1]] ?? 0}\n`) : ok('0\t2\n'),
   };
   function route(command: string, args: string[]) {
     const key = command === 'git' ? args[0] : args.slice(0, 2).join(' ');
@@ -237,6 +238,63 @@ test('status exposes ETA recommendations and override precedence without additio
   assert.equal(await f.invoke('status'), 0);
   assert.match(f.output.join('\n'), /eta: no eta/);
   assert.match(f.output.at(-1)!, /recommendation: cut/);
+});
+
+const CAND = 'cand/next';
+test('close with no open train left points at an untracked ahead candidate with the real adopt syntax', async t => {
+  const f = await setup(t);
+  f.state.candidates = { [CAND]: 3, 'cand/flat': 0, 'cand/other': 2 };
+  const other = { ...f.manifest, train: 'cand/other' };
+  await saveManifest(manifestPath(f.ctx.env, REPO, 'cand/other'), { ...other, state: 'abandoned' });
+  assert.equal(await f.invoke('close'), 0);
+  assert.deepEqual(f.output.slice(1), ['next: no open train; untracked candidate cand/next (ahead 3)',
+    `adopt with: pi-train init --adopt ${f.root} cand/next --base origin/main`]);
+  assert.ok(f.calls.every(call => !['fetch', 'push'].includes(call.args[2])));
+});
+
+test('close hint uses the worktree that has the candidate checked out', async t => {
+  const f = await setup(t);
+  f.state.candidates = { [CAND]: 1 }; f.state.wtBranch = CAND;
+  await rm(f.path);
+  await saveManifest(manifestPath(f.ctx.env, REPO, 'train/old'), { ...f.manifest, train: 'train/old' });
+  assert.equal(await f.invoke('close'), 0);
+  assert.match(f.output.at(-1)!, new RegExp(`adopt with: pi-train init --adopt ${f.manifest.worktree} ${CAND} --base origin/main`));
+});
+
+test('close prints no hint while another train is open, nothing tracked is listed, and --dry-run stays quiet', async t => {
+  const f = await setup(t);
+  f.state.candidates = { [CAND]: 3 };
+  await saveManifest(manifestPath(f.ctx.env, REPO, 'train/second'), { ...f.manifest, train: 'train/second' });
+  assert.equal(await f.invoke('close', TRAIN), 0);
+  assert.deepEqual(f.output, [`marked ${TRAIN} released`]);
+  f.output.length = 0;
+  assert.equal(await f.invoke('close', 'train/second', '--dry-run'), 0);
+  assert.equal(f.output.length, 1);
+  await saveManifest(manifestPath(f.ctx.env, REPO, CAND), { ...f.manifest, train: CAND, state: 'released' });
+  f.output.length = 0;
+  assert.equal(await f.invoke('close', 'train/second'), 0);
+  assert.deepEqual(f.output, ['marked train/second released']);
+});
+
+test('close with a git failure reports the lookup failure and still succeeds', async t => {
+  const f = await setup(t);
+  f.state.failCandidates = true;
+  assert.equal(await f.invoke('close'), 0);
+  assert.equal((await f.read()).state, 'released');
+  assert.equal(f.output.at(-1), 'next: candidate lookup failed');
+});
+
+test('status lists untracked candidates beside open trains and in json', async t => {
+  const f = await setup(t);
+  f.state.candidates = { [CAND]: 2, 'cand/flat': 0 };
+  assert.equal(await f.invoke('status'), 0);
+  assert.ok(f.output.includes('warning: untracked candidate cand/next (ahead 2)'));
+  assert.ok(f.output.some(line => line.startsWith('adopt with: pi-train init --adopt ')));
+  assert.equal(await f.invoke('status', '--json'), 0);
+  assert.deepEqual(JSON.parse(f.output.at(-1)!).untrackedCandidates, [{ branch: CAND, ahead: 2, base: 'origin/main', dir: f.root }]);
+  f.state.failCandidates = true;
+  assert.equal(await f.invoke('status'), 0);
+  assert.equal(f.output.at(-1), 'warning: candidate lookup failed');
 });
 
 const mutations = (f: Fixture) => f.calls.filter(({ command, args }) => command === 'gh'
