@@ -75,7 +75,7 @@ Exit codes:
 See also: docs/reference.md, pi-account --help, gpt-meter --help
 `;
 function main(args) {
-	if (args[0] === "-h" || args[0] === "--help" || args[0] === "help") { process.stdout.write(HELP); return; }
+	if (args[0] === "-h" || args[0] === "--help") { process.stdout.write(HELP); return; }
 	const providers = args.filter(arg => !arg.startsWith("--"));
 	if (providers.length > 1 || args.some(arg => arg.startsWith("--") && arg !== "--all-sessions" && arg !== "--all")) {
 		throw new Error("Usage: provider-restore [provider] [--all|--all-sessions]");

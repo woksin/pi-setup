@@ -53,7 +53,7 @@ Lanes are several coordinated sessions. See [Lanes](../README.md#lanes-opt-in).
 | `renice-builders` | **Acts.** Lowers the CPU priority of shared .NET build servers. Run by `docker-guardian`. | `renice-builders --help` | [source](../agent/bin/renice-builders) |
 | `secret-sweep` | Daily read-only gitleaks sweep. Reports contain metadata, never the matched values. | `secret-sweep --help` | [source](../agent/bin/secret-sweep) |
 | `ai-work-lifecycle` | Creates, tracks and cleans temporary task outputs under `.ai-work/`. See the [README](../tools/ai-work-lifecycle/README.md) and [REFERENCE](../tools/ai-work-lifecycle/REFERENCE.md). | `ai-work-lifecycle --help` | [source](../tools/ai-work-lifecycle/ai-work-lifecycle.py) |
-| `sweep-known-roots` | Sweeps registered `ai-work-lifecycle` tasks across known repositories. Runs on a schedule. | `sweep-known-roots --help` | [source](../tools/ai-work-lifecycle/sweep-known-roots.py) |
+| `sweep-known-roots` | Sweeps registered `ai-work-lifecycle` tasks across known repositories (dry run by default). Installed as a script, not on PATH; pi-setup does not schedule it, so run it yourself. | `python3 ~/.local/share/ai-work-lifecycle/sweep-known-roots.py --help` | [source](../tools/ai-work-lifecycle/sweep-known-roots.py) |
 
 ## Installer
 

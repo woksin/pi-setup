@@ -121,7 +121,7 @@ See also: docs/reference.md, tools/release-check.sh
 
 
 def main():
-    if sys.argv[1:2] and sys.argv[1] in ("-h", "--help", "help"):
+    if sys.argv[1:2] and sys.argv[1] in ("-h", "--help"):
         print(HELP, end="")
         return
     stage = Path(sys.argv[1]).resolve()

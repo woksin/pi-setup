@@ -12,7 +12,7 @@
 # INBOX_DIR overrides the default directory (including for isolated tests).
 # Marker advances to scan START only after output, so concurrent edits stay new.
 set -eu
-case "${1:-}" in -h|--help|help)
+case "${1:-}" in -h|--help)
     cat <<'HELP'
 Usage: inbox-watch [--alias NAME]... LANE [GROUP]
 Print the names of inbound message files (*.md) that are new since the last check.

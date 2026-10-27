@@ -64,6 +64,11 @@ GUARDS = {
 
 REQUIRED = [r"(?i)usage:", r"Examples:", r"Exit codes:", r"See also:"]
 
+# Tools whose first argument is data (a lane, directory, provider, kind or day count): a bare
+# `help` there is valid input, so only -h/--help may select help.
+POSITIONAL_DATA = ["inbox-watch", "pi-setup-tests", "publish-check", "provider-restore", "cratis-local-run", "pi-usage", "renice-builders", "docker-guardian", "release-check"]
+BARE_HELP = re.compile(r"--help\|help\)|\"--help\", \"help\"|=== \"help\"")
+
 
 def discovered():
     found = set()
@@ -103,6 +108,12 @@ class CliHelpSpecs(unittest.TestCase):
                 self.assertIn(help_marker, source)
                 self.assertIn(action_marker, source)
                 self.assertLess(source.index(help_marker), source.index(action_marker), f"{name}: help check must come first")
+
+    def test_positional_help_stays_data(self):
+        for name in POSITIONAL_DATA:
+            with self.subTest(name):
+                source = (ROOT / TOOLS[name][0]).read_text()
+                self.assertIsNone(BARE_HELP.search(source), f"{name}: a bare `help` argument must stay data")
 
     def test_help_format_and_no_side_effects(self):
         for name, (relative, subcommands) in TOOLS.items():

@@ -133,7 +133,7 @@ See also: docs/reference.md, docker-guardian --help, pi-phase --help
 
 
 if __name__ == "__main__":
-    if any(arg in ("-h", "--help", "help") for arg in sys.argv[1:2]):
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:2]):
         print(HELP, end="")
         sys.exit(0)
     sys.exit(main())

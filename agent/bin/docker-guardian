@@ -13,7 +13,7 @@
 #    Age prefers LastTagTime over Created; pinned/in-use/recent/unversioned-floating stay.
 # Authorised (2026-10-20): "the agents need to be able to do what it needs to do".
 set -u
-case "${1:-}" in -h|--help|help)
+case "${1:-}" in -h|--help)
     cat <<'HELP'
 Usage: docker-guardian [-h|--help]
 Keep local Docker Desktop usable: health check, restart when stuck, and hygiene pruning.

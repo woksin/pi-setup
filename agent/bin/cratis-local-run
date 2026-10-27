@@ -4,7 +4,7 @@
 # Usage: cratis-local-run [--priority low|normal|high] <kind> <label> -- <cmd...>
 # Priority defaults to $CRATIS_LOCAL_RUN_PRIORITY, else normal. High priority still needs pi-phase's grant.
 set -euo pipefail
-case "${1:-}" in -h|--help|help)
+case "${1:-}" in -h|--help)
     cat <<'HELP'
 Usage: cratis-local-run [--priority low|normal|high] <kind> <label> -- <cmd...>
 Run a build or test command through pi-phase (bounded, queued, one at a time).

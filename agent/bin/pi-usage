@@ -19,7 +19,7 @@ See also: docs/reference.md, gpt-meter --help, pi-account --help
 import collections, glob, gzip, json, os, re, statistics, sys, time
 from datetime import datetime
 
-if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help", "help"):
+if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
     print(__doc__.strip())
     sys.exit(0)
 DAYS = float(sys.argv[1]) if len(sys.argv) > 1 else 7

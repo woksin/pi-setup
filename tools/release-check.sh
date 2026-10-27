@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Release step: every test suite must pass and the whole git history must scan clean.
 set -euo pipefail
-case "${1:-}" in -h|--help|help)
+case "${1:-}" in -h|--help)
     cat <<'HELP'
 Usage: tools/release-check.sh [-h|--help]
 Maintainer release gate: skills tests, pi-setup-tests, unit tests, installer build and a full-history secret scan.
