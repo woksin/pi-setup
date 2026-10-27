@@ -217,10 +217,10 @@ ps_preflight() {
   if [ -n "$PS_PRIV" ]; then ps_say "Some of these run with sudo; you may be asked for your password."; fi
   ps_say "This takes about 2-5 minutes."
   if [ "$PS_GO" = ask ]; then
-    printf 'Continue? [y/N] ' >&2
+    printf 'Continue? [Y/n] ' >&2
     ps_answer=""
-    read -r ps_answer </dev/tty || ps_answer=""
-    case "$ps_answer" in y|Y|yes|YES) PS_GO="yes" ;; *) PS_GO="no" ;; esac
+    read -r ps_answer </dev/tty || ps_answer=n
+    case "$ps_answer" in ""|y|Y|yes|YES) PS_GO="yes" ;; *) PS_GO="no" ;; esac
   fi
   if [ "$PS_GO" != yes ]; then
     ps_die "$PS_NEED. Nothing was installed. To let the installer do it: ./install.sh --install-prereqs
