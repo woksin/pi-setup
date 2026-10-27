@@ -82,6 +82,9 @@ export interface Plan {
   manual: { tool: string; link: string }[];
 }
 
+/** Links fdfind as fd; never replaces a file or another link of the user's: that is reported and left alone. */
+export const FD_LINK = 'mkdir -p "$HOME/.local/bin" && t="$HOME/.local/bin/fd" && { if [ -L "$t" ] && [ "$(readlink "$t")" = /usr/bin/fdfind ]; then :; elif [ -e "$t" ] || [ -L "$t" ]; then echo "fd: $t already exists; not replacing it" >&2; else ln -s /usr/bin/fdfind "$t"; fi; }';
+
 /** The system-level steps for the missing tools; pure, nothing runs. */
 export function planPrereqs(ctx: Ctx, input: PlanInput): Plan {
   const manager = packageManager(ctx);
@@ -96,9 +99,7 @@ export function planPrereqs(ctx: Ctx, input: PlanInput): Plan {
     sudo: argv[0] === "sudo", system: true,
   }));
   if (manager === "apt" && installable.some((t) => t.tool === "fd")) {
-    const bin = join(ctx.home, ".local/bin");
-    steps.push({ id: "fd-link", label: "Make fd available as `fd`", argv: ["sh", "-c", 'mkdir -p "$HOME/.local/bin" && ln -sf /usr/bin/fdfind "$HOME/.local/bin/fd"'], sudo: false, system: false });
-    void bin;
+    steps.push({ id: "fd-link", label: "Make fd available as `fd`", argv: ["sh", "-c", FD_LINK], sudo: false, system: false });
   }
   return { steps, manual };
 }

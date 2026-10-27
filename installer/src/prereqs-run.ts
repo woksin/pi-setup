@@ -23,12 +23,12 @@ export interface PrereqResult {
   stillMissing: string[];
 }
 
-/** `--yes` takes the defaults: install on a fresh machine, report only when updating. `--skip-npm` never installs. */
+/** `--yes` takes the defaults: install on a fresh machine, report only when updating. `--skip-npm` is a veto: nothing is installed, whatever the other flags or answers say. */
 export function consentFor(options: Pick<Options, "installPrereqs" | "yes" | "skipNpm">, interactive: boolean, fresh: boolean): Consent {
-  if (options.installPrereqs === false) return "no";
+  if (options.skipNpm || options.installPrereqs === false) return "no";
   if (options.installPrereqs === true) return "yes";
   if (interactive) return "ask";
-  return options.yes && fresh && !options.skipNpm ? "yes" : "no";
+  return options.yes && fresh ? "yes" : "no";
 }
 
 export { logPath } from "./install-log.ts";
@@ -92,9 +92,10 @@ async function rootIfNeeded(ctx: Ctx, tools: string[]): Promise<boolean> {
   return isRoot(ctx);
 }
 
-function reportOnly(ctx: Ctx, steps: Step[], manual: { tool: string; link: string }[], missing: string[]): void {
+function reportOnly(ctx: Ctx, steps: Step[], manual: { tool: string; link: string }[], missing: string[], skipNpm: boolean): void {
   for (const tool of missing) ctx.err(`warning: ${tool} is not installed; install it with: ${installCommand(ctx, tool)}`);
-  if (steps.length) ctx.err("To let the installer do this for you, re-run with --install-prereqs.");
+  if (steps.length && skipNpm) ctx.err("--skip-npm was given, so nothing was installed. To let the installer do this for you, re-run without --skip-npm.");
+  else if (steps.length) ctx.err("To let the installer do this for you, re-run with --install-prereqs.");
   for (const m of manual) if (!steps.length) ctx.err(`  ${m.tool}: ${m.link}`);
 }
 
@@ -127,7 +128,7 @@ async function gather(ctx: Ctx, scope: Scope, interactive: boolean, probeVersion
 export async function ensurePrereqs(ctx: Ctx, options: Options, prompter: Prompter | undefined, scope: Scope): Promise<PrereqResult> {
   const readOnly = options.dryRun || options.plan;
   const consent = consentFor(options, Boolean(prompter), scope.fresh);
-  const pending = await gather(ctx, scope, consent === "ask", !readOnly);
+  const pending = await gather(ctx, scope, Boolean(prompter), !readOnly);
   if (pending.piWarning) ctx.err(`warning: ${pending.piWarning}`);
   const done = (ran: number, declined: boolean): PrereqResult => ({
     ran, declined, stillMissing: TOOLS.filter((t) => scope.tools.includes(t.tool) && !ctx.which(t.tool)).map((t) => t.tool),
@@ -141,7 +142,7 @@ export async function ensurePrereqs(ctx: Ctx, options: Options, prompter: Prompt
     for (const s of pending.steps) ctx.out(`Would run: ${formatCommand(s.argv)}`);
     return done(0, false);
   }
-  if (consent === "no") { reportOnly(ctx, pending.steps, pending.manual, pending.missing); return done(0, true); }
+  if (consent === "no") { reportOnly(ctx, pending.steps, pending.manual, pending.missing, options.skipNpm); return done(0, true); }
   const lines = firstScreen(ctx, scope.tools, pending.missing, pending.steps, await piVersionText(ctx));
   if (consent === "ask" && prompter) {
     const stopped = previousStop(ctx);
@@ -153,7 +154,7 @@ export async function ensurePrereqs(ctx: Ctx, options: Options, prompter: Prompt
       return done(0, true);
     }
   } else lines.forEach((l) => ctx.out(l));
-  const nonInteractive = consent !== "ask";
+  const nonInteractive = !prompter;
   for (const step of pending.steps) await runStep(ctx, step, nonInteractive);
   record(ctx, undefined);
   const after = done(pending.steps.length, false);

@@ -11,7 +11,7 @@ const boxes: Sandbox[] = [];
 after(() => boxes.forEach((b) => rmSync(b.root, { recursive: true, force: true })));
 
 // Real utilities the preflight declares; nothing else (no host node, brew, curl, apt-get) can leak in.
-const UTILITIES = ["cat", "mkdir", "ln", "rm", "sed", "grep", "tr", "head", "cut", "dirname", "basename", "tar", "gzip", "mktemp", "chmod", "sha256sum", "shasum", "perl", "sleep", "cp"];
+const UTILITIES = ["cat", "mkdir", "ln", "rm", "sed", "grep", "tr", "head", "cut", "dirname", "basename", "tar", "gzip", "mktemp", "chmod", "readlink", "sha256sum", "shasum", "perl", "sleep", "cp"];
 
 const put = (path: string, text: string) => { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, text); chmodSync(path, 0o755); };
 const which = (name: string): string | undefined => { const r = spawnSync("/bin/sh", ["-c", `command -v ${name}`], { encoding: "utf8" }); return r.status === 0 ? r.stdout.trim() : undefined; };
@@ -217,4 +217,60 @@ test("--dry-run with no Node: the command list once, the closing line, and the n
   assert.equal(r.status, 0);
   assert.equal((r.stderr.match(/apt-get install -y curl/g) ?? []).length, 1);
   assert.match(r.stderr, /\(the rest of the plan is shown once Node\.js is installed\)\nDry run: nothing changed\. Next: \.\/install\.sh\n$/);
+});
+
+test("--skip-npm is a veto: no install with --install-prereqs, on macOS or Linux", () => {
+  const mac = setup(["brew"], { os: "Darwin" });
+  const r = runInstall(mac, ["--skip-npm", "--install-prereqs"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /--skip-npm means nothing is installed/);
+  assert.deepEqual(mac.calls(), []);
+  const linux = setup(["sudo", "apt-get"], { uid: "0" });
+  linuxFixture(linux);
+  const l = runInstall(linux, ["--yes", "--install-prereqs", "--skip-npm"]);
+  assert.equal(l.status, 1);
+  assert.deepEqual(linux.calls(), []);
+  assert.ok(!existsSync(join(linux.b.home, ".local/bin/node")));
+  assert.match(runInstall(setup(["apt-get", "sudo"]), ["--skip-npm", "--install-prereqs", "--dry-run"]).stderr, /Dry run: nothing changed/);
+});
+
+test("the command word is found after flag values: --user doctor is not the doctor command", () => {
+  const e = setup(["brew"], { os: "Darwin" });
+  const r = runInstall(e, ["--user", "doctor", "--dry-run"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /Fix: brew install node/);
+  assert.equal(runInstall(e, ["doctor"]).status, 2);
+});
+
+test("Linux: apt-get update runs before the prerequisites install, and is in the plan", () => {
+  const e = setup(["sudo", "apt-get"], { uid: "0" });
+  linuxFixture(e);
+  const r = runInstall(e, ["--yes", "--install-prereqs", "--json"]);
+  assert.equal(r.status, 0, r.stderr);
+  const calls = e.calls();
+  assert.ok(calls.indexOf("apt-get update") >= 0 && calls.indexOf("apt-get update") < calls.findIndex((c) => c.startsWith("apt-get install")), calls.join("|"));
+  assert.match(runInstall(setup(["apt-get", "sudo"]), ["--dry-run"]).stderr, / {2}sudo apt-get update\n {2}sudo apt-get install -y curl/);
+});
+
+test("Linux: an existing link in ~/.local/bin is replaced and the log says where it pointed", () => {
+  const e = setup(["sudo", "apt-get"], { uid: "0" });
+  linuxFixture(e);
+  mkdirSync(join(e.b.home, ".local/bin"), { recursive: true });
+  execFileSync("ln", ["-s", "/old/place/node", join(e.b.home, ".local/bin/node")]);
+  const r = runInstall(e, ["--yes", "--install-prereqs", "--json"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(readFileSync(join(e.b.home, ".local/state/pi-setup/install.log"), "utf8"), /replacing link .*\.local\/bin\/node \(pointed to \/old\/place\/node\)/);
+});
+
+test("macOS: a brew found by a relative PATH entry never puts that directory on PATH twice", () => {
+  const e = setup([], { os: "Darwin" });
+  const rel = join(e.b.root, "rel");
+  put(join(rel, "brew"), `#!/bin/sh\necho "brew $*" >> "${e.b.root}/ps.log"\ncp "${e.stubs}/node-real" "${e.stubs}/node"\n`);
+  put(join(e.stubs, "node-real"), `#!/bin/sh\nif [ "$1" = "-e" ]; then exec "$REAL_NODE" -e 'Object.defineProperty(process.versions,"node",{value:process.env.TEST_NODE_VERSION});eval(process.argv[1])' "$2"; fi\nif [ "$1" = "-p" ]; then echo "$TEST_NODE_VERSION"; exit 0; fi\necho "$PATH" > "${e.b.root}/final-path"\n`);
+  const r = spawnSync("/bin/sh", [join(REPO, "install.sh"), "--yes", "--install-prereqs"], {
+    encoding: "utf8", input: "", cwd: e.b.root,
+    env: { HOME: e.b.home, PATH: `rel:${e.stubs}:${e.sysbin}`, PI_SETUP_SYSTEM_BIN_DIRS: e.systemDirs, REAL_NODE: process.execPath, TEST_NODE_VERSION: "24.0.0" },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(readFileSync(join(e.b.root, "final-path"), "utf8"), /^rel:rel:/);
 });

@@ -57,6 +57,12 @@ test("Review shows the PATH line pre-ticked and Install appends the snippet once
   assert.equal(readFileSync(rc(b), "utf8"), `\n# pi-setup tools\n${SNIPPET}\n`);
 });
 
+test("--no-edit-shell-profile wins over the wizard: the ticked PATH line is not applied", async () => {
+  const b = box(); const s = scripted();
+  assert.equal(await main([...flags(b), "--no-edit-shell-profile"], zsh(b), s.p), 0);
+  assert.ok(!existsSync(rc(b)));
+});
+
 test("an existing snippet is not appended again", async () => {
   const b = box(); writeFileSync(rc(b), `${SNIPPET}\n`);
   assert.equal(await main(flags(b), zsh(b), scripted().p), 0);

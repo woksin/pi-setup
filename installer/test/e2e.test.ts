@@ -47,7 +47,8 @@ describe("install (e2e)", () => {
     const box = fresh();
     const run = install(box, ARGS(box), { entry: "node", env: { CI: "" } });
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /Setup finished\. Next: follow steps 1–\d above\./);
+    assert.match(run.stdout, /^Setup finished\. Next: follow steps 1–\d above\.$/m);
+    assert.doesNotMatch(run.stdout, /above\. log in with/);
     assert.match(run.stdout, /Next steps:\n(  \d\. .*\n)+.*Start with: pi/);
   });
 

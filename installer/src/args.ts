@@ -55,7 +55,7 @@ export const USAGE = `Usage: ./install.sh [install] [options]
   --yes                 never prompt; on a fresh machine this also installs missing prerequisites and pi
   --install-prereqs     install missing prerequisites and pi without asking (apt shows its sudo command)
   --no-install-prereqs  only check and report prerequisites, never install them
-  --skip-npm            do not run npm install in ~/.pi/agent/npm
+  --skip-npm            do not run npm install in ~/.pi/agent/npm; also installs no prerequisites, even with --install-prereqs
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --no-launchd          do not load or unload launchd jobs
   --edit-shell-profile  append the PATH snippet to your shell profile (a fresh install does this by default)

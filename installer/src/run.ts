@@ -320,7 +320,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   if (guided === CANCEL) return cancelled(ctx);
   const r = guided?.r ?? resolveAll(ctx, options, detection, saved, {}, manifest);
   // A fresh machine gets the PATH line by default (the profile is backed up first); an update never edits it unasked.
-  const editPath = guided ? guided.editPath : !options.noEditShellProfile && (options.editShellProfile || fresh);
+  const editPath = !options.noEditShellProfile && (guided ? guided.editPath : options.editShellProfile || fresh);
   const better = detection.candidates[0]?.path;
   if (!prompter && r.settings.rootSource === "default" && better && better !== r.settings.reposRoot) {
     ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
@@ -434,7 +434,7 @@ function finish({ ctx, baseCtx, options, r, detection, lines, code, prompter, wr
     const kept = r.actions.filter((a) => a.op === "keep").length;
     const upToDate = `${prompter ? "Everything is up to date." : "Everything up to date."}${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
     const done = closing ?? (options.dryRun ? `Dry run: nothing changed. Next: ${setupCmd(ctx)}` : readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate);
-    const hint = r.choice.provisional && !readOnly && wrote ? ` ${r.choice.reason}.` : "";
+    const hint = !closing && r.choice.provisional && !readOnly && wrote ? ` ${r.choice.reason}.` : "";
     if (prompter && pending && !readOnly) prompter.outro(`Installed, with ${pending} ${pending === 1 ? "thing" : "things"} to finish: see "Still to finish" above.`);
     else if (prompter) prompter.outro(`${done}${hint}`);
     else ctx.out(`${done}${hint}`);

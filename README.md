@@ -53,7 +53,7 @@ What it installs, and with which command:
 - **pi:** `npm install -g @earendil-works/pi-coding-agent@<the version this setup pins>`, into `~/.local` when the global npm directory is not yours. Never with sudo.
 - **Windows:** use WSL2 and run `./install.sh` inside it; native Windows shells are not supported.
 
-When it asks: in a terminal it always asks. `--install-prereqs` skips the question and installs, `--no-install-prereqs` only reports what is missing. `--yes` takes the defaults: on a fresh machine it installs, but when you already have a pi-setup install (an update) it only reports what is missing and prints the command to fix it, and `--skip-npm` never installs anything. `--dry-run` prints the commands it would run and changes nothing. If a step fails, it names the command, the log (`~/.local/state/pi-setup/install.log`) and says to re-run `./install.sh`, which continues from where it stopped.
+When it asks: in a terminal it always asks. `--install-prereqs` skips the question and installs, `--no-install-prereqs` only reports what is missing. `--yes` takes the defaults: on a fresh machine it installs, but when you already have a pi-setup install (an update) it only reports what is missing and prints the command to fix it, and `--skip-npm` never installs anything, not even with `--install-prereqs` or an answer of yes (it names what it skipped). `--dry-run` prints the commands it would run and changes nothing. If a step fails, it names the command, the log (`~/.local/state/pi-setup/install.log`) and says to re-run `./install.sh`, which continues from where it stopped.
 
 <details>
 <summary>Manual setup (fallback)</summary>

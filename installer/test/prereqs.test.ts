@@ -1,10 +1,11 @@
 import { strict as assert } from "node:assert";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { parseArgs } from "../src/args.ts";
 import type { Options } from "../src/args.ts";
-import { formatCommand, shownCommand, installCommand, packageManager, piMinimum, piStep, planPrereqs } from "../src/prereqs.ts";
+import { execFileSync } from "node:child_process";
+import { FD_LINK, formatCommand, shownCommand, installCommand, packageManager, piMinimum, piStep, planPrereqs } from "../src/prereqs.ts";
 import { consentFor, ensurePrereqs, linkNotes, logPath } from "../src/prereqs-run.ts";
 import type { Scope } from "../src/prereqs-run.ts";
 import { SetupError } from "../src/types.ts";
@@ -59,13 +60,42 @@ test("apt: update then install behind sudo, plus a user-level fd link; root drop
   const argvs = (interactive: boolean, isRoot: boolean) => planPrereqs(f.ctx, { tools: REQUIRED, interactive, isRoot }).steps.map((s) => s.argv);
   assert.deepEqual(argvs(true, false), [
     ["sudo", "apt-get", "update"], ["sudo", "apt-get", "install", "-y", "gh", "jq", "ripgrep", "fd-find", "python3", "git"],
-    ["sh", "-c", 'mkdir -p "$HOME/.local/bin" && ln -sf /usr/bin/fdfind "$HOME/.local/bin/fd"'],
+    ["sh", "-c", FD_LINK],
   ]);
   assert.deepEqual(argvs(false, false)[0], ["sudo", "-n", "apt-get", "update"]);
   assert.equal(shownCommand(argvs(false, false)[0]), "sudo apt-get update");
   assert.deepEqual(argvs(true, true)[0], ["apt-get", "update"]);
   const noFd = planPrereqs(fake(b, "linux", ["apt-get", "fd"]).ctx, { tools: REQUIRED, interactive: true, isRoot: false });
   assert.ok(noFd.steps.every((s) => s.id !== "fd-link"));
+});
+
+test("fd link: never replaces a file or a foreign link of the user; an own link is fine", () => {
+  const run = (home: string) => execFileSync("sh", ["-c", FD_LINK], { env: { HOME: home, PATH: process.env.PATH }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const fresh = box();
+  run(fresh.home);
+  assert.equal(readlinkSync(join(fresh.home, ".local/bin/fd")), "/usr/bin/fdfind");
+  run(fresh.home);
+  const mine = box();
+  mkdirSync(join(mine.home, ".local/bin"), { recursive: true });
+  writeFileSync(join(mine.home, ".local/bin/fd"), "my own fd\n");
+  run(mine.home);
+  assert.ok(lstatSync(join(mine.home, ".local/bin/fd")).isFile());
+  assert.equal(readFileSync(join(mine.home, ".local/bin/fd"), "utf8"), "my own fd\n");
+  const foreign = box();
+  mkdirSync(join(foreign.home, ".local/bin"), { recursive: true });
+  execFileSync("ln", ["-s", "/somewhere/else/fd", join(foreign.home, ".local/bin/fd")]);
+  run(foreign.home);
+  assert.equal(readlinkSync(join(foreign.home, ".local/bin/fd")), "/somewhere/else/fd");
+});
+
+test("sudo form follows whether a person is there, not the consent value", async () => {
+  const f = fake(box(), "linux", ["apt-get", "sudo"]);
+  await ensurePrereqs(f.ctx, opts("--install-prereqs"), undefined, scope());
+  assert.deepEqual(f.ran[0].argv.slice(0, 3), ["sudo", "-n", "apt-get"]);
+  const g = fake(box(), "linux", ["apt-get", "sudo"]);
+  await ensurePrereqs(g.ctx, opts("--install-prereqs"), scripted({}).p, scope());
+  assert.deepEqual(g.ran[0].argv.slice(0, 2), ["sudo", "apt-get"]);
+  assert.equal(g.ran[0].inherit, true);
 });
 
 test("dnf, and no package manager (links only)", () => {
@@ -125,6 +155,20 @@ test("consent: --yes installs only on a fresh machine and never with --skip-npm"
   assert.equal(consentFor(opts("--yes"), false, true), "yes");
   assert.equal(consentFor(opts("--yes"), false, false), "no");
   assert.equal(consentFor(opts("--yes", "--skip-npm"), false, true), "no");
+  for (const [interactive, fresh] of [[true, true], [false, true], [true, false]]) {
+    assert.equal(consentFor(opts("--skip-npm", "--install-prereqs"), interactive, fresh), "no");
+    assert.equal(consentFor(opts("--skip-npm"), interactive, fresh), "no");
+  }
+});
+
+test("ensurePrereqs: --skip-npm with --install-prereqs or an interactive prompter installs nothing and says why", async () => {
+  for (const [flags, prompter] of [[["--skip-npm", "--install-prereqs"], undefined], [["--skip-npm", "--yes", "--install-prereqs"], undefined], [["--skip-npm"], scripted({}).p]] as const) {
+    const g = fake(box(), "darwin", ["brew"]);
+    const r = await ensurePrereqs(g.ctx, opts(...flags), prompter, scope());
+    assert.deepEqual(g.ran, [], flags.join(" "));
+    assert.equal(r.declined, true);
+    assert.match(g.err.join("\n"), /--skip-npm was given, so nothing was installed/);
+  }
 });
 
 test("args: the two flags conflict, and doctor takes them only with --fix", () => {

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Node-free preflight for install.sh: makes sure Node.js >= 22.19 exists before the Node installer starts.
 # Sourced by install.sh; POSIX sh only (it runs before any Node does). Everything it says goes to stderr.
-# Real utilities it uses: uname id cat mkdir ln rm grep sed tr cut head dirname tar mktemp chmod (+ curl, sha256sum or shasum, sudo, brew, apt-get, dnf when needed)
+# Real utilities it uses: uname id cat mkdir ln rm readlink grep sed tr cut head dirname tar mktemp chmod (+ curl, sha256sum or shasum, sudo, brew, apt-get, dnf when needed)
 
 # Node 26: the pinned @woksin/pi-orch declares engines.node ">=26" (npm view @woksin/pi-orch@0.1.1 engines); Homebrew's node is 26 too.
 PS_NODE_MAJOR=26
@@ -37,7 +37,7 @@ Usage: ./install.sh [flags]
   --yes                 never prompt; on a fresh machine this also installs missing prerequisites and pi
   --install-prereqs     install missing prerequisites and pi without asking
   --no-install-prereqs  only check and report prerequisites, never install them
-  --skip-npm            do not run npm install in ~/.pi/agent/npm
+  --skip-npm            do not run npm install in ~/.pi/agent/npm; also installs no prerequisites, even with --install-prereqs
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --no-launchd          do not load or unload launchd jobs
   --edit-shell-profile  append the PATH snippet to your shell profile (a fresh install does this by default)
@@ -56,8 +56,12 @@ ps_node_ok() {
 # Scan the arguments; they all pass through to Node unchanged.
 ps_scan() {
   PS_HELP=0 PS_VERSION=0 PS_DRY=0 PS_YES=0 PS_JSON=0 PS_SKIP_NPM=0 PS_CONSENT="" PS_CMD="install"
+  ps_skip=0
   for ps_arg in "$@"; do
+    # The value of a flag that takes one is not the command word.
+    if [ "$ps_skip" = 1 ]; then ps_skip=0; continue; fi
     case "$ps_arg" in
+      --user|--repos-root|--profile|--ref|--dir|--keep|--with|--without) ps_skip=1 ;;
       --help|-h) PS_HELP=1 ;;
       --version) PS_VERSION=1 ;;
       --dry-run|--plan) PS_DRY=1 ;;
@@ -125,7 +129,7 @@ ps_plan_lines() {
       fi ;;
     Linux)
       if ps_need_linux_pkgs; then
-        if [ "$PS_PM" = apt ]; then echo "${PS_PRIV}apt-get install -y curl ca-certificates libatomic1"
+        if [ "$PS_PM" = apt ]; then echo "${PS_PRIV}apt-get update"; echo "${PS_PRIV}apt-get install -y curl ca-certificates libatomic1"
         else echo "${PS_PRIV}dnf install -y curl ca-certificates libatomic"; fi
       fi
       echo "curl -fsSL $PS_NODE_MAJOR_URL/SHASUMS256.txt"
@@ -169,7 +173,7 @@ ps_link() {
   for ps_tool in node npm npx; do
     ps_target="$HOME/.local/bin/$ps_tool"
     if [ -e "$ps_target" ] || [ -L "$ps_target" ]; then
-      if [ -L "$ps_target" ]; then rm -f "$ps_target"
+      if [ -L "$ps_target" ]; then ps_log "replacing link $ps_target (pointed to $(readlink "$ps_target"))"; rm -f "$ps_target"
       else ps_die "$ps_target already exists and is not a link: not overwriting it. Move it away, then re-run ./install.sh."; fi
     fi
     ln -s "$1/bin/$ps_tool" "$ps_target"
@@ -185,7 +189,7 @@ ps_need_linux_pkgs() {
 
 ps_linux_node() {
   if ps_need_linux_pkgs; then
-    if [ "$PS_PM" = apt ]; then ps_run_priv apt-get install -y curl ca-certificates libatomic1
+    if [ "$PS_PM" = apt ]; then ps_run_priv apt-get update; ps_run_priv apt-get install -y curl ca-certificates libatomic1
     else ps_run_priv dnf install -y curl ca-certificates libatomic; fi
   fi
   ps_tmp="$(mktemp -d)"
@@ -218,7 +222,8 @@ ps_darwin_node() {
   fi
   ps_run "${PS_BREW:-brew}" install node
   PI_SETUP_USER_PATH="${PI_SETUP_USER_PATH:-$PATH}"; export PI_SETUP_USER_PATH
-  PATH="$(dirname "${PS_BREW:-brew}"):$PATH"; export PATH
+  # Only an absolute path goes on PATH: a relative one would put "." there.
+  case "${PS_BREW:-}" in /*) PATH="$(dirname "$PS_BREW"):$PATH"; export PATH ;; esac
 }
 
 ps_preflight() {
@@ -235,7 +240,7 @@ ps_preflight() {
   case "$PS_OS" in
     MINGW*|MSYS*|CYGWIN*) ps_die "$PS_NEED. pi-setup does not run in a native Windows shell: use WSL2 (https://learn.microsoft.com/windows/wsl/install), then run ./install.sh there." ;;
     Darwin)
-      if ! ps_find_brew && command -v brew >/dev/null 2>&1; then PS_BREW=brew; fi ;;
+      if ! ps_find_brew && command -v brew >/dev/null 2>&1; then PS_BREW="$(command -v brew)"; fi ;;
     Linux)
       if command -v apt-get >/dev/null 2>&1; then PS_PM=apt
       elif command -v dnf >/dev/null 2>&1; then PS_PM=dnf
@@ -255,8 +260,10 @@ ps_preflight() {
   fi
 
   # Consent: explicit flags win; --yes takes the defaults (install on a fresh machine, never with --skip-npm).
+  # --skip-npm is a veto: no brew, apt, dnf or npm -g, whatever the other flags or answers say.
   PS_GO="no"
-  if [ "$PS_CONSENT" = yes ]; then PS_GO="yes"
+  if [ "$PS_SKIP_NPM" = 1 ]; then PS_GO="no"
+  elif [ "$PS_CONSENT" = yes ]; then PS_GO="yes"
   elif [ -z "$PS_CONSENT" ] && [ "$PS_INTERACTIVE" = 1 ]; then PS_GO="ask"
   elif [ -z "$PS_CONSENT" ] && [ "$PS_YES" = 1 ] && [ "$PS_SKIP_NPM" = 0 ] && ps_fresh; then PS_GO="yes"
   fi
@@ -278,6 +285,9 @@ ps_preflight() {
     ps_answer=""
     read -r ps_answer </dev/tty || ps_answer=n
     case "$ps_answer" in ""|y|Y|yes|YES) PS_GO="yes" ;; *) PS_GO="no" ;; esac
+  fi
+  if [ "$PS_SKIP_NPM" = 1 ] && [ "$PS_DRY" = 0 ]; then
+    ps_die "$PS_NEED. --skip-npm means nothing is installed, so Node.js was not installed. Install it from https://nodejs.org, with brew install node, or with nvm, or re-run without --skip-npm."
   fi
   if [ "$PS_GO" != yes ]; then
     ps_die "$PS_NEED. Nothing was installed. To let the installer do it: ./install.sh --install-prereqs

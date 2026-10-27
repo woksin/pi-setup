@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: feb8149226f909564f489514d5c3ef7df6e3d2b52c5c8849f942e964eafd03c9
+// pi-setup-source-sha256: b31d82a8262e3da8458dd34fbab165788d2e535c0e521b2deb5bb20a404885e7
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5465,9 +5465,7 @@ function planPrereqs(ctx, input) {
     system: true
   }));
   if (manager === "apt" && installable.some((t2) => t2.tool === "fd")) {
-    const bin = join44(ctx.home, ".local/bin");
-    steps.push({ id: "fd-link", label: "Make fd available as `fd`", argv: ["sh", "-c", 'mkdir -p "$HOME/.local/bin" && ln -sf /usr/bin/fdfind "$HOME/.local/bin/fd"'], sudo: false, system: false });
-    void bin;
+    steps.push({ id: "fd-link", label: "Make fd available as `fd`", argv: ["sh", "-c", FD_LINK], sudo: false, system: false });
   }
   return { steps, manual };
 }
@@ -5518,7 +5516,7 @@ function installCommand(ctx, tool) {
   }
   return def ? `install it from ${def.link}` : `install ${tool}`;
 }
-var TOOLS, EXTRA_TOOLS, EXTRA_LINKS, PI_PACKAGE, isRequired, shownCommand, pm, parseVersion, writable;
+var TOOLS, EXTRA_TOOLS, EXTRA_LINKS, PI_PACKAGE, isRequired, shownCommand, pm, FD_LINK, parseVersion, writable;
 var init_prereqs = __esm({
   "src/prereqs.ts"() {
     TOOLS = [
@@ -5547,6 +5545,7 @@ var init_prereqs = __esm({
       if (manager === "dnf") return [[...sudo, "dnf", "install", "-y", ...packages2]];
       return [[...sudo, "apt-get", "update"], [...sudo, "apt-get", "install", "-y", ...packages2]];
     };
+    FD_LINK = 'mkdir -p "$HOME/.local/bin" && t="$HOME/.local/bin/fd" && { if [ -L "$t" ] && [ "$(readlink "$t")" = /usr/bin/fdfind ]; then :; elif [ -e "$t" ] || [ -L "$t" ]; then echo "fd: $t already exists; not replacing it" >&2; else ln -s /usr/bin/fdfind "$t"; fi; }';
     parseVersion = (text4) => {
       const m2 = /(\d+)\.(\d+)\.(\d+)/.exec(text4);
       return m2 ? [Number(m2[1]), Number(m2[2]), Number(m2[3])] : void 0;
@@ -6282,10 +6281,10 @@ var init_doctor_probes = __esm({
 import { mkdirSync as mkdirSync16, readFileSync as readFileSync28, rmSync as rmSync2, writeFileSync as writeFileSync11 } from "node:fs";
 import { dirname as dirname15, join as join51 } from "node:path";
 function consentFor(options, interactive, fresh2) {
-  if (options.installPrereqs === false) return "no";
+  if (options.skipNpm || options.installPrereqs === false) return "no";
   if (options.installPrereqs === true) return "yes";
   if (interactive) return "ask";
-  return options.yes && fresh2 && !options.skipNpm ? "yes" : "no";
+  return options.yes && fresh2 ? "yes" : "no";
 }
 function record2(ctx, failed) {
   try {
@@ -6340,9 +6339,10 @@ async function rootIfNeeded(ctx, tools) {
   if (!manager || manager === "brew" || !TOOLS.some((t2) => tools.includes(t2.tool) && !ctx.which(t2.tool))) return false;
   return isRoot(ctx);
 }
-function reportOnly(ctx, steps, manual, missing) {
+function reportOnly(ctx, steps, manual, missing, skipNpm) {
   for (const tool of missing) ctx.err(`warning: ${tool} is not installed; install it with: ${installCommand(ctx, tool)}`);
-  if (steps.length) ctx.err("To let the installer do this for you, re-run with --install-prereqs.");
+  if (steps.length && skipNpm) ctx.err("--skip-npm was given, so nothing was installed. To let the installer do this for you, re-run without --skip-npm.");
+  else if (steps.length) ctx.err("To let the installer do this for you, re-run with --install-prereqs.");
   for (const m2 of manual) if (!steps.length) ctx.err(`  ${m2.tool}: ${m2.link}`);
 }
 async function runStep(ctx, step, nonInteractive) {
@@ -6379,7 +6379,7 @@ async function gather(ctx, scope, interactive, probeVersion) {
 async function ensurePrereqs(ctx, options, prompter, scope) {
   const readOnly = options.dryRun || options.plan;
   const consent = consentFor(options, Boolean(prompter), scope.fresh);
-  const pending2 = await gather(ctx, scope, consent === "ask", !readOnly);
+  const pending2 = await gather(ctx, scope, Boolean(prompter), !readOnly);
   if (pending2.piWarning) ctx.err(`warning: ${pending2.piWarning}`);
   const done = (ran, declined) => ({
     ran,
@@ -6396,7 +6396,7 @@ async function ensurePrereqs(ctx, options, prompter, scope) {
     return done(0, false);
   }
   if (consent === "no") {
-    reportOnly(ctx, pending2.steps, pending2.manual, pending2.missing);
+    reportOnly(ctx, pending2.steps, pending2.manual, pending2.missing, options.skipNpm);
     return done(0, true);
   }
   const lines2 = firstScreen(ctx, scope.tools, pending2.missing, pending2.steps, await piVersionText(ctx));
@@ -6412,7 +6412,7 @@ ${pending2.steps.map((s) => `  ${formatCommand(s.argv)}`).join("\n")}`);
       return done(0, true);
     }
   } else lines2.forEach((l2) => ctx.out(l2));
-  const nonInteractive = consent !== "ask";
+  const nonInteractive = !prompter;
   for (const step of pending2.steps) await runStep(ctx, step, nonInteractive);
   record2(ctx, void 0);
   const after = done(pending2.steps.length, false);
@@ -7720,7 +7720,7 @@ var init_args = __esm({
   --yes                 never prompt; on a fresh machine this also installs missing prerequisites and pi
   --install-prereqs     install missing prerequisites and pi without asking (apt shows its sudo command)
   --no-install-prereqs  only check and report prerequisites, never install them
-  --skip-npm            do not run npm install in ~/.pi/agent/npm
+  --skip-npm            do not run npm install in ~/.pi/agent/npm; also installs no prerequisites, even with --install-prereqs
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --no-launchd          do not load or unload launchd jobs
   --edit-shell-profile  append the PATH snippet to your shell profile (a fresh install does this by default)
@@ -10163,7 +10163,7 @@ async function execute(ctx, options, prompter, baseCtx) {
   const guided = prompter ? await guidedResolution({ ctx, options, detection, saved: saved2, manifest, p: prompter, toolErrors }) : void 0;
   if (guided === CANCEL) return cancelled(ctx);
   const r2 = guided?.r ?? resolveAll(ctx, options, detection, saved2, {}, manifest);
-  const editPath = guided ? guided.editPath : !options.noEditShellProfile && (options.editShellProfile || fresh2);
+  const editPath = !options.noEditShellProfile && (guided ? guided.editPath : options.editShellProfile || fresh2);
   const better = detection.candidates[0]?.path;
   if (!prompter && r2.settings.rootSource === "default" && better && better !== r2.settings.reposRoot) {
     ctx.out(`pi-setup: repos root defaulted to ~/repos; detected ${better}; pass --repos-root ${better} to use it`);
@@ -10255,7 +10255,7 @@ function finish({ ctx, baseCtx, options, r: r2, detection, lines: lines2, code, 
     const kept = r2.actions.filter((a2) => a2.op === "keep").length;
     const upToDate = `${prompter ? "Everything is up to date." : "Everything up to date."}${kept ? ` ${kept} file(s) you changed were kept.` : ""}`;
     const done = closing ?? (options.dryRun ? `Dry run: nothing changed. Next: ${setupCmd(ctx)}` : readOnly ? "Nothing was written." : wrote ? "Done. Restart pi (or /reload)." : upToDate);
-    const hint = r2.choice.provisional && !readOnly && wrote ? ` ${r2.choice.reason}.` : "";
+    const hint = !closing && r2.choice.provisional && !readOnly && wrote ? ` ${r2.choice.reason}.` : "";
     if (prompter && pending2 && !readOnly) prompter.outro(`Installed, with ${pending2} ${pending2 === 1 ? "thing" : "things"} to finish: see "Still to finish" above.`);
     else if (prompter) prompter.outro(`${done}${hint}`);
     else ctx.out(`${done}${hint}`);
