@@ -89,6 +89,35 @@ for (const [version, status, exit] of [["Python 3.9.6", "ok", 0], ["Python 3.14.
   });
 }
 
+test("doctor previews differing first-install files without a manifest and writes nothing", async () => {
+  const f = fixture();
+  unlinkSync(join(f.pi, ".pi-setup/manifest.json"));
+  f.put("pi-phase/config.json", '{"heavy_slots":7}');
+  f.put("pi-phase/config.local.json", '{"heavy_slots":9}');
+  f.put("bin/inbox-watch", "local inbox default\n");
+  f.put("user.json", JSON.stringify({ githubUser: "tester", reposRoot: join(f.box.home, "repos") }));
+  const wrapper = join(f.box.home, ".local/bin/ai-work-lifecycle");
+  mkdirSync(dirname(wrapper), { recursive: true });
+  writeFileSync(wrapper, "#!/bin/sh\nexec /custom/python3 lifecycle.py\n");
+  const before = snapshot(f.box.home);
+  assert.equal(await main(["doctor", "--json"], f.ctx), 1);
+  const files = JSON.parse(f.out[0]).checks.find((c: { id: string }) => c.id === "files");
+  assert.match(files.detail, /no install manifest; first install would overwrite/);
+  for (const rel of [".pi/agent/pi-phase/config.json", ".pi/agent/bin/inbox-watch", ".local/bin/ai-work-lifecycle"]) assert.ok(files.items.includes(rel), rel);
+  assert.ok(!files.items.includes(".pi/agent/pi-phase/config.local.json"));
+  assert.deepEqual(snapshot(f.box.home), before);
+});
+
+test("doctor does not list identical first-install files or absent files as overwrites", () => {
+  const f = fixture();
+  unlinkSync(join(f.pi, ".pi-setup/manifest.json"));
+  f.put("bin/inbox-watch", readFileSync(join(f.ctx.repoDir, "agent/bin/inbox-watch"), "utf8"));
+  const files = f.checks().find(c => c.id === "files")!;
+  assert.match(files.detail, /first install would overwrite/);
+  assert.ok(!files.items?.includes(".pi/agent/bin/inbox-watch"));
+  assert.ok(!files.items?.includes(".local/bin/ai-work-lifecycle"));
+});
+
 test("files: missing, modified, pending, modes and moved checkout", () => {
   const f = fixture();
   assert.equal(f.checks().find(c => c.id === "files")?.status, "ok");

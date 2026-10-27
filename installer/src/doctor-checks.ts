@@ -5,7 +5,10 @@ import { installCommand } from "./prereqs.ts";
 import { missingBinDirs, pathFixCommand, shellPath } from "./shell-path.ts";
 import { fileSha, fromHomeRel, symlinkTarget, readManifest, validateManifest } from "./manifest.ts";
 import type { Manifest } from "./manifest.ts";
-import { chooseProfile, loadProfiles } from "./profiles.ts";
+import { chooseProfile, loadProfiles, overlayFor } from "./profiles.ts";
+import { buildPlan } from "./plan.ts";
+import { resolveSettings } from "./settings.ts";
+import { homeRel } from "./manifest.ts";
 import { PROVIDER_LABELS } from "./types.ts";
 import type { Ctx, GithubState, ProviderState } from "./types.ts";
 import type { DoctorCheck } from "./doctor.ts";
@@ -88,10 +91,23 @@ function state(ctx: Ctx, facts: DoctorFacts): State {
   return s;
 }
 
+function firstInstall(s: State): DoctorCheck {
+  try {
+    const settings = resolveSettings({ flagUser: "", flagRoot: "", saved: readJson(join(s.piDir, "user.json")) ?? {}, home: s.ctx.home, repoDir: s.ctx.repoDir, readOnly: true });
+    const profiles = loadProfiles(s.ctx.repoDir);
+    const profile = profiles.some(p => p.name === s.profile) ? s.profile : chooseProfile(new Set(Object.keys(s.facts.providers).filter(p => ready(s, `${p}/`))), profiles).name;
+    const actions = buildPlan({ repoDir: s.ctx.repoDir, home: s.ctx.home, settings, overlay: overlayFor(s.ctx.repoDir, profile, settings), which: s.ctx.which });
+    const overwritten = actions.filter(a => a.op === "install" && a.existed && !a.merge && !a.noMarkers).map(a => homeRel(s.ctx.home, a.path));
+    return check("files", "warn", `no install manifest; first install would overwrite ${overwritten.length} differing files (using saved/default settings and ${profile} profile)`, s.setup, overwritten);
+  } catch (error) {
+    return check("files", "warn", `no install manifest; cannot preview first-install overwrites: ${(error as Error).message}`, s.setup);
+  }
+}
+
 function files(s: State): DoctorCheck {
   if (!existsSync(s.piDir)) return check("files", "fail", "not installed", s.setup);
   if (s.manifestError) return check("files", "fail", s.manifestError, s.setup);
-  if (!s.manifest) return check("files", "warn", "no install manifest", s.setup);
+  if (!s.manifest) return firstInstall(s);
   const moved = s.manifest.source.commit && s.facts.head && s.manifest.source.commit !== s.facts.head;
   let detail = `${s.missing.length} missing, ${s.changed.length} changed by you`;
   if (moved) detail += `; checkout is at ${s.facts.head!.slice(0, 7)}, installed ${s.manifest.source.commit!.slice(0, 7)}; the checkout moved since the install; this would also update`;

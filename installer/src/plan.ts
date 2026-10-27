@@ -80,7 +80,7 @@ function putTree(
   for (const [rel, src] of overlay ?? []) if (rel.startsWith(prefix)) files.add(rel.slice(prefix.length));
   for (const rel of [...files].sort()) {
     const full = `${treeRel}${rel}`;
-    if (filter.skip(full)) continue;
+    if (full === "pi-phase/config.local.json" || filter.skip(full)) continue;
     const src = overlay?.get(`${prefix}${rel}`) ?? join(srcDir, rel);
     const desired = fromSource(src, settings);
     const content = filter.transform(full, desired.content);

@@ -139,9 +139,13 @@ class SyncPublishTests(unittest.TestCase):
         self.assertEqual(list(Path(self.directory.name).glob("pi-sync.*")), [], "stage left behind")
 
     def test_clean_sync_reports_no_leaks_and_matches_the_live_tree(self):
+        local = self.pi / "pi-phase/config.local.json"
+        local.write_text('{"heavy_slots":7}')
         result = self.run_command("./sync.sh", cwd=self.scratch)
         self.assertIn("no leaks found", result.stdout + result.stderr)
         self.assertIn("no findings", result.stdout)
+        self.assertFalse((self.scratch / "agent/pi-phase/config.local.json").exists())
+        self.assertEqual(local.read_text(), '{"heavy_slots":7}')
 
     def test_unknown_file_type_fails_before_the_checkout_changes(self):
         (self.pi / "extensions/creds.bin").write_bytes(b"\x00\x01opaque")

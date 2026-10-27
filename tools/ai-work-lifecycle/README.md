@@ -2,6 +2,15 @@
 
 One CLI, one shared skill, one hourly fallback. No root service or session-exit deletion.
 
+## Interpreter selection
+
+Python 3 must be installed. The installed wrapper uses `python3` from PATH.
+For launchd, cron or other minimal-PATH callers, set `AI_WORK_LIFECYCLE_PYTHON`
+to an absolute interpreter path in that caller's environment (for example
+`/opt/homebrew/bin/python3` or `/usr/bin/python3`). This overrides PATH lookup;
+both interpreter and installed script paths are quoted, including spaces.
+No interpreter probing, package installation or machine-specific wrapper edit is needed.
+
 ## Everyday use
 
 From an actual Git root with an existing ignored `.ai-work/`:

@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -36,6 +36,29 @@ test("a clean plan starts with user.json and installs rendered files; applying i
   assert.match(readFileSync(join(h, ".pi/agent/AGENTS.md"), "utf8"), /--add-assignee einari/);
   assert.ok(statSync(join(h, ".pi/agent/local-packages/pi-questions/dist/cli.js")).mode & 0o100);
   assert.ok(lstatSync(join(h, ".pi/agent/skills/ai-work-lifecycle")).isSymbolicLink());
+});
+
+test("config.local.json is never installed or overwritten, even if present in the source", async () => {
+  const h = home();
+  const source = join(h, "source");
+  mkdirSync(join(source, "agent"), { recursive: true });
+  for (const entry of readdirSync(join(REPO, "agent"))) {
+    const dest = join(source, "agent", entry);
+    if (entry === "pi-phase") cpSync(join(REPO, "agent", entry), dest, { recursive: true });
+    else symlinkSync(join(REPO, "agent", entry), dest);
+  }
+  for (const entry of ["skills", "tools"]) symlinkSync(join(REPO, entry), join(source, entry));
+  writeFileSync(join(source, "agent/pi-phase/config.local.json"), '{"heavy_slots":31}');
+  const local = join(h, ".pi/agent/pi-phase/config.local.json");
+  const fresh = buildPlan({ repoDir: source, home: h, settings, overlay: overlayFor(REPO, "balanced", settings) });
+  assert.ok(!fresh.some(a => a.path === local));
+  mkdirSync(join(h, ".pi/agent/pi-phase"), { recursive: true });
+  writeFileSync(local, '{"heavy_slots":7}');
+  assert.equal((await apply(ctxFor(h), fresh, opts)).code, 0);
+  assert.equal(readFileSync(local, "utf8"), '{"heavy_slots":7}');
+  assert.ok(!plan(h).some(a => a.path === local));
+  const manifest = JSON.parse(readFileSync(join(h, ".pi/agent/.pi-setup/manifest.json"), "utf8"));
+  assert.ok(!manifest.files[".pi/agent/pi-phase/config.local.json"]);
 });
 
 test("pi-phase policy paths render from reposRoot as valid JSON without changing other settings", () => {

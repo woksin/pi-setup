@@ -175,11 +175,14 @@ Run `./install.sh doctor [--fix] [--json]` (or `pi-setup doctor`): exit 0 means 
 `--fix` installs missing prerequisites and pi after asking (`--install-prereqs` skips the question; it prints the exact command first), reinstalls missing npm dependencies, restores missing tracked files/links when the checkout still matches the installed commit, and restores modes of unchanged files; it never changes logins, guards, profiles, PATH, services or edited files.
 Doctor runs `pi --version`, `pi auth check --provider <id> --no-refresh --json` (no token refresh), and `pi --offline --list-models` (no model call or network). pi may perform its normal one-time migrations; extension errors that do not crash pi are not visible.
 The update check is cached once a day; `PI_OFFLINE=1` skips it. Otherwise doctor is read-only, and `--json` emits one object on stdout.
+Without an install manifest, doctor previews differing files a first install would overwrite, using saved/default identity settings and the active/auto-selected profile. Identical and missing files are not listed; the preview never writes files.
 For build performance and disk cleanup, use `~/.pi/agent/bin/dev-doctor`; doctor delegates its disk check to that tool.
 
 `--legacy-peer-deps` is needed: the packages declare conflicting peer ranges for `@earendil-works/pi-*` (for example `@vigolium/piolium` wants `^0.74`, `@tintinweb/pi-subagents` wants `>=1.1.0`), so a plain `npm install` fails with ERESOLVE.
 
 `settings.json`, `models.json` and the other JSON configs are only written when they don't exist yet. `efficiency.json` and `context-budget.json` follow the same rule. Restart pi afterwards.
+
+`inbox-watch` resolves its directory at runtime: `INBOX_DIR` first, then a non-empty `orchMessagesDir` string in `~/.pi/agent/user.json`, then `~/.pi/agent/inbox`. Missing, malformed or empty settings use the fallback; no script edit is needed.
 
 Both `~/.local/bin` and `~/.pi/agent/bin` must be on PATH. The installer prints a shell-specific snippet when either is missing and **does not edit shell profiles by default**. Add it yourself or opt in with `--edit-shell-profile` (append-only, idempotent; zsh `.zshrc`, bash `.bash_profile` on macOS/`.bashrc` on Linux, fish `config.fish`). Restart your shell afterwards.
 
@@ -315,7 +318,7 @@ report-only session labels are never removed; remote/unknown context is skipped.
 The pi-phase config flags `msbuild_max_cpu` (default off),
 `container_test_detection` (default hint-only), and `cold_worktree_hint`
 (default on, hint-only) provide opt-in caps and advisory performance guidance.
-Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your version.
+Configure these in `~/.pi/agent/pi-phase/config.local.json` when supported by your version; installer-managed `config.json` supplies the base defaults. Local objects merge recursively, while arrays and scalars replace the base value.
 
 **Stuck-session watchdog:** `bin/session-watchdog` runs every 2 min from docker-guardian and only notifies, never kills. It flags live pi sessions (positively mapped to a running pi process through pi-orch heartbeats) with an unanswered tool call or an unanswered user/tool-result message older than 10 min, and raises an all-sessions-silent alarm (3+ sessions, none writing for over 15 min). Stuck notices go to `ALL-session-watchdog-*-stuck.md` and a macOS notification; sessions it cannot map, memory pressure (`kern.memorystatus_level` below 15% with swap used over 12 GB, or below 8%) and `fseventsd` above 4 GB go to the coordinator only. State is in `~/.pi/agent/session-watchdog/`, the log in `logs/session-watchdog.log`.
 

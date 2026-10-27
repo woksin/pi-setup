@@ -20,7 +20,7 @@ for d in agents extensions early-extensions lib workflows templates loose-thread
   "${RS[@]}" "$PI/$d/" "agent/$d/"
 done
 "${RS[@]}" --exclude=fd --exclude=rg "$PI/bin/" agent/bin/
-"${RS[@]}" --exclude=state "$PI/pi-phase/" agent/pi-phase/
+"${RS[@]}" --exclude=state --exclude=config.local.json "$PI/pi-phase/" agent/pi-phase/
 # pi-questions ships as source inside this repo (no npm package); dist/ is the CLI, rebuilt here
 (cd "$PI/local-packages/pi-questions" && node scripts/build.mjs)
 "${RS[@]}" "${PQ_EX[@]}" --exclude='*.tgz' "$PI/local-packages/pi-questions/" agent/local-packages/pi-questions/
@@ -74,7 +74,7 @@ for d in agents extensions early-extensions lib workflows templates loose-thread
   "${RS[@]}" "$STAGE/agent/$d/" "agent/$d/"
 done
 "${RS[@]}" --exclude=fd --exclude=rg "$STAGE/agent/bin/" agent/bin/
-"${RS[@]}" --exclude=state "$STAGE/agent/pi-phase/" agent/pi-phase/
+"${RS[@]}" --exclude=state --exclude=config.local.json "$STAGE/agent/pi-phase/" agent/pi-phase/
 "${RS[@]}" "${PQ_EX[@]}" "$STAGE/agent/local-packages/pi-questions/" agent/local-packages/pi-questions/
 "${RS[@]}" --exclude=ACTIVE "$STAGE/agent/profiles/" agent/profiles/
 mkdir -p agent/lane-policy agent/launchd

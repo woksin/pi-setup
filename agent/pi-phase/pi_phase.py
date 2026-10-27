@@ -705,6 +705,28 @@ class PhaseConfig(tuple):
         return result
 
 
+def merge_config(base, overlay):
+    """Merge objects recursively; scalars and arrays in the overlay replace the base."""
+    result = base.copy()
+    for key, value in overlay.items():
+        result[key] = merge_config(result[key], value) if isinstance(result.get(key), dict) and isinstance(value, dict) else value
+    return result
+
+
+def local_config(path, data, warn):
+    overlay = path.with_name("config.local.json")
+    if not overlay.exists():
+        return data
+    try:
+        local = json.loads(overlay.read_text())
+        if not isinstance(local, dict):
+            raise ValueError("expected an object")
+    except (ValueError, OSError) as exc:
+        warn(f"invalid config.local.json ({exc}); ignoring local overlay")
+        return data
+    return merge_config(data, local)
+
+
 def config(path, *, notes=None):
     def warn(message):
         if notes is None or message not in notes:
@@ -724,6 +746,7 @@ def config(path, *, notes=None):
     except (ValueError, OSError) as exc:
         warn(f"invalid config.json ({exc}); using defaults")
         data = {}
+    data = local_config(path, data, warn)
     for key in data.keys() - defaults.keys():
         warn(f"unknown config key {key}; ignored")
     values = defaults.copy()
