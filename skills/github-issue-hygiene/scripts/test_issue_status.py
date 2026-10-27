@@ -2,15 +2,28 @@
 import contextlib
 import importlib.util
 import io
+import sys
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _spec = importlib.util.spec_from_file_location('issue_status', Path(__file__).with_name('issue-status.py'))
 issue_status = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(issue_status)
 S, E = issue_status.START, issue_status.END
+AGENT = Path(__file__).resolve().parents[3] / 'agent'
+
+
+def refusing(lines):
+    """A scan_status stand-in with the real refusal behaviour: forwarded lines on stderr, exit 4."""
+    def scan(block):
+        print('\n'.join(lines), file=sys.stderr)
+        sys.exit(issue_status.SCAN_REFUSED_EXIT)
+    return scan
 
 
 class FakeGitHub:
@@ -37,6 +50,10 @@ class IssueStatusTest(unittest.TestCase):
         self.addCleanup(self.dir.cleanup)
         self.original = issue_status.gh_json
         self.addCleanup(setattr, issue_status, 'gh_json', self.original)
+        self.real_scan = issue_status.scan_status
+        self.addCleanup(setattr, issue_status, 'scan_status', self.real_scan)
+        self.scanned = []
+        issue_status.scan_status = self.scanned.append  # clean scanner that records its argument
 
     def file(self, name, text):
         path = os.path.join(self.dir.name, name)
@@ -126,6 +143,114 @@ class IssueStatusTest(unittest.TestCase):
         fake = FakeGitHub([f'Body\n{S}\nold\n{E}', f'Body edited\n{S}\nold\n{E}'])
         self.assertEqual(self.run_update(fake, 'new')[0], 0)
         self.assertEqual(fake.writes, [f'Body edited\n{S}\nnew\n{E}'])
+
+    def test_scans_exactly_the_inserted_block_once_even_when_recomposing(self):
+        fake = FakeGitHub([f'Body\n{S}\nold\n{E}', f'Body edited\n{S}\nold\n{E}'])
+        self.assertEqual(self.run_update(fake, '  new\r\nline  \n')[0], 0)
+        self.assertEqual(self.scanned, [f'{S}\nnew\r\nline\n{E}'])
+        self.assertIn(self.scanned[0], fake.writes[0])
+
+    def test_refusal_exits_4_before_any_write_with_only_forwarded_lines(self):
+        issue_status.scan_status = refusing(['publish: scan-refused', 'status: line 2 home-path', 'findings: 1'])
+        fake = FakeGitHub(['Body'])
+        code, out, err = self.run_update(fake, 'new')
+        self.assertEqual(code, issue_status.SCAN_REFUSED_EXIT)
+        self.assertEqual(fake.writes, []); self.assertEqual(out, '')
+        self.assertEqual(err.splitlines(), ['publish: scan-refused', 'status: line 2 home-path', 'findings: 1'])
+
+    def test_dry_run_scans_too_and_prints_nothing_when_refused(self):
+        issue_status.scan_status = refusing(['publish: scan-refused'])
+        issue_status.gh_json = FakeGitHub(['Body'])
+        argv = ['update', '--repo', 'o/r', '--issue', '1', '--file', self.file('s.md', 'new'), '--dry-run']
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            issue_status.main(argv)
+        self.assertEqual(raised.exception.code, issue_status.SCAN_REFUSED_EXIT); self.assertEqual(out.getvalue(), '')
+
+    def test_missing_scanner_fails_closed_without_writing(self):
+        fake = FakeGitHub(['Body'])
+        issue_status.scan_status = self.real_scan
+        for failure in (FileNotFoundError('/no/pi-publish'), subprocess.TimeoutExpired('pi-publish', 60), PermissionError('x')):
+            issue_status.gh_json = fake
+            argv = ['update', '--repo', 'o/r', '--issue', '1', '--file', self.file('s.md', 'new')]
+            with mock.patch.object(subprocess, 'run', side_effect=failure), self.assertRaises(SystemExit) as raised:
+                issue_status.main(argv)
+            self.assertEqual(raised.exception.code, 'publication scanner unavailable; status not written')
+            self.assertEqual(fake.writes, [])
+
+    def test_scanner_exit_mapping_and_output_filtering(self):
+        issue_status.scan_status = self.real_scan
+        done = lambda code, out: subprocess.CompletedProcess([], code, stdout=out, stderr='SECRET-STDERR')
+        fake = FakeGitHub(['Body'])
+        with mock.patch.object(subprocess, 'run', return_value=done(3, 'publish: scan-refused\nstatus: line 4 token\nleaked SECRET-VALUE\nfindings: 1\n')):
+            code, _, err = self.run_update(fake, 'new')
+        self.assertEqual(code, 4); self.assertEqual(err.splitlines(), ['publish: scan-refused', 'status: line 4 token', 'findings: 1'])
+        with mock.patch.object(subprocess, 'run', return_value=done(3, 'only SECRET-VALUE here')):
+            code, _, err = self.run_update(fake, 'new')
+        self.assertEqual((code, err.strip()), (4, 'scanner output withheld'))
+        with mock.patch.object(subprocess, 'run', return_value=done(5, '')):
+            code, _, err = self.run_update(fake, 'new')
+        self.assertEqual(code, 1); self.assertNotIn('SECRET', err); self.assertEqual(fake.writes, [])
+
+    def test_scanner_gets_a_private_file_with_the_exact_bytes_and_cleans_up(self):
+        issue_status.scan_status = self.real_scan
+        seen = {}
+        def run(argv, **kwargs):
+            seen.update(argv=argv, kwargs=kwargs, bytes=Path(argv[-1]).read_bytes(), mode=os.stat(argv[-1]).st_mode & 0o777,
+                        dirmode=os.stat(os.path.dirname(argv[-1])).st_mode & 0o777)
+            return subprocess.CompletedProcess(argv, 0, stdout='scan clean\n', stderr='')
+        with mock.patch.object(subprocess, 'run', side_effect=run), mock.patch.dict(os.environ, {'PI_CODING_AGENT_DIR': '/agent'}):
+            issue_status.scan_status(f'{S}\r\nx\n{E}')
+        self.assertEqual(seen['bytes'], f'{S}\r\nx\n{E}'.encode())
+        self.assertEqual((seen['mode'], seen['dirmode']), (0o600, 0o700))
+        self.assertEqual(seen['argv'][:3], ['/agent/bin/pi-publish', 'check', '--file'])
+        self.assertNotIn('shell', seen['kwargs']); self.assertEqual(seen['kwargs']['timeout'], 60)
+        self.assertFalse(os.path.exists(seen['argv'][-1])); self.assertFalse(os.path.exists(os.path.dirname(seen['argv'][-1])))
+
+    def test_patch_failure_prints_a_fixed_message_without_stderr(self):
+        base = FakeGitHub(['Body'])
+        def failing(args, payload=None):
+            if args[0] == '-X':
+                raise issue_status.GhFailure(1, 'SECRET-STDERR')
+            return base(args, payload)
+        code, _, err = self.run_update(failing, 'new')
+        self.assertEqual(code, 1); self.assertEqual(base.writes, [])
+        issue_status.gh_json = failing
+        with self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(io.StringIO()):
+            issue_status.main(['update', '--repo', 'o/r', '--issue', '1', '--file', self.file('t.md', 'new')])
+        self.assertEqual(raised.exception.code, 'gh api PATCH failed (exit 1); not verified')
+
+    def test_read_failure_keeps_gh_message(self):
+        def failing(args, payload=None):
+            raise issue_status.GhFailure(1, 'boom\n')
+        issue_status.gh_json = failing
+        with self.assertRaises(SystemExit) as raised:
+            issue_status.main(['show', '--repo', 'o/r', '--issue', '1'])
+        self.assertEqual(raised.exception.code, 'gh api failed: boom')
+
+
+@unittest.skipUnless(shutil.which('node'), 'node is required for the real scanner')
+class RealScannerTest(unittest.TestCase):
+    def scan(self, block):
+        with tempfile.TemporaryDirectory() as home:
+            env = {'PI_CODING_AGENT_DIR': str(AGENT), 'HOME': home}
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err):
+                try:
+                    issue_status.scan_status(block)
+                    return 0, err.getvalue()
+                except SystemExit as exit_:
+                    return exit_.code, err.getvalue()
+
+    def test_clean_block_passes(self):
+        self.assertEqual(self.scan(f'{S}\n**State:** Paused\n{E}'), (0, ''))
+
+    def test_home_path_is_refused_without_the_path(self):
+        leak = '/'.join(['', 'Users', 'alice', 'notes.md'])
+        code, err = self.scan(f'{S}\nline\nSee {leak}\n{E}')
+        self.assertEqual(code, issue_status.SCAN_REFUSED_EXIT)
+        self.assertIn('line 3 home-path', err)
+        self.assertNotIn('alice', err); self.assertNotIn('notes.md', err)
 
 
 if __name__ == '__main__':

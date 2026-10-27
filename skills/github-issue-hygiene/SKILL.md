@@ -15,7 +15,7 @@ Use the structured `publish` tool or `pi-publish` for issue/PR text, comments an
 {"kind":"issue-comment","repo":"OWNER/REPO","number":123,"body":"A concise public decision and next step."}
 ```
 
-CLI equivalent: `pi-publish issue-comment --repo OWNER/REPO --number 123 --body-file .ai-work/issue-comment.md`. File inputs are captured and scanned before publication. The manual `gh`/status-script examples below express workflow intent, not permission to bypass scanning; automatic internal status writers require their separate rollout integration.
+CLI equivalent: `pi-publish issue-comment --repo OWNER/REPO --number 123 --body-file .ai-work/issue-comment.md`. File inputs are captured and scanned before publication. The manual `gh`/status-script examples below express workflow intent, not permission to bypass scanning; `issue-status.py update` scans the status block it inserts and exits 4 (value-free diagnostics) if refused; other trusted internal writers remain direct.
 
 Refused text must be rewritten, not encoded, split, masked or sent by another transport. Remove credentials and mask placeholders, private/local paths, work-folder contents and session/agent details. Scanner diagnostics are value-free. `publish check` is advisory for captured files only and gives no later-send approval. Only the user may explicitly disable the cooperative `publish` routing guard; `all` and environment opt-outs exclude it, and the tool/CLI scanner still runs. Opaque execution and trusted internal writers are not a sandboxed boundary.
 

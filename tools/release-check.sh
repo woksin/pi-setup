@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 node --test --test-timeout=30000 tools/skills.test.mjs
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s skills/github-issue-hygiene/scripts -p 'test_*.py'
 # Tests the repository being released (agent/), not the live install; node_modules fall back to ~/.pi/agent/npm.
 agent/bin/pi-setup-tests "${PI_AGENT_DIR:-agent}"
 python3 -m unittest discover -s tests
