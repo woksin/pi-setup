@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: a18446af1b59e284b3a494d77e0cb37917cd903a44c87024a2779fca241ccece
+// pi-setup-source-sha256: ef9e91f1d1c378e96301d1eebbaf33595a38916af390fc312f61de5c6b42e399
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5427,7 +5427,7 @@ function planPrereqs(ctx, input) {
   const packages2 = [...new Set(installable.map((t2) => t2[manager]))];
   const steps = pm(manager, packages2, sudo).map((argv, i2) => ({
     id: `${manager}-${i2}`,
-    label: `Install ${installable.map((t2) => t2.tool).join(", ")}`,
+    label: argv.includes("update") ? "Refresh the package list" : `Install ${installable.map((t2) => t2.tool).join(", ")}`,
     argv,
     sudo: argv[0] === "sudo",
     system: true
@@ -10141,6 +10141,7 @@ async function execute(ctx, options, prompter, baseCtx) {
   const result3 = prompter ? await applyGuided(run, prompter) : await applyPlain(run);
   const shown = prompter || options.json ? [] : summary2.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") || l2.startsWith("warning:") || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no") || r2.componentNotes.includes(l2));
   if (result3.code === 0 && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...await installSummary(ctx, detection, piDir));
+  if (result3.code === 0 && result3.wrote && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...plainNextSteps(ctx, detection, r2, pathMissing));
   const offer = lanesOffered(r2, options, result3.code === 0);
   let pending2 = 0;
   if (prompter && result3.code === 0 && !options.dryRun) {
@@ -10148,6 +10149,16 @@ async function execute(ctx, options, prompter, baseCtx) {
   }
   if (prompter && offer) await offerLanesSetup(ctx, options, prompter);
   return finish({ ctx, baseCtx, options, r: r2, detection, lines: shown, code: result3.code, prompter, wrote: result3.wrote, pending: pending2 });
+}
+function plainNextSteps(ctx, detection, r2, pathMissing) {
+  const steps = [];
+  if (pathMissing) steps.push("Add ~/.local/bin and ~/.pi/agent/bin to PATH (./install.sh doctor shows the line for your shell), then open a new terminal.");
+  if (ctx.env.PI_SETUP_BREW_SHELLENV) steps.push(`Add to your shell profile: eval "$(${ctx.env.PI_SETUP_BREW_SHELLENV} shellenv)"`);
+  if (!detection.github.host) steps.push("Log in to GitHub: gh auth login");
+  const logins2 = missingLogins(r2.profile, r2.ready);
+  if (logins2.length) steps.push(`Log in to your AI providers: start pi, then type /login for ${logins2.join(", ")}`);
+  steps.push("Start with: pi");
+  return ["", "Next steps:", ...steps.map((s, i2) => `  ${i2 + 1}. ${s}`), ""];
 }
 function cancelled(ctx) {
   ctx.err("Cancelled; nothing written.");
@@ -10186,6 +10197,7 @@ var init_run = __esm({
     init_reconcile();
     init_prereqs();
     init_prereqs_run();
+    init_profiles();
     init_uninstall();
     init_components();
     init_retire();

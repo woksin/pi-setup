@@ -86,7 +86,7 @@ test("macOS: flags decide; --yes on a fresh HOME installs, --yes --skip-npm and 
   const r = runInstall(fresh, ["--yes"]);
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(fresh.calls(), ["brew install node"]);
-  assert.match(r.stderr, /Running: brew install node/);
+  assert.match(r.stderr, /→ brew install node/);
 
   const flagged = withBrew();
   mkdirSync(join(flagged.b.home, ".pi/agent"), { recursive: true });

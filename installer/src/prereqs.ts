@@ -88,7 +88,7 @@ export function planPrereqs(ctx: Ctx, input: PlanInput): Plan {
   if (!manager || !installable.length) return { steps: [], manual };
   const packages = [...new Set(installable.map((t) => t[manager]!))];
   const steps: Step[] = pm(manager, packages, sudo).map((argv, i) => ({
-    id: `${manager}-${i}`, label: `Install ${installable.map((t) => t.tool).join(", ")}`, argv,
+    id: `${manager}-${i}`, label: argv.includes("update") ? "Refresh the package list" : `Install ${installable.map((t) => t.tool).join(", ")}`, argv,
     sudo: argv[0] === "sudo", system: true,
   }));
   if (manager === "apt" && installable.some((t) => t.tool === "fd")) {

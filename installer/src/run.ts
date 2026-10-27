@@ -17,6 +17,7 @@ import { applyTakes, diffText, reconcile } from "./reconcile.ts";
 import type { KeepAction } from "./reconcile.ts";
 import { EXTRA_TOOLS, installCommand } from "./prereqs.ts";
 import { ensurePrereqs, linkNotes } from "./prereqs-run.ts";
+import { missingLogins } from "./profiles.ts";
 import { runUninstall } from "./uninstall.ts";
 import { available, codesceneNotes, COMPONENTS, currentState, WEB_PACKAGES, detectDefaults, hintFor, resolveComponents } from "./components.ts";
 import type { ComponentChoice } from "./components.ts";
@@ -347,6 +348,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const result = prompter ? await applyGuided(run, prompter) : await applyPlain(run);
   const shown = prompter || options.json ? [] : summary.filter((l) => l.startsWith("Profile:") || l.startsWith("Kimi") || l.startsWith("warning:") || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l));
   if (result.code === 0 && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...await installSummary(ctx, detection, piDir));
+  if (result.code === 0 && result.wrote && !options.dryRun && !options.plan && !options.json && !prompter) shown.push(...plainNextSteps(ctx, detection, r, pathMissing));
   const offer = lanesOffered(r, options, result.code === 0);
   let pending = 0;
   if (prompter && result.code === 0 && !options.dryRun) {
@@ -354,6 +356,18 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   }
   if (prompter && offer) await offerLanesSetup(ctx, options, prompter);
   return finish({ ctx, baseCtx, options, r, detection, lines: shown, code: result.code, prompter, wrote: result.wrote, pending });
+}
+
+/** The unattended finish: what is left for the person to do, numbered, each with the exact command. */
+function plainNextSteps(ctx: Ctx, detection: Detection, r: Resolved, pathMissing: boolean): string[] {
+  const steps: string[] = [];
+  if (pathMissing) steps.push("Add ~/.local/bin and ~/.pi/agent/bin to PATH (./install.sh doctor shows the line for your shell), then open a new terminal.");
+  if (ctx.env.PI_SETUP_BREW_SHELLENV) steps.push(`Add to your shell profile: eval "$(${ctx.env.PI_SETUP_BREW_SHELLENV} shellenv)"`);
+  if (!detection.github.host) steps.push("Log in to GitHub: gh auth login");
+  const logins = missingLogins(r.profile, r.ready);
+  if (logins.length) steps.push(`Log in to your AI providers: start pi, then type /login for ${logins.join(", ")}`);
+  steps.push("Start with: pi");
+  return ["", "Next steps:", ...steps.map((s, i) => `  ${i + 1}. ${s}`), ""];
 }
 
 function cancelled(ctx: Ctx): number {

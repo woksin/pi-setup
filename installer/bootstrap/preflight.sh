@@ -8,6 +8,8 @@ PS_NODE_MAJOR_URL="https://nodejs.org/dist/latest-v24.x"
 PS_SYSTEM_DIRS="${PI_SETUP_SYSTEM_BIN_DIRS:-/opt/homebrew/bin /usr/local/bin}"
 PS_BREW_INSTALLER="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 
+PS_LOG="$HOME/.local/state/pi-setup/install.log"
+
 ps_say() { printf '%s\n' "$*" >&2; }
 ps_die() { ps_say "$*"; exit 1; }
 
@@ -95,22 +97,28 @@ ps_plan_lines() {
   esac
 }
 
+# Command output goes to the log, not the screen; a failure names the log.
+ps_log() { mkdir -p "$(dirname "$PS_LOG")" 2>/dev/null; printf '\n$ %s\n' "$*" >> "$PS_LOG" 2>/dev/null || true; }
+ps_fail() { ps_die "Failed (exit $1): $2
+Details: $PS_LOG
+Fix the problem, then re-run ./install.sh: it continues from here."; }
+
 ps_run() {
-  ps_say "Running: $*"
-  "$@" || ps_die "Failed (exit $?): $*
-Fix the problem, then re-run ./install.sh: it continues from here."
+  ps_say "→ $*"
+  ps_log "$*"
+  "$@" >>"$PS_LOG" 2>&1 || ps_fail $? "$*"
 }
 
 ps_run_priv() {
-  ps_say "Running: ${PS_PRIV}$*"
+  ps_say "→ ${PS_PRIV}$*"
+  ps_log "${PS_PRIV}$*"
   if [ -n "$PS_PRIV" ]; then
     command -v sudo >/dev/null 2>&1 || ps_die "sudo is not available. Run this as root, then re-run ./install.sh:
   $*"
-    if [ "$PS_PRIV" = "sudo -n " ]; then sudo -n "$@"; else sudo "$@"; fi || ps_die "Failed (exit $?): ${PS_PRIV}$*
-Fix the problem, then re-run ./install.sh: it continues from here."
+    # shellcheck disable=SC2024 # the log is the user's own file: the redirect must not run as root
+    if [ "$PS_PRIV" = "sudo -n " ]; then sudo -n "$@" >>"$PS_LOG" 2>&1; else sudo "$@" >>"$PS_LOG" 2>&1; fi || ps_fail $? "${PS_PRIV}$*"
   else
-    "$@" || ps_die "Failed (exit $?): $*
-Fix the problem, then re-run ./install.sh: it continues from here."
+    "$@" >>"$PS_LOG" 2>&1 || ps_fail $? "$*"
   fi
 }
 
@@ -155,9 +163,10 @@ ps_linux_node() {
 ps_darwin_node() {
   if [ -z "${PS_BREW:-}" ]; then
     command -v curl >/dev/null 2>&1 || ps_die "curl is needed to install Homebrew. Install Homebrew from https://brew.sh, then re-run ./install.sh."
-    ps_say "Running: NONINTERACTIVE=1 /bin/bash -c \"\$(curl -fsSL $PS_BREW_INSTALLER)\""
+    ps_say "→ NONINTERACTIVE=1 /bin/bash -c \"\$(curl -fsSL $PS_BREW_INSTALLER)\""
+    ps_log "Homebrew installer"
     ps_script="$(curl -fsSL "$PS_BREW_INSTALLER")" || ps_die "Could not download the Homebrew installer from $PS_BREW_INSTALLER"
-    NONINTERACTIVE=1 /bin/bash -c "$ps_script" >&2 || ps_die "The Homebrew installer failed. See https://brew.sh, then re-run ./install.sh."
+    NONINTERACTIVE=1 /bin/bash -c "$ps_script" >>"$PS_LOG" 2>&1 || ps_die "The Homebrew installer failed (details: $PS_LOG). See https://brew.sh, then re-run ./install.sh."
     ps_find_brew || ps_die "Homebrew was installed but brew was not found in /opt/homebrew/bin or /usr/local/bin."
     PI_SETUP_BREW_SHELLENV="$PS_BREW"; export PI_SETUP_BREW_SHELLENV
     PI_SETUP_USER_PATH="$PATH"; export PI_SETUP_USER_PATH

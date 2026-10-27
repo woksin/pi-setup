@@ -43,7 +43,7 @@ grep -q "/login" "$HOME/s3.log" || fail "S3: no /login in the next steps"
 step "S4 re-run: safe, fast, quiet"
 PATH="$HOME/.local/bin:$HOME/.pi/agent/bin:$PATH" ./install.sh --yes --user ci-bot --repos-root "$HOME/repos" 2>&1 | tee "$HOME/s4.log"
 grep -q "Everything up to date" "$HOME/s4.log" || fail "S4: re-run did not say Everything up to date"
-if grep -q "^Running:" "$HOME/s4.log"; then fail "S4: re-run ran installers again"; fi
+if grep -qE "^(→|Running:)" "$HOME/s4.log"; then fail "S4: re-run ran installers again"; fi
 
 step "S5 doctor"
 set +e

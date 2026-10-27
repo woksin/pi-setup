@@ -48,6 +48,7 @@ describe("install (e2e)", () => {
     const run = install(box, ARGS(box), { entry: "node", env: { CI: "" } });
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.match(run.stdout, /Done\. Restart pi/);
+    assert.match(run.stdout, /Next steps:\n(  \d\. .*\n)+.*Start with: pi/);
   });
 
   test("(c) a re-run is a no-op", () => {
