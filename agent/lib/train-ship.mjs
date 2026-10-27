@@ -5,6 +5,7 @@ import { selectTrain } from './train-resolve.mjs';
 import { checkBody, checkPackageLeaks, checkShip, gateEvidence, shipConfig } from './train-ship-check.mjs';
 import { linkFoldedPRs, notesMarker, reviewerNotes, shipBody, shipLabel, shipTitle, upsertTrainPR } from './train-ship-pr.mjs';
 import { preflight, publishText } from './train-publish.mjs';
+import { baseBranch } from './train-init.mjs';
 
 async function pushTrain(api, manifest) {
   const remote = (await api.git(manifest.worktree, ['ls-remote', 'origin', `refs/heads/${manifest.train}`])).stdout.trim().split(/\s+/)[0];
@@ -56,7 +57,7 @@ export async function shipTrain(ctx, api, options, repo) {
     const notesComment = `${notes}\n${notesMarker(manifest, notes)}\n`;
     const files = { body, notes, notesComment, label, bodyFile: join(directory, 'pr-body.md'), notesFile: join(directory, 'pr-notes.md') };
     // Fail before any file, check or push; the bytes sent later are these in-memory strings, never the files.
-    preflight(ctx, manifest, { title: shipTitle(options, manifest), body, notes: notesComment, train: manifest.train });
+    preflight(ctx, manifest, { title: shipTitle(options, manifest), body, notes: notesComment, train: manifest.train, base: baseBranch(manifest), repo: manifest.repo });
     if (!options.dryRun) await writeShipFiles(directory, manifest, files);
     await checkBody(ctx, manifest, config, { files, dryRun: options.dryRun });
     const save = () => saveManifest(selected.path, manifest);
