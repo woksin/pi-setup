@@ -14,10 +14,12 @@ npm --prefix installer run build
 git diff --exit-code -- installer/dist
 npm --prefix installer test
 sh -n install.sh
+sh -n bootstrap.sh
+sh -n tools/release-asset.sh
 sh -n installer/bootstrap/preflight.sh
-shellcheck -s sh install.sh installer/bootstrap/preflight.sh tests/container/inside.sh
+shellcheck -s sh install.sh bootstrap.sh tools/release-asset.sh installer/bootstrap/preflight.sh tests/container/inside.sh
 shellcheck tests/container/run.sh
 # No personal paths or names in the installer, its shell scripts or the container test.
 # (lanes-reap.test.ts holds pre-existing ps-output fixtures; it is excluded until they are anonymised.)
-if grep -rn --exclude-dir=node_modules --exclude-dir=dist --exclude=lanes-reap.test.ts '/Users/' installer install.sh tests/container; then echo "personal path (/Users/) found" >&2; exit 1; fi
+if grep -rn --exclude-dir=node_modules --exclude-dir=dist --exclude=lanes-reap.test.ts '/Users/' installer install.sh bootstrap.sh tools/release-asset.sh tests/container; then echo "personal path (/Users/) found" >&2; exit 1; fi
 gitleaks git . --no-banner --redact
