@@ -59,6 +59,15 @@ test("lanes backend detection is read-only and the default applies with --yes as
   }
 });
 
+test("existing installs without a saved lanes choice do not use the new backend default", () => {
+  const existing = { detected: { lanes: true }, existingInstall: true, interactive: false };
+  assert.deepEqual(resolveComponents(existing).lanes, { on: false, source: "default" });
+  assert.deepEqual(resolveComponents({ ...existing, saved: {} }).lanes, { on: false, source: "default" });
+  assert.deepEqual(resolveComponents({ ...existing, flags: { lanes: true } }).lanes, { on: true, source: "flag" });
+  assert.deepEqual(resolveComponents({ ...existing, saved: { lanes: { on: true } } }).lanes, { on: true, source: "saved" });
+  assert.deepEqual(resolveComponents({ ...existing, saved: { lanes: { on: false } } }).lanes, { on: false, source: "saved" });
+});
+
 test("link planning creates only free core links and leaves files and foreign links with notes", () => {
   const home = tempDir("lanes-link-plan"); fakeTargets(home);
   let actions = plan(home);

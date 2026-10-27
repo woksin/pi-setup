@@ -165,7 +165,7 @@ Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" ques
 
 ### Parallel sessions (lanes)
 
-Lanes is on by default when tmux or macOS Terminal/iTerm is found, including with `--yes`. Opt out with `./install.sh --without lanes` or toggle lanes in Review via Change a step… → Extras. With no backend it defaults off and Review explains why; `./install.sh --with lanes` explicitly installs it anyway. Your choice is saved for reruns.
+On fresh installs, lanes is on by default when tmux or macOS Terminal/iTerm is found, including with `--yes`. Opt out with `./install.sh --without lanes` or toggle lanes in Review via Change a step… → Extras. With no backend it defaults off and Review explains why; `./install.sh --with lanes` explicitly installs it anyway. Your choice is saved for reruns. Existing installs with no saved lanes choice stay off unless you opt in.
 
 Installation only installs the tool: nothing starts or is trusted. Run `lanes init <dir>` to create a coordination folder, or `./install.sh lanes` for guided setup. MCP preapproval stays off unless you explicitly opt in.
 For hand-started sessions, `lanes adopt --dir <root> --exclude-tty ttys004 --inventory <file>` previews a config diff; add `--write` to merge atomically without controlling sessions or moving messages.

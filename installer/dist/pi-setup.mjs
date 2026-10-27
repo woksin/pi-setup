@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 280137f7197e3393b0a080ab0e2bb0dfaff3c512e4b3ab65e1fcfeaea9462806
+// pi-setup-source-sha256: 89b5f9a633eaf1284d5f9f612d7b4a890bcabb387bc31500127d9bb367858511
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -6450,6 +6450,10 @@ function available(id, ctx) {
   if (id === "cleanup") return ctx.platform === "darwin" || ctx.which("systemctl") ? true : "needs launchd (macOS) or systemd";
   return true;
 }
+function detectedChoice(id, input) {
+  if (id === "lanes" && input.existingInstall) return { on: false, source: "default" };
+  return { on: Boolean(input.detected[id]), source: "detected" };
+}
 function resolveComponents(input) {
   const out = {};
   for (const def of COMPONENTS) {
@@ -6459,7 +6463,7 @@ function resolveComponents(input) {
     else if (input.saved?.[id]) out[id] = { on: input.saved[id].on === true, source: "saved" };
     else if (!def.service && input.current?.[id]) out[id] = { on: true, source: "installed" };
     else if (def.service && !input.interactive) out[id] = { on: false, source: "default" };
-    else out[id] = { on: Boolean(input.detected[id]), source: "detected" };
+    else out[id] = detectedChoice(id, input);
   }
   return out;
 }
@@ -9990,6 +9994,7 @@ function resolveAll(ctx, options, detection, saved2, answers, manifest, prompted
     flags: flagMap(options),
     answers: answers.components,
     saved: manifest?.components,
+    existingInstall: Boolean(manifest),
     current: currentState(ctx),
     detected: detectDefaults(ctx, detection, settings3.reposRoot),
     interactive: Boolean(answers.components) || isInteractive(options, ctx.env, ctx.stdinTTY, ctx.stdoutTTY)

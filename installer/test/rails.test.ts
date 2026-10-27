@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { main } from "../src/run.ts";
@@ -66,6 +66,28 @@ test("recommended backend installs lanes with safe MCP defaults and a single set
     assert.equal(JSON.parse(readFileSync(join(dir, "defaults.json"), "utf8")).launch.preapproveMcp, false);
     assert.match([...lines, ...s.notes].join("\n"), /Optional: set up parallel sessions now: \.\/install\.sh lanes/);
     assert.ok(!s.events.some((e) => e.includes("Set up a coordinator")));
+  }
+});
+
+test("unattended update installs keep lanes absent without a saved choice unless --with lanes", async () => {
+  for (const missing of ["lanes", "components"]) {
+    const b = box(); const ctx = ctxFor(b); const which = ctx.which;
+    ctx.which = (name) => name === "tmux" ? "/stub/tmux" : which(name);
+    const args = [...flags(b), "--yes"];
+    assert.equal(await main([...args, "--without", "lanes"], ctx), 0);
+    const path = join(b.home, ".pi/agent/.pi-setup/manifest.json");
+    const legacy = JSON.parse(readFileSync(path, "utf8"));
+    if (missing === "lanes") delete legacy.components.lanes;
+    else delete legacy.components;
+    writeFileSync(path, JSON.stringify(legacy));
+
+    // update re-runs install with --yes; neither form of the legacy manifest opts in.
+    assert.equal(await main(args, ctx), 0);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).components.lanes.on, false, missing);
+    assert.equal(existsSync(join(b.home, ".local/share/pi-setup/lanes")), false, missing);
+    assert.equal(await main([...args, "--with", "lanes"], ctx), 0);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).components.lanes.on, true, missing);
+    assert.equal(existsSync(join(b.home, ".local/share/pi-setup/lanes/lanes.mjs")), true, missing);
   }
 });
 

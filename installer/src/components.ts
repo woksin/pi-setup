@@ -44,10 +44,17 @@ export interface ResolveInput {
   answers?: Record<string, boolean>;
   /** manifest.components. */
   saved?: Record<string, { on: boolean }>;
+  /** A manifest exists, including installs from before component choices were recorded. */
+  existingInstall?: boolean;
   /** State of an install from before choices were recorded (non-services only). */
   current?: Record<string, boolean>;
   detected: Record<string, boolean>;
   interactive: boolean;
+}
+
+function detectedChoice(id: ComponentId, input: ResolveInput): ComponentChoice[string] {
+  if (id === "lanes" && input.existingInstall) return { on: false, source: "default" };
+  return { on: Boolean(input.detected[id]), source: "detected" };
 }
 
 /**
@@ -64,7 +71,7 @@ export function resolveComponents(input: ResolveInput): ComponentChoice {
     else if (input.saved?.[id]) out[id] = { on: input.saved[id].on === true, source: "saved" };
     else if (!def.service && input.current?.[id]) out[id] = { on: true, source: "installed" };
     else if (def.service && !input.interactive) out[id] = { on: false, source: "default" };
-    else out[id] = { on: Boolean(input.detected[id]), source: "detected" };
+    else out[id] = detectedChoice(id, input);
   }
   return out;
 }

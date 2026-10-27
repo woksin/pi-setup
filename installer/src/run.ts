@@ -148,7 +148,7 @@ function resolveAll(
   const choice: Choice = answers.profile ? { name: picked.name, reason: "you picked it", provisional: false, source: "prompt" } : picked;
   const profile = profiles.find((p) => p.name === choice.name);
   const components = resolveComponents({
-    flags: flagMap(options), answers: answers.components, saved: manifest?.components, current: currentState(ctx),
+    flags: flagMap(options), answers: answers.components, saved: manifest?.components, existingInstall: Boolean(manifest), current: currentState(ctx),
     detected: detectDefaults(ctx, detection, settings.reposRoot), interactive: Boolean(answers.components) || isInteractive(options, ctx.env, ctx.stdinTTY, ctx.stdoutTTY),
   });
   const componentNotes: string[] = [];
