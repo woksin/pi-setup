@@ -124,9 +124,9 @@ ps_plan_lines() {
         echo "brew install node"
       fi ;;
     Linux)
-      if ! command -v curl >/dev/null 2>&1; then
-        if [ "$PS_PM" = apt ]; then echo "${PS_PRIV}apt-get install -y curl ca-certificates"
-        else echo "${PS_PRIV}dnf install -y curl ca-certificates"; fi
+      if ps_need_linux_pkgs; then
+        if [ "$PS_PM" = apt ]; then echo "${PS_PRIV}apt-get install -y curl ca-certificates libatomic1"
+        else echo "${PS_PRIV}dnf install -y curl ca-certificates libatomic"; fi
       fi
       echo "curl -fsSL $PS_NODE_MAJOR_URL/SHASUMS256.txt"
       echo "curl -fsSL $PS_NODE_MAJOR_URL/node-v$PS_NODE_MAJOR.<x.y>-linux-$PS_ARCH.tar.gz   (SHA-256 checked)"
@@ -176,10 +176,17 @@ ps_link() {
   done
 }
 
+# curl downloads Node; the official Node build needs libatomic, which minimal images lack.
+ps_need_linux_pkgs() {
+  command -v curl >/dev/null 2>&1 || return 0
+  if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q "libatomic\.so\.1"; then return 1; fi
+  return 0
+}
+
 ps_linux_node() {
-  if ! command -v curl >/dev/null 2>&1; then
-    if [ "$PS_PM" = apt ]; then ps_run_priv apt-get install -y curl ca-certificates
-    else ps_run_priv dnf install -y curl ca-certificates; fi
+  if ps_need_linux_pkgs; then
+    if [ "$PS_PM" = apt ]; then ps_run_priv apt-get install -y curl ca-certificates libatomic1
+    else ps_run_priv dnf install -y curl ca-certificates libatomic; fi
   fi
   ps_tmp="$(mktemp -d)"
   ps_run curl -fsSL -o "$ps_tmp/SHASUMS256.txt" "$PS_NODE_MAJOR_URL/SHASUMS256.txt"
