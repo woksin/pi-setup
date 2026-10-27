@@ -253,7 +253,9 @@ ps_preflight() {
       elif command -v dnf >/dev/null 2>&1; then PS_PM=dnf
       fi
       PS_ARCH="$(ps_arch)"
-      [ -n "$PS_PM" ] && [ -n "$PS_ARCH" ] || ps_die "$PS_NEED. Install it from https://nodejs.org, then re-run ./install.sh. (Automatic install needs apt or dnf on x86_64 or arm64.)" ;;
+      if [ -z "$PS_PM" ] || [ -z "$PS_ARCH" ]; then
+        ps_die "$PS_NEED. Install it from https://nodejs.org, then re-run ./install.sh. (Automatic install needs apt or dnf on x86_64 or arm64.)"
+      fi ;;
     *) ps_die "$PS_NEED. Install it from https://nodejs.org, then re-run ./install.sh." ;;
   esac
   ps_priv_text

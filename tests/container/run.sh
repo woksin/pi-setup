@@ -10,9 +10,9 @@ command -v docker >/dev/null 2>&1 || { echo "docker is required for the containe
 tmp="$(mktemp -d)"
 name="pi-setup-container-$$"
 watchdog=""
-# shellcheck disable=SC2329 # invoked through the EXIT trap
+# shellcheck disable=SC2317,SC2329 # invoked through the EXIT trap
 cleanup() {
-  [ -n "$watchdog" ] && kill "$watchdog" 2>/dev/null || true
+  if [ -n "$watchdog" ]; then kill "$watchdog" 2>/dev/null || true; fi
   docker rm -f "$name" >/dev/null 2>&1 || true
   rm -rf "$tmp"
 }
