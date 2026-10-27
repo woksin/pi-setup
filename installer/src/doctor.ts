@@ -85,6 +85,7 @@ export async function runDoctor(ctx: Ctx, options: Options, baseCtx: Ctx, prompt
     for (const line of render(report.checks)) ctx.out(line);
     const names = [...new Set(report.checks.map(c => c.fixable).filter(Boolean))];
     ctx.out(`${counts(report.checks)}.${!options.fix && names.length ? ` \`${setupCmd(ctx)} doctor --fix\` can fix: ${names.map(n => n === "prereq" ? "missing tools (asks first; --install-prereqs to skip the question)" : n).join(", ")}.` : ""}`);
+    if (exitCode) ctx.out(`Setup defect? Run \`${setupCmd(ctx)} report\` for versions and the reporting repository (https://github.com/woksin/pi-setup/issues).`);
   }
   return exitCode;
 }

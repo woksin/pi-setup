@@ -12,6 +12,10 @@
 - Keep a session on one repository and task. At a completed milestone, start a fresh session from a short handoff in `.ai-work/` (or `/compact`) rather than running one session all day — every call re-reads the whole context, so each turn gets more expensive as the session grows (usage history: most main-session cost is re-caching the whole conversation). Context limits are in "Orchestrator context". Never do it every turn, and never drop unresolved details to save tokens.
 - Every tool call re-reads the whole context, so take fewer, bigger steps: issue all independent reads, greps, listings and status checks in ONE message; one `edit` per file with several edits; `grep`/`rg` before a ranged `read` instead of reading whole files; `git diff --stat` before a full diff; never print whole logs (write them to a file, read the failing part).
 
+## Reporting setup problems
+
+- For reproducible setup defects or misleading output, use `report-setup-issue`: find the owning repository, search for duplicates first, and redact secrets, tokens, personal paths, private repo names and session content. Filing or commenting in `woksin/*` is standing-authorized; third-party/upstream reports need the user's OK. Subagents report to their parent. Never silently patch the live install or disable guards to work around a setup defect.
+
 ## Setup tools before ad-hoc scripts
 Answer these with the setup's tools, not hand-rolled `gh`/`ls`/`grep` loops:
 

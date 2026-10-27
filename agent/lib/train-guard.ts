@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { tokenizeShell } from './issue-work.ts';
 import { listManifests, repoKey } from './train-manifest.mjs';
@@ -9,7 +10,7 @@ type Push = { cwd: string; remote: string; refs: string[]; all: boolean; delete:
 type Location = { cwd: string; git: Git };
 type Segment = Location & { tokens: string[] };
 type ParsedPush = { repo: string; branches: string[] };
-type ParseResult = { pushes: ParsedPush[]; notices: string[] };
+type ParseResult = { pushes: ParsedPush[]; notices: string[]; unparsed: { cwd: string }[] };
 const dynamic = (value: string) => /[$`*?{}<>\n]/.test(value);
 const VALUE_OPTIONS = new Set(['--receive-pack', '--exec', '--push-option', '-o']);
 const SAFE_OPTIONS = new Set(['-f', '--force', '--force-if-includes', '--force-with-lease', '-u', '--set-upstream',
@@ -160,11 +161,11 @@ function parseSegment(segment: Segment, result: ParseResult) {
   const normalized = commandTokens(segment);
   if (!/\bgit\b.*\bpush\b/.test(normalized.tokens.join(' '))) return;
   try { result.pushes.push(resolveTokens(normalized)); }
-  catch (error) { result.notices.push(`Train guard: unparsed push allowed (${(error as Error).message}); install the pre-push hook for exact refs.`); }
+  catch (error) { result.unparsed.push({ cwd: segment.cwd }); }
 }
 
 export function parsePushes(command: string, cwd: string, git: Git = nativeGuardGit) {
-  const result: ParseResult = { pushes: [], notices: [] };
+  const result: ParseResult = { pushes: [], notices: [], unparsed: [] };
   for (const tokens of tokenizeShell(command)) {
     const segment = { tokens, cwd, git };
     if (tokens[0] === 'cd') cwd = changedDirectory(segment);
@@ -180,12 +181,49 @@ function blockedPush(manifests: any[], pushes: ParsedPush[]) {
   }
 }
 
-export async function trainPushDecision(command: string, cwd: string, env = process.env, git: Git = nativeGuardGit) {
+const HOOK_MARKER = '# pi-train pre-push v1';
+const noticedUnparsed = new Set<string>();
+type DecisionDeps = { listManifests?: typeof listManifests; hookInstalled?: (cwd: string, git: Git) => boolean; noticed?: Set<string> };
+
+export function nativeHookInstalled(cwd: string, git: Git): boolean {
+  try {
+    const configured = git(cwd, ['config', '--get', 'core.hooksPath']).trim();
+    const dir = configured || resolve(cwd, git(cwd, ['rev-parse', '--git-common-dir']).trim(), 'hooks');
+    return readFileSync(resolve(cwd, dir, 'pre-push'), 'utf8').includes(HOOK_MARKER);
+  } catch { return false; }
+}
+
+function repoId(cwd: string, git: Git) {
+  if (!cwd) return '';
+  try { return resolve(cwd, git(cwd, ['rev-parse', '--git-common-dir']).trim()); } catch { return cwd; }
+}
+
+async function anyManifest(list: typeof listManifests, env: NodeJS.ProcessEnv) {
+  try { return (await list(env)).length > 0; } catch { return false; }
+}
+
+async function unparsedNotice(unparsed: { cwd: string }[], context: { env: NodeJS.ProcessEnv; git: Git; deps: DecisionDeps }) {
+  const { env, git, deps } = context;
+  if (!unparsed.length || !await anyManifest(deps.listManifests ?? listManifests, env)) return;
+  const noticed = deps.noticed ?? noticedUnparsed;
+  const installed = deps.hookInstalled ?? nativeHookInstalled;
+  for (const { cwd } of unparsed) {
+    if (cwd && installed(cwd, git)) continue;
+    const id = repoId(cwd, git);
+    if (noticed.has(id)) continue;
+    noticed.add(id);
+    return 'Train guard: unparsed push allowed (dynamic shell syntax); install the pre-push hook for exact refs.';
+  }
+}
+
+export async function trainPushDecision(command: string, cwd: string, env = process.env, git: Git = nativeGuardGit, deps: DecisionDeps = {}) {
   if (!command.includes('push')) return { notices: [] as string[] };
-  const { pushes, notices } = parsePushes(command, cwd, git);
+  const { pushes, notices, unparsed } = parsePushes(command, cwd, git);
+  const unparsedText = await unparsedNotice(unparsed, { env, git, deps });
+  if (unparsedText) notices.push(unparsedText);
   if (!pushes.some(push => push.repo)) return { notices };
   try {
-    const manifests = await listManifests(env);
+    const manifests = await (deps.listManifests ?? listManifests)(env);
     const reason = blockedPush(manifests, pushes);
     if (reason) return { reason, notices };
   } catch (error) { notices.push(`Train guard: manifests unavailable; push allowed (${(error as Error).message}).`); }
