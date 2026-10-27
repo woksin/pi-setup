@@ -227,7 +227,7 @@ exit 0
 `);
   chmodSync(node, 0o755);
   for (const version of ["22.19.0", "24.1.0", "26.8.0", "30.0.0", "22.18.0", "20.19.0"]) {
-    const result = spawnSync("/bin/bash", [join(REPO, "install.sh"), "--help"], { encoding: "utf8", env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, REAL_NODE: process.execPath, TEST_NODE_VERSION: version } });
+    const result = spawnSync("/bin/bash", [join(REPO, "install.sh"), "--help"], { encoding: "utf8", env: { HOME: home, PI_SETUP_SYSTEM_BIN_DIRS: join(home, "no-system-bin"), PATH: `${bin}:/usr/bin:/bin`, REAL_NODE: process.execPath, TEST_NODE_VERSION: version } });
     const supported = !["22.18.0", "20.19.0"].includes(version);
     assert.equal(result.status, supported ? 0 : 1, version);
     assert.equal(result.stderr.includes("needs Node.js"), !supported, version);

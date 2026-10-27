@@ -120,6 +120,8 @@ export function install(box: Sandbox, args: string[], options: RunOptions = {}):
     TMPDIR: box.root,
     PATH: options.path ?? [box.stubs, process.env.PATH ?? "/usr/bin:/bin"].join(delimiter),
     STUB_LOG: box.log,
+    // The preflight must never look at the host's Homebrew or /usr/local.
+    PI_SETUP_SYSTEM_BIN_DIRS: join(box.root, "no-system-bin"),
     STUB_READY: options.ready ?? "anthropic,openai-codex,kimi-coding",
     ...options.env,
   };

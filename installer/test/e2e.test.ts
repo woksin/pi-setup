@@ -85,21 +85,21 @@ describe("install (e2e)", () => {
     }
   });
 
-  test("(f) node missing or too old: one line, exit 1, nothing written", () => {
+  test("(f) node missing or too old: names Node first, exit 1, nothing written, nothing installed", () => {
     const box = fresh();
     const fake = join(box.root, "fakenode");
     mkdirSync(fake);
     writeFileSync(join(fake, "node"), '#!/bin/sh\ncase "$1" in -e) exit 1 ;; -p) echo 20.0.0 ;; esac\n');
     chmodSync(join(fake, "node"), 0o755);
-    const old = install(box, ARGS(box), { path: `${fake}:/usr/bin:/bin` });
+    const noInstall = [...ARGS(box), "--no-install-prereqs"];
+    const old = install(box, noInstall, { path: `${fake}:/usr/bin:/bin` });
     assert.equal(old.status, 1);
-    assert.equal(old.stderr.trim().split("\n").length, 1);
-    assert.match(old.stderr, /Node\.js >= 22\.19.*found 20\.0\.0/);
+    assert.match(old.stderr.split("\n")[0], /Node\.js >= 22\.19.*found 20\.0\.0/);
     const empty = join(box.root, "empty");
     mkdirSync(empty);
-    const missing = install(box, ARGS(box), { path: empty });
+    const missing = install(box, noInstall, { path: empty });
     assert.equal(missing.status, 1);
-    assert.equal(missing.stderr.trim().split("\n").length, 1);
+    assert.match(missing.stderr, /Node\.js >= 22\.19/);
     assert.deepEqual(homeEntries(box), []);
   });
 
