@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { parseArgs } from "../src/args.ts";
 import type { Options } from "../src/args.ts";
-import { formatCommand, installCommand, packageManager, piMinimum, piStep, planPrereqs } from "../src/prereqs.ts";
+import { formatCommand, shownCommand, installCommand, packageManager, piMinimum, piStep, planPrereqs } from "../src/prereqs.ts";
 import { consentFor, ensurePrereqs, linkNotes, logPath } from "../src/prereqs-run.ts";
 import type { Scope } from "../src/prereqs-run.ts";
 import { SetupError } from "../src/types.ts";
@@ -59,9 +59,10 @@ test("apt: update then install behind sudo, plus a user-level fd link; root drop
   const argvs = (interactive: boolean, isRoot: boolean) => planPrereqs(f.ctx, { tools: REQUIRED, interactive, isRoot }).steps.map((s) => s.argv);
   assert.deepEqual(argvs(true, false), [
     ["sudo", "apt-get", "update"], ["sudo", "apt-get", "install", "-y", "gh", "jq", "ripgrep", "fd-find", "python3", "git"],
-    ["mkdir", "-p", join(b.home, ".local/bin")], ["ln", "-sf", "/usr/bin/fdfind", join(b.home, ".local/bin/fd")],
+    ["sh", "-c", 'mkdir -p "$HOME/.local/bin" && ln -sf /usr/bin/fdfind "$HOME/.local/bin/fd"'],
   ]);
   assert.deepEqual(argvs(false, false)[0], ["sudo", "-n", "apt-get", "update"]);
+  assert.equal(shownCommand(argvs(false, false)[0]), "sudo apt-get update");
   assert.deepEqual(argvs(true, true)[0], ["apt-get", "update"]);
   const noFd = planPrereqs(fake(b, "linux", ["apt-get", "fd"]).ctx, { tools: REQUIRED, interactive: true, isRoot: false });
   assert.ok(noFd.steps.every((s) => s.id !== "fd-link"));

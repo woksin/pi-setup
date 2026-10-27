@@ -1,8 +1,10 @@
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendLog, logPath } from "./install-log.ts";
 import { dirname, join } from "node:path";
 import type { Options } from "./args.ts";
-import { EXTRA_LINKS, formatCommand, installCommand, isRequired, packageManager, piStep, planPrereqs, TOOLS } from "./prereqs.ts";
+import { EXTRA_LINKS, formatCommand, shownCommand, installCommand, isRequired, packageManager, piStep, planPrereqs, TOOLS } from "./prereqs.ts";
 import type { Step } from "./prereqs.ts";
+import { setupCmd } from "./doctor-checks.ts";
 import { CANCEL, SetupError } from "./types.ts";
 import type { Ctx, Prompter } from "./types.ts";
 
@@ -29,7 +31,7 @@ export function consentFor(options: Pick<Options, "installPrereqs" | "yes" | "sk
   return options.yes && fresh && !options.skipNpm ? "yes" : "no";
 }
 
-export const logPath = (ctx: Ctx): string => join(ctx.home, ".local/state/pi-setup/install.log");
+export { logPath } from "./install-log.ts";
 const statePath = (ctx: Ctx): string => join(ctx.home, ".local/state/pi-setup/bootstrap.json");
 
 function record(ctx: Ctx, failed: { label: string; command: string } | undefined): void {
@@ -45,13 +47,6 @@ function previousStop(ctx: Ctx): string | undefined {
     const s = JSON.parse(readFileSync(statePath(ctx), "utf8")) as { label?: string };
     return s.label;
   } catch { return undefined; }
-}
-
-function appendLog(ctx: Ctx, text: string): void {
-  try {
-    mkdirSync(dirname(logPath(ctx)), { recursive: true });
-    appendFileSync(logPath(ctx), text);
-  } catch { /* logging must not stop an install */ }
 }
 
 const minutes = (steps: Step[]): string => steps.some((s) => s.system) ? "about 2-5 minutes" : "about a minute";
@@ -70,8 +65,11 @@ function firstScreen(ctx: Ctx, tools: string[], missing: string[], steps: Step[]
     ...(missing.length ? [`Missing: ${missing.join(", ")}`] : []),
     "",
     "Commands I will run:",
-    ...steps.map((s) => `  ${formatCommand(s.argv)}`),
+    ...steps.map((s) => `  ${shownCommand(s.argv)}`),
     ...(steps.some((s) => s.sudo) ? ["", "Some of these run with sudo; you may be asked for your password."] : []),
+    "",
+    "Files go to ~/.pi/agent; anything it replaces is backed up first.",
+    `Undo any time: ${setupCmd(ctx)} uninstall`,
     `This takes ${minutes(steps)}.`,
   ];
 }
@@ -101,7 +99,7 @@ function reportOnly(ctx: Ctx, steps: Step[], manual: { tool: string; link: strin
 }
 
 async function runStep(ctx: Ctx, step: Step, nonInteractive: boolean): Promise<void> {
-  const command = formatCommand(step.argv);
+  const command = shownCommand(step.argv);
   if (step.sudo && !ctx.which("sudo")) {
     throw new SetupError(`sudo is not available. Run this as root, then re-run ./install.sh:\n  ${command.replace(/^sudo (-n )?/, "")}`);
   }
@@ -112,7 +110,7 @@ async function runStep(ctx: Ctx, step: Step, nonInteractive: boolean): Promise<v
   if (r.code === 0 && !r.timedOut) { ctx.out(`✓ ${step.label}`); return; }
   record(ctx, { label: step.label, command });
   const why = r.timedOut ? "timed out" : `exit code ${r.code}`;
-  const hint = step.sudo && nonInteractive ? "\nsudo needs a password here: run the command yourself in a terminal, or re-run ./install.sh interactively." : "";
+  const hint = step.sudo && nonInteractive ? "\nsudo needs your password: run ./install.sh in a terminal." : "";
   throw new SetupError(`✗ ${step.label} failed (${why}): ${command}${hint}\nDetails: ${logPath(ctx)}\nFix the problem, then re-run ./install.sh: it continues from here.`);
 }
 

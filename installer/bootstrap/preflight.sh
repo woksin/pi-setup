@@ -3,7 +3,9 @@
 # Sourced by install.sh; POSIX sh only (it runs before any Node does). Everything it says goes to stderr.
 # Real utilities it uses: uname id cat mkdir ln rm grep sed tr cut head dirname tar mktemp chmod (+ curl, sha256sum or shasum, sudo, brew, apt-get, dnf when needed)
 
-PS_NODE_MAJOR_URL="https://nodejs.org/dist/latest-v24.x"
+# Node 26: the pinned @woksin/pi-orch declares engines.node ">=26" (npm view @woksin/pi-orch@0.1.1 engines); Homebrew's node is 26 too.
+PS_NODE_MAJOR=26
+PS_NODE_MAJOR_URL="https://nodejs.org/dist/latest-v$PS_NODE_MAJOR.x"
 # Where Homebrew and the official Node installer put things; tests point this at an empty directory.
 PS_SYSTEM_DIRS="${PI_SETUP_SYSTEM_BIN_DIRS:-/opt/homebrew/bin /usr/local/bin}"
 PS_BREW_INSTALLER="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
@@ -13,15 +15,51 @@ PS_LOG="$HOME/.local/state/pi-setup/install.log"
 ps_say() { printf '%s\n' "$*" >&2; }
 ps_die() { ps_say "$*"; exit 1; }
 
+# A shell copy of the installer's help (installer/src/args.ts USAGE): --help must work before Node exists.
+# A test keeps the two in step.
+ps_usage() {
+  cat <<'USAGE_EOF'
+Usage: ./install.sh [flags]
+       ./install.sh uninstall [--dry-run] [--yes] [--no-launchd]
+       ./install.sh update [--dry-run] [--ref <tag>] [--yes] [--skip-npm]
+       ./install.sh backups [list | prune --keep <n> [--dry-run]]
+       ./install.sh doctor [--fix] [--json]
+       ./install.sh lanes [--dir <folder>]
+
+  --dry-run             show what would change, write nothing
+  --plan                print the full plan (detection, profile, actions), write nothing
+  --json                print one JSON object on stdout (combine with --plan or --dry-run)
+  --user <login>        GitHub login (default: saved, then gh, then ask)
+  --repos-root <dir>    repositories root
+  --profile <name|auto> profile to apply
+  --with <id> / --without <id>  turn an extra on or off
+  --preapprove-mcp      trust project MCP server definitions for new lanes folders (default: off)
+  --yes                 never prompt; on a fresh machine this also installs missing prerequisites and pi
+  --install-prereqs     install missing prerequisites and pi without asking
+  --no-install-prereqs  only check and report prerequisites, never install them
+  --skip-npm            do not run npm install in ~/.pi/agent/npm
+  --reinstall-npm       run npm install even when package.json and the lock file are unchanged
+  --no-launchd          do not load or unload launchd jobs
+  --edit-shell-profile  append the PATH snippet to your shell profile (a fresh install does this by default)
+  --no-edit-shell-profile  never touch your shell profile
+  --help                this text
+
+Node.js is not installed yet, so this is the short help. Run ./install.sh once to set it up;
+then ./install.sh --help shows the full text.
+USAGE_EOF
+}
+
 ps_node_ok() {
   "$1" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)' >/dev/null 2>&1
 }
 
 # Scan the arguments; they all pass through to Node unchanged.
 ps_scan() {
-  PS_DRY=0 PS_YES=0 PS_JSON=0 PS_SKIP_NPM=0 PS_CONSENT="" PS_CMD="install"
+  PS_HELP=0 PS_VERSION=0 PS_DRY=0 PS_YES=0 PS_JSON=0 PS_SKIP_NPM=0 PS_CONSENT="" PS_CMD="install"
   for ps_arg in "$@"; do
     case "$ps_arg" in
+      --help|-h) PS_HELP=1 ;;
+      --version) PS_VERSION=1 ;;
       --dry-run|--plan) PS_DRY=1 ;;
       --yes) PS_YES=1 ;;
       --json) PS_JSON=1 ;;
@@ -91,26 +129,25 @@ ps_plan_lines() {
         else echo "${PS_PRIV}dnf install -y curl ca-certificates"; fi
       fi
       echo "curl -fsSL $PS_NODE_MAJOR_URL/SHASUMS256.txt"
-      echo "curl -fsSL $PS_NODE_MAJOR_URL/node-v24.<x.y>-linux-$PS_ARCH.tar.gz   (SHA-256 checked)"
-      echo "tar -xzf node-v24.<x.y>-linux-$PS_ARCH.tar.gz -C ~/.local/lib/nodejs"
-      echo "ln -s ~/.local/lib/nodejs/node-v24.<x.y>-linux-$PS_ARCH/bin/{node,npm,npx} ~/.local/bin/" ;;
+      echo "curl -fsSL $PS_NODE_MAJOR_URL/node-v$PS_NODE_MAJOR.<x.y>-linux-$PS_ARCH.tar.gz   (SHA-256 checked)"
+      echo "tar -xzf node-v$PS_NODE_MAJOR.<x.y>-linux-$PS_ARCH.tar.gz -C ~/.local/lib/nodejs"
+      echo "ln -s ~/.local/lib/nodejs/node-v$PS_NODE_MAJOR.<x.y>-linux-$PS_ARCH/bin/{node,npm,npx} ~/.local/bin/" ;;
   esac
 }
 
 # Command output goes to the log, not the screen; a failure names the log.
 ps_log() { mkdir -p "$(dirname "$PS_LOG")" 2>/dev/null; printf '\n$ %s\n' "$*" >> "$PS_LOG" 2>/dev/null || true; }
-ps_fail() { ps_die "Failed (exit $1): $2
+ps_fail() { [ "$PS_PRIV" = "sudo -n " ] && case "$2" in sudo*) ps_say "sudo needs your password: run ./install.sh in a terminal." ;; esac
+  ps_die "Failed (exit $1): $2
 Details: $PS_LOG
 Fix the problem, then re-run ./install.sh: it continues from here."; }
 
 ps_run() {
-  ps_say "→ $*"
   ps_log "$*"
   "$@" >>"$PS_LOG" 2>&1 || ps_fail $? "$*"
 }
 
 ps_run_priv() {
-  ps_say "→ ${PS_PRIV}$*"
   ps_log "${PS_PRIV}$*"
   if [ -n "$PS_PRIV" ]; then
     command -v sudo >/dev/null 2>&1 || ps_die "sudo is not available. Run this as root, then re-run ./install.sh:
@@ -146,8 +183,8 @@ ps_linux_node() {
   fi
   ps_tmp="$(mktemp -d)"
   ps_run curl -fsSL -o "$ps_tmp/SHASUMS256.txt" "$PS_NODE_MAJOR_URL/SHASUMS256.txt"
-  ps_file="$(grep " node-v24\.[0-9.]*-linux-$PS_ARCH\.tar\.gz\$" "$ps_tmp/SHASUMS256.txt" | head -n 1 | sed 's/^[0-9a-f]*  *//')"
-  [ -n "$ps_file" ] || { rm -rf "$ps_tmp"; ps_die "Could not find a Node 24 build for linux-$PS_ARCH in $PS_NODE_MAJOR_URL/SHASUMS256.txt"; }
+  ps_file="$(grep " node-v$PS_NODE_MAJOR\.[0-9.]*-linux-$PS_ARCH\.tar\.gz\$" "$ps_tmp/SHASUMS256.txt" | head -n 1 | sed 's/^[0-9a-f]*  *//')"
+  [ -n "$ps_file" ] || { rm -rf "$ps_tmp"; ps_die "Could not find a Node $PS_NODE_MAJOR build for linux-$PS_ARCH in $PS_NODE_MAJOR_URL/SHASUMS256.txt"; }
   ps_want="$(grep " $ps_file\$" "$ps_tmp/SHASUMS256.txt" | head -n 1 | cut -d' ' -f1)"
   ps_run curl -fsSL -o "$ps_tmp/$ps_file" "$PS_NODE_MAJOR_URL/$ps_file"
   ps_have="$(ps_sha256 "$ps_tmp/$ps_file")"
@@ -163,7 +200,7 @@ ps_linux_node() {
 ps_darwin_node() {
   if [ -z "${PS_BREW:-}" ]; then
     command -v curl >/dev/null 2>&1 || ps_die "curl is needed to install Homebrew. Install Homebrew from https://brew.sh, then re-run ./install.sh."
-    ps_say "→ NONINTERACTIVE=1 /bin/bash -c \"\$(curl -fsSL $PS_BREW_INSTALLER)\""
+    ps_say "  Homebrew is missing: installing it first with its official installer ($PS_BREW_INSTALLER)"
     ps_log "Homebrew installer"
     ps_script="$(curl -fsSL "$PS_BREW_INSTALLER")" || ps_die "Could not download the Homebrew installer from $PS_BREW_INSTALLER"
     NONINTERACTIVE=1 /bin/bash -c "$ps_script" >>"$PS_LOG" 2>&1 || ps_die "The Homebrew installer failed (details: $PS_LOG). See https://brew.sh, then re-run ./install.sh."
@@ -181,6 +218,8 @@ ps_preflight() {
   ps_scan "$@"
   if command -v node >/dev/null 2>&1 && ps_node_ok node; then return 0; fi
   if ps_find_node; then return 0; fi
+  if [ "$PS_HELP" = 1 ]; then ps_usage; exit 0; fi
+  if [ "$PS_VERSION" = 1 ]; then ps_say "pi-setup: Node.js is not installed yet, so the version cannot be read. Run ./install.sh to set it up."; exit 0; fi
   PS_NEED="pi-setup needs Node.js >= 22.19 (pi needs it too)"
   if command -v node >/dev/null 2>&1; then PS_NEED="$PS_NEED (found $(node -p process.versions.node 2>/dev/null || echo unknown))"; fi
 
@@ -215,16 +254,18 @@ ps_preflight() {
   elif [ -z "$PS_CONSENT" ] && [ "$PS_YES" = 1 ] && [ "$PS_SKIP_NPM" = 0 ] && ps_fresh; then PS_GO="yes"
   fi
 
-  ps_say "$PS_NEED."
-  ps_say "Found: $PS_OS${PS_PM:+ with $PS_PM}${PS_BREW:+ with Homebrew}, Node.js not usable"
-  ps_say "Commands I will run:"
-  ps_plan_lines | while IFS= read -r ps_line; do ps_say "  $ps_line"; done
   if [ "$PS_DRY" = 1 ]; then
-    ps_plan_lines | while IFS= read -r ps_line; do ps_say "Would run: $ps_line"; done
+    ps_say "$PS_NEED."
+    ps_say "To install Node.js the installer would run:"
+    ps_plan_lines | while IFS= read -r ps_line; do ps_say "  $ps_line"; done
+    ps_say "(the rest of the plan is shown once Node.js is installed)"
+    ps_say "Dry run: nothing changed. Next: ./install.sh"
     exit 0
   fi
-  if [ -n "$PS_PRIV" ]; then ps_say "Some of these run with sudo; you may be asked for your password."; fi
-  ps_say "This takes about 2-5 minutes."
+  # One short line; the commands themselves go to the log. sudo is named because it may ask for a password.
+  if [ "$PS_OS" = Darwin ]; then PS_WHAT="Node.js with Homebrew (brew install node)"; else PS_WHAT="Node.js $PS_NODE_MAJOR into ~/.local"; fi
+  if [ -n "$PS_PRIV" ]; then PS_WHAT="$PS_WHAT; sudo may ask for your password"; else PS_WHAT="$PS_WHAT (no sudo needed)"; fi
+  if [ "$PS_GO" != no ]; then ps_say "Step 1 of 2: install $PS_WHAT"; fi
   if [ "$PS_GO" = ask ]; then
     printf 'Continue? [Y/n] ' >&2
     ps_answer=""
@@ -241,5 +282,5 @@ Or by hand: install it from https://nodejs.org, with brew install node, or with 
     Linux) ps_linux_node ;;
   esac
   ps_node_ok node || ps_die "Node.js was installed but is still not usable on PATH. Open a new terminal and re-run ./install.sh."
-  ps_say "✓ Node.js ready: $(node -p process.versions.node)"
+  ps_say "✓ Node.js $(node -p process.versions.node) ready"
 }

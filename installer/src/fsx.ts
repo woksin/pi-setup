@@ -12,7 +12,7 @@ export function timestamp(d: Date): string {
 }
 
 /** Local build and OS clutter that must never be installed from a checkout. */
-const isClutterFile = (name: string) => name.endsWith(".pi-setup-new") || name.endsWith(".pyc") || name === ".DS_Store";
+const isClutterFile = (name: string) => name.endsWith(".pi-setup-new") || name.endsWith(".pyc") || name === ".DS_Store" || name.startsWith("._"); // ._* are macOS AppleDouble files
 const isClutterDir = (name: string) => name === "__pycache__" || name === "node_modules";
 
 /** Relative paths of regular files below dir, without following symlinks (like `find -type f`), skipping local clutter. */

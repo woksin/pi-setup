@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { main } from "../src/run.ts";
@@ -80,12 +80,20 @@ test("no PATH line and no new-terminal advice when both directories are on PATH"
   assert.ok(!existsSync(rc(b)));
 });
 
-test("non-interactive runs still need --edit-shell-profile", async () => {
-  for (const edit of [false, true]) {
+test("non-interactive: a fresh install edits the profile by default (with a backup), an update never does unasked", async () => {
+  const run = async (extra: string[], existing: boolean) => {
     const b = box(); const ctx = zsh(b); ctx.stdinTTY = false; ctx.stdoutTTY = false;
-    assert.equal(await main([...flags(b), "--yes", "--user", "alice", ...(edit ? ["--edit-shell-profile"] : [])], ctx), 0);
-    assert.equal(existsSync(rc(b)), edit);
-  }
+    if (existing) mkdirSync(join(b.home, ".pi/agent"), { recursive: true });
+    writeFileSync(rc(b), "# mine\n");
+    assert.equal(await main([...flags(b), "--yes", "--user", "alice", ...extra], ctx), 0);
+    return { text: readFileSync(rc(b), "utf8"), backups: readdirSync(b.home).filter((n) => n.startsWith(".zshrc.pi-setup-bak-")) };
+  };
+  const fresh = await run([], false);
+  assert.ok(fresh.text.includes(SNIPPET));
+  assert.equal(fresh.backups.length, 1);
+  assert.ok(!(await run(["--no-edit-shell-profile"], false)).text.includes(SNIPPET));
+  assert.ok(!(await run([], true)).text.includes(SNIPPET));
+  assert.ok((await run(["--edit-shell-profile"], true)).text.includes(SNIPPET));
 });
 
 test("the finish says what is left, never up to date or done, and What's next lists the actions", async () => {

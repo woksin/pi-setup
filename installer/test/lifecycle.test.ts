@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFile
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { after, describe, test } from "node:test";
-import { REPO, backupDirs, findBackups, install, installLines, piPath, sandbox, snapshot, stubLog } from "./helpers/home.ts";
+import { REPO, backupDirs, findBackups, install, loggedInstalls, piPath, sandbox, snapshot, stubLog } from "./helpers/home.ts";
 import type { Sandbox } from "./helpers/home.ts";
 
 const boxes: Sandbox[] = [];
@@ -30,7 +30,7 @@ describe("manifest and re-runs (lifecycle e2e)", () => {
     assert.equal(run.status, 0, run.stdout + run.stderr);
     const text = readFileSync(piPath(box, ".pi-setup/manifest.json"), "utf8");
     const m = JSON.parse(text);
-    const paths = installLines(run.stdout).map((l) => l.slice("install ".length));
+    const paths = loggedInstalls(box).map((l) => l.slice("install ".length));
     assert.ok(paths.length > 50);
     for (const path of paths) {
       const r = rel(box, path);
@@ -50,7 +50,7 @@ describe("manifest and re-runs (lifecycle e2e)", () => {
     const again = install(box, RERUN);
     assert.equal(again.status, 0, again.stdout + again.stderr);
     assert.match(again.stdout, /Everything up to date/);
-    assert.deepEqual(installLines(again.stdout), []);
+    assert.doesNotMatch(again.stdout, /Installed \d+ files/);
     assert.deepEqual(snapshot(box.home, true), before);
     assert.ok(readFileSync(piPath(box, ".pi-setup/manifest.json")).equals(manifest));
   });
@@ -86,8 +86,7 @@ describe("manifest and re-runs (lifecycle e2e)", () => {
     assert.equal(run.status, 0, run.stdout + run.stderr);
     assert.ok(readFileSync(path).equals(mine));
     assert.ok(readFileSync(`${path}.pi-setup-new`).equals(original));
-    assert.ok(run.stdout.split("\n").some((l) => l.startsWith(`keep ${path}`)), run.stdout);
-    assert.ok(!installLines(run.stdout).some((l) => l.includes(path)));
+    assert.match(run.stdout, /1 file\(s\) you changed|Review the files you changed/);
     const before = snapshot(box.home, true);
     const third = install(box, RERUN);
     assert.match(third.stdout, /Everything up to date\. 1 file\(s\) you changed were kept/);
@@ -121,7 +120,7 @@ describe("manifest and re-runs (lifecycle e2e)", () => {
     const mine = readFileSync(path);
     const run = install(box, RERUN);
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.deepEqual(installLines(run.stdout), [`install ${path}`]);
+    assert.deepEqual(loggedInstalls(box), [`install ${path}`]);
     const m = manifestOf(box);
     assert.equal(m.files[rel(box, path)].origin, "replaced");
     assert.ok(readFileSync(piPath(box, ".pi-setup/backups", m.files[rel(box, path)].backup)).equals(mine));
@@ -224,6 +223,8 @@ describe("uninstall (lifecycle e2e)", () => {
     const dir = dirname(rel(box, path));
     for (const parts = dir.split("/"); parts.length; parts.pop()) expected[parts.join("/")] = "d";
     expected[rel(box, path)] = mine;
+    // The installer's own log (outside ~/.pi/agent) is not part of what uninstall restores.
+    rmSync(join(box.home, ".local/state"), { recursive: true, force: true });
     assert.deepEqual(snapshot(box.home), expected);
     assert.ok(!existsSync(piPath(box, ".pi-setup")));
     assert.equal(readFileSync(piPath(box, "auth.json"), "utf8"), "SENTINEL-NOT-A-SECRET");

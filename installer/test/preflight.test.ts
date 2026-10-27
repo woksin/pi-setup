@@ -58,7 +58,7 @@ test("macOS, brew present, node missing: --dry-run plans and touches nothing", (
   const before = snapshot(e.b.home);
   const r = runInstall(e, ["--dry-run"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /Would run: brew install node/);
+  assert.match(r.stderr, / {2}brew install node/);
   assert.deepEqual(e.calls(), []);
   assert.deepEqual(snapshot(e.b.home), before);
   assert.equal(r.stdout, "");
@@ -86,7 +86,7 @@ test("macOS: flags decide; --yes on a fresh HOME installs, --yes --skip-npm and 
   const r = runInstall(fresh, ["--yes"]);
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(fresh.calls(), ["brew install node"]);
-  assert.match(r.stderr, /→ brew install node/);
+  assert.match(r.stderr, /Step 1 of 2: install Node\.js with Homebrew/);
 
   const flagged = withBrew();
   mkdirSync(join(flagged.b.home, ".pi/agent"), { recursive: true });
@@ -98,23 +98,23 @@ test("macOS, no brew: the plan shows the official Homebrew installer, then brew 
   const e = setup([], { os: "Darwin" });
   const r = runInstall(e, ["--dry-run"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /Would run: NONINTERACTIVE=1 \/bin\/bash -c .*raw\.githubusercontent\.com\/Homebrew\/install\/HEAD\/install\.sh/);
-  assert.match(r.stderr, /Would run: brew install node/);
+  assert.match(r.stderr, / {2}NONINTERACTIVE=1 \/bin\/bash -c .*raw\.githubusercontent\.com\/Homebrew\/install\/HEAD\/install\.sh/);
+  assert.match(r.stderr, / {2}brew install node/);
 });
 
 test("Linux, node missing, non-root, curl missing: the plan names sudo apt-get, the download, checksum, extraction and links", () => {
   const e = setup(["apt-get", "sudo"]);
   const r = runInstall(e, ["--dry-run"]);
   assert.equal(r.status, 0, r.stderr);
-  for (const re of [/Would run: sudo apt-get install -y curl ca-certificates/, /nodejs\.org\/dist\/latest-v24\.x\/SHASUMS256\.txt/, /node-v24\.<x\.y>-linux-x64\.tar\.gz {3}\(SHA-256 checked\)/, /tar -xzf/, /~\/\.local\/bin\//]) assert.match(r.stderr, re);
+  for (const re of [/ {2}sudo apt-get install -y curl ca-certificates/, /nodejs\.org\/dist\/latest-v26\.x\/SHASUMS256\.txt/, /node-v26\.<x\.y>-linux-x64\.tar\.gz {3}\(SHA-256 checked\)/, /tar -xzf/, /~\/\.local\/bin\//]) assert.match(r.stderr, re);
   assert.deepEqual(e.calls(), []);
-  assert.match(runInstall(setup(["apt-get", "sudo"], { uid: "0" }), ["--dry-run"]).stderr, /Would run: apt-get install -y curl/);
-  assert.match(runInstall(setup(["apt-get", "sudo"]), ["--yes", "--no-install-prereqs", "--dry-run"]).stderr, /Would run: sudo apt-get/);
+  assert.match(runInstall(setup(["apt-get", "sudo"], { uid: "0" }), ["--dry-run"]).stderr, / {2}apt-get install -y curl/);
+  assert.match(runInstall(setup(["apt-get", "sudo"]), ["--yes", "--no-install-prereqs", "--dry-run"]).stderr, / {2}sudo apt-get/);
 });
 
 /** A fake node tarball and a curl stub that serves it; `sum` can be wrong on purpose. */
 function linuxFixture(e: Env, sum?: string) {
-  const name = "node-v24.0.0-linux-x64";
+  const name = "node-v26.0.0-linux-x64";
   const dir = join(e.b.root, "fx", name);
   put(join(dir, "bin/node"), NODE_STUB);
   put(join(dir, "bin/npm"), "#!/bin/sh\nexit 0\n");
@@ -122,7 +122,7 @@ function linuxFixture(e: Env, sum?: string) {
   const tgz = join(e.b.root, "fx", `${name}.tar.gz`);
   execFileSync("tar", ["-czf", tgz, "-C", join(e.b.root, "fx"), name]);
   const real = createHash("sha256").update(readFileSync(tgz)).digest("hex");
-  writeFileSync(join(e.b.root, "fx", "SHASUMS256.txt"), `${"0".repeat(64)}  node-v24.0.0-linux-arm64.tar.gz\n${sum ?? real}  ${name}.tar.gz\n`);
+  writeFileSync(join(e.b.root, "fx", "SHASUMS256.txt"), `${"0".repeat(64)}  node-v26.0.0-linux-arm64.tar.gz\n${sum ?? real}  ${name}.tar.gz\n`);
   put(join(e.stubs, "curl"), `#!/bin/sh
 echo "curl $*" >> "${e.b.root}/ps.log"
 out=""; url=""
@@ -136,10 +136,10 @@ if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
 test("Linux: executes the download, verifies the checksum, extracts and links node, then execs the installer", () => {
   const e = setup(["sudo", "apt-get"], { uid: "0" });
   const name = linuxFixture(e);
-  const r = runInstall(e, ["--yes", "--install-prereqs", "--help"], { PATH: `${e.stubs}:${e.sysbin}` });
+  const r = runInstall(e, ["--yes", "--install-prereqs", "--json"], { PATH: `${e.stubs}:${e.sysbin}` });
   assert.equal(r.status, 0, r.stderr);
   for (const tool of ["node", "npm", "npx"]) assert.equal(readlinkSync(join(e.b.home, ".local/bin", tool)), join(e.b.home, ".local/lib/nodejs", name, "bin", tool));
-  assert.match(r.stderr, /✓ Node\.js ready: 24\.0\.0/);
+  assert.match(r.stderr, /✓ Node\.js 24\.0\.0 ready/);
   assert.ok(e.calls().some((c) => c.includes("SHASUMS256.txt")));
 });
 
@@ -194,4 +194,27 @@ test("output goes to stderr, so --json stdout stays clean", () => {
   const r = runInstall(e, ["--json", "--plan"]);
   assert.equal(r.stdout, "");
   assert.notEqual(r.stderr, "");
+});
+
+test("--help with no Node prints the help, not the install plan; it lists every flag of the real help", () => {
+  const e = setup(["brew"], { os: "Darwin" });
+  for (const flag of ["--help", "-h"]) {
+    const r = runInstall(e, [flag]);
+    assert.equal(r.status, 0);
+    assert.match(r.stderr + r.stdout, /^Usage: \.\/install\.sh/m);
+    assert.doesNotMatch(r.stderr + r.stdout, /Step 1 of 2|would run/i);
+  }
+  assert.deepEqual(e.calls(), []);
+  const real = readFileSync(join(REPO, "installer/src/args.ts"), "utf8");
+  const flags = [...real.matchAll(/^\s{2}(--[a-z-]+)/gm)].map((m) => m[1]);
+  assert.ok(flags.length > 15);
+  const shell = runInstall(e, ["--help"]);
+  for (const flag of flags) assert.ok((shell.stderr + shell.stdout).includes(flag), `${flag} missing from the shell help`);
+});
+
+test("--dry-run with no Node: the command list once, the closing line, and the note about the rest", () => {
+  const r = runInstall(setup(["apt-get", "sudo"]), ["--dry-run"]);
+  assert.equal(r.status, 0);
+  assert.equal((r.stderr.match(/apt-get install -y curl/g) ?? []).length, 1);
+  assert.match(r.stderr, /\(the rest of the plan is shown once Node\.js is installed\)\nDry run: nothing changed\. Next: \.\/install\.sh\n$/);
 });

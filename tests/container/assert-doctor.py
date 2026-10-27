@@ -16,7 +16,7 @@ ALLOWED_NOT_OK = [
     "profile", "gh", "provider:*", "fallback*", "models",  # logins: a first-time install has none
     "tool:gitleaks", "tool:rtk", "tool:docker", "tool:tmux",  # optional tools
     "update", "launchd*", "docker", "disk*",  # need .git, macOS services, docker or network
-    "path",  # the PATH snippet is only added with --edit-shell-profile
+    "path",  # PATH is set in the profile for new shells; this doctor run has its own PATH
 ]
 
 

@@ -21,6 +21,8 @@ export interface Options {
   reinstallNpm: boolean;
   noLaunchd: boolean;
   editShellProfile: boolean;
+  /** `--no-edit-shell-profile`: never touch the shell profile, even on a fresh install. */
+  noEditShellProfile: boolean;
   preapproveMcp: boolean;
   plan: boolean;
   json: boolean;
@@ -56,7 +58,8 @@ export const USAGE = `Usage: ./install.sh [install] [options]
   --skip-npm            do not run npm install in ~/.pi/agent/npm
   --reinstall-npm       run npm install even when package.json and the lock file are unchanged
   --no-launchd          do not load or unload launchd jobs
-  --edit-shell-profile  append the suggested PATH snippet to your shell profile
+  --edit-shell-profile  append the PATH snippet to your shell profile (a fresh install does this by default)
+  --no-edit-shell-profile  never touch your shell profile
   --help                this text`;
 
 const VALUE_FLAGS = new Set(["--dir", "--user", "--repos-root", "--profile", "--ref", "--keep", "--with", "--without"]);
@@ -76,6 +79,7 @@ const BOOLEAN_FLAGS: Record<string, keyof Options> = {
   "--reinstall-npm": "reinstallNpm",
   "--no-launchd": "noLaunchd",
   "--edit-shell-profile": "editShellProfile",
+  "--no-edit-shell-profile": "noEditShellProfile",
   "--preapprove-mcp": "preapproveMcp",
   "--plan": "plan",
   "--json": "json",
@@ -90,7 +94,7 @@ function isAbsoluteOrHome(value: string): boolean {
 export function parseArgs(argv: string[], cwd: string): Parsed {
   const options: Options = {
     command: "install", sub: "list", keep: 10, ref: "", help: false, dryRun: false, user: "", reposRoot: "", dir: "", profile: "",
-    yes: false, skipNpm: false, reinstallNpm: false, noLaunchd: false, editShellProfile: false, preapproveMcp: false, plan: false, json: false, fix: false, installPrereqs: undefined, with: [], without: [],
+    yes: false, skipNpm: false, reinstallNpm: false, noLaunchd: false, editShellProfile: false, noEditShellProfile: false, preapproveMcp: false, plan: false, json: false, fix: false, installPrereqs: undefined, with: [], without: [],
   };
   let args = argv[0] === "install" ? argv.slice(1) : argv;
   if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor" || args[0] === "lanes") {

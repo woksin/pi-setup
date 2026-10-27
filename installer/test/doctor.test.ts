@@ -335,7 +335,8 @@ test("guard env, malformed shapes and shell-specific PATH suggestions are read-o
   f.ctx.env.PATH = "/bin";
   for (const [shell, rc] of [["/bin/bash", ".bashrc"], ["/bin/fish", ".config/fish/config.fish"]]) {
     f.ctx.env.SHELL = shell;
-    assert.ok(f.checks().find(c => c.id === "path")!.fix!.endsWith(join(f.ctx.home, rc)));
+    const fix = f.checks().find(c => c.id === "path")!.fix!;
+    assert.ok(fix.startsWith("echo '") && fix.endsWith(` >> ~/${rc}`), fix);
   }
 });
 

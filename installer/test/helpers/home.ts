@@ -77,6 +77,10 @@ for spec in "$@"; do
       printf '{"version":"%s"}\\n' "$version" > "node_modules/$name/package.json" ;;
   esac
 done
+# Like a real npm: every dependency in package.json ends up in node_modules.
+for name in $(grep -o '"[@a-z][^"]*": *"[^"]*"' package.json 2>/dev/null | sed 's/": *".*//; s/^"//' | grep -v '^name$' | grep -v '^version$' | grep -v '^private$'); do
+  [ -f "node_modules/$name/package.json" ] || { mkdir -p "node_modules/$name"; printf '{"version":"1.0.0"}\\n' > "node_modules/$name/package.json"; }
+done
 : > node_modules/.package-lock.json`);
   // Package managers and downloaders are stubs too: a test must never reach the host's brew, apt, dnf, sudo or network.
   // An install "succeeds" by writing a stub of each requested tool next to the stub itself.
@@ -147,6 +151,13 @@ export function piPath(box: Sandbox, ...parts: string[]): string {
 
 export function installLines(stdout: string): string[] {
   return stdout.split("\n").filter((l) => l.startsWith("install "));
+}
+
+/** The file paths the last install run logged (per-file lines go to ~/.local/state/pi-setup/install.log, not the screen). */
+export function loggedInstalls(box: Sandbox): string[] {
+  const log = readFileSync(join(box.home, ".local/state/pi-setup/install.log"), "utf8");
+  const last = log.split("# files written").at(-1) ?? "";
+  return last.split("\n").filter((l) => l.startsWith("install "));
 }
 
 export function findBackups(dir: string): string[] {

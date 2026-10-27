@@ -22,7 +22,8 @@ export const TOOLS: ToolDef[] = [
   { tool: "fd", required: true, brew: "fd", apt: "fd-find", dnf: "fd-find", link: "https://github.com/sharkdp/fd#installation" },
   { tool: "python3", required: true, brew: "python", apt: "python3", dnf: "python3", link: "https://www.python.org/downloads/" },
   { tool: "git", required: true, brew: "git", apt: "git", dnf: "git", link: "https://git-scm.com/downloads" },
-  { tool: "gitleaks", required: false, brew: "gitleaks", apt: "gitleaks", dnf: "gitleaks", link: "https://github.com/gitleaks/gitleaks#installing" },
+  // gitleaks is not in Ubuntu 24.04's default apt sources, so only Homebrew installs it; elsewhere it is a link.
+  { tool: "gitleaks", required: false, brew: "gitleaks", link: "https://github.com/gitleaks/gitleaks#installing" },
   { tool: "tmux", required: false, brew: "tmux", apt: "tmux", dnf: "tmux", link: "https://github.com/tmux/tmux/wiki/Installing" },
   { tool: "npm", required: true, brew: "node", link: "https://nodejs.org" },
   { tool: "node", required: true, brew: "node", link: "https://nodejs.org" },
@@ -55,6 +56,9 @@ export function packageManager(ctx: Pick<Ctx, "platform" | "which">): Manager | 
   if (ctx.which("apt-get")) return "apt";
   return ctx.which("dnf") ? "dnf" : undefined;
 }
+
+/** A command as the person would type it: the unattended `sudo -n` is an implementation detail. */
+export const shownCommand = (argv: string[]): string => formatCommand(argv[0] === "sudo" && argv[1] === "-n" ? ["sudo", ...argv.slice(2)] : argv);
 
 export function formatCommand(argv: string[]): string {
   return argv.map((a) => (/^[A-Za-z0-9_@%+=:,./^~-]+$/.test(a) ? a : `'${a.replaceAll("'", "'\\''")}'`)).join(" ");
@@ -93,8 +97,8 @@ export function planPrereqs(ctx: Ctx, input: PlanInput): Plan {
   }));
   if (manager === "apt" && installable.some((t) => t.tool === "fd")) {
     const bin = join(ctx.home, ".local/bin");
-    steps.push({ id: "fd-dir", label: "Make fd available as `fd`", argv: ["mkdir", "-p", bin], sudo: false, system: false });
-    steps.push({ id: "fd-link", label: "Make fd available as `fd`", argv: ["ln", "-sf", "/usr/bin/fdfind", join(bin, "fd")], sudo: false, system: false });
+    steps.push({ id: "fd-link", label: "Make fd available as `fd`", argv: ["sh", "-c", 'mkdir -p "$HOME/.local/bin" && ln -sf /usr/bin/fdfind "$HOME/.local/bin/fd"'], sudo: false, system: false });
+    void bin;
   }
   return { steps, manual };
 }

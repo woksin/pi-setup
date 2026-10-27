@@ -18,8 +18,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The tracked and untracked-but-not-ignored files; the worktree's .git is a file and would break inside the container.
-(cd "$repo" && git ls-files -co --exclude-standard -z | tar --null -T - -czf "$tmp/src.tgz")
+# The tracked files; the worktree's .git is a file and would break inside the container.
+# Tracked files only, and no macOS AppleDouble (._*) entries in the archive.
+(cd "$repo" && COPYFILE_DISABLE=1 git ls-files -c -z | COPYFILE_DISABLE=1 tar --null -T - -czf "$tmp/src.tgz")
 cp "$here/inside.sh" "$here/assert-doctor.py" "$tmp/"
 
 deadline="${PI_SETUP_CONTAINER_DEADLINE:-1500}"
