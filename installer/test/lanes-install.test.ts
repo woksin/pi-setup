@@ -5,7 +5,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, s
 import { dirname, join } from "node:path";
 import { install, piPath, REPO, sandbox, snapshot, tempDir, testCtx } from "./helpers/home.ts";
 import { installationChoice } from "./helpers/prompter.ts";
-import { available, detectDefaults, hintFor, COMPONENTS } from "../src/components.ts";
+import { available, detectDefaults, hintFor, resolveComponents, COMPONENTS } from "../src/components.ts";
 import { buildPlan } from "../src/plan.ts";
 import { overlayFor } from "../src/profiles.ts";
 import { emptyManifest, readManifest } from "../src/manifest.ts";
@@ -27,14 +27,36 @@ const plan = (home: string, components?: Record<string, boolean>, notes: string[
 const args = ["--yes", "--user", "tester", "--skip-npm"];
 function assertInstall(r: ReturnType<typeof install>): void { assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`); }
 
-test("lanes is opt-in, needs git, and has a wizard hint", () => {
+test("lanes needs git, defaults off without a backend, and explains parallel sessions", () => {
   const home = tempDir("lanes-component"); const ctx = testCtx(home);
   assert.equal(available("lanes", ctx), "needs git");
   assert.equal(available("lanes", { ...ctx, which: () => "/stub/git" }), true);
   assert.equal(detectDefaults(ctx, { github: { orgs: [] } as never }, home).lanes, false);
-  assert.match(hintFor(COMPONENTS.find((c) => c.id === "lanes")!, false), /opt-in/);
+  assert.equal(hintFor(COMPONENTS.find((c) => c.id === "lanes")!, false), "off: no tmux or macOS Terminal found; run several pi sessions in parallel, coordinated by one session");
   assert.ok(!plan(home).some((a) => a.path.includes(".local/share/pi-setup/lanes")));
   assert.ok(plan(home, { lanes: true }).some((a) => a.op === "symlink" && a.path.endsWith("/bin/lanes")));
+});
+
+test("lanes backend detection is read-only and the default applies with --yes as well as interactively", () => {
+  const home = tempDir("lanes-defaults");
+  const cases = [
+    { platform: "linux", env: {}, tools: [], on: false },
+    { platform: "linux", env: {}, tools: ["tmux"], on: true },
+    { platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal" }, tools: [], on: true },
+    { platform: "darwin", env: { TERM_PROGRAM: "iTerm.app" }, tools: [], on: true },
+    { platform: "darwin", env: {}, tools: ["osascript"], on: true },
+    { platform: "linux", env: { TERM_PROGRAM: "Apple_Terminal" }, tools: [], on: false },
+  ];
+  for (const c of cases) {
+    const ctx = testCtx(home, { platform: c.platform, env: c.env, which: (name) => c.tools.includes(name) ? `/stub/${name}` : undefined,
+      run: async () => { throw new Error("backend detection must not run anything"); } });
+    const detected = detectDefaults(ctx, { github: { orgs: [] } as never }, home);
+    assert.equal(detected.lanes, c.on, JSON.stringify(c));
+    for (const interactive of [true, false]) assert.deepEqual(resolveComponents({ detected, interactive }).lanes, { on: c.on, source: "detected" });
+    assert.deepEqual(resolveComponents({ detected, flags: { lanes: !c.on } }).lanes, { on: !c.on, source: "flag" });
+    assert.deepEqual(resolveComponents({ detected, saved: { lanes: { on: !c.on } } }).lanes, { on: !c.on, source: "saved" });
+    assert.deepEqual(resolveComponents({ detected, answers: { lanes: !c.on }, interactive: true }).lanes, { on: !c.on, source: "prompt" });
+  }
 });
 
 test("link planning creates only free core links and leaves files and foreign links with notes", () => {

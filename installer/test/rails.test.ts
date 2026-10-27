@@ -37,6 +37,38 @@ test("recommended with ready logins asks only mode and Review, then installs", a
   assert.match(s.notes[0], /Ctrl-C quits at any time/);
 });
 
+test("Review explains the lanes default on or off and Extras can opt out", async () => {
+  for (const backend of [false, true]) {
+    const b = box(); const ctx = ctxFor(b); const which = ctx.which;
+    ctx.which = (name) => name === "tmux" && backend ? "/stub/tmux" : which(name);
+    const s = scripted(backend ? { "Review": ["change", "install"], "Change which step": ["extras"], "Extras": [[]] } : {});
+    assert.equal(await main(flags(b), ctx, s.p), 0);
+    const reviews = s.notes.filter((n) => n.startsWith("GitHub login"));
+    assert.match(reviews[0], backend
+      ? /\nlanes: on: backend found; run several pi sessions in parallel, coordinated by one session/
+      : /\nlanes: off: no tmux or macOS Terminal found; run several pi sessions in parallel, coordinated by one session/);
+    if (backend) assert.match(reviews.at(-1)!, /\nlanes: off: your choice;/);
+    const manifest = JSON.parse(readFileSync(join(b.home, ".pi/agent/.pi-setup/manifest.json"), "utf8"));
+    assert.equal(manifest.components.lanes.on, false);
+    const rerun = scripted();
+    assert.equal(await main(flags(b), ctx, rerun.p), 0);
+    assert.ok(!rerun.events.some((e) => e.startsWith("confirm:Preapprove")), "saved off stays off even with a backend");
+  }
+});
+
+test("recommended backend installs lanes with safe MCP defaults and a single setup command hint", async () => {
+  for (const unattended of [false, true]) {
+    const b = box(); const ctx = ctxFor(b); const which = ctx.which;
+    ctx.which = (name) => name === "tmux" ? "/stub/tmux" : which(name);
+    const s = scripted(); const lines: string[] = []; ctx.out = (line) => lines.push(line);
+    assert.equal(await main([...flags(b), ...(unattended ? ["--yes"] : [])], ctx, s.p), 0);
+    const dir = join(b.home, ".local/share/pi-setup/lanes");
+    assert.equal(JSON.parse(readFileSync(join(dir, "defaults.json"), "utf8")).launch.preapproveMcp, false);
+    assert.match([...lines, ...s.notes].join("\n"), /Optional: set up parallel sessions now: \.\/install\.sh lanes/);
+    assert.ok(!s.events.some((e) => e.includes("Set up a coordinator")));
+  }
+});
+
 test("recommended without a saved or gh login asks You as Step 1 of 2", async () => {
   const b = box(); const s = scripted({ "GitHub login": ["alice"] });
   const ctx = ctxFor(b); ctx.env.STUB_LOGIN = "";

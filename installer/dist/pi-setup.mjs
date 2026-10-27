@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 3ee21c49ee09311e7efd6c91d7b62bebed03e0cc2052a42a02b16a465fcd2964
+// pi-setup-source-sha256: 280137f7197e3393b0a080ab0e2bb0dfaff3c512e4b3ab65e1fcfeaea9462806
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -6497,6 +6497,11 @@ function hasCratisDir(root) {
   }
   return false;
 }
+function lanesBackendFound(ctx) {
+  if (ctx.which("tmux")) return true;
+  if (ctx.platform !== "darwin") return false;
+  return ["Apple_Terminal", "iTerm.app"].includes(ctx.env.TERM_PROGRAM ?? "") || Boolean(ctx.which("osascript"));
+}
 function detectDefaults(ctx, detection, reposRoot) {
   const cratis = detection.github.orgs.some((o) => o.toLowerCase() === "cratis") || isDir(join52(reposRoot, "cratis")) || isDir(join52(reposRoot, "Cratis")) || hasCratisDir(reposRoot);
   return {
@@ -6507,10 +6512,10 @@ function detectDefaults(ctx, detection, reposRoot) {
     codescene: Boolean(ctx.which("cs-mcp")) || Boolean(ctx.env.CS_ACCESS_TOKEN),
     cratis,
     web: true,
-    lanes: false
+    lanes: lanesBackendFound(ctx)
   };
 }
-function hintFor(def, on) {
+function hintFor(def, on, source = "detected") {
   const why = {
     "docker-guardian": ["docker found", "no docker found"],
     cleanup: ["a scheduler is available", "no scheduler found"],
@@ -6519,8 +6524,9 @@ function hintFor(def, on) {
     codescene: ["cs-mcp or a token found", "no cs-mcp or token found"],
     cratis: ["Cratis repos found", "no Cratis repos found"],
     web: ["on by default", "off"],
-    lanes: ["explicitly selected", "opt-in"]
+    lanes: ["on: backend found", "no tmux or macOS Terminal found"]
   };
+  if (def.id === "lanes" && source !== "detected") return `${on ? "on" : "off"}: ${source === "flag" ? "set by flag" : "your choice"}; ${def.explain}`;
   const [yes, no] = why[def.id];
   return on ? `${yes}; ${def.explain}` : `off: ${no}; ${def.explain}`;
 }
@@ -6569,7 +6575,7 @@ var init_components = __esm({
       { id: "disk-growth", label: "disk-growth alert", explain: "every minute: alerts when free disk drops 5 GiB within 5 minutes and names the top writers (macOS launchd)", service: true },
       { id: "codescene", label: "CodeScene", explain: "Code Health MCP server and policy in AGENTS.md (needs cs-mcp and a token)", service: false },
       { id: "cratis", label: "Cratis conventions", explain: "Cratis rules, cratis-cli guard and agent, and the Cratis sections of AGENTS.md", service: false },
-      { id: "lanes", label: "lanes", explain: "the lanes command: a coordinator and several pi sessions in git worktrees, talking through message files", service: false },
+      { id: "lanes", label: "lanes", explain: "run several pi sessions in parallel, coordinated by one session", service: false },
       { id: "web", label: "browser and web tools", explain: "pi-web-access and pi-browser-use (the browser may download on first use)", service: false }
     ];
     isComponentId = (id) => COMPONENT_IDS.includes(id);
@@ -7087,7 +7093,10 @@ function summaryLines(args) {
   );
   if (args.components) {
     const word = (id) => `${COMPONENTS.find((c2) => c2.id === id)?.label} ${args.components?.[id]?.on ? "on" : "off"}`;
-    lines2.push(`Extras: ${COMPONENTS.map((c2) => word(c2.id)).join(", ")}`);
+    lines2.push(`Extras: ${COMPONENTS.filter((c2) => c2.id !== "lanes").map((c2) => word(c2.id)).join(", ")}`);
+    const lanes = args.components.lanes;
+    const def = COMPONENTS.find((c2) => c2.id === "lanes");
+    lines2.push(`lanes: ${hintFor(def, lanes.on, lanes.source)}`);
   }
   const kept = actions.filter((a2) => a2.op === "keep");
   if (kept.some((a2) => /\/\.pi\/agent\/(agents\/[^/]+\.md|workflows\/[^/]+\.js)$/.test(a2.path))) {
@@ -7100,6 +7109,9 @@ function summaryLines(args) {
   for (const warning of args.warnings.filter((w) => w !== args.kimi)) lines2.push(`warning: ${warning}`);
   return lines2;
 }
+function lanesNextLines(installed) {
+  return installed ? ["Optional: set up parallel sessions now: ./install.sh lanes"] : [];
+}
 function whatsNextLines(next) {
   const lines2 = [];
   if (next.pathMissing) {
@@ -7110,7 +7122,7 @@ function whatsNextLines(next) {
   if (next.logins.length) lines2.push(`Log in: in pi, type /login for ${next.logins.join(", ")}`);
   lines2.push("Switch profile: pi-profile list, or ./install.sh --profile <name>");
   lines2.push("Check health any time: ./install.sh doctor");
-  if (next.lanesOffered) lines2.push("Optional: set up a coordinator and lanes (offered next; or later with ./install.sh lanes)");
+  lines2.push(...lanesNextLines(Boolean(next.lanesOffered)));
   return lines2;
 }
 var USER_SOURCES, ROOT_SOURCES, KEPT_EDITS;
@@ -7533,7 +7545,6 @@ var init_retire = __esm({
 });
 
 // src/finish.ts
-import { existsSync as existsSync35 } from "node:fs";
 import { join as join58 } from "node:path";
 async function applyPlain({ ctx, options, r: r2, applyOptions, manifest, off, editPath }) {
   const live = await retire(ctx, join58(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
@@ -7580,23 +7591,13 @@ function guidedNotes(p, e) {
   return compact.count;
 }
 function lanesOffered(r2, options, ok) {
-  return ok && !options.dryRun && !options.plan && r2.components.lanes.on && !existsSync35(join58(r2.settings.reposRoot, ".lanes/lanes.json"));
-}
-async function offerLanesSetup(ctx, options, p) {
-  const answer = await p.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
-  if (p.isCancel(answer) || answer !== true) return;
-  try {
-    if (await runLanesFlow(ctx, { ...options, dir: "" }, p, true) !== 0) ctx.err("Lanes setup was not completed; run ./install.sh lanes to continue.");
-  } catch (error) {
-    ctx.err(`Lanes setup was not completed: ${error.message}`);
-  }
+  return ok && !options.dryRun && !options.plan && r2.components.lanes.on;
 }
 var installedPaths, spinnerEnd;
 var init_finish = __esm({
   "src/finish.ts"() {
     init_apply();
     init_doctor();
-    init_lanes_flow();
     init_profiles();
     init_report();
     init_retire();
@@ -7754,7 +7755,7 @@ var init_args = __esm({
 });
 
 // src/plan.ts
-import { existsSync as existsSync36, lstatSync as lstatSync10, readdirSync as readdirSync19, readFileSync as readFileSync33, readlinkSync as readlinkSync5, statSync as statSync19 } from "node:fs";
+import { existsSync as existsSync35, lstatSync as lstatSync10, readdirSync as readdirSync19, readFileSync as readFileSync33, readlinkSync as readlinkSync5, statSync as statSync19 } from "node:fs";
 import { join as join59 } from "node:path";
 function fromSource(src, settings3) {
   const raw = readFileSync33(src);
@@ -7763,14 +7764,14 @@ function fromSource(src, settings3) {
   return hasTokens(raw) ? { content: src.endsWith("/pi-phase/config.json") ? Buffer.from(raw.toString("utf8").split("{{REPOS_ROOT}}").join(JSON.stringify(settings3.reposRoot).slice(1, -1))) : render(raw, settings3), mode } : { content: raw, mode, mtimeMs: st.mtimeMs };
 }
 function sameBytes(dest, content) {
-  return existsSync36(dest) && statSync19(dest).isFile() && readFileSync33(dest).equals(content);
+  return existsSync35(dest) && statSync19(dest).isFile() && readFileSync33(dest).equals(content);
 }
 function put(actions, dest, desired) {
   if (sameBytes(dest, desired.content)) {
     actions.push({ op: "adopt", path: dest });
     return;
   }
-  actions.push({ op: "install", path: dest, existed: existsSync36(dest), ...desired });
+  actions.push({ op: "install", path: dest, existed: existsSync35(dest), ...desired });
 }
 function putSource(actions, src, dest, settings3) {
   put(actions, dest, fromSource(src, settings3));
@@ -7791,7 +7792,7 @@ function userJsonAction(actions, piDir, settings3) {
   const path2 = join59(piDir, "user.json");
   const existing = readSettings(path2);
   const merged = mergeUserJson(existing, settings3);
-  if (existsSync36(path2) && deepEqual(existing, merged)) return;
+  if (existsSync35(path2) && deepEqual(existing, merged)) return;
   const jsonOps = [];
   for (const key of ["githubUser", "reposRoot"]) {
     if (key in existing && deepEqual(existing[key], merged[key])) continue;
@@ -7800,7 +7801,7 @@ function userJsonAction(actions, piDir, settings3) {
   actions.push({
     op: "install",
     path: path2,
-    existed: existsSync36(path2),
+    existed: existsSync35(path2),
     mode: 420,
     merge: "user-json",
     jsonOps,
@@ -7817,14 +7818,14 @@ function agentsMd(input, live) {
     delete base.mtimeMs;
     input.notes?.push(...stripped.warnings);
   }
-  const existing = existsSync36(live) && statSync19(live).isFile() ? readFileSync33(live) : void 0;
+  const existing = existsSync35(live) && statSync19(live).isFile() ? readFileSync33(live) : void 0;
   const noMarkers = existing !== void 0 && !hasRoutingMarkers(existing);
   if (!input.overlay.routing) return { ...base, noMarkers };
   return { content: spliceRouting(base.content, input.overlay.routing, noMarkers ? void 0 : existing), mode: base.mode, noMarkers };
 }
 function registerJson(actions, path2, edit) {
   const pending2 = actions.find((a2) => a2.op === "install" && a2.path === path2);
-  const content = pending2 && pending2.op === "install" ? pending2.content : existsSync36(path2) ? readFileSync33(path2) : void 0;
+  const content = pending2 && pending2.op === "install" ? pending2.content : existsSync35(path2) ? readFileSync33(path2) : void 0;
   if (!content) return;
   let data;
   try {
@@ -7916,7 +7917,7 @@ function buildPlan(input) {
   if (noMarkers && last.op === "install") last.noMarkers = true;
   putSource(actions, join59(agent, "AGENTS.subagent.md"), join59(piDir, "AGENTS.subagent.md"), settings3);
   for (const name of ONLY_IF_ABSENT) {
-    if (!existsSync36(join59(piDir, name))) putSource(actions, join59(agent, name), join59(piDir, name), settings3);
+    if (!existsSync35(join59(piDir, name))) putSource(actions, join59(agent, name), join59(piDir, name), settings3);
   }
   registerJson(actions, join59(piDir, "settings.json"), settingsEdit(input.components?.web, Boolean(input.activate?.includes("web")), input.drop ?? [], piDir));
   registerJson(actions, join59(piDir, "mcp-adapter.json"), mcpEdit(input.components?.codescene, Boolean(input.activate?.includes("codescene")), input.which ?? (() => void 0)));
@@ -7927,7 +7928,7 @@ function buildPlan(input) {
     ["npm-package.json", "npm/package.json"]
   ];
   for (const [from, to] of absent) {
-    if (!existsSync36(join59(piDir, to))) putSource(actions, join59(agent, from), join59(piDir, to), settings3);
+    if (!existsSync35(join59(piDir, to))) putSource(actions, join59(agent, from), join59(piDir, to), settings3);
   }
   for (const skill of listSkills(repoDir2)) {
     putTree(actions, join59(repoDir2, "skills", skill), join59(home, ".agents", "skills", skill), settings3);
@@ -7953,7 +7954,7 @@ function buildPlan(input) {
 }
 function listSkills(repoDir2) {
   const dir = join59(repoDir2, "skills");
-  if (!existsSync36(dir)) return [];
+  if (!existsSync35(dir)) return [];
   return readdirSync19(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 }
 function lstatExists2(path2) {
@@ -7982,17 +7983,17 @@ var init_plan = __esm({
 });
 
 // src/reconcile.ts
-import { existsSync as existsSync37, mkdtempSync, readFileSync as readFileSync34, rmSync as rmSync3, writeFileSync as writeFileSync12 } from "node:fs";
+import { existsSync as existsSync36, mkdtempSync, readFileSync as readFileSync34, rmSync as rmSync3, writeFileSync as writeFileSync12 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join60 } from "node:path";
 function newVersionNeedsWrite(newPath, content) {
-  return !(existsSync37(newPath) && readFileSync34(newPath).equals(content));
+  return !(existsSync36(newPath) && readFileSync34(newPath).equals(content));
 }
 function reconcile(actions, manifest, home) {
   const conflicts2 = [];
   const out = actions.map((action) => {
     if (action.op !== "install" || action.merge) return action;
-    if (!action.existed || !existsSync37(action.path)) return { ...action, decision: "new" };
+    if (!action.existed || !existsSync36(action.path)) return { ...action, decision: "new" };
     const entry2 = manifest?.files[homeRel(home, action.path)];
     if (!action.noMarkers) {
       if (!entry2) return { ...action, decision: "replace" };
@@ -9915,7 +9916,7 @@ var run_exports = {};
 __export(run_exports, {
   main: () => main2
 });
-import { existsSync as existsSync38, readdirSync as readdirSync20, readFileSync as readFileSync35 } from "node:fs";
+import { existsSync as existsSync37, readdirSync as readdirSync20, readFileSync as readFileSync35 } from "node:fs";
 import { join as join61 } from "node:path";
 function pickProfile(options, activeBefore, ready3, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
@@ -9952,7 +9953,7 @@ function extraRows(ctx, options, saved2, detection, manifest) {
       return {
         id: def.id,
         label: def.label,
-        hint: hintFor(def, initial[def.id].on),
+        hint: hintFor(def, initial[def.id].on, initial[def.id].source),
         initial: initial[def.id].on,
         unavailable: why === true ? void 0 : why,
         fixed: def.id in flags
@@ -10143,7 +10144,7 @@ async function execute(ctx, options, prompter, baseCtx) {
     throw new SetupError(`unknown profile '${options.profile}'. available: ${names.join(", ")}`);
   }
   prompter?.intro("pi-setup");
-  const fresh2 = !manifest && !existsSync38(piDir);
+  const fresh2 = !manifest && !existsSync37(piDir);
   const required = ["gh", "jq", "rg", "fd", "python3", "git", ...options.skipNpm ? [] : ["npm"]];
   await ensurePrereqs(ctx, options, prompter, { tools: required, pi: true, fresh: fresh2 });
   const spin = prompter?.spinner();
@@ -10193,7 +10194,7 @@ async function execute(ctx, options, prompter, baseCtx) {
   const run = { ctx, options, r: r2, applyOptions, manifest, off, editPath };
   const result3 = prompter ? await applyGuided(run, prompter) : await applyPlain(run);
   const noLogins = plainReal && r2.ready.size === 0;
-  const shown = prompter || options.json ? [] : summary2.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("Kimi") && !noLogins || l2.startsWith("warning:") && !(noLogins && l2.includes("no models yet")) || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no") || r2.componentNotes.includes(l2)).map((l2) => l2.startsWith("Profile:") && noLogins && !r2.choice.source.startsWith("flag") ? `Profile: ${r2.choice.name} (final choice after you log in)` : l2);
+  const shown = prompter || options.json ? [] : summary2.filter((l2) => l2.startsWith("Profile:") || l2.startsWith("lanes:") || l2.startsWith("Kimi") && !noLogins || l2.startsWith("warning:") && !(noLogins && l2.includes("no models yet")) || l2 === KEPT_EDITS || l2.startsWith("AGENTS.md has no") || r2.componentNotes.includes(l2)).map((l2) => l2.startsWith("Profile:") && noLogins && !r2.choice.source.startsWith("flag") ? `Profile: ${r2.choice.name} (final choice after you log in)` : l2);
   let done;
   if (result3.code === 0 && plainReal && !options.plan) {
     const end = plainFinish({ ctx, options, detection, r: r2, wrote: result3.wrote, editPath, pathMissing, piDir });
@@ -10205,7 +10206,6 @@ async function execute(ctx, options, prompter, baseCtx) {
   if (prompter && result3.code === 0 && !options.dryRun) {
     pending2 = guidedNotes(prompter, { ctx, options, detection, profile: r2.profile, ready: r2.ready, pathMissing, editPath, offerLanes: offer });
   }
-  if (prompter && offer) await offerLanesSetup(ctx, options, prompter);
   return finish({ ctx, baseCtx, options, r: r2, detection, lines: shown, code: result3.code, prompter, wrote: result3.wrote, pending: pending2, done });
 }
 function plainFinish(e) {
@@ -10227,6 +10227,7 @@ function plainFinish(e) {
     steps.push(`After logging in, run: ${home} --profile auto`);
   }
   steps.push("Start with: pi");
+  steps.push(...lanesNextLines(r2.components.lanes.on));
   const backups = readdirSyncSafe(backupsDir(e.piDir));
   const lines2 = [
     e.wrote ? backups.length ? `Replaced files are backed up in ~/.pi/agent/.pi-setup/backups/. Undo any time: ${home} uninstall` : `Nothing needed backing up. Undo any time: ${home} uninstall` : "",

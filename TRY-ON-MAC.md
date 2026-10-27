@@ -32,6 +32,8 @@ It shows what your Mac already has and what it will install (Homebrew, Node.js, 
 
 The installer asks a few questions. When you are unsure, press Return to take the recommended answer.
 
+Parallel sessions (lanes) is pre-selected when a backend is found; toggle it in Review via Change a step… → Extras to opt out. Installing it does not start any sessions. Optional next step after logging in: run `./install.sh lanes` to set up parallel sessions.
+
 ## 4. Log in
 
 At the end, the installer prints a short numbered list of what is left. Usually that is:

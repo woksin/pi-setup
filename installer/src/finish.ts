@@ -1,10 +1,8 @@
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { apply } from "./apply.ts";
 import type { ApplyOptions, ApplyResult } from "./apply.ts";
 import type { Options } from "./args.ts";
 import { compactChecks, installChecks } from "./doctor.ts";
-import { runLanesFlow } from "./lanes-flow.ts";
 import type { ComponentRecord, Manifest } from "./manifest.ts";
 import { missingLogins } from "./profiles.ts";
 import { whatsNextLines } from "./report.ts";
@@ -95,13 +93,5 @@ export function guidedNotes(p: Prompter, e: GuidedEnd): number {
 export function lanesOffered(
   r: { components: { lanes: { on: boolean } }; settings: { reposRoot: string } }, options: Options, ok: boolean,
 ): boolean {
-  return ok && !options.dryRun && !options.plan && r.components.lanes.on && !existsSync(join(r.settings.reposRoot, ".lanes/lanes.json"));
-}
-
-export async function offerLanesSetup(ctx: Ctx, options: Options, p: Prompter): Promise<void> {
-  const answer = await p.confirm({ message: "Set up a coordinator and lanes now?", initial: false });
-  if (p.isCancel(answer) || answer !== true) return;
-  try {
-    if (await runLanesFlow(ctx, { ...options, dir: "" }, p, true) !== 0) ctx.err("Lanes setup was not completed; run ./install.sh lanes to continue.");
-  } catch (error) { ctx.err(`Lanes setup was not completed: ${(error as Error).message}`); }
+  return ok && !options.dryRun && !options.plan && r.components.lanes.on;
 }
