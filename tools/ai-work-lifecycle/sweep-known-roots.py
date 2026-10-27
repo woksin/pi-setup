@@ -292,7 +292,15 @@ def sweep(config, state, apply=False, discovery_base=DISCOVERY_BASE):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""Examples:
+  sweep-known-roots.py                 # dry run over the known roots
+  sweep-known-roots.py --apply         # state-changing: cleans completed, authorized tasks; enrols discovered registries
+Exit codes:
+  0 sweep finished (blocks are reported, not failures)
+  1 another sweep holds the lock (error)
+  2 degraded: a root failed or a cleanup failed/was partial
+See also: docs/reference.md, tools/ai-work-lifecycle/README.md
+""")
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--config', type=Path, default=HOME / '.config/ai-work-lifecycle/roots.json')
     parser.add_argument('--state-dir', type=Path, default=HOME / '.ai-work/ai-work-lifecycle')

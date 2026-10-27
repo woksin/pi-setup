@@ -58,7 +58,24 @@ function withLock(path, fn) {
 	try { return fn(); }
 	finally { try { unlinkSync(lock); } catch { /* gone */ } }
 }
+const HELP = `Usage: provider-restore [provider] [--all | --all-sessions]
+Clear recovered provider limits and tell every running pi session to restore at its next turn.
+Without a provider it clears all limits. The signal is always written; --all and --all-sessions are accepted aliases.
+
+Environment:
+  PI_PROVIDER_FALLBACK_STATE  limits file (default: $PI_CODING_AGENT_DIR/.provider-limits.json, else ~/.pi/agent/.provider-limits.json)
+  PI_CODING_AGENT_DIR         agent directory
+Examples:
+  provider-restore --help          # this text, no side effects
+  provider-restore openai          # clear one provider's limits (state-changing)
+  provider-restore                 # clear all provider limits (state-changing)
+Exit codes:
+  0 limits cleared (or help shown)
+  2 usage error or the state file could not be locked
+See also: docs/reference.md, pi-account --help, gpt-meter --help
+`;
 function main(args) {
+	if (args[0] === "-h" || args[0] === "--help") { process.stdout.write(HELP); return; }
 	const providers = args.filter(arg => !arg.startsWith("--"));
 	if (providers.length > 1 || args.some(arg => arg.startsWith("--") && arg !== "--all-sessions" && arg !== "--all")) {
 		throw new Error("Usage: provider-restore [provider] [--all|--all-sessions]");

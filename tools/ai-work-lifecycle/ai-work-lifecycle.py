@@ -1007,8 +1007,19 @@ def run_task(lifecycle, task, command):
     return code
 
 
+EPILOG = """Examples:
+  ai-work-lifecycle --repo /abs/repo inventory     # read-only report
+  ai-work-lifecycle --repo /abs/repo sweep         # dry run; --apply needs exact-plan authorization
+  ai-work-lifecycle --repo /abs/repo start TASK    # state-changing: declares task resources
+Exit codes:
+  0 ok
+  2 refusal, invalid input or I/O error (JSON error on stderr)
+See also: docs/reference.md, tools/ai-work-lifecycle/README.md, tools/ai-work-lifecycle/REFERENCE.md
+"""
+
+
 def parser():
-    result = argparse.ArgumentParser(description=__doc__)
+    result = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog=EPILOG)
     location = result.add_mutually_exclusive_group(required=True)
     location.add_argument("--repo", help="exact absolute Git repository root (no symlink components)")
     location.add_argument("--root", help="exact absolute repository/.ai-work directory (no symlink components)")
