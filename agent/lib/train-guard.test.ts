@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { parsePushes, trainPushDecision } from './train-guard.ts';
+import { nativeHookInstalled, parsePushes, trainPushDecision } from './train-guard.ts';
 import { protectedItems, pushBlock } from './train-push.mjs';
 import { main } from './pi-train.mjs';
 import { manifestPath, repoKey, saveManifest } from './train-manifest.mjs';
@@ -52,11 +52,47 @@ test('guard resolves repeated -C and cd from the effective directory and checks 
   assert.equal(result.pushes.length, 2); assert.ok(dirs.includes('/repo/wt')); assert.ok(dirs.includes('/repo'));
 });
 
+const dyn = 'git push origin "$BRANCH"';
+const withManifest = async () => [{}];
+const decide = (deps: object, cwd = '/work') => trainPushDecision(dyn, cwd, {}, fakeGit, { noticed: new Set(), ...deps } as any);
+
+test('unparsed push notice shown when a manifest exists and no hook is installed', async () => {
+  const result = await decide({ listManifests: withManifest, hookInstalled: () => false });
+  assert.match(result.notices[0], /unparsed push allowed/);
+});
+
+test('unparsed push notice silent without manifests, on manifest errors, or with the hook installed', async () => {
+  assert.deepEqual((await decide({ listManifests: async () => [], hookInstalled: () => false })).notices, []);
+  assert.deepEqual((await decide({ listManifests: async () => { throw new Error('x'); }, hookInstalled: () => false })).notices, []);
+  assert.deepEqual((await decide({ listManifests: withManifest, hookInstalled: () => true })).notices, []);
+});
+
+test('unparsed push notice appears once per repository', async () => {
+  const deps = { listManifests: withManifest, hookInstalled: () => false, noticed: new Set<string>() };
+  assert.equal((await decide(deps)).notices.length, 1);
+  assert.equal((await decide(deps)).notices.length, 0);
+});
+
+test('unresolved cwd checks manifests only', async () => {
+  const result = await trainPushDecision('cd "$X" && ' + dyn, '/work', {}, fakeGit, { listManifests: withManifest, hookInstalled: () => true, noticed: new Set() });
+  assert.match(result.notices[0], /unparsed push allowed/);
+});
+
+test('nativeHookInstalled detects the marker through core.hooksPath', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hook-'));
+  try {
+    const git = (_cwd: string, args: string[]) => args[0] === 'config' ? dir : '';
+    assert.equal(nativeHookInstalled(dir, git), false);
+    await writeFile(join(dir, 'pre-push'), '#!/bin/sh\n# pi-train pre-push v1\n');
+    assert.equal(nativeHookInstalled(dir, git), true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 for (const command of ['git push origin "$BRANCH"', 'git -c push.default=matching push', 'git push --unknown origin x',
   'git push origin refs/heads/*:refs/heads/*']) {
-  test(`unparseable push allows with a notice: ${command}`, () => {
+  test(`unparseable push allows and is recorded as unparsed: ${command}`, () => {
     const result = parsePushes(command, '/work', fakeGit);
-    assert.equal(result.pushes.length, 0); assert.match(result.notices[0], /unparsed push allowed/);
+    assert.equal(result.pushes.length, 0); assert.equal(result.unparsed.length, 1);
   });
 }
 
