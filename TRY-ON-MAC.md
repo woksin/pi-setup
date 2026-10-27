@@ -1,26 +1,30 @@
 # Try pi-setup on your Mac
 
-This guide sets up pi the way we recommend it, including parallel sessions. It is written for someone who has never used pi and takes about 10 minutes. The installer asks before it installs or changes anything.
+This guide sets up pi the way we recommend it, including parallel sessions. It assumes you have never used pi or Terminal much. It takes about 15 minutes, and the installer asks before it installs or changes anything.
+
+**What is pi?** pi is an AI coding assistant that runs in Terminal. You start it in a project folder, type what you want in plain language, and it reads the code, runs commands and edits files for you. pi-setup adds our rules, helper agents and tools on top of it.
 
 ## What you need
 
-- A Mac (Apple silicon or Intel) and your login password.
-- A GitHub account.
+- A Mac (Apple silicon or Intel) and your Mac login password.
+- A GitHub account, and your GitHub username at hand.
 - At least one AI subscription: Claude (Anthropic) or ChatGPT (OpenAI). Kimi is optional.
 
 ## 1. Open Terminal
 
-Press `⌘ Space`, type **Terminal** and press Return.
+Press `⌘ Space`, type **Terminal** and press Return. A window with a text prompt opens.
+
+In this guide, "run" means: copy the command, paste it into Terminal with `⌘ V`, and press Return. Wait until the prompt comes back before running the next one.
 
 ## 2. Get the setup
 
-Paste this line and press Return:
+Run:
 
 ```sh
 git clone https://github.com/woksin/pi-setup ~/pi-setup && cd ~/pi-setup
 ```
 
-If macOS says it needs the **command line developer tools**, click **Install**. When that finishes, paste the same line again.
+If macOS says it needs the **command line developer tools**, click **Install** and wait for it to finish (a few minutes). Then run the same line again.
 
 ## 3. Run the installer
 
@@ -30,39 +34,83 @@ Run the recommended setup with parallel sessions turned on:
 ./install.sh --with lanes
 ```
 
-It shows what your Mac already has and what it will install (Homebrew, Node.js, a few command-line tools and pi), then asks `Continue? [Y/n]`. Press Return to accept. Homebrew may ask for your Mac password; that is normal.
+- It shows what your Mac already has and what it will install (Homebrew, Node.js, a few command-line tools and pi), then asks `Continue? [Y/n]`. Press Return.
+- Homebrew asks for your **Mac password**. Type it and press Return. Nothing appears while you type; that is normal.
+- When it asks for your **GitHub login**, type your GitHub username.
+- For every other question, press Return to take the recommended answer. If it says you have no AI logins yet, continue anyway; you log in in step 5.
+- On the review screen, keep "Add them to PATH in your shell profile" selected if it is shown, and choose **Install**.
 
-The installer asks a few more questions. When you are unsure, press Return to take the recommended answer.
+At the end it shows **What's next**. Keep that window open for now.
 
-## 4. Log in
+## 4. Make the new tools available
 
-Open a **new** Terminal window, so the new tools are on your path. Then:
+On Apple silicon Macs, Homebrew must be added to your shell once. Run this (it does nothing on Intel Macs, and is safe to run twice):
 
-1. **GitHub:** run `gh auth login` and follow the prompts (choose GitHub.com and log in with a web browser).
-2. **AI:** run `pi`, type `/login`, pick Claude or ChatGPT and log in in the browser. Type `/quit` to leave pi.
+```sh
+[ -x /opt/homebrew/bin/brew ] && ! grep -q 'brew shellenv' ~/.zprofile 2>/dev/null && echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+```
 
-## 5. Finish the setup
+Now **quit Terminal completely** (`⌘ Q`) and open it again (step 1). From here on, use the new window.
+
+Check that everything is found:
+
+```sh
+pi --version && gh --version
+```
+
+Both should print a version number. If one says `command not found`, see "If something goes wrong" below.
+
+## 5. Log in
+
+1. **GitHub:** run `gh auth login`. Choose **GitHub.com**, **HTTPS**, answer **Yes** to authenticate Git, and **Login with a web browser**. Copy the code it shows, press Return, and paste the code in the browser.
+2. **AI:** run `pi`. Inside pi, type `/login` and press Return, pick Claude or ChatGPT, and log in in the browser. Repeat `/login` for the other one if you have both. Type `/quit` to leave pi.
+
+## 6. Finish the setup
+
+Run:
 
 ```sh
 cd ~/pi-setup && ./install.sh --with lanes --profile auto
 ```
 
-This picks the right model setup for the logins you have.
-
-## 6. Try it
-
-Go to any project folder and start pi:
+This picks the right model setup for the logins you have. Then check the setup:
 
 ```sh
-cd ~/path/to/a/project
+./install.sh doctor
+```
+
+It should end without errors. Warnings about optional tools (Docker, gitleaks, tmux, CodeScene) are fine.
+
+## 7. Try it
+
+Start pi in a project folder. If you have a project already:
+
+```sh
+cd ~/path/to/your/project
 pi
 ```
 
-Then ask for something, for example: *"Explain what this project does and how it is structured."*
+If you don't, make a small test project:
 
-## 7. Optional: parallel sessions
+```sh
+mkdir -p ~/pi-test && cd ~/pi-test && git init && pi
+```
 
-When you are comfortable with one session, you can let one pi session coordinate several others working in parallel:
+Then type a request and press Return, for example:
+
+- *"Explain what this project does and how it is structured."*
+- In the test project: *"Create a small web page that shows today's date, and tell me how to open it."*
+
+Useful to know:
+
+- pi works only in the folder you start it in. Start it in the project you want it to work on.
+- Press `Esc` to stop pi while it is working. Type `/quit` to leave.
+- Run `pi -c` to continue your last session in that folder.
+- pi can change files and run commands, so try it first in a project that is in git, where every change can be reviewed and undone.
+
+## 8. Optional: parallel sessions
+
+When you are comfortable with one session, you can let one pi session coordinate several others working in parallel, each on its own issue or goal:
 
 ```sh
 cd ~/pi-setup && ./install.sh lanes
@@ -72,9 +120,10 @@ It asks which repositories and issues or goals to work on, prepares a separate w
 
 ## If something goes wrong
 
-- Run `./install.sh doctor` in `~/pi-setup`. It tells you what is missing and how to fix it.
+- **`command not found` after step 4:** quit Terminal completely (`⌘ Q`), open it again and retry. If it still fails, run step 4 again, then `cd ~/pi-setup && ./install.sh --with lanes`.
+- Run `cd ~/pi-setup && ./install.sh doctor`. It tells you what is missing and how to fix it.
 - Re-running `./install.sh --with lanes` is always safe: it continues where it stopped.
-- The installer writes a log to `~/.local/state/pi-setup/install.log`.
+- The installer writes a log to `~/.local/state/pi-setup/install.log`. Send it, together with the doctor output, to whoever shared this guide with you.
 
 ## Update later
 
