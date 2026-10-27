@@ -108,6 +108,8 @@ Useful to know:
 - Run `pi -c` to continue your last session in that folder.
 - pi can change files and run commands, so try it first in a project that is in git, where every change can be reviewed and undone.
 
+Next: [Getting started](docs/getting-started.md) and [Daily workflow](docs/daily-workflow.md).
+
 ## 8. Optional: parallel sessions
 
 When you are comfortable with one session, you can let one pi session coordinate several others working in parallel, each on its own issue or goal:
@@ -117,8 +119,6 @@ cd ~/pi-setup && ./install.sh lanes
 ```
 
 It asks which repositories and issues or goals to work on, prepares a separate working copy for each, and offers to open the coordinating session. Nothing starts until you run this.
-
-Next: [Getting started](docs/getting-started.md) and [Daily workflow](docs/daily-workflow.md).
 
 ## If something goes wrong
 
