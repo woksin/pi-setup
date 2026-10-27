@@ -168,7 +168,7 @@ export function installCommand(ctx: Ctx, tool: string): string {
   if (def && manager && def[manager]) {
     const cmd = pm(manager, [def[manager]!], ["sudo"]).map(formatCommand);
     const last = cmd[cmd.length - 1];
-    const link = manager === "apt" && tool === "fd" ? " && mkdir -p ~/.local/bin && ln -sf /usr/bin/fdfind ~/.local/bin/fd" : "";
+    const link = manager === "apt" && tool === "fd" ? " && mkdir -p ~/.local/bin && ln -s /usr/bin/fdfind ~/.local/bin/fd" : "";
     return `${last}${link}`;
   }
   return def ? `install it from ${def.link}` : `install ${tool}`;

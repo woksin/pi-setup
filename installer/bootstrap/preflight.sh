@@ -56,12 +56,18 @@ ps_node_ok() {
 # Scan the arguments; they all pass through to Node unchanged.
 ps_scan() {
   PS_HELP=0 PS_VERSION=0 PS_DRY=0 PS_YES=0 PS_JSON=0 PS_SKIP_NPM=0 PS_CONSENT="" PS_CMD="install"
-  ps_skip=0
+  ps_skip=0 ps_flag=""
   for ps_arg in "$@"; do
-    # The value of a flag that takes one is not the command word.
-    if [ "$ps_skip" = 1 ]; then ps_skip=0; continue; fi
+    # The value of a flag that takes one is not the command word. A missing value
+    # (end of arguments, or another flag) stops here, before anything is installed,
+    # so a flag such as --skip-npm is never swallowed as a value.
+    if [ "$ps_skip" = 1 ]; then
+      ps_skip=0
+      case "$ps_arg" in ""|--*) printf 'Missing value for %s\n' "$ps_flag" >&2; exit 2 ;; esac
+      continue
+    fi
     case "$ps_arg" in
-      --user|--repos-root|--profile|--ref|--dir|--keep|--with|--without) ps_skip=1 ;;
+      --user|--repos-root|--profile|--ref|--dir|--keep|--with|--without) ps_skip=1 ps_flag="$ps_arg" ;;
       --help|-h) PS_HELP=1 ;;
       --version) PS_VERSION=1 ;;
       --dry-run|--plan) PS_DRY=1 ;;
@@ -74,6 +80,7 @@ ps_scan() {
       *) [ "$PS_CMD" = "install" ] && PS_CMD="$ps_arg" ;;
     esac
   done
+  if [ "$ps_skip" = 1 ]; then printf 'Missing value for %s\n' "$ps_flag" >&2; exit 2; fi
   PS_INTERACTIVE=0
   if [ -t 0 ] && [ -t 1 ] && [ -z "${CI:-}" ] && [ "$PS_YES" = 0 ] && [ "$PS_JSON" = 0 ] && [ "$PS_DRY" = 0 ]; then PS_INTERACTIVE=1; fi
 }

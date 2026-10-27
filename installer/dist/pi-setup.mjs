@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: b31d82a8262e3da8458dd34fbab165788d2e535c0e521b2deb5bb20a404885e7
+// pi-setup-source-sha256: 3ee21c49ee09311e7efd6c91d7b62bebed03e0cc2052a42a02b16a465fcd2964
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5511,7 +5511,7 @@ function installCommand(ctx, tool) {
   if (def && manager && def[manager]) {
     const cmd = pm(manager, [def[manager]], ["sudo"]).map(formatCommand);
     const last = cmd[cmd.length - 1];
-    const link = manager === "apt" && tool === "fd" ? " && mkdir -p ~/.local/bin && ln -sf /usr/bin/fdfind ~/.local/bin/fd" : "";
+    const link = manager === "apt" && tool === "fd" ? " && mkdir -p ~/.local/bin && ln -s /usr/bin/fdfind ~/.local/bin/fd" : "";
     return `${last}${link}`;
   }
   return def ? `install it from ${def.link}` : `install ${tool}`;

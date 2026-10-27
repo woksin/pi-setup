@@ -242,6 +242,19 @@ test("the command word is found after flag values: --user doctor is not the doct
   assert.equal(runInstall(e, ["doctor"]).status, 2);
 });
 
+test("a value flag without a value stops before anything is installed and never swallows --skip-npm", () => {
+  const e = setup(["sudo", "apt-get"], { uid: "0" });
+  linuxFixture(e);
+  const r = runInstall(e, ["--user", "--skip-npm", "--install-prereqs", "--yes"]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /Missing value for --user/);
+  assert.deepEqual(e.calls(), []);
+  const t = runInstall(e, ["--yes", "--install-prereqs", "--profile"]);
+  assert.equal(t.status, 2);
+  assert.match(t.stderr, /Missing value for --profile/);
+  assert.deepEqual(e.calls(), []);
+});
+
 test("Linux: apt-get update runs before the prerequisites install, and is in the plan", () => {
   const e = setup(["sudo", "apt-get"], { uid: "0" });
   linuxFixture(e);
