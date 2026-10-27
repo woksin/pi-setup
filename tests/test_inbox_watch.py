@@ -1,4 +1,5 @@
 """Specs for agent/bin/inbox-watch recipient matching."""
+import json
 import os
 import subprocess
 import tempfile
@@ -21,6 +22,52 @@ def matches(names, *args, env=None):
         result = subprocess.run(["bash", str(SCRIPT), *args], env=run_env, capture_output=True, text=True)
         assert result.returncode in (0, 1), result.stderr
         return set(result.stdout.split())
+
+
+class InboxDefaultSpecs(unittest.TestCase):
+    def check_default(self, user=None, override=None):
+        with tempfile.TemporaryDirectory() as home:
+            agent = Path(home, ".pi/agent")
+            fallback = agent / "inbox"
+            fallback.mkdir(parents=True)
+            configured = Path(home, "configured inbox")
+            configured.mkdir()
+            explicit = Path(home, "explicit inbox")
+            explicit.mkdir()
+            if user is not None:
+                content = user.replace("CONFIGURED", str(configured))
+                (agent / "user.json").write_text(content)
+            env = {**os.environ, "HOME": home}
+            env.pop("INBOX_DIR", None)
+            if override is not None:
+                env["INBOX_DIR"] = str(explicit) if override else ""
+            result = subprocess.run(["bash", str(SCRIPT), "L66"], env=env, capture_output=True, text=True)
+            if override is False:
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("invalid INBOX_DIR", result.stderr)
+                return
+            self.assertEqual(result.returncode, 1, result.stderr)
+            expected = explicit if override else configured if user == '{"orchMessagesDir":"CONFIGURED"}' else fallback
+            self.assertTrue((expected / "L66-inbox.marker").exists())
+            self.assertEqual(len(list(Path(home).rglob("*-inbox.marker"))), 1)
+
+    def test_user_json_directory(self):
+        self.check_default('{"orchMessagesDir":"CONFIGURED"}')
+
+    def test_environment_takes_precedence(self):
+        self.check_default('{"orchMessagesDir":"CONFIGURED"}', override=True)
+
+    def test_empty_environment_is_not_replaced(self):
+        self.check_default('{"orchMessagesDir":"CONFIGURED"}', override=False)
+
+    def test_missing_user_json_falls_back(self):
+        self.check_default()
+
+    def test_missing_invalid_or_empty_setting_falls_back(self):
+        for user in ({}, {"orchMessagesDir": ""}, {"orchMessagesDir": 42}, []):
+            with self.subTest(user=user):
+                self.check_default(json.dumps(user))
+        self.check_default("{broken")
 
 
 class InboxWatchSpecs(unittest.TestCase):

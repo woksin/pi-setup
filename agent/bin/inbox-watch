@@ -9,7 +9,7 @@
 # Inbound: a recipient is LANE, an alias, ALL or GROUP (or the name starts
 # with GROUP-/ALL-); messages the lane or an alias sent are skipped.
 # Aliases: --alias NAME (repeatable) or INBOX_ALIASES=R-AI,R-Studio.
-# INBOX_DIR overrides the default directory (including for isolated tests).
+# INBOX_DIR overrides user.json's orchMessagesDir, then ~/.pi/agent/inbox.
 # Marker advances to scan START only after output, so concurrent edits stay new.
 set -eu
 aliases=()
@@ -34,7 +34,22 @@ for name in "$lane" ${group:+"$group"} ${aliases[@]+"${aliases[@]}"}; do
         exit 2
     fi
 done
-dir=${INBOX_DIR:-$HOME/.pi/agent/inbox}
+if [[ ${INBOX_DIR+x} ]]; then
+    dir=$INBOX_DIR
+else
+    dir=$(python3 - <<'PY'
+import json
+from pathlib import Path
+
+try:
+    data = json.loads((Path.home() / ".pi/agent/user.json").read_text())
+    value = data.get("orchMessagesDir") if isinstance(data, dict) else None
+except (OSError, ValueError):
+    value = None
+print(str(Path(value).expanduser()) if isinstance(value, str) and value.strip() else Path.home() / ".pi/agent/inbox")
+PY
+    )
+fi
 if ! cd "$dir" 2>/dev/null; then
     printf 'inbox-watch: invalid INBOX_DIR: %s\n' "$dir" >&2
     exit 2

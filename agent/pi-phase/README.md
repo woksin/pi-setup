@@ -78,6 +78,17 @@ This is guidance only: it neither grants priority nor reorders existing waiters;
 
 Fast waiters use priority then the order above. If fast permits are full, they may take a heavy permit, sharing heavy priority/FIFO reservations rather than jumping older eligible heavy waiters. Memory admission, HIGH caps, nice, MSBuild shims/caps, RSS checks, verified-pass skipping and cleanup are unchanged. `status` shows `fast=<running>/<slots> queued=<n>` and marks fast phases; `wait --eta` includes fast occupancy and fallback reservations; pass `-- COMMAND` (and optionally `--expect-fast`) to classify the caller's command against the fast queue. Fast waiters/leases use separate files, invisible to old heavy-only schedulers; new schedulers account for both lanes.
 
+### Machine-local configuration
+
+Put machine tuning in `~/.pi/agent/pi-phase/config.local.json`, not the
+installer-managed `config.json`. The local file is optional and never installed
+or synced back into the checkout. Objects merge recursively (local keys win);
+arrays and scalars replace the base value. Missing local files leave shipped
+settings unchanged. Invalid JSON or a non-object root warns and ignores the
+overlay; invalid option values use the existing validation/defaults.
+For example, `{"fast_lane":{"slots":1},"rss_cap_mb":8192}` changes only those
+keys, retaining the other shipped fast-lane settings. Keep this file local.
+
 ### Optional performance flags
 
 Config also accepts these keys (unknown keys are ignored and invalid values fall back to defaults, with a note, deduplicated per phase):
