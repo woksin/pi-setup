@@ -30,6 +30,7 @@ import { finishHealth } from "./doctor-compact.ts";
 import { logPath } from "./install-log.ts";
 import { pythonVersionCheck } from "./doctor-probes.ts";
 import { runUpdate } from "./update.ts";
+import { runReport } from "./setup-issue.ts";
 import {
   chooseProfile, kimiNote, loadProfiles, overlayFor, pinnedModels, pinWarnings, profileNames, profilesDir,
 } from "./profiles.ts";
@@ -226,6 +227,7 @@ export async function main(argv: string[], baseCtx: Ctx, injected?: Prompter): P
 }
 
 async function runCommand(ctx: Ctx, options: Options, prompter: Prompter | undefined, baseCtx: Ctx): Promise<number> {
+  if (options.command === "report") return runReport(ctx, options);
   if (options.command === "lanes") return runLanesFlow(ctx, options, prompter);
   if (options.command === "doctor") return runDoctor(ctx, options, baseCtx, prompter);
   if (options.command === "uninstall") return runUninstall(ctx, options, prompter);
