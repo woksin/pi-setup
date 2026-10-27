@@ -1839,6 +1839,257 @@ def unlock(fd):
     os.close(fd)
 
 
+WORKTREE_ENV = "PI_PHASE_WORKTREE_LOCK"
+WORKTREE_HELD_ENV = "PI_PHASE_WORKTREE_HELD"
+
+
+def worktree_root(cwd):
+    for _ in range(2):
+        try:
+            result = subprocess.run(["git", "--no-optional-locks", "rev-parse", "--show-toplevel"],
+                                    cwd=cwd, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"),
+                                    capture_output=True, text=True, timeout=3)
+            return os.path.realpath(result.stdout.strip() if result.returncode == 0 else cwd)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    note("worktree root unknown (git probe failed); locking cwd")
+    return os.path.realpath(cwd)
+
+
+def worktree_paths(state, root):
+    directory = state / "worktrees"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    key = hashlib.sha256(os.fsencode(root)).hexdigest()[:32]
+    return directory / f"{key}.lock", directory / f"{key}.json", key
+
+
+class WorktreeLease:
+    """Own a close-only reference; inherited leases never edit holder metadata."""
+    def __init__(self, path, fd, info, inherited=False):
+        self.path, self.fd, self.info, self.inherited = path, fd, info, inherited
+
+    def environment(self, state):
+        return {WORKTREE_HELD_ENV: json.dumps(dict(fd=self.fd, state=os.path.realpath(state),
+                                                  root=self.info["root"], token=self.info["token"]))}
+
+    def publish(self, pgid):
+        if not self.inherited:
+            self.info["pgid"] = pgid
+            save(self.path.with_suffix(".json"), self.info)
+
+    def close(self, state, safe):
+        if self.inherited:
+            os.close(self.fd)
+        else:
+            release(state, [(self.path, self.fd)], self.info["token"], safe)
+
+
+def worktree_hint(state, root):
+    hint = json.loads(os.environ.get(WORKTREE_HELD_ENV, "null"))
+    if not isinstance(hint, dict):
+        return None
+    identity = (hint.get("state"), hint.get("root"))
+    return hint if identity == (os.path.realpath(state), root) else None
+
+
+def inherited_worktree(state, path, root):
+    """Hints are not authority: only the already-locked open-file description qualifies."""
+    try:
+        hint = worktree_hint(state, root)
+        if hint is None:
+            return None
+        fd = hint["fd"]
+        actual, expected = os.fstat(fd), path.stat()
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            return None
+        info = metadata(path.with_suffix(".json"))
+        if (info.get("token"), info.get("root")) != (hint.get("token"), root):
+            return None
+        if not readonly_busy(path):
+            return None
+        # A separate open of the same inode fails here. Never LOCK_UN a shared description.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return WorktreeLease(path, os.dup(fd), info, inherited=True)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def worktree_waiters(state, readonly=False):
+    waiters = []
+    for path in (state / "worktrees" / "waiting").glob("*.json"):
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except FileNotFoundError:
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                with os.fdopen(fd, "r", closefd=False) as stream:
+                    waiters.append(json.load(stream))
+            else:
+                if not readonly:
+                    path.unlink(missing_ok=True)
+        finally:
+            os.close(fd)
+    return sorted(waiters, key=lambda w: (w["enqueued"], w["token"]))
+
+
+class WorktreeAdmission:
+    def __init__(self, state, args, token):
+        self.opt_out = getattr(args, "no_worktree_lock", False)
+        if args.kind == "build" and self.opt_out:
+            raise ValueError("--no-worktree-lock is not allowed: build writes the worktree")
+        self.state, self.args, self.token = state, args, token
+        self.root = None
+        self.lease = None
+        self.result = "error"
+
+    def register(self):
+        directory = self.state / "worktrees" / "waiting"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        path = directory / f"{self.token}.json"
+        temporary = path.with_suffix(".tmp")
+        fd = lock_file(temporary)
+        try:
+            data = dict(token=self.token, key=self.key, root=self.root, label=self.args.label,
+                        kind=self.args.kind, pid=os.getpid(), enqueued=time.time(), policy=self.args.policy)
+            os.write(fd, json.dumps(data).encode())
+            os.replace(temporary, path)
+            return path, fd
+        except BaseException:
+            os.close(fd)
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def claim(self):
+        waiters = [w for w in worktree_waiters(self.state) if w["key"] == self.key]
+        if waiters and waiters[0]["token"] != self.token:
+            return None
+        fd = lock_file(self.path)
+        if fd is None:
+            return None
+        try:
+            info = metadata(self.info_path)
+            if group_alive(info) is not False:
+                return None
+            self.publish_holder(fd, info)
+            fd = None
+            return self.lease
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def publish_holder(self, fd, previous):
+        if previous:
+            note(f"recovered stale worktree lock (was {previous.get('label', '?')} pid {previous.get('pid', '?')})")
+        info = dict(token=self.token, pid=os.getpid(), label=self.args.label, kind=self.args.kind,
+                    root=self.root, policy=self.args.policy, acquired=time.time())
+        save(self.info_path, info)
+        self.lease = WorktreeLease(self.path, fd, info)
+
+    def wait(self, deadline, cancelled):
+        waiting, waiter_fd = self.register()
+        previous = None
+        heartbeat = time.monotonic() + HEARTBEAT
+        try:
+            while True:
+                if cancelled():
+                    return "cancelled", None
+                info = metadata(self.info_path)
+                if time.monotonic() >= deadline:
+                    return "timeout", info
+                if self.claim():
+                    return "held", self.lease
+                holder = info.get("token", "unknown")
+                if holder != previous:
+                    note(f"waiting for worktree lock (held by {info.get('label', '?')} pid {info.get('pid', '?')})")
+                    previous = holder
+                if time.monotonic() >= heartbeat:
+                    note(f"queued kind={self.args.kind} label={self.args.label} worktree root={self.root} id={self.token[:12]}")
+                    heartbeat = time.monotonic() + HEARTBEAT
+                time.sleep(min(.5, max(0, deadline - time.monotonic())))
+        finally:
+            waiting.unlink(missing_ok=True)
+            os.close(waiter_fd)
+
+    def acquire(self, deadline, cancelled, ledger):
+        if os.environ.get(WORKTREE_ENV) == "0":
+            self.result = "disabled"
+            return None
+        started = time.monotonic()
+        try:
+            self.result, value = self.admit(deadline, cancelled)
+            return self.exit_code(value, cancelled, ledger)
+        finally:
+            if ledger:
+                ledger.record.update(worktreeLock=self.result, worktreeWaitS=round(time.monotonic() - started, 1),
+                                     worktreeRoot=self.root)
+                # waitS and its telemetry continue to describe global admission only.
+                ledger.queued = time.monotonic()
+
+    def admit(self, deadline, cancelled):
+        if self.args.kind == "ci" or self.opt_out:
+            return "skipped", None
+        self.root = worktree_root(os.getcwd())
+        self.path, self.info_path, self.key = worktree_paths(self.state, self.root)
+        self.lease = inherited_worktree(self.state, self.path, self.root)
+        if self.lease:
+            note(f"worktree lock inherited from parent phase {self.lease.info.get('label', '?')}")
+            return "inherited", self.lease
+        return self.wait(deadline, cancelled)
+
+    def exit_code(self, value, cancelled, ledger):
+        if self.result not in ("timeout", "cancelled"):
+            return None
+        if ledger:
+            ledger.outcome("queue-timeout" if self.result == "timeout" else "cancelled")
+        if self.result == "timeout":
+            queue_timeout_note(self.args.queue_timeout)
+            note(f"worktree lock still held by {value.get('label', '?')} pid {value.get('pid', '?')}")
+            return 75
+        note("cancelled while waiting for worktree lock")
+        return 128 + cancelled()
+
+    def environment(self, environment):
+        if self.lease:
+            return dict(os.environ if environment is None else environment, **self.lease.environment(self.state))
+        return environment
+
+    def descriptors(self):
+        return [self.lease.fd] if self.lease else []
+
+    def publish(self, pgid):
+        if self.lease:
+            self.lease.publish(pgid)
+
+    def close(self, safe):
+        if self.lease:
+            self.lease.close(self.state, safe)
+
+
+def worktree_status(state):
+    owners = []
+    for path in sorted((state / "worktrees").glob("*.lock")):
+        info = metadata(path.with_suffix(".json"))
+        busy = readonly_busy(path)
+        if busy or group_alive(info) is not False:
+            owners.append((info, not busy))
+    now = time.time()
+    lines = []
+    for info, orphan in owners:
+        age = max(0, int(now - info.get("acquired", now)))
+        lines.append(f"worktree-lock root={info.get('root', '?')} holder={info.get('label', '?')} "
+                     f"pid={info.get('pid', '?')} kind={info.get('kind', '?')} held={age}s"
+                     f"{' orphan-group' if orphan else ''}")
+    for waiter in worktree_waiters(state, readonly=True):
+        age = max(0, int(now - waiter["enqueued"]))
+        lines.append(f"worktree-wait root={waiter['root']} label={waiter['label']} "
+                     f"pid={waiter['pid']} kind={waiter['kind']} waited={age}s")
+    for line in lines:
+        note(line)
+
+
 def group_liveness(pgid, timeouts=(2,)):
     """Return live/empty/unknown without treating failed probes as empty."""
     for timeout in timeouts:
@@ -2506,6 +2757,11 @@ def critical_path_guidance(waiters):
          "(pi-phase grant-priority --minutes 5); do not promote the whole queue")
 
 
+def admission_status(state, fast_running, fast_slots, waiters):
+    worktree_status(state)
+    note(f"fast={fast_running}/{fast_slots} queued={sum(bool(w.get('fast')) for w in waiters)}")
+
+
 def status(state, configuration=CONFIG):
     settings = config(configuration)
     options = settings.options
@@ -2565,7 +2821,7 @@ def status(state, configuration=CONFIG):
              f"{' fast' if waiter.get('fast') else ''}"
              f" policy={waiter.get('policy', 'queued')} source={waiter.get('source', 'default')}"
              f" id={waiter.get('token', '?')[:12]}")
-    note(f"fast={fast_running}/{fast_slots} queued={sum(bool(w.get('fast')) for w in waiters)}")
+    admission_status(state, fast_running, fast_slots, waiters)
     note(f"high={high}/{cap}")
     if grant:
         remaining = "unlimited uses" if grant["uses"] is None else f"{grant['uses']} use(s) remaining"
@@ -2881,6 +3137,8 @@ def run(args, state, configuration, output=None):
     ci_key = (args.repo, args.pr, args.commit)
     long_queue_hint = False
     next_heartbeat = 0
+    token = uuid.uuid4().hex
+    worktree = WorktreeAdmission(state, args, token)
     cancelled = [None]
 
     def interrupt(sig, _frame):
@@ -2890,7 +3148,6 @@ def run(args, state, configuration, output=None):
     old_term = signal.signal(signal.SIGTERM, interrupt)
     held = None
     proc = None
-    token = uuid.uuid4().hex
     started = None
     return_code = 125
     safe = False
@@ -2923,6 +3180,9 @@ def run(args, state, configuration, output=None):
                     return 0
         queued = time.monotonic()
         deadline = queued + args.queue_timeout
+        worktree_code = worktree.acquire(deadline, lambda: cancelled[0], ledger)
+        if worktree_code is not None:
+            return worktree_code
         admission_args.max_high = options["max_high"]
         admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
         burst_settings = options["memory_admission"].get("integration_burst") if admission else None
@@ -3021,12 +3281,13 @@ def run(args, state, configuration, output=None):
             note(f"nice {options['phase_nice']} (phase_nice)")
         if options["cold_worktree_hint"] and args.kind in ("build", "test") and cold_worktree(os.getcwd()):
             note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
+        child_env = worktree.environment(child_env)
         read_gate, write_gate = os.pipe()
         try:
             launcher = [sys.executable, str(Path(__file__).resolve()), "_launch", str(read_gate), "--", *command]
             output_options = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
             operation = "Popen"
-            proc = subprocess.Popen(launcher, pass_fds=[read_gate, *(fd for _, fd in held)],
+            proc = subprocess.Popen(launcher, pass_fds=[read_gate, *(fd for _, fd in held), *worktree.descriptors()],
                                     start_new_session=True, env=child_env, **output_options)
             os.close(read_gate)
             read_gate = -1
@@ -3034,6 +3295,7 @@ def run(args, state, configuration, output=None):
             publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, cwd=os.getcwd(),
                                label=args.label, kind=args.kind, priority=admission_args.priority, started=time.time(),
                                fast=admission_args.fast, policy=admission_args.policy, source=admission_args.source))
+            worktree.publish(proc.pid)
             if cancelled[0]:
                 note("cancelled before execution; command not started")
                 if ledger:
@@ -3141,6 +3403,7 @@ def run(args, state, configuration, output=None):
             safe = alive is False
         if held:
             cleanup_step(errors, "release", proc, lambda: release(state, held, token, safe or proc is None))
+        cleanup_step(errors, "worktree_release", proc, lambda: worktree.close(safe or proc is None))
         if shim_dir is not None:
             cleanup_step(errors, "shim_cleanup", proc, shim_dir.cleanup)
         cleanup_step(errors, "restore_sigint", proc, lambda: signal.signal(signal.SIGINT, old_int))
@@ -3176,6 +3439,11 @@ def validate_withdraw(parser, args):
         parser.error("--force requires --reason")
     if args.mine and caller_identity() == (None, None):
         parser.error("--mine requires a session or lane identity")
+
+
+def add_worktree_arguments(runner):
+    add_policy_arguments(runner)
+    runner.add_argument("--no-worktree-lock", action="store_true", help="opt out of worktree admission (not build)")
 
 
 def main(argv=None, *, state=None, configuration=None):
@@ -3216,7 +3484,7 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--queue-timeout", type=float, default=120, help="separate permit wait in seconds")
     runner.add_argument("--approved-long-timeout", action="store_true", help="declare explicit user approval for execution >600 seconds")
     runner.add_argument("--rerun", action="store_true", help="run even if this exact state already passed")
-    add_policy_arguments(runner)
+    add_worktree_arguments(runner)
     runner.add_argument("--repo", help="ci watcher repo identity")
     runner.add_argument("--pr", help="ci watcher PR identity")
     runner.add_argument("--commit", help="ci watcher commit identity")

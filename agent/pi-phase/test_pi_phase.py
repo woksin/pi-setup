@@ -45,7 +45,8 @@ class PhaseTests(unittest.TestCase):
         swap_floor = patch.object(pi_phase, "SWAP_FLOOR_ENFORCED", True)
         swap_floor.start()
         self.addCleanup(swap_floor.stop)
-        environment = patch.dict(os.environ, PATH=str(self.fake_bin) + os.pathsep + os.environ["PATH"])
+        environment = patch.dict(os.environ, PATH=str(self.fake_bin) + os.pathsep + os.environ["PATH"],
+                                 PI_PHASE_WORKTREE_LOCK="0")
         environment.start()
         self.addCleanup(environment.stop)
         self.children = []

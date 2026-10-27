@@ -22,6 +22,7 @@ class CleanupDiagnosticsTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.dict(os.environ, PI_PHASE_WORKTREE_LOCK="0"))
         self.output = io.StringIO()
         self.stack.enter_context(redirect_stdout(self.output))
         # main's pre-existing final exception print is not a diagnostic write.
