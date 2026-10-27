@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: b05e4a0e0f0ce0553afeecb40f5f704c0994317b0a861376a6a47c051b8f8966
+// pi-setup-source-sha256: 17226c6d5b2b30f4901210d3eb116fbdafccbd3a899f55963c8c0c6dafecbde6
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -10064,7 +10064,7 @@ function extraRows(ctx, options, saved2, detection, manifest) {
   const flags = flagMap(options);
   return (root) => {
     const detected = detectDefaults(ctx, detection, root);
-    const initial = resolveComponents({ flags, saved: manifest?.components, current: currentState(ctx), detected, interactive: true });
+    const initial = resolveComponents({ flags, saved: manifest?.components, existingInstall: Boolean(manifest), current: currentState(ctx), detected, interactive: true });
     return COMPONENTS.map((def) => {
       const why = available(def.id, ctx);
       return {

@@ -91,6 +91,22 @@ test("unattended update installs keep lanes absent without a saved choice unless
   }
 });
 
+test("customise on a legacy install does not preselect lanes without a saved choice", async () => {
+  const b = box(); const ctx = ctxFor(b); const which = ctx.which;
+  ctx.which = (name) => name === "tmux" ? "/stub/tmux" : which(name);
+  assert.equal(await main([...flags(b), "--yes", "--without", "lanes"], ctx), 0);
+  const path = join(b.home, ".pi/agent/.pi-setup/manifest.json");
+  const legacy = JSON.parse(readFileSync(path, "utf8"));
+  delete legacy.components.lanes;
+  writeFileSync(path, JSON.stringify(legacy));
+
+  const s = scripted({ "How do you": ["custom"] });
+  assert.equal(await main(flags(b), ctx, s.p), 0);
+  assert.ok(s.events.some((e) => e.startsWith("multiselect:Extras")), "Extras was asked with its initial values");
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).components.lanes.on, false);
+  assert.equal(existsSync(join(b.home, ".local/share/pi-setup/lanes")), false);
+});
+
 test("recommended without a saved or gh login asks You as Step 1 of 2", async () => {
   const b = box(); const s = scripted({ "GitHub login": ["alice"] });
   const ctx = ctxFor(b); ctx.env.STUB_LOGIN = "";

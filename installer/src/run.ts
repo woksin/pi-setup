@@ -107,7 +107,7 @@ function extraRows(
   const flags = flagMap(options);
   return (root) => {
     const detected = detectDefaults(ctx, detection, root);
-    const initial = resolveComponents({ flags, saved: manifest?.components, current: currentState(ctx), detected, interactive: true });
+    const initial = resolveComponents({ flags, saved: manifest?.components, existingInstall: Boolean(manifest), current: currentState(ctx), detected, interactive: true });
     return COMPONENTS.map((def) => {
       const why = available(def.id, ctx);
       return {
