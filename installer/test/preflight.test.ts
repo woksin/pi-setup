@@ -246,11 +246,11 @@ test("a value flag without a value stops before anything is installed and never 
   const e = setup(["sudo", "apt-get"], { uid: "0" });
   linuxFixture(e);
   const r = runInstall(e, ["--user", "--skip-npm", "--install-prereqs", "--yes"]);
-  assert.equal(r.status, 2);
+  assert.equal(r.status, 1);
   assert.match(r.stderr, /Missing value for --user/);
   assert.deepEqual(e.calls(), []);
   const t = runInstall(e, ["--yes", "--install-prereqs", "--profile"]);
-  assert.equal(t.status, 2);
+  assert.equal(t.status, 1);
   assert.match(t.stderr, /Missing value for --profile/);
   assert.deepEqual(e.calls(), []);
 });

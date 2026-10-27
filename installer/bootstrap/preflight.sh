@@ -63,7 +63,7 @@ ps_scan() {
     # so a flag such as --skip-npm is never swallowed as a value.
     if [ "$ps_skip" = 1 ]; then
       ps_skip=0
-      case "$ps_arg" in ""|--*) printf 'Missing value for %s\n' "$ps_flag" >&2; exit 2 ;; esac
+      case "$ps_arg" in ""|--*) printf 'Missing value for %s\n' "$ps_flag" >&2; exit 1 ;; esac
       continue
     fi
     case "$ps_arg" in
@@ -80,7 +80,7 @@ ps_scan() {
       *) [ "$PS_CMD" = "install" ] && PS_CMD="$ps_arg" ;;
     esac
   done
-  if [ "$ps_skip" = 1 ]; then printf 'Missing value for %s\n' "$ps_flag" >&2; exit 2; fi
+  if [ "$ps_skip" = 1 ]; then printf 'Missing value for %s\n' "$ps_flag" >&2; exit 1; fi
   PS_INTERACTIVE=0
   if [ -t 0 ] && [ -t 1 ] && [ -z "${CI:-}" ] && [ "$PS_YES" = 0 ] && [ "$PS_JSON" = 0 ] && [ "$PS_DRY" = 0 ]; then PS_INTERACTIVE=1; fi
 }

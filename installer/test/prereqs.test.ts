@@ -140,7 +140,7 @@ test("formatCommand quotes what a shell would need quoted; installCommand names 
   const b = box();
   assert.equal(installCommand(fake(b, "darwin", ["brew"]).ctx, "rg"), "brew install ripgrep");
   assert.equal(installCommand(fake(b, "linux", ["apt-get"]).ctx, "rg"), "sudo apt-get install -y ripgrep");
-  assert.match(installCommand(fake(b, "linux", ["apt-get"]).ctx, "fd"), /fd-find && mkdir -p ~\/\.local\/bin && ln -sf \/usr\/bin\/fdfind/);
+  assert.match(installCommand(fake(b, "linux", ["apt-get"]).ctx, "fd"), /fd-find && mkdir -p ~\/\.local\/bin && ln -s \/usr\/bin\/fdfind ~\/\.local\/bin\/fd$/);
   assert.match(installCommand(fake(b, "linux", ["dnf"]).ctx, "git"), /^sudo dnf install -y git$/);
   assert.match(installCommand(fake(b, "linux", []).ctx, "jq"), /^install it from https:/);
   assert.match(installCommand(fake(b, "linux", []).ctx, "pi"), /^npm install -g @earendil-works\/pi-coding-agent@\^\d/);
