@@ -25,6 +25,7 @@ Usage: ./install.sh [flags]
        ./install.sh backups [list | prune --keep <n> [--dry-run]]
        ./install.sh doctor [--fix] [--json]
        ./install.sh lanes [--dir <folder>]
+       ./install.sh report [--component <name>] [--open]
 
   --dry-run             show what would change, write nothing
   --plan                print the full plan (detection, profile, actions), write nothing
@@ -241,6 +242,8 @@ ps_preflight() {
   if [ "$PS_VERSION" = 1 ]; then ps_say "pi-setup: Node.js is not installed yet, so the version cannot be read. Run ./install.sh to set it up."; exit 0; fi
   PS_NEED="pi-setup needs Node.js >= 22.19 (pi needs it too)"
   if command -v node >/dev/null 2>&1; then PS_NEED="$PS_NEED (found $(node -p process.versions.node 2>/dev/null || echo unknown))"; fi
+
+  if [ "$PS_CMD" = report ]; then ps_die "$PS_NEED. Install Node.js to run ./install.sh report, or report at https://github.com/woksin/pi-setup/issues."; fi
 
   PS_OS="$(uname -s 2>/dev/null || echo unknown)"
   PS_BREW="" PS_PM="" PS_ARCH=""

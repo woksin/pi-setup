@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 44bcecad63a8d00df8f10af01552181cae6ea07f7e0397df7be222506893992b
+// pi-setup-source-sha256: 1d13beba337b9f9e538c4594125d6ede8e00b1a8530c9770f95f9f9a89bffc77
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -4926,11 +4926,11 @@ function npmPackageCheck(spec, piDir) {
   const at = full.indexOf("@", 1);
   const name = at < 0 ? full : full.slice(0, at);
   const expected = at < 0 ? "" : full.slice(at + 1);
-  const version2 = packageVersion(piDir, name);
-  const wrongVersion = /^\d+\.\d+\.\d+$/.test(expected) && version2 !== expected;
-  if (version2 && !wrongVersion) return void 0;
+  const version3 = packageVersion(piDir, name);
+  const wrongVersion = /^\d+\.\d+\.\d+$/.test(expected) && version3 !== expected;
+  if (version3 && !wrongVersion) return void 0;
   const id = `package:${name}`;
-  const detail = version2 ? `${spec}: installed ${version2}, expected ${expected}` : `${spec} is missing`;
+  const detail = version3 ? `${spec}: installed ${version3}, expected ${expected}` : `${spec} is missing`;
   return { id, title: id, status: PINNED_PACKAGES.some((p) => p.name === name) ? "fail" : "warn", detail, fix: `pi install ${spec}` };
 }
 function packageSource(value) {
@@ -6564,10 +6564,10 @@ var init_update = __esm({
 // src/doctor-probes.ts
 import { existsSync as existsSync31, readdirSync as readdirSync19, readFileSync as readFileSync29, writeFileSync as writeFileSync10 } from "node:fs";
 import { join as join52 } from "node:path";
-function pythonVersionCheck(ctx, version2) {
-  const match = /^Python (\d+)\.(\d+)\b/.exec(version2 ?? "");
+function pythonVersionCheck(ctx, version3) {
+  const match = /^Python (\d+)\.(\d+)\b/.exec(version3 ?? "");
   const supported = match && (Number(match[1]) > 3 || Number(match[1]) === 3 && Number(match[2]) >= 9);
-  return result2("python", supported ? "ok" : "warn", `${version2 || "Python version unknown"}; pi-phase requires Python >=3.9 on macOS/Linux`, installCommand(ctx, "python3"));
+  return result2("python", supported ? "ok" : "warn", `${version3 || "Python version unknown"}; pi-phase requires Python >=3.9 on macOS/Linux`, installCommand(ctx, "python3"));
 }
 async function python(ctx) {
   if (!ctx.which("python3")) return pythonVersionCheck(ctx);
@@ -6635,7 +6635,7 @@ async function gatherFacts(baseCtx, manifest) {
   const all = plists(ctx);
   const agents = all.filter((p) => !recorded.has(p.label));
   const guardian = all.some((p) => p.label.endsWith(".docker-guardian")) || manifest?.components?.["docker-guardian"]?.on === true;
-  const [providers2, models2, version2, gh, head, checkout, disks, launchd, docker, updates, pythonCheck] = await Promise.all([
+  const [providers2, models2, version3, gh, head, checkout, disks, launchd, docker, updates, pythonCheck] = await Promise.all([
     Promise.all(PROVIDER_IDS.map((id) => hasPi ? probeProvider(ctx, id).catch(() => ({ status: "unknown" })) : Promise.resolve({ status: "unknown" }))),
     hasPi ? listModels(ctx) : Promise.resolve({ catalog: null, code: null, stderr: "", timedOut: false }),
     hasPi ? ctx.run("pi", ["--version"], { timeoutMs: 8e3 }) : Promise.resolve(skippedRun),
@@ -6653,9 +6653,9 @@ async function gatherFacts(baseCtx, manifest) {
   ]);
   let pi;
   if (!hasPi) pi = { ...result2("pi", "fail", "not on PATH", installCommand(ctx, "pi")), fixable: "prereq" };
-  else if (models2.timedOut || version2.timedOut) pi = result2("pi", "warn", "timed out", `${setupCmd(ctx)} doctor`);
-  else if (models2.code !== 0 || version2.code !== 0) pi = result2("pi", "fail", models2.stderr.split("\n")[0] || version2.stderr.split("\n")[0] || "pi did not load", "run `pi` and read the startup errors");
-  else pi = result2("pi", "ok", `pi ${version2.stdout.trim().split("\n")[0]}`);
+  else if (models2.timedOut || version3.timedOut) pi = result2("pi", "warn", "timed out", `${setupCmd(ctx)} doctor`);
+  else if (models2.code !== 0 || version3.code !== 0) pi = result2("pi", "fail", models2.stderr.split("\n")[0] || version3.stderr.split("\n")[0] || "pi did not load", "run `pi` and read the startup errors");
+  else pi = result2("pi", "ok", `pi ${version3.stdout.trim().split("\n")[0]}`);
   const github = parseAuthStatus(`${gh.stdout}
 ${gh.stderr}`);
   const ghCheck = !ctx.which("gh") ? { ...result2("gh", "warn", "not on PATH", installCommand(ctx, "gh")), fixable: "prereq" } : !github.host ? result2("gh", "warn", "not logged in", "gh auth login") : result2("gh", "ok", `${github.login}@${github.host}`);
@@ -7264,6 +7264,7 @@ async function runDoctor(ctx, options, baseCtx, prompter) {
     for (const line of render2(report.checks)) ctx.out(line);
     const names = [...new Set(report.checks.map((c2) => c2.fixable).filter(Boolean))];
     ctx.out(`${counts(report.checks)}.${!options.fix && names.length ? ` \`${setupCmd(ctx)} doctor --fix\` can fix: ${names.map((n3) => n3 === "prereq" ? "missing tools (asks first; --install-prereqs to skip the question)" : n3).join(", ")}.` : ""}`);
+    if (exitCode) ctx.out(`Setup defect? Run \`${setupCmd(ctx)} report\` for versions and the reporting repository (https://github.com/woksin/pi-setup/issues).`);
   }
   return exitCode;
 }
@@ -7857,6 +7858,8 @@ function isAbsoluteOrHome(value) {
 function parseArgs(argv, cwd) {
   const options = {
     command: "install",
+    component: "pi-setup",
+    open: false,
     sub: "list",
     keep: 10,
     ref: "",
@@ -7881,7 +7884,7 @@ function parseArgs(argv, cwd) {
     without: []
   };
   let args = argv[0] === "install" ? argv.slice(1) : argv;
-  if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor" || args[0] === "lanes") {
+  if (args[0] === "uninstall" || args[0] === "update" || args[0] === "backups" || args[0] === "doctor" || args[0] === "lanes" || args[0] === "report") {
     options.command = args[0];
     args = args.slice(1);
     if (options.command === "backups" && (args[0] === "list" || args[0] === "prune")) {
@@ -7893,6 +7896,7 @@ function parseArgs(argv, cwd) {
   for (let i2 = 0; i2 < args.length; i2++) {
     const arg = args[i2];
     if (arg === "--dir" && options.command !== "lanes") return { ok: false, error: `--dir is not valid for ${options.command}` };
+    if ((arg === "--component" || arg === "--open") && options.command !== "report") return { ok: false, error: `${arg} is not valid for ${options.command}` };
     if (arg === "--fix" && options.command !== "doctor") return { ok: false, error: `--fix is not valid for ${options.command}` };
     if (allowed && (arg in BOOLEAN_FLAGS || VALUE_FLAGS.has(arg)) && !allowed.includes(arg)) {
       return { ok: false, error: `${arg} is not valid for ${options.command}` };
@@ -7925,7 +7929,8 @@ function parseArgs(argv, cwd) {
         (arg === "--with" ? options.with : options.without).push(value);
         continue;
       }
-      if (arg === "--user") options.user = value;
+      if (arg === "--component") options.component = value;
+      else if (arg === "--user") options.user = value;
       else if (arg === "--profile") options.profile = value;
       else if (arg === "--dir") options.dir = isAbsoluteOrHome(value) ? value : `${cwd}/${value}`;
       else options.reposRoot = isAbsoluteOrHome(value) ? value : `${cwd}/${value}`;
@@ -7951,6 +7956,7 @@ var init_args = __esm({
        ./install.sh backups [list | prune --keep <n> [--dry-run]]
        ./install.sh doctor [--fix] [--json]
        ./install.sh lanes [--dir <folder>]
+       ./install.sh report [--component <name>] [--open]
 
   --dry-run             show what would change, write nothing
   --plan                print the full plan (detection, profile, actions), write nothing
@@ -7969,11 +7975,12 @@ var init_args = __esm({
   --edit-shell-profile  append the PATH snippet to your shell profile (a fresh install does this by default)
   --no-edit-shell-profile  never touch your shell profile
   --help                this text`;
-    VALUE_FLAGS = /* @__PURE__ */ new Set(["--dir", "--user", "--repos-root", "--profile", "--ref", "--keep", "--with", "--without"]);
+    VALUE_FLAGS = /* @__PURE__ */ new Set(["--dir", "--user", "--repos-root", "--profile", "--ref", "--keep", "--with", "--without", "--component"]);
     COMMON = ["--help", "--dry-run"];
     ALLOWED = {
       install: void 0,
       lanes: ["--help", "--dir"],
+      report: ["--help", "--component", "--open"],
       doctor: ["--help", "--json", "--fix", "--install-prereqs", "--no-install-prereqs"],
       uninstall: [...COMMON, "--yes", "--no-launchd"],
       update: [...COMMON, "--yes", "--skip-npm", "--ref"],
@@ -7991,6 +7998,7 @@ var init_args = __esm({
       "--plan": "plan",
       "--json": "json",
       "--fix": "fix",
+      "--open": "open",
       "--help": "help"
     };
   }
@@ -8052,6 +8060,111 @@ var init_reconcile = __esm({
   "src/reconcile.ts"() {
     init_manifest();
     DIFF_LINES = 200;
+  }
+});
+
+// src/setup-issue.ts
+import { readFileSync as readFileSync35, readdirSync as readdirSync20 } from "node:fs";
+import { arch, release } from "node:os";
+import { join as join61 } from "node:path";
+function reportRepo(component) {
+  if (Object.values(REPORT_REPOS).includes(component)) return component;
+  const name = component.replace(/^@[^/]+\//, "");
+  const repo = Object.hasOwn(REPORT_REPOS, name) ? REPORT_REPOS[name] : void 0;
+  if (component.startsWith("@") && !repo?.startsWith(component.slice(1).split("/")[0] + "/")) return void 0;
+  return repo;
+}
+function readJson3(path2) {
+  try {
+    return JSON.parse(readFileSync35(path2, "utf8"));
+  } catch {
+    return void 0;
+  }
+}
+function version2(value) {
+  return typeof value === "string" && /^v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(value) ? value : void 0;
+}
+async function setupVersion(ctx) {
+  const source = readJson3(join61(ctx.home, ".pi/agent/.pi-setup/manifest.json"))?.source;
+  if (version2(source?.release)) return source.release;
+  if (typeof source?.commit === "string" && /^[a-f0-9]{7,40}$/.test(source.commit)) return source.commit;
+  const tag = await ctx.run("git", ["describe", "--tags", "--exact-match", "HEAD"], { cwd: ctx.repoDir, timeoutMs: 2e3 });
+  if (tag.code === 0 && version2(tag.stdout.trim())) return tag.stdout.trim();
+  const commit = await ctx.run("git", ["rev-parse", "HEAD"], { cwd: ctx.repoDir, timeoutMs: 2e3 });
+  return commit.code === 0 && /^[a-f0-9]{40}$/.test(commit.stdout.trim()) ? commit.stdout.trim() : "unknown";
+}
+function packageVersions(ctx) {
+  const dir = join61(ctx.home, ".pi/agent/npm/node_modules/@woksin");
+  let names;
+  try {
+    names = readdirSync20(dir).sort();
+  } catch {
+    return ["woksin packages: none found"];
+  }
+  return names.filter((name) => /^[a-z0-9][a-z0-9-]*$/.test(name)).map((name) => `@woksin/${name}: ${version2(readJson3(join61(dir, name, "package.json"))?.version) ?? "unknown"}`);
+}
+async function runReport(ctx, options) {
+  const target = reportRepo(options.component);
+  if (!target) throw new SetupError(`unknown report component '${options.component}'; valid names: ${Object.keys(REPORT_REPOS).join(", ")}`);
+  const pi = await ctx.run("pi", ["--version"], { timeoutMs: 3e3, env: { PI_OFFLINE: "1" } });
+  const versions = [
+    `pi-setup: ${await setupVersion(ctx)}`,
+    `pi: ${pi.code === 0 ? version2(pi.stdout.trim()) ?? "unknown" : "unavailable"}`,
+    ...packageVersions(ctx),
+    `node: ${ctx.nodeVersion}`,
+    `OS: ${ctx.platform} ${release()} (${arch()})`
+  ];
+  const block2 = `## Versions
+
+\`\`\`text
+${versions.join("\n")}
+\`\`\``;
+  ctx.out(`Target repository: ${target}
+
+${block2}`);
+  ctx.out("Search for duplicates first. Redact secrets, tokens, personal paths, private repo names and session content before sharing.");
+  if (!options.open) return 0;
+  const body = `## What happened
+
+## Expected
+
+## Exact command and output excerpt (redacted)
+
+${block2}`;
+  const result3 = await ctx.run("gh", ["issue", "create", "--repo", target, "--web", "--body", body], { inherit: true, timeoutMs: 15e3 });
+  if (result3.code !== 0 || result3.timedOut) throw new SetupError("could not open the issue; check that gh is installed and logged in, or open https://github.com/" + target + "/issues");
+  return 0;
+}
+var REPORT_REPOS;
+var init_setup_issue = __esm({
+  "src/setup-issue.ts"() {
+    init_types();
+    REPORT_REPOS = {
+      "pi-setup": "woksin/pi-setup",
+      installer: "woksin/pi-setup",
+      agent: "woksin/pi-setup",
+      extensions: "woksin/pi-setup",
+      lib: "woksin/pi-setup",
+      bin: "woksin/pi-setup",
+      skills: "woksin/pi-setup",
+      agents: "woksin/pi-setup",
+      profiles: "woksin/pi-setup",
+      "pi-questions": "woksin/pi-setup",
+      "pi-jobs": "woksin/pi-jobs",
+      "pi-recover": "woksin/pi-recover",
+      "pi-context-budget": "woksin/pi-context-budget",
+      "pi-orch": "woksin/pi-orch",
+      "pi-anthropic-auth": "gotgenes/pi-anthropic-auth",
+      "pi-subagents": "tintinweb/pi-subagents",
+      piolium: "vigolium/piolium",
+      donsetch: "dondai44423/donsetch",
+      "pi-browser-use": "0xPlayerOne/pi-browser-use",
+      "pi-mcp-adapter": "nicobailon/pi-mcp-adapter",
+      "pi-web-access": "nicobailon/pi-web-access",
+      pi: "earendil-works/pi",
+      "pi-coding-agent": "earendil-works/pi",
+      codescene: "codescene-oss/codescene-mcp-server"
+    };
   }
 });
 
@@ -9930,8 +10043,8 @@ var run_exports = {};
 __export(run_exports, {
   main: () => main2
 });
-import { existsSync as existsSync38, readdirSync as readdirSync20, readFileSync as readFileSync35 } from "node:fs";
-import { join as join61 } from "node:path";
+import { existsSync as existsSync38, readdirSync as readdirSync21, readFileSync as readFileSync36 } from "node:fs";
+import { join as join62 } from "node:path";
 function pickProfile(options, activeBefore, ready3, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
     if (!names.includes(options.profile)) {
@@ -9976,10 +10089,10 @@ function extraRows(ctx, options, saved2, detection, manifest) {
   };
 }
 function savedPreapproval(ctx) {
-  return preapprovalDefault(join61(ctx.home, ".local/share/pi-setup/lanes/templates"));
+  return preapprovalDefault(join62(ctx.home, ".local/share/pi-setup/lanes/templates"));
 }
 function resolveAll(ctx, options, detection, saved2, answers, manifest, prompted = false) {
-  const piDir = join61(ctx.home, ".pi", "agent");
+  const piDir = join62(ctx.home, ".pi", "agent");
   const settings3 = resolveSettings({
     flagUser: answers.user ?? options.user,
     flagRoot: answers.root ?? options.reposRoot,
@@ -10046,7 +10159,7 @@ function resolveAll(ctx, options, detection, saved2, answers, manifest, prompted
     ...settings3.warnings,
     ...componentNotes.filter((n3) => n3.startsWith("warning:")).map((n3) => n3.slice(9)),
     ...detection.warnings,
-    ...pinWarnings(pinnedModels(join61(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
+    ...pinWarnings(pinnedModels(join62(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
     ...kimi ? [kimi] : []
   ];
   return { settings: settings3, choice, actions, warnings, profile: profile3, ready: ready3, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts: conflicts2, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
@@ -10086,6 +10199,7 @@ async function main2(argv, baseCtx, injected) {
   }
 }
 async function runCommand(ctx, options, prompter, baseCtx) {
+  if (options.command === "report") return runReport(ctx, options);
   if (options.command === "lanes") return runLanesFlow(ctx, options, prompter);
   if (options.command === "doctor") return runDoctor(ctx, options, baseCtx, prompter);
   if (options.command === "uninstall") return runUninstall(ctx, options, prompter);
@@ -10108,7 +10222,7 @@ function addToolWarnings(r2, detection, toolErrors, ctx) {
 }
 async function guidedResolution({ ctx, options, detection, saved: saved2, manifest, p, toolErrors }) {
   const profiles = loadProfiles(ctx.repoDir);
-  const activeBefore = readActive(join61(ctx.home, ".pi/agent"));
+  const activeBefore = readActive(join62(ctx.home, ".pi/agent"));
   const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, profileNames(ctx.repoDir));
   let resolved;
   const result3 = await runRails(p, {
@@ -10149,8 +10263,8 @@ async function guidedResolution({ ctx, options, detection, saved: saved2, manife
   return result3 === CANCEL ? CANCEL : { r: resolved, editPath: result3.editPath };
 }
 async function execute(ctx, options, prompter, baseCtx) {
-  const piDir = join61(ctx.home, ".pi", "agent");
-  const saved2 = readSettings(join61(piDir, "user.json"));
+  const piDir = join62(ctx.home, ".pi", "agent");
+  const saved2 = readSettings(join62(piDir, "user.json"));
   const manifest = readManifest(piDir);
   const readOnly = options.dryRun || options.plan;
   const names = profileNames(ctx.repoDir);
@@ -10302,6 +10416,7 @@ var init_run = __esm({
     init_install_log();
     init_doctor_probes();
     init_update();
+    init_setup_issue();
     init_profiles();
     init_report();
     init_settings();
@@ -10316,14 +10431,14 @@ var init_run = __esm({
     });
     pathInProfile = (ctx) => {
       try {
-        return readFileSync35(shellPath(ctx).file, "utf8").split("\n").includes(shellPath(ctx).snippet);
+        return readFileSync36(shellPath(ctx).file, "utf8").split("\n").includes(shellPath(ctx).snippet);
       } catch {
         return false;
       }
     };
     readdirSyncSafe = (dir) => {
       try {
-        return readdirSync20(dir);
+        return readdirSync21(dir);
       } catch {
         return [];
       }
@@ -10332,11 +10447,11 @@ var init_run = __esm({
 });
 
 // src/cli.ts
-import { dirname as dirname17, join as join62 } from "node:path";
+import { dirname as dirname17, join as join63 } from "node:path";
 import { fileURLToPath } from "node:url";
 var MIN = [22, 19, 0];
-function nodeTooOld(version2) {
-  const have = version2.replace(/^v/, "").split(".").map(Number);
+function nodeTooOld(version3) {
+  const have = version3.replace(/^v/, "").split(".").map(Number);
   for (let i2 = 0; i2 < MIN.length; i2++) {
     if ((have[i2] ?? 0) !== MIN[i2]) return (have[i2] ?? 0) < MIN[i2];
   }
@@ -10347,7 +10462,7 @@ if (nodeTooOld(process.version)) {
 `);
   process.exit(1);
 }
-var repoDir = join62(dirname17(fileURLToPath(import.meta.url)), "..", "..");
+var repoDir = join63(dirname17(fileURLToPath(import.meta.url)), "..", "..");
 var { realContext: realContext2 } = await Promise.resolve().then(() => (init_context(), context_exports));
 var { main: main3 } = await Promise.resolve().then(() => (init_run(), run_exports));
 process.exitCode = await main3(process.argv.slice(2), realContext2(repoDir));

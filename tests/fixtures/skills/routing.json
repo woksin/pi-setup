@@ -1,6 +1,8 @@
 {
   "note": "Human-reviewed routing intent. Deterministic tests check schema and coverage only; they do not model an LLM.",
   "cases": [
+    { "request": "The setup installer reproducibly prints a wrong success message; report it", "load": ["report-setup-issue"], "notLoad": [], "rationale": "A reproducible setup-owned defect." },
+    { "request": "Fix a bug in my project's checkout handler", "load": [], "notLoad": ["report-setup-issue"], "rationale": "Project code is not owned by the setup." },
     { "request": "sol loop", "load": ["sol-loop"], "notLoad": [], "rationale": "Explicit invocation phrase." },
     { "request": "Run a sol loop on this branch before I publish", "load": ["sol-loop"], "notLoad": [], "rationale": "The user asks for the loop by name." },
     { "request": "Please review my diff", "load": [], "notLoad": ["sol-loop"], "rationale": "An ordinary review request does not name the loop." },
