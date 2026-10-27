@@ -21,6 +21,8 @@ git clone https://github.com/woksin/pi-setup && cd pi-setup
 ./install.sh             # guided setup; overwritten files are backed up first
 ```
 
+**New to pi and on a Mac? Follow [Try pi-setup on your Mac](TRY-ON-MAC.md), a 10-minute step-by-step guide.**
+
 Prerequisites: none. Run `./install.sh`. It checks what your machine has, shows what it will install and asks once before it starts. It sets up Node.js, the tools below and pi itself. The full installer reference follows below (see [The guided installer](#the-guided-installer)).
 
 ## Contents
