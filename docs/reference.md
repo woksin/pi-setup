@@ -33,11 +33,11 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 
 ## Lanes and messaging (opt-in)
 
-Lanes are several coordinated sessions. See [Lanes](../README.md#lanes-opt-in).
+Lanes are several coordinated sessions. See [Lanes](../README.md#parallel-sessions-lanes).
 
 | Tool | Purpose | Help | Source |
 |---|---|---|---|
-| `lanes` | Creates and starts lanes and sends messages between them. Installed with `./install.sh --with lanes`. | `lanes --help` | [Lanes](../README.md#lanes-opt-in) |
+| `lanes` | Creates and starts lanes and sends messages between them. Installed with `./install.sh --with lanes`. | `lanes --help` | [Lanes](../README.md#parallel-sessions-lanes) |
 | `inbox-watch` | Prints new message files addressed to a lane; made for a single `job_watch`. | `inbox-watch --help` | [source](../agent/bin/inbox-watch) |
 | `lane-status` | Records whether a lane is working, waiting or closed. | `lane-status --help` | [source](../agent/bin/lane-status) |
 | `session-watchdog` | Notify-only detector for stuck pi sessions. Never kills anything. | `session-watchdog --help` | [source](../agent/bin/session-watchdog) |

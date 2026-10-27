@@ -19,7 +19,7 @@ export const COMPONENTS: ComponentDef[] = [
   { id: "disk-growth", label: "disk-growth alert", explain: "every minute: alerts when free disk drops 5 GiB within 5 minutes and names the top writers (macOS launchd)", service: true },
   { id: "codescene", label: "CodeScene", explain: "Code Health MCP server and policy in AGENTS.md (needs cs-mcp and a token)", service: false },
   { id: "cratis", label: "Cratis conventions", explain: "Cratis rules, cratis-cli guard and agent, and the Cratis sections of AGENTS.md", service: false },
-  { id: "lanes", label: "lanes", explain: "the lanes command: a coordinator and several pi sessions in git worktrees, talking through message files", service: false },
+  { id: "lanes", label: "lanes", explain: "run several pi sessions in parallel, coordinated by one session", service: false },
   { id: "web", label: "browser and web tools", explain: "pi-web-access and pi-browser-use (the browser may download on first use)", service: false },
 ];
 
@@ -44,10 +44,17 @@ export interface ResolveInput {
   answers?: Record<string, boolean>;
   /** manifest.components. */
   saved?: Record<string, { on: boolean }>;
+  /** A manifest exists, including installs from before component choices were recorded. */
+  existingInstall?: boolean;
   /** State of an install from before choices were recorded (non-services only). */
   current?: Record<string, boolean>;
   detected: Record<string, boolean>;
   interactive: boolean;
+}
+
+function detectedChoice(id: ComponentId, input: ResolveInput): ComponentChoice[string] {
+  if (id === "lanes" && input.existingInstall) return { on: false, source: "default" };
+  return { on: Boolean(input.detected[id]), source: "detected" };
 }
 
 /**
@@ -64,7 +71,7 @@ export function resolveComponents(input: ResolveInput): ComponentChoice {
     else if (input.saved?.[id]) out[id] = { on: input.saved[id].on === true, source: "saved" };
     else if (!def.service && input.current?.[id]) out[id] = { on: true, source: "installed" };
     else if (def.service && !input.interactive) out[id] = { on: false, source: "default" };
-    else out[id] = { on: Boolean(input.detected[id]), source: "detected" };
+    else out[id] = detectedChoice(id, input);
   }
   return out;
 }
@@ -120,6 +127,12 @@ function hasCratisDir(root: string): boolean {
   return false;
 }
 
+function lanesBackendFound(ctx: Pick<Ctx, "platform" | "which" | "env">): boolean {
+  if (ctx.which("tmux")) return true;
+  if (ctx.platform !== "darwin") return false;
+  return ["Apple_Terminal", "iTerm.app"].includes(ctx.env.TERM_PROGRAM ?? "") || Boolean(ctx.which("osascript"));
+}
+
 export function detectDefaults(
   ctx: Pick<Ctx, "platform" | "which" | "env">, detection: Pick<Detection, "github">, reposRoot: string,
 ): Record<string, boolean> {
@@ -134,12 +147,12 @@ export function detectDefaults(
     codescene: Boolean(ctx.which("cs-mcp")) || Boolean(ctx.env.CS_ACCESS_TOKEN),
     cratis,
     web: true,
-    lanes: false,
+    lanes: lanesBackendFound(ctx),
   };
 }
 
 /** One line explaining the initial value, e.g. `docker found; restarts …` or `off: no Cratis repos found`. */
-export function hintFor(def: ComponentDef, on: boolean): string {
+export function hintFor(def: ComponentDef, on: boolean, source: ComponentSource = "detected"): string {
   const why: Record<string, [string, string]> = {
     "docker-guardian": ["docker found", "no docker found"],
     cleanup: ["a scheduler is available", "no scheduler found"],
@@ -148,8 +161,9 @@ export function hintFor(def: ComponentDef, on: boolean): string {
     codescene: ["cs-mcp or a token found", "no cs-mcp or token found"],
     cratis: ["Cratis repos found", "no Cratis repos found"],
     web: ["on by default", "off"],
-    lanes: ["explicitly selected", "opt-in"],
+    lanes: ["on: backend found", "no tmux or macOS Terminal found"],
   };
+  if (def.id === "lanes" && source !== "detected") return `${on ? "on" : "off"}: ${source === "flag" ? "set by flag" : "your choice"}; ${def.explain}`;
   const [yes, no] = why[def.id];
   return on ? `${yes}; ${def.explain}` : `off: ${no}; ${def.explain}`;
 }

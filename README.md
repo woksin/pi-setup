@@ -114,14 +114,14 @@ Doctor fails missing required tools/packages and warns about missing optional to
 
 In a terminal, `./install.sh` opens a short welcome and one first choice:
 
-- **Use our recommended setup** (the default; on a rerun it reads **Update with your current choices**). It uses what detection finds and asks only what it cannot settle itself, such as your GitHub login or repositories folder. The recommended extras are the detected defaults: `docker-guardian` (macOS with Docker), `cleanup`, `secret-sweep` (macOS with `gitleaks`), `disk-growth` (macOS), `codescene` (when `cs-mcp` or `CS_ACCESS_TOKEN` is found), `cratis` (when Cratis repositories are found) and web tools. `lanes` is off.
+- **Use our recommended setup** (the default; on a rerun it reads **Update with your current choices**). It uses what detection finds and asks only what it cannot settle itself, such as your GitHub login or repositories folder. The recommended extras are the detected defaults: `docker-guardian` (macOS with Docker), `cleanup`, `secret-sweep` (macOS with `gitleaks`), `disk-growth` (macOS), `codescene` (when `cs-mcp` or `CS_ACCESS_TOKEN` is found), `cratis` (when Cratis repositories are found), web tools and `lanes` (when tmux or macOS Terminal/iTerm is found).
 - **Customise step by step** asks every step: GitHub login, repositories folder, AI logins, profile and extras.
 
 Each question shows "Step n of N". Steps already answered by flags such as `--user`, `--repos-root` or `--profile` are skipped and not counted.
 
 1. **AI logins** shows Claude, ChatGPT and Kimi with ✓ or ✗. "Log in now, then check again" lets you run `pi` and `/login` and come back without quitting.
 2. **Profile** lists every profile with what it needs. Profiles whose logins are missing are shown but cannot be picked, and the recommended one comes first. With no logins yet, `balanced` stays available so you can install now and run `./install.sh --profile auto` after logging in.
-3. **Review** shows everything that will change before anything is written. Choose Install, Change a step…, Show every file or Cancel. Files you edited are handled here. When `~/.local/bin` or `~/.pi/agent/bin` is missing from your PATH, "Add them to PATH in your shell profile" is pre-selected; your shell profile is only changed when you choose Install with that line selected.
+3. **Review** shows everything that will change before anything is written, including a separate lanes line explaining parallel sessions and why it is on or off. Toggle it like other extras through Change a step… → Extras. Choose Install, Change a step…, Show every file or Cancel. Files you edited are handled here. When `~/.local/bin` or `~/.pi/agent/bin` is missing from your PATH, "Add them to PATH in your shell profile" is pre-selected; your shell profile is only changed when you choose Install with that line selected.
 4. **Installing** shows one progress line per phase, then a health summary that says "Installed, with N things to finish" if something still needs you.
 5. **What's next** lists: open a new terminal if PATH changed, start `pi`, log in to any missing provider, switch profiles with `pi-profile list` or `./install.sh --profile <name>`, and check with `./install.sh doctor`. The lanes offer follows as an optional step.
 
@@ -196,9 +196,11 @@ For temporary-HOME testing use `--no-launchd`. Loading/unloading launchd is also
 
 Optional extras: `--with <id>` / `--without <id>` (or the wizard's "Extras" question) turn on `docker-guardian`, `cleanup`, `secret-sweep`, `disk-growth`, `codescene`, `cratis`, `web` or `lanes`. Your choice is saved in the manifest and reused on later runs; turning one off removes what pi-setup added and leaves files you changed. The schedules (`docker-guardian`, `cleanup`, `secret-sweep`, `disk-growth`) are only installed when you choose them (the guided installer pre-selects the supported ones in its Review; unattended runs need `--with`): on macOS they are written to `~/Library/LaunchAgents/com.<user>.<name>.plist` and loaded with `launchctl bootstrap`; `cleanup` on Linux uses a systemd user timer. `codescene` needs `cs-mcp` on PATH and `CS_ACCESS_TOKEN` in your shell profile; pi-setup never stores the token.
 
-### Lanes (opt-in)
+### Parallel sessions (lanes)
 
-Install with `./install.sh --with lanes`, then run `lanes init <dir>` to create a coordination folder.
+On fresh installs, lanes is on by default when tmux or macOS Terminal/iTerm is found, including with `--yes`. Opt out with `./install.sh --without lanes` or toggle lanes in Review via Change a step… → Extras. With no backend it defaults off and Review explains why; `./install.sh --with lanes` explicitly installs it anyway. Your choice is saved for reruns. Existing installs with no saved lanes choice stay off unless you opt in.
+
+Installation only installs the tool: nothing starts or is trusted. Run `lanes init <dir>` to create a coordination folder, or `./install.sh lanes` for guided setup. MCP preapproval stays off unless you explicitly opt in.
 For hand-started sessions, `lanes adopt --dir <root> --exclude-tty ttys004 --inventory <file>` previews a config diff; add `--write` to merge atomically without controlling sessions or moving messages.
 For guided setup, run `./install.sh lanes [--dir <folder>]`; it selects local repositories and issues or goals, creates locked worktrees, and offers to open the coordinator.
 Add work with `lanes --dir <dir> add L1 --repo owner/name --issue 123` (clone the repository first).

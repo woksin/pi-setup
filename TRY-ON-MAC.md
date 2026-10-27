@@ -18,10 +18,10 @@ In this guide, "run" means: copy the command, paste it into Terminal with `⌘ V
 
 ## 2. Install
 
-Run the recommended setup with parallel sessions turned on:
+Run the recommended setup (parallel sessions are pre-selected when a backend is found):
 
 ```sh
-curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh -s -- --with lanes
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh
 ```
 
 If macOS asks to install the **command line developer tools**, click **Install**.
@@ -33,6 +33,8 @@ If macOS asks to install the **command line developer tools**, click **Install**
 - On the review screen, keep "Add them to PATH in your shell profile" selected if it is shown, and choose **Install**.
 
 At the end it shows **What's next**. Keep that window open for now.
+
+To opt out of parallel sessions (lanes), use Review → Change a step… → Extras, or add `-s -- --without lanes` after `sh`. Installing the tool does not start any sessions; step 7 is optional.
 
 ## 3. Make the new tools available
 
@@ -62,7 +64,7 @@ Both should print a version number. If one says `command not found`, see "If som
 Run:
 
 ```sh
-cd ~/pi-setup && ./install.sh --with lanes --profile auto
+cd ~/pi-setup && ./install.sh --profile auto
 ```
 
 This picks the right model setup for the logins you have. Then check the setup:
@@ -114,10 +116,10 @@ It asks which repositories and issues or goals to work on, prepares a separate w
 
 ## If something goes wrong
 
-- **`command not found` after step 3:** quit Terminal completely (`⌘ Q`), open it again and retry. If it still fails, run step 3 again, then `cd ~/pi-setup && ./install.sh --with lanes`.
+- **`command not found` after step 3:** quit Terminal completely (`⌘ Q`), open it again and retry. If it still fails, run step 3 again, then `cd ~/pi-setup && ./install.sh`.
 - Run `cd ~/pi-setup && ./install.sh doctor`. It tells you what is missing and how to fix it.
 - For setup bugs, run `cd ~/pi-setup && ./install.sh report` and open an issue at https://github.com/woksin/pi-setup/issues. Search for duplicates first; remove secrets, tokens, personal paths, private repo names and session content before sharing.
-- Re-running `./install.sh --with lanes` is always safe: it continues where it stopped.
+- Re-running `./install.sh` is always safe: it continues where it stopped.
 - The installer writes a log to `~/.local/state/pi-setup/install.log`. Send it, together with the doctor output, to whoever shared this guide with you.
 
 ## Update later
@@ -125,7 +127,7 @@ It asks which repositories and issues or goals to work on, prepares a separate w
 For an install made with the one-liner, re-run the same command to download and verify the latest release:
 
 ```sh
-curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh -s -- --with lanes
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh
 ```
 
 If you used a git clone instead, run `cd ~/pi-setup && ./install.sh update`.

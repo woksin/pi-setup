@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { runLanesFlow } from "./lanes-flow.ts";
-import { applyGuided, applyPlain, guidedNotes, lanesOffered, offerLanesSetup } from "./finish.ts";
+import { applyGuided, applyPlain, guidedNotes, lanesOffered } from "./finish.ts";
 import type { ApplyRun } from "./finish.ts";
 import { preapprovalDefault } from "./lanes/config.ts";
 import { describe, needsNpm, readActive } from "./apply.ts";
@@ -35,7 +35,7 @@ import {
   chooseProfile, kimiNote, loadProfiles, overlayFor, pinnedModels, pinWarnings, profileNames, profilesDir,
 } from "./profiles.ts";
 import type { Choice } from "./profiles.ts";
-import { KEPT_EDITS, summaryLines } from "./report.ts";
+import { KEPT_EDITS, lanesNextLines, summaryLines } from "./report.ts";
 import { readSettings, resolveSettings } from "./settings.ts";
 import type { ResolvedSettings } from "./settings.ts";
 import { CANCEL, SetupError } from "./types.ts";
@@ -107,11 +107,11 @@ function extraRows(
   const flags = flagMap(options);
   return (root) => {
     const detected = detectDefaults(ctx, detection, root);
-    const initial = resolveComponents({ flags, saved: manifest?.components, current: currentState(ctx), detected, interactive: true });
+    const initial = resolveComponents({ flags, saved: manifest?.components, existingInstall: Boolean(manifest), current: currentState(ctx), detected, interactive: true });
     return COMPONENTS.map((def) => {
       const why = available(def.id, ctx);
       return {
-        id: def.id, label: def.label, hint: hintFor(def, initial[def.id].on), initial: initial[def.id].on,
+        id: def.id, label: def.label, hint: hintFor(def, initial[def.id].on, initial[def.id].source), initial: initial[def.id].on,
         unavailable: why === true ? undefined : why, fixed: def.id in flags,
       };
     });
@@ -149,7 +149,7 @@ function resolveAll(
   const choice: Choice = answers.profile ? { name: picked.name, reason: "you picked it", provisional: false, source: "prompt" } : picked;
   const profile = profiles.find((p) => p.name === choice.name);
   const components = resolveComponents({
-    flags: flagMap(options), answers: answers.components, saved: manifest?.components, current: currentState(ctx),
+    flags: flagMap(options), answers: answers.components, saved: manifest?.components, existingInstall: Boolean(manifest), current: currentState(ctx),
     detected: detectDefaults(ctx, detection, settings.reposRoot), interactive: Boolean(answers.components) || isInteractive(options, ctx.env, ctx.stdinTTY, ctx.stdoutTTY),
   });
   const componentNotes: string[] = [];
@@ -354,7 +354,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   const result = prompter ? await applyGuided(run, prompter) : await applyPlain(run);
   const noLogins = plainReal && r.ready.size === 0;
   const shown = prompter || options.json ? [] : summary
-    .filter((l) => l.startsWith("Profile:") || (l.startsWith("Kimi") && !noLogins) || (l.startsWith("warning:") && !(noLogins && l.includes("no models yet"))) || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l))
+    .filter((l) => l.startsWith("Profile:") || l.startsWith("lanes:") || (l.startsWith("Kimi") && !noLogins) || (l.startsWith("warning:") && !(noLogins && l.includes("no models yet"))) || l === KEPT_EDITS || l.startsWith("AGENTS.md has no") || r.componentNotes.includes(l))
     .map((l) => (l.startsWith("Profile:") && noLogins && !r.choice.source.startsWith("flag") ? `Profile: ${r.choice.name} (final choice after you log in)` : l));
   let done: string | undefined;
   if (result.code === 0 && plainReal && !options.plan) {
@@ -367,7 +367,6 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
   if (prompter && result.code === 0 && !options.dryRun) {
     pending = guidedNotes(prompter, { ctx, options, detection, profile: r.profile, ready: r.ready, pathMissing, editPath, offerLanes: offer });
   }
-  if (prompter && offer) await offerLanesSetup(ctx, options, prompter);
   return finish({ ctx, baseCtx, options, r, detection, lines: shown, code: result.code, prompter, wrote: result.wrote, pending, done });
 }
 
@@ -399,6 +398,7 @@ function plainFinish(e: PlainEnd): { lines: string[]; done: string } {
     steps.push(`After logging in, run: ${home} --profile auto`);
   }
   steps.push("Start with: pi");
+  steps.push(...lanesNextLines(r.components.lanes.on));
   const backups = readdirSyncSafe(backupsDir(e.piDir));
   const lines = [
     e.wrote ? (backups.length ? `Replaced files are backed up in ~/.pi/agent/.pi-setup/backups/. Undo any time: ${home} uninstall` : `Nothing needed backing up. Undo any time: ${home} uninstall`) : "",

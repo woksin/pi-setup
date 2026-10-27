@@ -1,6 +1,6 @@
 import { PROVIDER_IDS, PROVIDER_LABELS } from "./types.ts";
 import type { Action, Detection, ProfileMeta } from "./types.ts";
-import { COMPONENTS } from "./components.ts";
+import { COMPONENTS, hintFor } from "./components.ts";
 import type { ComponentChoice } from "./components.ts";
 import type { Choice } from "./profiles.ts";
 import type { ResolvedSettings } from "./settings.ts";
@@ -71,7 +71,10 @@ export function summaryLines(args: {
   );
   if (args.components) {
     const word = (id: string): string => `${COMPONENTS.find((c) => c.id === id)?.label} ${args.components?.[id]?.on ? "on" : "off"}`;
-    lines.push(`Extras: ${COMPONENTS.map((c) => word(c.id)).join(", ")}`);
+    lines.push(`Extras: ${COMPONENTS.filter((c) => c.id !== "lanes").map((c) => word(c.id)).join(", ")}`);
+    const lanes = args.components.lanes;
+    const def = COMPONENTS.find((c) => c.id === "lanes")!;
+    lines.push(`lanes: ${hintFor(def, lanes.on, lanes.source)}`);
   }
   const kept = actions.filter((a) => a.op === "keep");
   if (kept.some((a) => /\/\.pi\/agent\/(agents\/[^/]+\.md|workflows\/[^/]+\.js)$/.test(a.path))) {
@@ -96,6 +99,10 @@ export interface NextSteps {
 }
 
 /** The guided flow's "What's next" note, one action per line. */
+export function lanesNextLines(installed: boolean): string[] {
+  return installed ? ["Optional: set up parallel sessions now: ./install.sh lanes"] : [];
+}
+
 export function whatsNextLines(next: NextSteps): string[] {
   const lines: string[] = [];
   if (next.pathMissing) {
@@ -106,6 +113,6 @@ export function whatsNextLines(next: NextSteps): string[] {
   if (next.logins.length) lines.push(`Log in: in pi, type /login for ${next.logins.join(", ")}`);
   lines.push("Switch profile: pi-profile list, or ./install.sh --profile <name>");
   lines.push("Check health any time: ./install.sh doctor");
-  if (next.lanesOffered) lines.push("Optional: set up a coordinator and lanes (offered next; or later with ./install.sh lanes)");
+  lines.push(...lanesNextLines(Boolean(next.lanesOffered)));
   return lines;
 }

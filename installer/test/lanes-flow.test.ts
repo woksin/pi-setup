@@ -71,23 +71,29 @@ test("checkout discovery handles two levels, validates origins and caps results"
   assert.equal(listCheckouts(home, 1).length, 1);
 });
 
-test("post-install lanes offer is separate, default-no and gated on a real interactive install", async () => {
-  for (const mode of ["decline", "cancel", "yes", "dry", "plan", "without", "existing", "accept-cancel"]) {
+test("installing lanes only offers the setup command, never starts setup or trusts MCP", async () => {
+  for (const mode of ["guided", "yes", "dry", "plan", "without", "existing"]) {
     const home = assertTempHome(tempDir("lanes-offer")); const repos = join(home, "repos"); const questions: { message: string; initial: boolean }[] = [];
+    const notes: string[] = []; const lines: string[] = [];
     if (mode === "existing") { mkdirSync(join(repos, ".lanes"), { recursive: true }); writeFileSync(join(repos, ".lanes/lanes.json"), "{}"); }
-    const ctx = testCtx(home, { stdinTTY: true, stdoutTTY: true, which: (name) => ["python3", "git"].includes(name) ? `/stub/${name}` : undefined });
-    const p: Prompter = { intro: () => {}, outro: () => {}, note: () => {}, spinner: () => ({ start: () => {}, stop: () => {} }),
+    const ctx = testCtx(home, { stdinTTY: true, stdoutTTY: true, which: (name) => ["python3", "git"].includes(name) ? `/stub/${name}` : undefined }, lines);
+    const p: Prompter = { intro: () => {}, outro: () => {}, note: (body) => notes.push(body), spinner: () => ({ start: () => {}, stop: () => {} }),
       text: async () => { throw new Error("unexpected text"); },
       select: async (o) => installationChoice(o) as never,
       multiselect: async (o) => o.initial as never, isCancel: (v) => v === CANCEL,
-      confirm: async (o) => { questions.push({ message: o.message, initial: o.initial }); return o.message === "Set up a coordinator and lanes now?" ? mode === "cancel" ? CANCEL : mode === "accept-cancel" : true; } };
+      confirm: async (o) => { questions.push({ message: o.message, initial: o.initial }); return o.initial; } };
     const args = ["--user", "tester", "--repos-root", repos, "--profile", "balanced", "--skip-npm", ...(mode === "without" ? ["--without", "lanes"] : ["--with", "lanes"]),
       ...(mode === "yes" ? ["--yes"] : mode === "dry" ? ["--dry-run"] : mode === "plan" ? ["--plan"] : [])];
     assert.equal(await main(args, ctx, p), 0, mode);
     const offers = questions.filter((q) => q.message === "Set up a coordinator and lanes now?");
-    assert.equal(offers.length, ["decline", "cancel", "accept-cancel"].includes(mode) ? 1 : 0, mode);
-    if (offers.length) assert.equal(offers[0].initial, false);
+    assert.equal(offers.length, 0, mode);
+    const output = [...notes, ...lines].join("\n");
+    assert.equal(output.includes("Optional: set up parallel sessions now: ./install.sh lanes"), !["dry", "plan", "without"].includes(mode), mode);
     if (mode !== "existing") assert.equal(existsSync(join(repos, ".lanes/lanes.json")), false, mode);
+    if (!["dry", "plan", "without"].includes(mode)) {
+      const installed = join(home, ".local/share/pi-setup/lanes/defaults.json");
+      assert.equal(JSON.parse(readFileSync(installed, "utf8")).launch.preapproveMcp, false, mode);
+    }
   }
 });
 
