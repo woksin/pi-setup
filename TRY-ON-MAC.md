@@ -52,6 +52,8 @@ pi
 
 Then ask for something, for example: *"Explain what this project does and how it is structured."*
 
+Next: [Getting started](docs/getting-started.md) and [Daily workflow](docs/daily-workflow.md).
+
 ## If something goes wrong
 
 - Run `./install.sh doctor` in `~/pi-setup`. It tells you what is missing and how to fix it.
