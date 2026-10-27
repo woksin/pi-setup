@@ -55,6 +55,14 @@ function history(entries: Entry[]) {
 	return { initial, switches };
 }
 
+function countsFor(refs: (string | undefined)[]) {
+	const counts = new Map<string, number>();
+	for (const model of refs) {
+		if (model) counts.set(model, (counts.get(model) ?? 0) + 1);
+	}
+	return Object.fromEntries(counts);
+}
+
 export function buildProvenance(rawEntries: unknown[], { session }: { session?: string } = {}) {
 	const entries = rawEntries.map(object);
 	const messages = entries.filter(entry => assistant(entry));
@@ -65,7 +73,7 @@ export function buildProvenance(rawEntries: unknown[], { session }: { session?: 
 	const names = entries.filter(entry => entry.type === "session_info" && typeof entry.name === "string");
 	return {
 		source: PROVENANCE_SOURCE, session, agent: names.at(-1)?.name,
-		...history(entries), models: [...new Set(refs.filter((model): model is string => model !== undefined))],
+		...history(entries), models: [...new Set(refs.filter((model): model is string => model !== undefined))], modelCounts: countsFor(refs),
 		assistants: messages.length, errors: messages.filter(entry => assistant(entry)!.stopReason === "error").length,
 		firstAt: timestamp(messages[0] ?? {}), lastAt: timestamp(messages.at(-1) ?? {}),
 		...(refs.includes(undefined) ? { unavailable: "assistant model record missing" } : {}),

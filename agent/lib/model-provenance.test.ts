@@ -25,6 +25,7 @@ test("correct provenance has model, identity and assistant timestamps, not conte
 	assert.deepEqual(result.switches, []);
 	assert.equal(result.initial, OPUS);
 	assert.equal(result.assistants, 3);
+	assert.deepEqual(result.modelCounts, { [OPUS]: 3 });
 	assert.equal(result.errors, 0);
 	assert.equal(result.session, "session");
 	assert.equal(result.agent, named.name);
@@ -44,6 +45,7 @@ test("initial fallback uses effective assistant records, not the initial model",
 test("mid-review fallback after a request failure includes error model and clipped reason", () => {
 	const result = buildProvenance([change(OPUS), assistant(), assistant(OPUS, "error"), reason(SOL, "x".repeat(1000)), change(SOL), assistant(SOL)]);
 	assert.deepEqual(result.models, [OPUS, SOL]);
+	assert.deepEqual(result.modelCounts, { [OPUS]: 2, [SOL]: 1 });
 	assert.equal(result.errors, 1);
 	assert.deepEqual(result.switches, [{ at, from: OPUS, to: SOL, when: "after-request-failure", reason: "x".repeat(160) }]);
 });
@@ -80,7 +82,7 @@ test("headless hook overwrites forged attribution in place, leaving findings unt
 	const entries = [change(OPUS), named, assistant()];
 	const ctx = { hasUI: false, sessionManager: { getBranch: () => entries, getSessionId: () => "s" } };
 	assert.equal(run({ toolName: "StructuredOutput", input }, ctx), undefined);
-	assert.deepEqual(input.runtimeProvenance, buildProvenance(entries, { session: "s" }));
+	assert.deepEqual(input.runtimeProvenance, { ...buildProvenance(entries, { session: "s" }), runtimeStamp: "model-provenance/tool-call/v1" });
 	assert.equal(input.summary, "x");
 	assert.deepEqual(input.findings, []);
 	const other = { runtimeProvenance: "untouched" };
@@ -95,5 +97,5 @@ test("branch exceptions replace forged attribution with a value-free unavailable
 	const input = { runtimeProvenance: { models: [OPUS] } };
 	const result = hook()({ toolName: "StructuredOutput", input }, { sessionManager: { getBranch: () => { throw new Error("SENTINEL"); } } });
 	assert.equal(result, undefined);
-	assert.deepEqual(input.runtimeProvenance, { source: PROVENANCE_SOURCE, models: [], unavailable: "runtime session records unavailable" });
+	assert.deepEqual(input.runtimeProvenance, { source: PROVENANCE_SOURCE, runtimeStamp: "model-provenance/tool-call/v1", models: [], unavailable: "runtime session records unavailable" });
 });

@@ -115,6 +115,8 @@ const AGENT_MODELS = {
 }
 const runtimeRuns = []
 const runtimeProblems = []
+// Never included in reviewer schemas/prompts; accidental imitation defense, NOT authentication.
+const RUNTIME_STAMP = 'model-provenance/tool-call/v1'
 const runtimeNext = 'Not certified: a reviewer ran on a different model than configured (see incomplete). Do not rerun or override; report it to the user/routing owner.'
 const classification = p => ({
   'before-first-response': 'provider fallback before its first response',
@@ -124,11 +126,28 @@ const runtimeModels = p => {
   if (!Array.isArray(p?.models)) return []
   return p.models.every(model => typeof model === 'string' && model.length > 0) ? p.models : []
 }
-const runtimeAvailable = (p, models) => p?.source === 'model-provenance/v1' && p.unavailable === undefined && models.length > 0
+const positiveInteger = value => Number.isInteger(value) && value > 0
+const countMap = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const runtimeCounts = (p, models) => {
+  if (!countMap(p?.modelCounts)) return false
+  const counts = p.modelCounts
+  if (models.length === 0) return false
+  if (Object.keys(counts).length !== models.length) return false
+  if (new Set(models).size !== models.length) return false
+  if (!models.every(model => positiveInteger(counts[model]))) return false
+  return models.reduce((total, model) => total + counts[model], 0) === p.assistants
+}
+const runtimeSource = p => p?.source === 'model-provenance/v1' && p.runtimeStamp === RUNTIME_STAMP && p.unavailable === undefined && Array.isArray(p.switches)
+const nonemptyText = value => typeof value === 'string' && value.trim().length > 0
+const runtimeIdentity = p => nonemptyText(p?.session) && nonemptyText(p.agent) && nonemptyText(p.initial)
+const runtimeTotals = p => positiveInteger(p?.assistants) && Number.isInteger(p.errors) && p.errors >= 0 && p.errors <= p.assistants
+const runtimeTimestamp = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/.test(value) && Number.isFinite(Date.parse(value))
+const runtimeWindow = p => runtimeTimestamp(p?.firstAt) && runtimeTimestamp(p.lastAt) && Date.parse(p.firstAt) <= Date.parse(p.lastAt)
+const runtimeAvailable = (p, models) => runtimeSource(p) && runtimeIdentity(p) && runtimeTotals(p) && runtimeWindow(p) && runtimeCounts(p, models)
 const runtimeDetails = p => {
   if (!p) return {}
-  const { initial, agent, session, firstAt, lastAt, switches, errors } = p
-  return { initial, agent, session, firstAt, lastAt, switches, errors }
+  const { source, runtimeStamp, initial, agent, session, firstAt, lastAt, switches, errors, assistants, modelCounts } = p
+  return { source, runtimeStamp, initial, agent, session, firstAt, lastAt, switches, errors, assistants, modelCounts }
 }
 const record = (res, opts, name) => {
   const p = res.runtimeProvenance
@@ -148,13 +167,14 @@ const reviewAgent = async (prompt, opts, name) => {
 const runtimeReviewers = () => runtimeRuns.sort((a, b) => a.label.localeCompare(b.label))
 const trimRuntimeDetails = res => {
   if (!res.reviewers) return
-  res.reviewers = res.reviewers.map(({ switches, firstAt, lastAt, ...run }) => run.ok ? run : { ...run, switches, firstAt, lastAt })
+  res.reviewers = res.reviewers.map(({ switches, ...run }) => run.ok ? run : { ...run, switches })
 }
 const compactRuntimeRuns = (res, oversized) => {
   if (!oversized || !res.reviewers) return
   res.reviewers = res.reviewers.map(run =>
     `${run.label}: ${run.effective.join(', ') || 'no runtime model record'}; expected ${run.expected}; ${run.ok ? 'ok' : 'INCOMPLETE'}`)
 }
+// End runtime recording.
 
 const FINDINGS = {
   type: 'object',

@@ -128,14 +128,17 @@ function modelMap(file) {
   return new Function(`return (${declaration[1]})`)();
 }
 function provenance(model, label) {
-  return { source: "model-provenance/v1", session: `session-${label}`, agent: "reviewer#fixture",
-    initial: model, models: [model], assistants: 3, errors: 0, firstAt: "2026-10-27T00:00:00Z", lastAt: "2026-10-27T00:01:00Z", switches: [] };
+  return { source: "model-provenance/v1", runtimeStamp: "model-provenance/tool-call/v1", session: `session-${label}`, agent: "reviewer#fixture",
+    initial: model, models: [model], modelCounts: { [model]: 3 }, assistants: 3, errors: 0, firstAt: "2026-10-27T00:00:00Z", lastAt: "2026-10-27T00:01:00Z", switches: [] };
 }
 async function runReview(args, { file = reviewFiles[0], override } = {}) {
   const calls = [];
   const models = modelMap(file);
   const agent = async (prompt, opts) => {
     calls.push(opts);
+    assert.ok(!prompt.includes("runtimeStamp"));
+    assert.ok(!prompt.includes("model-provenance/tool-call/v1"));
+    assert.ok(!JSON.stringify(opts.schema).includes("runtimeProvenance"));
     const res = { summary: "ok", findings: [], verdicts: [], runtimeProvenance: provenance(models[opts.agentType], opts.label) };
     return override ? override(opts, res) : res;
   };
@@ -220,7 +223,7 @@ test("runtime StructuredOutput preserves hook-injected provenance with every act
 });
 
 test("review routing, runtime wrapper and schemas stay synchronized across all profiles", () => {
-  const wrapper = source => source.slice(source.indexOf("const runtimeRuns ="), source.indexOf("const FINDINGS ="));
+  const wrapper = source => source.slice(source.indexOf("const runtimeRuns ="), source.indexOf("// End runtime recording."));
   for (const file of reviewFiles) {
     const source = loadReview(file);
     const models = modelMap(file);
@@ -250,6 +253,7 @@ function withClaims(opts, res) {
 function withFallback(res, models, when = "before-first-response") {
   const expected = res.runtimeProvenance.models[0];
   res.runtimeProvenance.models = models;
+  res.runtimeProvenance.modelCounts = Object.fromEntries(models.map((model, i) => [model, i === 0 ? 4 - models.length : 1]));
   res.runtimeProvenance.switches = [{ at: "2026-10-27T00:00:00Z", from: expected, to: "kimi/moonshot-v1-128k", when, reason: "usage limit" }];
   return res;
 }
@@ -357,6 +361,54 @@ for (const file of reviewFiles) {
     assert.equal(verifyFailed.result.passed, false);
     assert.equal(verifyFailed.result.complete, false);
     assert.equal(verifyFailed.calls, 4);
+  });
+}
+
+test("matching caches without complete reviewer evidence fail INCOMPLETE without rerunning", async () => {
+  for (const file of reviewFiles.filter(file => loadReview(file).includes("const cacheKey"))) {
+    const { result } = await runReview(base, { file, override: withClaims });
+    assert.equal(result.reviewers.length, 4);
+    const corruptions = [undefined, [], result.reviewers.slice(1), result.reviewers.filter(run => !run.label.startsWith("verify:")),
+      result.reviewers.map(run => ({ ...run, effective: ["kimi/moonshot-v1-128k"], modelCounts: { "kimi/moonshot-v1-128k": run.assistants } })),
+      result.reviewers.map(run => run.label.startsWith("verify:") ? { ...run, effective: ["kimi/moonshot-v1-128k"], modelCounts: { "kimi/moonshot-v1-128k": run.assistants } } : run),
+      result.reviewers.map(run => ({ ...run, runtimeStamp: undefined }))];
+    for (const reviewers of corruptions) {
+      const cached = await runReview({ ...base, cachedReview: { ...result, reviewers } }, { file });
+      assertUncertified(cached.result);
+      assert.equal(cached.calls, 0, "invalid cache must not trigger a retry");
+    }
+    const unchanged = await runReview({ ...base, cachedReview: result }, { file });
+    assert.equal(unchanged.result.passed, true);
+    assert.equal(unchanged.calls, 0);
+  }
+});
+
+test("cache identity includes profile model routing and rechecks cached role attribution", async () => {
+  const shared = await runReview(base);
+  const file = "agent/profiles/balanced-anthropic/workflows/review.js";
+  const anthropic = await runReview(base, { file });
+  assert.notEqual(shared.result.reviewCacheKey, anthropic.result.reviewCacheKey);
+  const crossProfile = await runReview({ ...base, cachedReview: shared.result }, { file });
+  assert.ok(crossProfile.calls > 0);
+  assert.notEqual(crossProfile.result.cached, true);
+  const forgedIdentity = await runReview({ ...base, cachedReview: { ...shared.result, reviewCacheKey: anthropic.result.reviewCacheKey } }, { file });
+  assertUncertified(forgedIdentity.result);
+  assert.equal(forgedIdentity.calls, 0);
+});
+
+for (const file of reviewFiles) {
+  test(`${file}: minimal imitation and inconsistent full-shape metadata fail closed`, async () => {
+    const minimal = await runReview(base, { file, override: (_opts, res) => ({ ...res,
+      runtimeProvenance: { source: "model-provenance/v1", models: res.runtimeProvenance.models } }) });
+    assertUncertified(minimal.result);
+    for (const changes of [{ runtimeStamp: undefined }, { session: "" }, { agent: undefined }, { initial: undefined },
+      { switches: undefined }, { assistants: 0 }, { firstAt: undefined },
+      { lastAt: "not a timestamp" }, { firstAt: "2027-10-27T00:00:00Z" }, { modelCounts: {} },
+      { modelCounts: { "kimi/moonshot-v1-128k": 3 } }, { assistants: 4 }, { errors: 4 }]) {
+      const run = await runReview(base, { file, override: (_opts, res) => ({ ...res,
+        runtimeProvenance: { ...res.runtimeProvenance, ...changes } }) });
+      assertUncertified(run.result);
+    }
   });
 }
 
