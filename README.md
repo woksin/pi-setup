@@ -49,7 +49,7 @@ What it installs, and with which command:
 
 - **macOS:** Node.js with `brew install node` (it offers the official Homebrew installer first if Homebrew is missing), then `brew install gh jq ripgrep fd python git` for whatever is missing.
 - **Debian/Ubuntu:** `sudo apt-get install -y gh jq ripgrep fd-find python3 git` (and `apt-get update` first), plus a `fd` link in `~/.local/bin`. Fedora and similar: `sudo dnf install -y ...`.
-- **Node.js on Linux:** the official nodejs.org tarball (latest v24), checked against its SHA-256 and unpacked into `~/.local/lib/nodejs`, with `node`, `npm` and `npx` linked in `~/.local/bin`. No sudo is needed for Node itself.
+- **Node.js on Linux:** the official nodejs.org tarball (latest v26: the pinned `@woksin/pi-orch` needs Node 26 or newer; Homebrew's `node` is 26 too), checked against its SHA-256 and unpacked into `~/.local/lib/nodejs`, with `node`, `npm` and `npx` linked in `~/.local/bin`. No sudo is needed for Node itself.
 - **pi:** `npm install -g @earendil-works/pi-coding-agent@<the version this setup pins>`, into `~/.local` when the global npm directory is not yours. Never with sudo.
 - **Windows:** use WSL2 and run `./install.sh` inside it; native Windows shells are not supported.
 
