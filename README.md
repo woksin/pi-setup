@@ -34,14 +34,44 @@ Prerequisites: none. Run `./install.sh`. It checks what your machine has, shows 
 - [Related repositories](#related-repositories)
 - [What is deliberately not included](#what-is-deliberately-not-included)
 - [Keeping it up to date](#keeping-it-up-to-date)
+- Guides: [Getting started](docs/getting-started.md), [Daily workflow](docs/daily-workflow.md), [Tool reference](docs/reference.md)
 
 ## Highlights
 
 - Safe to re-run: files you changed are kept and the new version is written next to them, and every overwrite is backed up.
 - Nothing is scheduled behind your back. The `docker-guardian`, `cleanup`, `secret-sweep` and `disk-growth` schedules are extras: the guided installer pre-selects the ones your machine supports and shows them in the Review before anything is written, and unattended installs need `--with <id>`.
-- Releases are cut by hand from tagged versions; `./install.sh update` moves a checkout to the latest release tag.
+- Releases are cut by hand from tagged versions; each release carries a checksummed archive and `bootstrap.sh`; `./install.sh update` moves a checkout to the latest release tag.
 
 ## Install
+
+### One-line install
+
+No clone is needed. In a macOS or Linux terminal (WSL2 on Windows), run:
+
+```sh
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh
+```
+
+The bootstrap needs only POSIX sh, curl or wget, tar and a SHA-256 tool (`sha256sum`, `shasum` or `openssl`). It downloads a SHA-256-pinned release archive, verifies it, unpacks it into `~/pi-setup` and runs `./install.sh` there. When a terminal is available it reopens the terminal for the guided questions, even though the script arrived through a pipe; without a terminal it never prompts.
+
+Installer flags pass through unchanged. For example:
+
+```sh
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh -s -- --yes --install-prereqs
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh -s -- --dry-run
+```
+
+`--dry-run` (or `--plan`) downloads and checks the release in a temporary directory, then removes it without changing your home folder. Add `--dir "/path/to/pi-setup"` to choose another destination (or set `PI_SETUP_DIR`), and `--version <tag>` to choose a released version. Bootstrap refuses git checkouts and non-empty foreign folders; re-running it replaces only a folder it previously marked as its own. To update an install made this way, run the same one-liner again.
+
+Piping a script into sh means trusting it. To read it first:
+
+```sh
+curl -fsSLO https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh
+# Read bootstrap.sh before running it.
+sh bootstrap.sh
+```
+
+A git clone works too: clone this repository, enter it and run `./install.sh`.
 
 ### New machine prerequisites
 
@@ -133,7 +163,7 @@ Flags, in any order: `--install-prereqs` (install missing prerequisites and pi w
 
 Each install records what it wrote in `~/.pi/agent/.pi-setup/manifest.json` (HOME-relative paths and hashes; no checkout path or remote). Re-runs use it: a file you have not changed is updated silently (the old bytes go to `~/.pi/agent/.pi-setup/backups/<timestamp>/`); a file you changed is kept, and in a terminal install asks whether to keep yours, take the new one or show the diff, otherwise it writes the new version next to it as `<file>.pi-setup-new`. An install made before the manifest existed is adopted on its next run. `settings.json` and `user.json` are merged key by key, so uninstall can revert just those keys.
 
-- `./install.sh update [--dry-run] [--ref <tag>]` checks out the latest `v*` release tag of this checkout (detached; `git switch main` goes back) and runs that release's installer. It refuses a checkout with local changes.
+- `./install.sh update [--dry-run] [--ref <tag>]` checks out the latest `v*` release tag of this checkout (detached; `git switch main` goes back) and runs that release's installer. It refuses a checkout with local changes. An install from the one-liner has no git checkout; re-run the one-liner to update it instead.
 - `./install.sh uninstall [--dry-run] [--yes]` removes what the manifest lists, restores files that install had replaced, and leaves files you changed (it lists them). It never touches `auth.json`, `sessions/`, `accounts/`, `jobs/`, caches or anything that is not in the manifest.
 - `./install.sh backups [list | prune --keep N]` lists the run folders or prunes them; installs keep the last 10. Backups that uninstall restores from are pinned and never pruned.
 
@@ -145,11 +175,14 @@ Run `./install.sh doctor [--fix] [--json]` (or `pi-setup doctor`): exit 0 means 
 `--fix` installs missing prerequisites and pi after asking (`--install-prereqs` skips the question; it prints the exact command first), reinstalls missing npm dependencies, restores missing tracked files/links when the checkout still matches the installed commit, and restores modes of unchanged files; it never changes logins, guards, profiles, PATH, services or edited files.
 Doctor runs `pi --version`, `pi auth check --provider <id> --no-refresh --json` (no token refresh), and `pi --offline --list-models` (no model call or network). pi may perform its normal one-time migrations; extension errors that do not crash pi are not visible.
 The update check is cached once a day; `PI_OFFLINE=1` skips it. Otherwise doctor is read-only, and `--json` emits one object on stdout.
+Without an install manifest, doctor previews differing files a first install would overwrite, using saved/default identity settings and the active/auto-selected profile. Identical and missing files are not listed; the preview never writes files.
 For build performance and disk cleanup, use `~/.pi/agent/bin/dev-doctor`; doctor delegates its disk check to that tool.
 
 `--legacy-peer-deps` is needed: the packages declare conflicting peer ranges for `@earendil-works/pi-*` (for example `@vigolium/piolium` wants `^0.74`, `@tintinweb/pi-subagents` wants `>=1.1.0`), so a plain `npm install` fails with ERESOLVE.
 
 `settings.json`, `models.json` and the other JSON configs are only written when they don't exist yet. `efficiency.json` and `context-budget.json` follow the same rule. Restart pi afterwards.
+
+`inbox-watch` resolves its directory at runtime: `INBOX_DIR` first, then a non-empty `orchMessagesDir` string in `~/.pi/agent/user.json`, then `~/.pi/agent/inbox`. Missing, malformed or empty settings use the fallback; no script edit is needed.
 
 Both `~/.local/bin` and `~/.pi/agent/bin` must be on PATH. The installer prints a shell-specific snippet when either is missing and **does not edit shell profiles by default**. Add it yourself or opt in with `--edit-shell-profile` (append-only, idempotent; zsh `.zshrc`, bash `.bash_profile` on macOS/`.bashrc` on Linux, fish `config.fish`). Restart your shell afterwards.
 
@@ -287,7 +320,7 @@ report-only session labels are never removed; remote/unknown context is skipped.
 The pi-phase config flags `msbuild_max_cpu` (default off),
 `container_test_detection` (default hint-only), and `cold_worktree_hint`
 (default on, hint-only) provide opt-in caps and advisory performance guidance.
-Configure these in `~/.pi/agent/pi-phase/config.json` when supported by your version.
+Configure these in `~/.pi/agent/pi-phase/config.local.json` when supported by your version; installer-managed `config.json` supplies the base defaults. Local objects merge recursively, while arrays and scalars replace the base value.
 
 **Stuck-session watchdog:** `bin/session-watchdog` runs every 2 min from docker-guardian and only notifies, never kills. It flags live pi sessions (positively mapped to a running pi process through pi-orch heartbeats) with an unanswered tool call or an unanswered user/tool-result message older than 10 min, and raises an all-sessions-silent alarm (3+ sessions, none writing for over 15 min). Stuck notices go to `ALL-session-watchdog-*-stuck.md` and a macOS notification; sessions it cannot map, memory pressure (`kern.memorystatus_level` below 15% with swap used over 12 GB, or below 8%) and `fseventsd` above 4 GB go to the coordinator only. State is in `~/.pi/agent/session-watchdog/`, the log in `logs/session-watchdog.log`.
 

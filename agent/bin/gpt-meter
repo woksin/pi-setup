@@ -40,11 +40,24 @@ def last_saturday():
     return d - timedelta(days=(d.weekday() - 5) % 7)
 
 
+EPILOG = """Examples:
+  gpt-meter                        # table for today, 24 h and the week
+  gpt-meter --check                # one line; for scripts and watchers
+  gpt-meter --week-start 2026-10-24T00:00 --cap 300
+Exit codes:
+  0 report printed (with --check: today is at or under the cap)
+  1 with --check: today's spend is over the cap
+  2 usage error
+See also: docs/reference.md, pi-usage --help, provider-restore --help
+"""
+
+
 def main():
     ap = argparse.ArgumentParser(description=(
         'Read-only GPT (provider openai*) spend meter from ~/.pi/agent/sessions. '
         'Dollars are pi\'s recorded list cost per message (usage.cost.total). '
-        'Policy: ~$600/day list = 100%% of weekly pace; soft daily cap $450; ~$150/week/lane.'))
+        'Policy: ~$600/day list = 100%% of weekly pace; soft daily cap $450; ~$150/week/lane.'),
+        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=EPILOG)
     ap.add_argument('--check', action='store_true', help='one-line summary; exit 1 if today $ > cap, else 0')
     ap.add_argument('--cap', type=float, default=450.0, help='soft daily cap in $ (default 450)')
     ap.add_argument('--week-start', help='local ISO e.g. 2026-10-24T00:00. Default: most recent Saturday 00:00 local. '

@@ -16,35 +16,27 @@ Press `⌘ Space`, type **Terminal** and press Return. A window with a text prom
 
 In this guide, "run" means: copy the command, paste it into Terminal with `⌘ V`, and press Return. Wait until the prompt comes back before running the next one.
 
-## 2. Get the setup
-
-Run:
-
-```sh
-git clone https://github.com/woksin/pi-setup ~/pi-setup && cd ~/pi-setup
-```
-
-If macOS says it needs the **command line developer tools**, click **Install** and wait for it to finish (a few minutes). Then run the same line again.
-
-## 3. Run the installer
+## 2. Install
 
 Run the recommended setup (parallel sessions are pre-selected when a backend is found):
 
 ```sh
-./install.sh
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh
 ```
+
+If macOS asks to install the **command line developer tools**, click **Install**.
 
 - It shows what your Mac already has and what it will install (Homebrew, Node.js, a few command-line tools and pi), then asks `Continue? [Y/n]`. Press Return.
 - Homebrew asks for your **Mac password**. Type it and press Return. Nothing appears while you type; that is normal.
 - When it asks for your **GitHub login**, type your GitHub username.
-- For every other question, press Return to take the recommended answer. If it says you have no AI logins yet, continue anyway; you log in in step 5.
+- For every other question, press Return to take the recommended answer. If it says you have no AI logins yet, continue anyway; you log in in step 4.
 - On the review screen, keep "Add them to PATH in your shell profile" selected if it is shown, and choose **Install**.
 
 At the end it shows **What's next**. Keep that window open for now.
 
-To opt out of parallel sessions (lanes), use Review → Change a step… → Extras, or run `./install.sh --without lanes`. Installing the tool does not start any sessions; step 8 is optional.
+To opt out of parallel sessions (lanes), use Review → Change a step… → Extras, or add `-s -- --without lanes` after `sh`. Installing the tool does not start any sessions; step 7 is optional.
 
-## 4. Make the new tools available
+## 3. Make the new tools available
 
 On Apple silicon Macs, Homebrew must be added to your shell once. Run this (it does nothing on Intel Macs, and is safe to run twice):
 
@@ -62,12 +54,12 @@ pi --version && gh --version
 
 Both should print a version number. If one says `command not found`, see "If something goes wrong" below.
 
-## 5. Log in
+## 4. Log in
 
 1. **GitHub:** run `gh auth login`. Choose **GitHub.com**, **HTTPS**, answer **Yes** to authenticate Git, and **Login with a web browser**. Copy the code it shows, press Return, and paste the code in the browser.
 2. **AI:** run `pi`. Inside pi, type `/login` and press Return, pick Claude or ChatGPT, and log in in the browser. Repeat `/login` for the other one if you have both. Type `/quit` to leave pi.
 
-## 6. Finish the setup
+## 5. Finish the setup
 
 Run:
 
@@ -83,7 +75,7 @@ This picks the right model setup for the logins you have. Then check the setup:
 
 It should end without errors. Warnings about optional tools (Docker, gitleaks, tmux, CodeScene) are fine.
 
-## 7. Try it
+## 6. Try it
 
 Start pi in a project folder. If you have a project already:
 
@@ -110,7 +102,9 @@ Useful to know:
 - Run `pi -c` to continue your last session in that folder.
 - pi can change files and run commands, so try it first in a project that is in git, where every change can be reviewed and undone.
 
-## 8. Optional: parallel sessions
+Next: [Getting started](docs/getting-started.md) and [Daily workflow](docs/daily-workflow.md).
+
+## 7. Optional: parallel sessions
 
 When you are comfortable with one session, you can let one pi session coordinate several others working in parallel, each on its own issue or goal:
 
@@ -122,7 +116,7 @@ It asks which repositories and issues or goals to work on, prepares a separate w
 
 ## If something goes wrong
 
-- **`command not found` after step 4:** quit Terminal completely (`⌘ Q`), open it again and retry. If it still fails, run step 4 again, then `cd ~/pi-setup && ./install.sh`.
+- **`command not found` after step 3:** quit Terminal completely (`⌘ Q`), open it again and retry. If it still fails, run step 3 again, then `cd ~/pi-setup && ./install.sh`.
 - Run `cd ~/pi-setup && ./install.sh doctor`. It tells you what is missing and how to fix it.
 - For setup bugs, run `cd ~/pi-setup && ./install.sh report` and open an issue at https://github.com/woksin/pi-setup/issues. Search for duplicates first; remove secrets, tokens, personal paths, private repo names and session content before sharing.
 - Re-running `./install.sh` is always safe: it continues where it stopped.
@@ -130,9 +124,13 @@ It asks which repositories and issues or goals to work on, prepares a separate w
 
 ## Update later
 
+For an install made with the one-liner, re-run the same command to download and verify the latest release:
+
 ```sh
-cd ~/pi-setup && ./install.sh update
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh
 ```
+
+If you used a git clone instead, run `cd ~/pi-setup && ./install.sh update`.
 
 ## Remove it again
 

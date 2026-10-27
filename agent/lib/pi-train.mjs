@@ -29,7 +29,17 @@ export const HELP = `Usage: pi-train [--repo-dir path] [--dry-run] [--json] <com
 
 Manifest store: \$PI_TRAIN_DIR or ~/.pi/trains. Dry runs print commands and change nothing.
 ETA: ISO 8601 with timezone or +90m/+2h/+1d. Gate duration: e.g. 90m or 2h.
-Local train packages are not implemented in this slice.`;
+Local train packages are not implemented in this slice.
+
+Examples:
+  pi-train status --all                         # read-only
+  pi-train --dry-run ship --train my-train      # prints commands, changes nothing
+  pi-train init . my-train --from origin/main   # state-changing: creates a train
+Exit codes:
+  0 ok
+  1 a failed step reported by a command
+  2 usage error or refused request
+See also: docs/reference.md, README.md`;
 
 const FLAGS = new Map(Object.entries({ '--dry-run': 'dryRun', '--json': 'json', '--all': 'all', '--allow-foreign': 'allowForeign',
   '--adopt': 'adopt', '--allow-behind': 'allowBehind', '--stdin': 'stdin', '--abandoned': 'abandoned' }));

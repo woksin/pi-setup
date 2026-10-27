@@ -705,6 +705,28 @@ class PhaseConfig(tuple):
         return result
 
 
+def merge_config(base, overlay):
+    """Merge objects recursively; scalars and arrays in the overlay replace the base."""
+    result = base.copy()
+    for key, value in overlay.items():
+        result[key] = merge_config(result[key], value) if isinstance(result.get(key), dict) and isinstance(value, dict) else value
+    return result
+
+
+def local_config(path, data, warn):
+    overlay = path.with_name("config.local.json")
+    if not overlay.exists():
+        return data
+    try:
+        local = json.loads(overlay.read_text())
+        if not isinstance(local, dict):
+            raise ValueError("expected an object")
+    except (ValueError, OSError) as exc:
+        warn(f"invalid config.local.json ({exc}); ignoring local overlay")
+        return data
+    return merge_config(data, local)
+
+
 def config(path, *, notes=None):
     def warn(message):
         if notes is None or message not in notes:
@@ -724,6 +746,7 @@ def config(path, *, notes=None):
     except (ValueError, OSError) as exc:
         warn(f"invalid config.json ({exc}); using defaults")
         data = {}
+    data = local_config(path, data, warn)
     for key in data.keys() - defaults.keys():
         warn(f"unknown config key {key}; ignored")
     values = defaults.copy()
@@ -3471,8 +3494,19 @@ def add_worktree_arguments(runner):
     runner.add_argument("--no-worktree-lock", action="store_true", help="opt out of worktree admission (not build)")
 
 
+HELP_EPILOG = """Examples:
+  pi-phase status                                      # read-only: leases and queue
+  pi-phase run --kind test --label unit -- npm test    # state-changing: runs the command as a bounded phase
+Exit codes:
+  run: the command's own exit code, or 75 queue timeout, 76 RSS cap, 77 withdrawn, 124 timeout, 125 wrapper failure
+  other commands: 0 ok, 1 no match, 2 usage error, 3 refused (see README.md)
+See also: docs/reference.md, agent/pi-phase/README.md, cratis-local-run --help
+"""
+
+
 def main(argv=None, *, state=None, configuration=None):
-    parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner")
+    parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner",
+                                     formatter_class=argparse.RawDescriptionHelpFormatter, epilog=HELP_EPILOG)
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("status", help="show leases, queue and priority grant (never command arguments)")
     reprioritizing = commands.add_parser("reprioritize", help="change an owned queued waiter's priority in place")

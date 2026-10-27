@@ -216,8 +216,24 @@ def cmd_close(a, now):
     return 0
 
 
+EPILOG = """Environment:
+  LANE_STATUS_DIR  status directory (default: $INBOX_DIR/status, else ~/.pi/agent/lane-status/)
+  INBOX_DIR        message inbox (used by close)
+Examples:
+  lane-status list
+  lane-status set L15 working                             # state-changing
+  lane-status set L15 waiting-on "review" --until +90m    # state-changing
+  lane-status get L15
+Exit codes:
+  0 ok
+  1 negative answer (get with no status, suppressed not in force)
+  2 usage or I/O error
+See also: docs/reference.md, inbox-watch --help
+"""
+
+
 def build_parser():
-    ap = argparse.ArgumentParser(prog="lane-status", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog="lane-status", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog=EPILOG)
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("set", help="set a lane status")
     s.add_argument("lane")

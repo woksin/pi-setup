@@ -820,8 +820,21 @@ def apply_findings(findings, runner):
         item['evidence'] += '; ' + ('action taken: ' + shlex.join(cmd) if result is not None else 'action failed/unknown')
 
 
+EPILOG = """Environment: none required.
+Examples:
+  dev-doctor                         # read-only checks of this machine
+  dev-doctor --only disk,docker-stale --json
+  dev-doctor --apply                 # state-changing: performs safe automatic fixes
+Exit codes:
+  0 checks ran (findings are reported, not an error)
+  1 an explicit action (--apply package-cache write, --move-nuget) failed
+  2 usage error
+See also: docs/reference.md, pi-cleanup --help, docker-guardian --help
+"""
+
+
 def main(argv=None, runner=run):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog=EPILOG)
     output = parser.add_mutually_exclusive_group()
     output.add_argument('--json', action='store_true')
     output.add_argument('--quiet', action='store_true', help='print successful actions and fuse trips')
