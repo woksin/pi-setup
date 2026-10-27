@@ -59,8 +59,32 @@ build() {
   render "$tag" "$sha" "$source" "$out/bootstrap.sh"
 }
 
+usage() {
+  cat <<'EOF_HELP'
+Usage: release-asset.sh build <tag> <outdir> [<tree-ish>]
+       release-asset.sh render <tag> <sha256> <in> <out>
+       release-asset.sh -h | --help
+
+Builds the uploaded assets for a pi-setup release, used by the release-assets workflow.
+
+Commands:
+  build   Write pi-setup-<tag>.tar.gz (git archive of <tree-ish>, default <tag>), SHA256SUMS
+          and a bootstrap.sh pinned to that tag and checksum into <outdir>.
+          PI_SETUP_BOOTSTRAP_SRC=<file> renders that bootstrap template instead of <tag>:bootstrap.sh.
+  render  Pin an existing bootstrap template to <tag> and <sha256>, writing <out>.
+
+Examples:
+  release-asset.sh build v2026.10.27.9 dist/
+  PI_SETUP_BOOTSTRAP_SRC=bootstrap.sh release-asset.sh build v2026.10.27.6 /tmp/rel
+
+Exit codes: 0 success, 1 usage or build error.
+See also: bootstrap.sh, .github/workflows/release-assets.yml, README "Install".
+EOF_HELP
+}
+
 main() {
   case "${1:-}" in
+    -h|--help) usage ;;
     build)
       shift
       if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then die 'Usage: release-asset.sh build <tag> <outdir> [<tree-ish>]'; fi
