@@ -612,6 +612,10 @@ export default function (pi: ExtensionAPI) {
 		return false;
 	}
 
+	function recordHeadlessSwitch(ctx: ExtensionContext, data: { text: string; from: string; to: string; until: number }): void {
+		if (!ctx.hasUI) pi.appendEntry(CUSTOM_TYPE, data);
+	}
+
 	/** Pre-emptive switch away from a marked provider, or back once the mark has expired. */
 	async function preempt(ctx: ExtensionContext, requested = false): Promise<void> {
 		const config = loadConfig();
@@ -639,7 +643,9 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		rememberOriginal(ctx, { ref: originalRef ?? current, reason, destination: target, until });
-		notify(ctx, `provider-fallback: ${currentProvider} limited (${formatUntil(until)} left); using ${target} instead of ${current} (${allowance}).`, "warning");
+		const text = `provider-fallback: ${currentProvider} limited (${formatUntil(until)} left); using ${target} instead of ${current} (${allowance}).`;
+		recordHeadlessSwitch(ctx, { text, from: current, to: target, until });
+		notify(ctx, text, "warning");
 	}
 
 	async function checkRestore(ctx: ExtensionContext): Promise<void> {

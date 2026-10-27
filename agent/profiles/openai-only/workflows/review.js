@@ -35,6 +35,56 @@ if (since && !prior) return { passed: false, error: 'since requires prior findin
 if (round > 3 && input.force !== true) {
   return { passed: false, error: 'Three-round cap reached. Make a structural fix or ask the user.' }
 }
+// Complete only when every runtime-recorded model matches its configured agent; no retry or override.
+// Pinned models, not provider labels. Keep synchronized with agent frontmatter.
+const AGENT_MODELS = {
+  reviewer: 'openai-codex/gpt-6-astra',
+  'sol-reviewer': 'openai-codex/gpt-6.1-sol',
+  'second-opinion': 'openai-codex/gpt-6-astra',
+}
+const runtimeRuns = []
+const runtimeProblems = []
+const runtimeNext = 'Not certified: a reviewer ran on a different model than configured (see incomplete). Do not rerun or override; report it to the user/routing owner.'
+const classification = p => ({
+  'before-first-response': 'provider fallback before its first response',
+  'after-request-failure': 'provider fallback after a failed request',
+})[p?.switches?.[0]?.when] ?? 'model switched during the review'
+const runtimeModels = p => {
+  if (!Array.isArray(p?.models)) return []
+  return p.models.every(model => typeof model === 'string' && model.length > 0) ? p.models : []
+}
+const runtimeAvailable = (p, models) => p?.source === 'model-provenance/v1' && p.unavailable === undefined && models.length > 0
+const runtimeDetails = p => {
+  if (!p) return {}
+  const { initial, agent, session, firstAt, lastAt, switches, errors } = p
+  return { initial, agent, session, firstAt, lastAt, switches, errors }
+}
+const record = (res, opts, name) => {
+  const p = res.runtimeProvenance
+  const expected = AGENT_MODELS[opts.agentType]
+  const models = runtimeModels(p)
+  const available = runtimeAvailable(p, models)
+  const ok = available && models.every(model => model === expected)
+  if (!available) runtimeProblems.push(`${name} (${opts.label}): no runtime model record`)
+  else if (!ok) runtimeProblems.push(`${name} (${opts.label}) ran on ${models.join(', ')}, not ${expected} (${classification(p)})`)
+  runtimeRuns.push({ ...runtimeDetails(p), label: opts.label, agentType: opts.agentType, expected, effective: models, ok })
+}
+const reviewAgent = async (prompt, opts, name) => {
+  const res = await agent(prompt, opts)
+  if (res) record(res, opts, name)
+  return res
+}
+const runtimeReviewers = () => runtimeRuns.sort((a, b) => a.label.localeCompare(b.label))
+const trimRuntimeDetails = res => {
+  if (!res.reviewers) return
+  res.reviewers = res.reviewers.map(({ switches, firstAt, lastAt, ...run }) => run.ok ? run : { ...run, switches, firstAt, lastAt })
+}
+const compactRuntimeRuns = (res, oversized) => {
+  if (!oversized || !res.reviewers) return
+  res.reviewers = res.reviewers.map(run =>
+    `${run.label}: ${run.effective.join(', ') || 'no runtime model record'}; expected ${run.expected}; ${run.ok ? 'ok' : 'INCOMPLETE'}`)
+}
+
 const FINDINGS = {
   type: 'object',
   properties: {
@@ -75,10 +125,10 @@ const scope = since ? `\nFollow-up round ${round}: review ONLY git diff ${since}
 const priorText = prior ? `\nEarlier findings/decisions (respect dismissals):\n${prior}` : ''
 const rubric = '\nOnly critical/major regressions, data loss, security holes, spec violations, broken builds/tests or out-of-scope behaviour changes block merge. Minor/nit items are advisory. Exclude pre-existing defects, unreachable hypothetical inputs, wording preferences and release notes/PR descriptions. Read actual code; do not guess. Remain read-only and obey execution budgets. Empty findings are valid.'
 const prompt = `Review ${target}.${context}${scope}${priorText}\nCheck correctness, regressions, security and missing/broken tests.${rubric}`
-const call = (side, text, schema, label, phaseName) => agent(text, {
+const call = (side, text, schema, label, phaseName) => reviewAgent(text, {
   agentType: reviewers[side].agentType, effort: reviewers[side].effort,
   schema, label, phase: phaseName,
-})
+}, reviewers[side].name)
 const advisoryText = f => `(${f.severity}) ${f.location}: ${f.problem}`
 const next = passed => passed ? 'Passed; fix cheap advisory items in the same pass, not another round.'
   : round >= 3 ? 'Not passed at the cap; make a structural fix or ask the user.'
@@ -89,11 +139,14 @@ if (quick) {
   const res = await call(side, prompt, FINDINGS, `review:${side}`, 'Review')
   if (!res) return { passed: false, mode: 'quick', error: 'Review failed.' }
   const blockers = res.findings.filter(blocking)
+  const incomplete = [...runtimeProblems]
+  const passedQ = blockers.length === 0 && incomplete.length === 0
   return {
-    mode: 'quick', round, passed: blockers.length === 0, reviewedBy: reviewers[side].name,
+    mode: 'quick', round, passed: passedQ, complete: incomplete.length === 0, incomplete,
+    reviewers: runtimeReviewers(), reviewedBy: reviewers[side].name,
     diversity: 'OpenAI-only cross-model', summary: res.summary,
     blockingCount: blockers.length, blocking: blockers,
-    advisory: res.findings.filter(f => !blocking(f)).map(advisoryText), next: next(blockers.length === 0),
+    advisory: res.findings.filter(f => !blocking(f)).map(advisoryText), next: runtimeProblems.length ? runtimeNext : next(passedQ),
   }
 }
 const sides = ['sol', 'astra']
@@ -132,12 +185,13 @@ results.forEach((res, index) => {
     else rejected.push({ ...item, reason: verdict.reason })
   })
 })
+incomplete.push(...runtimeProblems)
 const passed = !incomplete.length && !confirmed.length && !unverified.length
 log(`${confirmed.length} blocking, ${unverified.length} unverified, ${advisory.length} advisory — ${passed ? 'PASSED' : 'NOT PASSED'}`)
 return {
   mode: deep ? 'deep' : 'full', diversity: 'OpenAI-only cross-model', round, target, passed,
-  complete: incomplete.length === 0, incomplete, summaries,
+  complete: incomplete.length === 0, incomplete, summaries, reviewers: runtimeReviewers(),
   blockingCount: confirmed.length, unverifiedCount: unverified.length,
   blocking: confirmed, unverified, advisory: advisory.map(advisoryText),
-  rejectedCount: rejected.length, rejected: rejected.map(f => `${f.location}: ${f.reason}`), next: next(passed),
+  rejectedCount: rejected.length, rejected: rejected.map(f => `${f.location}: ${f.reason}`), next: runtimeProblems.length ? runtimeNext : next(passed),
 }

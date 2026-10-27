@@ -44,7 +44,9 @@
  * start another review round for them.
  *
  * Result: every return carries `passed` (boolean). It is true only when the review completed
- * (every reviewer and verifier returned) and no blocking finding is confirmed or unverified.
+ * (every reviewer and verifier returned) and no blocking finding is confirmed or unverified,
+ * and every reviewer's runtime-recorded model (child session records, via model-provenance)
+ * equals the agent's configured model. Fallback or missing records make it incomplete: no retry, no override.
  * The result is kept compact (blocking findings in full, advisory as one-liners) so the parent's
  * notification is not truncated. A failed,
  * missing or incomplete review is never a pass — gate merges on `passed === true`, not on an
@@ -103,6 +105,55 @@ if (round > 3 && input?.force !== true) {
       'the approach needs a structural fix (sweep the whole class of issue) or a decision from the user. ' +
       'Pass force: true only after one of those.',
   }
+}
+
+// Pinned models, not provider labels. Keep synchronized with agent frontmatter.
+const AGENT_MODELS = {
+  reviewer: 'anthropic/claude-opus-5-5',
+  'sol-reviewer': 'openai-codex/gpt-6.1-sol',
+  'second-opinion': 'openai-codex/gpt-6-astra',
+}
+const runtimeRuns = []
+const runtimeProblems = []
+const runtimeNext = 'Not certified: a reviewer ran on a different model than configured (see incomplete). Do not rerun or override; report it to the user/routing owner.'
+const classification = p => ({
+  'before-first-response': 'provider fallback before its first response',
+  'after-request-failure': 'provider fallback after a failed request',
+})[p?.switches?.[0]?.when] ?? 'model switched during the review'
+const runtimeModels = p => {
+  if (!Array.isArray(p?.models)) return []
+  return p.models.every(model => typeof model === 'string' && model.length > 0) ? p.models : []
+}
+const runtimeAvailable = (p, models) => p?.source === 'model-provenance/v1' && p.unavailable === undefined && models.length > 0
+const runtimeDetails = p => {
+  if (!p) return {}
+  const { initial, agent, session, firstAt, lastAt, switches, errors } = p
+  return { initial, agent, session, firstAt, lastAt, switches, errors }
+}
+const record = (res, opts, name) => {
+  const p = res.runtimeProvenance
+  const expected = AGENT_MODELS[opts.agentType]
+  const models = runtimeModels(p)
+  const available = runtimeAvailable(p, models)
+  const ok = available && models.every(model => model === expected)
+  if (!available) runtimeProblems.push(`${name} (${opts.label}): no runtime model record`)
+  else if (!ok) runtimeProblems.push(`${name} (${opts.label}) ran on ${models.join(', ')}, not ${expected} (${classification(p)})`)
+  runtimeRuns.push({ ...runtimeDetails(p), label: opts.label, agentType: opts.agentType, expected, effective: models, ok })
+}
+const reviewAgent = async (prompt, opts, name) => {
+  const res = await agent(prompt, opts)
+  if (res) record(res, opts, name)
+  return res
+}
+const runtimeReviewers = () => runtimeRuns.sort((a, b) => a.label.localeCompare(b.label))
+const trimRuntimeDetails = res => {
+  if (!res.reviewers) return
+  res.reviewers = res.reviewers.map(({ switches, firstAt, lastAt, ...run }) => run.ok ? run : { ...run, switches, firstAt, lastAt })
+}
+const compactRuntimeRuns = (res, oversized) => {
+  if (!oversized || !res.reviewers) return
+  res.reviewers = res.reviewers.map(run =>
+    `${run.label}: ${run.effective.join(', ') || 'no runtime model record'}; expected ${run.expected}; ${run.ok ? 'ok' : 'INCOMPLETE'}`)
 }
 
 const FINDINGS = {
@@ -208,6 +259,7 @@ const full = f => ({
 const fit = (res, budget = 3600) => {
   const size = () => JSON.stringify(res).length
   if (size() <= budget) return res
+  trimRuntimeDetails(res)
   res.advisory = res.advisory ? res.advisory.slice(0, 3).concat(res.advisory.length > 3 ? [`…${res.advisory.length - 3} more`] : []) : res.advisory
   if (res.summaries) res.summaries = res.summaries.map(s => ({ by: s.by, summary: clip(s.summary, 150) }))
   if (size() <= budget) return res
@@ -220,6 +272,7 @@ const fit = (res, budget = 3600) => {
     }
   }
   res.advisory = Array.isArray(res.advisory) ? [`${res.advisory.length} advisory items omitted for size`] : res.advisory
+  compactRuntimeRuns(res, size() > budget)
   return res
 }
 const ADVISORY_MAX = 10
@@ -240,28 +293,30 @@ phase('Review')
 if (quick) {
   const side = other(author)
   const r = QUICK_REVIEWERS[side]
-  const res = await agent(reviewPrompt, { agentType: r.agentType, schema: FINDINGS, label: `review:${side}`, phase: 'Review' })
+  const res = await reviewAgent(reviewPrompt, { agentType: r.agentType, schema: FINDINGS, label: `review:${side}`, phase: 'Review' }, r.name)
   if (!res) return { mode: 'quick', round, passed: false, error: `${r.name} review failed` }
   const blocking = res.findings.filter(isBlocking)
-  const passedQ = blocking.length === 0
+  const incomplete = [...runtimeProblems]
+  const passedQ = blocking.length === 0 && incomplete.length === 0
   return fit({
-    mode: 'quick', round, passed: passedQ, reviewedBy: r.name, blockingCount: blocking.length,
+    mode: 'quick', round, passed: passedQ, complete: incomplete.length === 0, incomplete,
+    reviewers: runtimeReviewers(), reviewedBy: r.name, blockingCount: blocking.length,
     summary: clip(res.summary, 400),
     blocking: blocking.map(full), advisory: advisoryList(res.findings.filter(f => !isBlocking(f))),
-    next: nextStep(passedQ),
+    next: runtimeProblems.length ? runtimeNext : nextStep(passedQ),
   })
 }
 
 const results = await pipeline(
   ['claude', 'gpt'],
   side =>
-    agent(reviewPrompt, {
+    reviewAgent(reviewPrompt, {
       agentType: REVIEWERS[side].agentType,
       schema: FINDINGS,
       label: `review:${side}`,
       phase: 'Review',
       ...(REVIEWERS[side].reviewEffort ? { effort: REVIEWERS[side].reviewEffort } : {}),
-    }),
+    }, REVIEWERS[side].name),
   async (res, side) => {
     if (!res) return { side, failed: true }
     // Only blocking claims are adversarially verified; everything else is advisory and never gates.
@@ -272,7 +327,7 @@ const results = await pipeline(
     const list = toCheck
       .map(({ f, i }) => `[${i}] (${f.severity}) ${f.location}: ${f.problem}\n    Suggested fix: ${f.fix}`)
       .join('\n')
-    const v = await agent(
+    const v = await reviewAgent(
       `Another model (${REVIEWERS[side].name}) reviewed ${target} and reported the findings below.${context}\n\n` +
         'Each was claimed to BLOCK merge. Independently check each one against the actual code. Try to refute it. ' +
         'status: "refuted" only if you positively showed the claim is wrong (cite the code); "uncertain" if you ' +
@@ -282,6 +337,7 @@ const results = await pipeline(
         'Return one verdict per index.' + scope + '\n\n' +
         list,
       { agentType: checkerAgent.agentType, schema: VERDICTS, label: `verify:${side}-by-${verifier}`, phase: 'Verify' },
+      checkerAgent.name,
     )
     return { side, summary: res.summary, findings: res.findings, verdicts: v ? v.verdicts : null }
   },
@@ -326,6 +382,7 @@ for (const r of results.filter(Boolean)) {
 const order = { critical: 0, major: 1, minor: 2, nit: 3 }
 confirmed.sort((a, b) => order[a.severity] - order[b.severity])
 advisory.sort((a, b) => order[a.severity] - order[b.severity])
+incomplete.push(...runtimeProblems)
 const complete = incomplete.length === 0
 const passed = complete && confirmed.length === 0 && unverified.length === 0
 log(`${confirmed.length} blocking, ${advisory.length} advisory, ${rejected.length} rejected, ${unverified.length} unverified — ${passed ? 'PASSED' : 'NOT PASSED'}`)
@@ -337,6 +394,7 @@ return fit({
   passed,
   complete,
   incomplete,
+  reviewers: runtimeReviewers(),
   blockingCount: confirmed.length,
   unverifiedCount: unverified.length,
   target: clip(target, 160),
@@ -346,5 +404,5 @@ return fit({
   advisory: advisoryList(advisory),
   rejected: rejected.map(f => clip(`${f.location}: ${f.problem} — refuted: ${f.reason}`, 160)).slice(0, 3),
   rejectedCount: rejected.length,
-  next: nextStep(passed),
+  next: runtimeProblems.length ? runtimeNext : nextStep(passed),
 })

@@ -516,6 +516,19 @@ test("manual select clears blocking marks, pins the model through later marks an
 	assert.deepEqual(s.switched, [B, B]);
 });
 
+test("headless preempt records the fallback trigger and destination before the first request", async () => {
+	const s = session({ hasUI: false });
+	writeFileSync(stateFile, JSON.stringify({ "anthropic/a": { until: hour(), since: 0 } }));
+	await s.boundary("session_start");
+	assert.deepEqual(s.switched, [B]);
+	const entry = s.appended.find(a => a.type === "provider-fallback");
+	assert.ok(entry);
+	assert.equal(entry.data.from, "anthropic/a");
+	assert.equal(entry.data.to, "openai/b");
+	assert.ok(entry.data.until > Date.now());
+	assert.equal(entry.data.text, s.notices.at(-1)![0]);
+});
+
 test("subagent (no UI) model_select never clears shared marks", async () => {
 	const s = session({ hasUI: false });
 	writeFileSync(stateFile, JSON.stringify({ "anthropic/a": { until: hour(), since: 0 } }));

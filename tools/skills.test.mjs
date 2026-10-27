@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -112,18 +113,36 @@ test("routing fixtures are well formed, reference owned skills and cover each sk
   for (const c of cases.filter((c) => c.load.includes("sol-loop"))) assert.match(c.request, /sol loop/i);
 });
 
-// ---- review workflow cache boundary (no reviewer or model runs) ----
+// ---- review workflow cache and runtime provenance (no reviewer or model runs) ----
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-const reviewSource = readFileSync(join(REPO, "agent/workflows/review.js"), "utf8").replace(/export const meta = \{[\s\S]*?\n\}\n/, "");
+const reviewFiles = ["agent/workflows/review.js", ...["anthropic-heavy", "balanced", "balanced-anthropic", "balanced-openai", "kimi-heavy", "openai-heavy", "openai-only"].map(name => `agent/profiles/${name}/workflows/review.js`)];
+function loadReview(file = reviewFiles[0]) {
+  return readFileSync(join(REPO, file), "utf8").replace(/export const meta = \{[\s\S]*?\n\}\n/, "");
+}
+const reviewSource = loadReview();
 assert.ok(!reviewSource.includes("export const meta"), "meta declaration removed for evaluation");
 
-async function runReview(args) {
-  let calls = 0;
-  const agent = async () => { calls++; return { summary: "ok", findings: [], verdicts: [] }; };
+function modelMap(file) {
+  const declaration = loadReview(file).match(/const AGENT_MODELS = (\{[\s\S]*?\n\})/);
+  assert.ok(declaration, file);
+  return new Function(`return (${declaration[1]})`)();
+}
+function provenance(model, label) {
+  return { source: "model-provenance/v1", session: `session-${label}`, agent: "reviewer#fixture",
+    initial: model, models: [model], assistants: 3, errors: 0, firstAt: "2026-10-27T00:00:00Z", lastAt: "2026-10-27T00:01:00Z", switches: [] };
+}
+async function runReview(args, { file = reviewFiles[0], override } = {}) {
+  const calls = [];
+  const models = modelMap(file);
+  const agent = async (prompt, opts) => {
+    calls.push(opts);
+    const res = { summary: "ok", findings: [], verdicts: [], runtimeProvenance: provenance(models[opts.agentType], opts.label) };
+    return override ? override(opts, res) : res;
+  };
   const pipeline = async (items, ...stages) => Promise.all(items.map(async (item) => { let v = item; for (const s of stages) v = await s(v, item); return v; }));
-  const fn = new AsyncFunction("args", "agent", "pipeline", "phase", "log", reviewSource);
+  const fn = new AsyncFunction("args", "agent", "pipeline", "phase", "log", loadReview(file));
   const result = await fn(args, agent, pipeline, () => {}, () => {});
-  return { result, calls };
+  return { result, calls: calls.length, requests: calls };
 }
 
 const base = { target: "git diff A..B in /repo", context: "issue 60", author: "gpt", round: 1, baseSha: "a".repeat(40), headSha: "b".repeat(40) };
@@ -161,6 +180,208 @@ test("quick, follow-up, incomplete and unverified results are not eligible", asy
     const r = await runReview({ ...base, cachedReview: { ...result, ...spoiled } });
     assert.ok(r.calls > 0 && r.result.cached !== true, JSON.stringify(spoiled));
   }
+});
+
+test("runtime StructuredOutput preserves hook-injected provenance with every actual review schema", async () => {
+  const subagents = join(findPiModules(), "@tintinweb/pi-subagents/dist");
+  // Use the same typebox/value Check as compileJsonSchema. pi's dependency may be nested,
+  // rather than hoisted where the optional subagents peer dependency resolves it.
+  const requirePi = createRequire(join(findPiModules(), "@earendil-works/pi-coding-agent/package.json"));
+  const { Check } = await import(pathToFileURL(requirePi.resolve("typebox/value")));
+  const { createStructuredCapture, createStructuredOutputTool } = await import(pathToFileURL(join(subagents, "structured-output.js")));
+  const { default: register } = await import(pathToFileURL(join(REPO, "agent/extensions/model-provenance.ts")));
+  let hook;
+  register({ on: (name, handler) => { if (name === "tool_call") hook = handler; } });
+  for (const file of reviewFiles) {
+    const declarations = [...loadReview(file).matchAll(/const (FINDINGS|VERDICTS) = (\{[\s\S]*?\n\})/g)].map(match => match[0]);
+    assert.equal(declarations.length, 2, file);
+    const schemas = new Function(`${declarations.join(";\n")}; return { FINDINGS, VERDICTS };`)();
+    for (const [name, schema] of Object.entries(schemas)) {
+      const compiled = { schema, check: value => Check(schema, value) ? true : "schema mismatch" };
+      const input = name === "FINDINGS" ? { summary: "ok", findings: [] } : { verdicts: [] };
+      assert.equal(compiled.check(input), true, "valid before the hook");
+      const model = modelMap(file).reviewer;
+      const [provider, id] = model.split("/");
+      hook({ toolName: "StructuredOutput", input }, { hasUI: false, sessionManager: {
+        getSessionId: () => "runtime-contract", getBranch: () => [
+          { type: "model_change", provider, modelId: id, timestamp: "2026-10-27T00:00:00Z" },
+          { type: "session_info", name: "reviewer#runtime-contract" },
+          { type: "message", timestamp: "2026-10-27T00:00:01Z", message: { role: "assistant", provider, model: id, stopReason: "stop" } },
+        ],
+      } });
+      assert.deepEqual(input.runtimeProvenance.models, [model]);
+      assert.equal(compiled.check(input), true, `${file} ${name}: valid after the hook`);
+      const capture = createStructuredCapture();
+      const result = await createStructuredOutputTool(compiled, capture).execute("runtime-contract", input);
+      assert.notEqual(result.isError, true, `${file} ${name}`);
+      assert.deepEqual(JSON.parse(capture.json), input, "runtimeProvenance survives execute-time validation and capture");
+    }
+  }
+});
+
+test("review routing, runtime wrapper and schemas stay synchronized across all profiles", () => {
+  const wrapper = source => source.slice(source.indexOf("const runtimeRuns ="), source.indexOf("const FINDINGS ="));
+  for (const file of reviewFiles) {
+    const source = loadReview(file);
+    const models = modelMap(file);
+    assert.deepEqual(Object.keys(models).sort(), ["reviewer", "second-opinion", "sol-reviewer"]);
+    for (const [agentType, expected] of Object.entries(models)) {
+      const dir = file.replace(/workflows\/review\.js$/, "agents");
+      const frontmatter = readFileSync(join(REPO, dir, `${agentType}.md`), "utf8").split("---")[1];
+      assert.equal(frontmatter.match(/^model: (.+)$/m)?.[1], expected, `${file}: ${agentType}`);
+      assert.match(frontmatter.match(/^extensions: (.+)$/m)?.[1] ?? "", /\bmodel-provenance\b/);
+    }
+    for (const [, agentType] of source.matchAll(/agentType:\s*'([^']+)'/g)) assert.ok(models[agentType], `${file}: ${agentType}`);
+    assert.equal(wrapper(source), wrapper(reviewSource), `${file}: identical runtime wrapper`);
+    assert.ok(!source.includes("additionalProperties"), `${file}: schemas must accept injected provenance`);
+    assert.ok(!source.includes("review-v1:"), `${file}: no legacy cache prefix`);
+    if (source.includes("const cacheKey")) assert.match(source, /const cacheKey = 'review-v2:'/);
+  }
+  for (const profile of ["balanced", "balanced-openai"]) assert.equal(loadReview(`agent/profiles/${profile}/workflows/review.js`), reviewSource);
+});
+
+const blockingClaim = index => ({ severity: "major", blocking: true, location: `src/a.ts:${index + 1}`,
+  problem: `regression ${index}`, fix: "restore required behavior" });
+function withClaims(opts, res) {
+  if (opts.label.startsWith("review:")) res.findings = [blockingClaim(0)];
+  else res.verdicts = [{ index: 0, status: "refuted", reason: "checked source" }];
+  return res;
+}
+function withFallback(res, models, when = "before-first-response") {
+  const expected = res.runtimeProvenance.models[0];
+  res.runtimeProvenance.models = models;
+  res.runtimeProvenance.switches = [{ at: "2026-10-27T00:00:00Z", from: expected, to: "kimi/moonshot-v1-128k", when, reason: "usage limit" }];
+  return res;
+}
+function assertUncertified(result) {
+  assert.equal(result.complete, false);
+  assert.equal(result.passed, false);
+  assert.ok(result.incomplete.length > 0);
+  assert.equal(result.reviewCacheKey, undefined);
+  assert.match(result.next, /Do not rerun or override/);
+}
+
+for (const file of reviewFiles) {
+  test(`${file}: correct full/deep/quick model records certify and preserve provenance`, async () => {
+    const full = await runReview(base, { file });
+    assert.equal(full.result.passed, true);
+    assert.equal(full.result.complete, true);
+    assert.equal(full.calls, 2);
+    assert.equal(full.result.reviewers.length, 2);
+    assert.ok(full.result.reviewers.every(run => run.ok && run.effective.length === 1 && run.session));
+    const deep = await runReview({ ...base, deep: true, deepReason: "security", deepJustification: "auth change" }, { file, override: withClaims });
+    assert.equal(deep.result.passed, true);
+    assert.equal(deep.calls, 4);
+    assert.equal(deep.result.reviewers.length, 4);
+    const labels = deep.result.reviewers.map(run => run.label);
+    assert.deepEqual(labels, [...labels].sort());
+    for (const request of deep.requests) assert.equal(request.model, undefined, "no model overrides");
+    const quick = await runReview({ ...base, quick: true }, { file });
+    assert.equal(quick.calls, 1);
+    assert.equal(quick.result.passed, true);
+    assert.equal(quick.result.complete, true);
+    assert.equal(quick.result.reviewers.length, 1);
+  });
+
+  test(`${file}: initial and mid-review fallback preserve four calls but cannot certify`, async () => {
+    for (const when of ["before-first-response", "after-request-failure", "mid-review"]) {
+      const run = await runReview(base, { file, override: (opts, res) => {
+        withClaims(opts, res);
+        if (opts.label.startsWith("review:")) withFallback(res,
+          when === "before-first-response" ? ["kimi/moonshot-v1-128k"] : [...res.runtimeProvenance.models, "kimi/moonshot-v1-128k"], when);
+        return res;
+      } });
+      assertUncertified(run.result);
+      assert.equal(run.calls, 4, "no skipped verification or reruns");
+      assert.equal(run.result.reviewers.length, 4);
+      assert.equal(run.result.reviewers.filter(r => !r.ok).length, 2);
+      const text = run.result.incomplete.join(" ");
+      assert.match(text, /kimi\/moonshot-v1-128k/);
+      assert.match(text, when === "before-first-response" ? /before its first response/ : when === "after-request-failure" ? /after a failed request/ : /during the review/);
+      for (const request of run.requests) assert.equal(request.model, undefined);
+    }
+  });
+
+  test(`${file}: verifier fallback is checked independently`, async () => {
+    const run = await runReview(base, { file, override: (opts, res) => {
+      withClaims(opts, res);
+      return opts.label.startsWith("verify:") ? withFallback(res, ["kimi/moonshot-v1-128k"]) : res;
+    } });
+    assertUncertified(run.result);
+    assert.equal(run.calls, 4);
+    assert.ok(run.result.incomplete.every(problem => problem.includes("verify:")));
+  });
+
+  test(`${file}: missing, forged-source, empty and unavailable records fail closed`, async () => {
+    const invalid = [undefined, {}, { source: "self-reported", models: ["kimi/moonshot-v1-128k"] },
+      { source: "model-provenance/v1", models: [] }, { source: "model-provenance/v1", models: [null] }];
+    for (const p of invalid) {
+      const run = await runReview(base, { file, override: (_opts, res) => ({ ...res, runtimeProvenance: p }) });
+      assertUncertified(run.result);
+      assert.equal(run.calls, 2);
+      assert.ok(run.result.incomplete.every(problem => problem.endsWith("no runtime model record")));
+    }
+    const unavailable = await runReview(base, { file, override: (_opts, res) => {
+      res.runtimeProvenance.unavailable = "runtime session records unavailable";
+      return res;
+    } });
+    assertUncertified(unavailable.result);
+  });
+
+  test(`${file}: historical switches and request errors alone do not invalidate coverage`, async () => {
+    const run = await runReview(base, { file, override: (_opts, res) => {
+      res.runtimeProvenance.errors = 1;
+      res.runtimeProvenance.initial = "kimi/moonshot-v1-128k";
+      res.runtimeProvenance.switches = [{ from: "kimi/moonshot-v1-128k", to: res.runtimeProvenance.models[0], when: "before-first-response" }];
+      return res;
+    } });
+    assert.equal(run.result.passed, true);
+    assert.equal(run.calls, 2);
+  });
+
+  test(`${file}: quick-mode missing or different records cannot certify`, async () => {
+    for (const override of [(_opts, res) => ({ ...res, runtimeProvenance: undefined }),
+      (_opts, res) => withFallback(res, ["kimi/moonshot-v1-128k"])]) {
+      const run = await runReview({ ...base, quick: true, force: true, allowFallback: true }, { file, override });
+      assertUncertified(run.result);
+      assert.equal(run.calls, 1);
+    }
+  });
+
+  test(`${file}: failed review or verification follows existing failure paths`, async () => {
+    const reviewFailed = await runReview(base, { file, override: () => null });
+    assert.equal(reviewFailed.result.passed, false);
+    assert.equal(reviewFailed.result.complete, false);
+    assert.equal(reviewFailed.calls, 2);
+    const verifyFailed = await runReview(base, { file, override: (opts, res) => opts.label.startsWith("review:") ? withClaims(opts, res) : null });
+    assert.equal(verifyFailed.result.passed, false);
+    assert.equal(verifyFailed.result.complete, false);
+    assert.equal(verifyFailed.calls, 4);
+  });
+}
+
+test("review-v1 cache results cannot bypass runtime provenance enforcement", async () => {
+  const { result } = await runReview(base);
+  assert.match(result.reviewCacheKey, /^review-v2:/);
+  const old = { ...result, reviewCacheKey: result.reviewCacheKey.replace("review-v2:", "review-v1:") };
+  const run = await runReview({ ...base, cachedReview: old });
+  assert.equal(run.calls, 2);
+  assert.notEqual(run.result.cached, true);
+});
+
+test("fit preserves gate and coverage with six blockers and four reviewer records", async () => {
+  const run = await runReview(base, { override: (opts, res) => {
+    if (opts.label.startsWith("review:")) {
+      res.summary = "summary ".repeat(100);
+      res.findings = [0, 1, 2].map(i => ({ ...blockingClaim(i), problem: `regression ${i} ${"detail ".repeat(50)}` }));
+    } else res.verdicts = [0, 1, 2].map(index => ({ index, status: "blocks", reason: "confirmed ".repeat(50) }));
+    return res;
+  } });
+  assert.equal(run.result.passed, false);
+  assert.equal(run.result.complete, true);
+  assert.equal(run.result.blockingCount, 6);
+  assert.equal(run.result.reviewers.length, 4);
+  assert.ok(JSON.stringify(run.result).length < 3600);
 });
 
 test("a standalone Sol result is not a full-review cache entry", async () => {

@@ -319,6 +319,7 @@ The lessons behind the global rules are in [docs/operating-lessons.md](docs/oper
 | `extensions/phase-priority.ts` | Asks you before an agent gets high priority in the `pi-phase` queue (`--priority high`); blocks subagents and self-granting. `/phase-priority` grants or revokes. A session you designate as orchestrator can grant priority itself, capped at 10 uses or 120 minutes (`lib/phase-priority.ts`). |
 | `extensions/stale-cwd.ts` | Warns once (and shows a status) when the process working directory went stale, with the recovery (`lib/stale-cwd.ts`). |
 | `extensions/provider-fallback.ts` | Falls back to another provider's model when a usage or rate limit is hit (`provider-fallback.json`). |
+| `extensions/model-provenance.ts` | Stamps StructuredOutput with runtime assistant model records (also headless), overwriting self-reported attribution. Review workflows fail `INCOMPLETE` on missing or mixed/wrong model evidence. |
 | `extensions/lane-policy.ts`, `lib/lane-policy.ts`, `lane-policy/README.md` | **Dormant pilot.** A cooperative guard for git push and `gh` writes in repositories you enrol with `/lane-policy`. Does nothing until you enrol a repository. Read `lane-policy/README.md` before turning it on. |
 | `extensions/subagent-result-guard.ts` | Stops agents from re-reading a subagent result that was already delivered in full. |
 | `extensions/output-cap.ts`, `extensions/observation-mask.ts` | Cap large tool output (full text goes to `.ai-work/tool-out/`) and mask old tool output in subagent context. Tuned in `efficiency.json`. |
@@ -326,7 +327,7 @@ The lessons behind the global rules are in [docs/operating-lessons.md](docs/oper
 | `extensions/cratis-cleanup-env.ts` | Sets `CRATIS_CLEANUP_NO_GH=1` so the Cratis worktree cleanup hook stops querying GitHub once per worktree; git-ancestry cleanup still runs. |
 | `extensions/ai-work-lifecycle.ts` | Integrates the `ai-work-lifecycle` task-output tool. |
 | `early-extensions/mcp-project-trust.ts` | Only loads project MCP configs from trusted folders. |
-| `workflows/review.js` | Cross-provider code review with adversarial verification; gates only on confirmed blocking findings. |
+| `workflows/review.js` | Cross-provider code review with adversarial verification; gates only on confirmed blocking findings and requires runtime provenance matching each pinned reviewer/verifier model. |
 | `workflows/bulk-edit.js` | One mechanical change across many files, then verified. |
 | `workflows/loose-threads-plan.js` | Turns a `loose-threads` inventory into a cleanup plan. |
 | `loose-threads/` | Weekly audit of leftover worktrees, branches, stashes and Docker volumes. |
