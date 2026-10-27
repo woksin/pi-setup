@@ -69,5 +69,6 @@ For people who publish pi-setup itself. Not needed for normal use.
 |---|---|---|---|
 | `release-check.sh` | **Acts.** Runs the full release gate: every test suite and a scan of the git history. | `release-check.sh --help` | [source](../tools/release-check.sh) |
 | `publish-check.py` | Checks a staged copy of the published tree for disallowed files and secrets. | `publish-check.py --help` | [source](../tools/publish-check.py) |
+| `release-asset.sh` | Builds the checksummed archive, `SHA256SUMS` and the pinned `bootstrap.sh` uploaded to each release. | `release-asset.sh --help` | [source](../tools/release-asset.sh) |
 
 Per-tool pages, extension depth and scenario guides are planned for later parts of [#34](https://github.com/woksin/pi-setup/issues/34).

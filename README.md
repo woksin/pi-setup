@@ -40,9 +40,38 @@ Prerequisites: none. Run `./install.sh`. It checks what your machine has, shows 
 
 - Safe to re-run: files you changed are kept and the new version is written next to them, and every overwrite is backed up.
 - Nothing is scheduled behind your back. The `docker-guardian`, `cleanup`, `secret-sweep` and `disk-growth` schedules are extras: the guided installer pre-selects the ones your machine supports and shows them in the Review before anything is written, and unattended installs need `--with <id>`.
-- Releases are cut by hand from tagged versions; `./install.sh update` moves a checkout to the latest release tag.
+- Releases are cut by hand from tagged versions; each release carries a checksummed archive and `bootstrap.sh`; `./install.sh update` moves a checkout to the latest release tag.
 
 ## Install
+
+### One-line install
+
+No clone is needed. In a macOS or Linux terminal (WSL2 on Windows), run:
+
+```sh
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh
+```
+
+The bootstrap needs only POSIX sh, curl or wget, tar and a SHA-256 tool (`sha256sum`, `shasum` or `openssl`). It downloads a SHA-256-pinned release archive, verifies it, unpacks it into `~/pi-setup` and runs `./install.sh` there. When a terminal is available it reopens the terminal for the guided questions, even though the script arrived through a pipe; without a terminal it never prompts.
+
+Installer flags pass through unchanged. For example:
+
+```sh
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh -s -- --yes --install-prereqs
+curl -fsSL https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh | sh -s -- --dry-run
+```
+
+`--dry-run` (or `--plan`) downloads and checks the release in a temporary directory, then removes it without changing your home folder. Add `--dir "/path/to/pi-setup"` to choose another destination (or set `PI_SETUP_DIR`), and `--version <tag>` to choose a released version. Bootstrap refuses git checkouts and non-empty foreign folders; re-running it replaces only a folder it previously marked as its own. To update an install made this way, run the same one-liner again.
+
+Piping a script into sh means trusting it. To read it first:
+
+```sh
+curl -fsSLO https://github.com/woksin/pi-setup/releases/latest/download/bootstrap.sh
+# Read bootstrap.sh before running it.
+sh bootstrap.sh
+```
+
+A git clone works too: clone this repository, enter it and run `./install.sh`.
 
 ### New machine prerequisites
 
@@ -134,7 +163,7 @@ Flags, in any order: `--install-prereqs` (install missing prerequisites and pi w
 
 Each install records what it wrote in `~/.pi/agent/.pi-setup/manifest.json` (HOME-relative paths and hashes; no checkout path or remote). Re-runs use it: a file you have not changed is updated silently (the old bytes go to `~/.pi/agent/.pi-setup/backups/<timestamp>/`); a file you changed is kept, and in a terminal install asks whether to keep yours, take the new one or show the diff, otherwise it writes the new version next to it as `<file>.pi-setup-new`. An install made before the manifest existed is adopted on its next run. `settings.json` and `user.json` are merged key by key, so uninstall can revert just those keys.
 
-- `./install.sh update [--dry-run] [--ref <tag>]` checks out the latest `v*` release tag of this checkout (detached; `git switch main` goes back) and runs that release's installer. It refuses a checkout with local changes.
+- `./install.sh update [--dry-run] [--ref <tag>]` checks out the latest `v*` release tag of this checkout (detached; `git switch main` goes back) and runs that release's installer. It refuses a checkout with local changes. An install from the one-liner has no git checkout; re-run the one-liner to update it instead.
 - `./install.sh uninstall [--dry-run] [--yes]` removes what the manifest lists, restores files that install had replaced, and leaves files you changed (it lists them). It never touches `auth.json`, `sessions/`, `accounts/`, `jobs/`, caches or anything that is not in the manifest.
 - `./install.sh backups [list | prune --keep N]` lists the run folders or prunes them; installs keep the last 10. Backups that uninstall restores from are pinned and never pruned.
 

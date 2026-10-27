@@ -36,6 +36,7 @@ TOOLS = {
     "session-watchdog": ("agent/bin/session-watchdog", []),
     "publish-check": ("tools/publish-check.py", []),
     "release-check": ("tools/release-check.sh", []),
+    "release-asset": ("tools/release-asset.sh", ["build", "render"]),
     "ai-work-lifecycle": ("tools/ai-work-lifecycle/ai-work-lifecycle.py", ["start", "sweep", "inventory"]),
     "sweep-known-roots": ("tools/ai-work-lifecycle/sweep-known-roots.py", []),
 }
