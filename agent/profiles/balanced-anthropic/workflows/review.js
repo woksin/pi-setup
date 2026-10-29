@@ -14,6 +14,13 @@
  * security-sensitive, concurrency/algorithmic or large cross-cutting changes — it costs
  * considerably more OpenAI budget.
  *
+ * Security lens (every mode): one extra reviewer from the provider that did NOT write the work reviews only
+ * trust boundaries (caller-controlled input, authn/authz, tenancy, secure defaults, fail-closed, host parity,
+ * injection, secrets). It returns nothing when the change touches no trust boundary. In full mode its blocking
+ * findings are verified like the others; in quick mode they gate unverified (fail closed). Holes that already
+ * existed in touched code come back as advisory items prefixed "PRE-EXISTING:" — track them (private advisory
+ * for exploitable ones), never drop them. Added 2026-10-29 after GHSA-qr53-922q-xh7r slipped through review.
+ *
  * Quick mode: one review by the provider that did NOT write the work, no verification:
  * GPT-6.1 Sol (`sol-reviewer`, high) for Claude-written work, Opus 5.5 (`reviewer`, medium)
  * for GPT-written work.
@@ -66,7 +73,7 @@ export const meta = {
   description: 'Two-model code/work review on Anthropic models (Opus 5.5 + Sonnet 5.5; Opus 5.5 high with deep: true); only blocking findings gate, verified by the other model',
   whenToUse: 'Reviewing a diff, change set, document or plan before it is merged or published; pass author, round and full SHAs.',
   phases: [
-    { title: 'Review', detail: 'Opus 5.5 and GPT-6.1 Sol (Astra in deep mode) review independently' },
+    { title: 'Review', detail: 'Opus 5.5 and GPT-6.1 Sol (Astra in deep mode) review independently, plus a security lens from the non-author side' },
     { title: 'Verify', detail: 'each finding is challenged by the other provider' },
   ],
 }
@@ -206,20 +213,25 @@ const compactRuntimeRuns = (res, oversized) => {
 // End runtime recording.
 
 // Cache identities include the pinned routing, not just caller-supplied diff identity.
-const cacheKey = 'review-v2:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
+const cacheKey = 'review-v2-security:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
   mode: deep ? 'deep' : 'full', author, context: input.context ?? '', routing: AGENT_MODELS, runtimeStamp: RUNTIME_STAMP,
   deepReason: input.deepReason ?? null, deepJustification: input.deepJustification ?? null }))
+// The security lens runs on the provider that did NOT write the work (same rule as `other` below).
+const secSide = author === 'claude' ? 'gpt' : 'claude'
 const cacheAgentTypes = {
   'review:claude': 'reviewer', 'review:gpt': deep ? 'second-opinion' : 'sol-reviewer',
+  [`review:security-${secSide}`]: secSide === 'claude' ? 'reviewer' : deep ? 'second-opinion' : 'sol-reviewer',
   'verify:claude-by-gpt': deep || author === 'gpt' ? 'second-opinion' : 'sol-reviewer',
   'verify:gpt-by-claude': 'reviewer',
+  // The security lane is verified by the author side (the provider that is not reviewing it).
+  [`verify:security-${secSide}-by-${secSide === 'claude' ? 'gpt' : 'claude'}`]: secSide === 'claude' ? (deep || author === 'gpt' ? 'second-opinion' : 'sol-reviewer') : 'reviewer',
 }
 const cachedProvenance = run => ({ ...run, models: run?.effective })
 const reusableRun = run => runtimeAvailable(cachedProvenance(run), runtimeModels(cachedProvenance(run)))
 const completeCacheCoverage = (cached, runs) => {
   const labels = new Set(runs.map(run => run?.label))
   return runs.length === cached.runtimeCallCount && labels.size === runs.length &&
-    labels.has('review:claude') && labels.has('review:gpt')
+    labels.has('review:claude') && labels.has('review:gpt') && labels.has(`review:security-${secSide}`)
 }
 const validCachedRole = (run, agentType) => Boolean(agentType) && run.agentType === agentType && run.ok === true
 const checkCachedRun = run => {
@@ -340,9 +352,45 @@ const reviewPrompt =
   'missing or broken tests and security issues. Read the actual code; do not guess. ' +
   'Report only real problems — an empty findings list is a valid answer.' + RUBRIC
 
+const securityPrompt =
+  `Security review of ${target}.${context}${scope}${priorText}\n\n` +
+  'You are the SECURITY lens. Ignore general correctness, style and performance; other reviewers cover those. ' +
+  'First decide whether the change touches a trust boundary: request handling (endpoints, headers, query, cookies, ' +
+  'route values, body fields), authentication, authorization, roles/policies, tenancy, identity, validation that ' +
+  'enforces business, state or ownership rules, secrets/credentials/tokens, (de)serialization, file/path/process/SQL/' +
+  'shell handling, outbound network calls, cryptography, logging of sensitive data, generated clients/proxies, or ' +
+  'security-relevant configuration defaults. If it touches none, return an empty findings list and say so in one line.\n' +
+  'Otherwise read the real code paths end to end and check:\n' +
+  '- Caller-controlled input: can any value a caller sends (header, query, cookie, body field, client-side flag) weaken ' +
+  'validation, authorization, tenant or identity checks, or select a less strict code path? Server-side enforcement must ' +
+  'never depend on the client (generated proxies, UI components) behaving well.\n' +
+  '- Secure by default: relaxing a security or validation rule must be an explicit server-side opt-in (attribute, ' +
+  'option), never the default and never caller-selected. A documentation warning is not a mitigation.\n' +
+  '- Anonymous and low-privilege callers: what can public/[AllowAnonymous] endpoints and callers holding only the ' +
+  'required role reach? Ownership, tenant and organization rules must still hold for them.\n' +
+  '- Fail closed: errors, missing configuration, unknown enum values and parse failures must deny, not allow.\n' +
+  '- Parity: every host, transport and language variant of the same behaviour (HTTP, MCP, gRPC, C#/Kotlin/TypeScript) ' +
+  'enforces the same rule.\n' +
+  '- Injection and unsafe handling: SQL, shell, path traversal, templates, unsafe deserialization, SSRF, open redirects.\n' +
+  '- Exposure: credentials, tokens, connection strings or personal data in logs, errors, responses or telemetry; ' +
+  'unsigned or unvalidated cookies/tokens treated as identity.\n' +
+  '- Tests: a security rule that is added or changed needs a spec proving the hostile case is rejected.\n\n' +
+  'For each finding, put a concrete exploit sketch in problem (who sends what, and what happens). blocking=true ' +
+  '(critical/major) for any exploitable hole this change introduces or widens, including a missing hostile-case spec ' +
+  'for a new security rule. A hole that already existed in code this change touches: report it with severity major, ' +
+  'blocking=false, and start problem with "PRE-EXISTING:" so it is tracked; do not omit it. Do not report theoretical ' +
+  'issues without a reachable path. ' +
+  'Deployment context: in Cratis repositories, assume the Cratis platform deployment (services behind Cratis AuthProxy, ' +
+  'which strips client identity and tenant headers and injects verified ones). Rate a hole that AuthProxy fully ' +
+  'neutralises as minor and say so; holes AuthProxy passes through (other headers, bodies, responses, authenticated ' +
+  'callers) keep their full severity. An empty findings list is a valid answer.'
+
 const isBlocking = f => f.blocking === true && (f.severity === 'critical' || f.severity === 'major')
 const clip = (t, n) => (typeof t === 'string' && t.length > n ? t.slice(0, n) + '…' : t)
 const oneLine = f => clip(`(${f.severity}) ${f.location}: ${f.problem}`, 160)
+// Security holes found in touched code that predate the change: surfaced separately so they are never lost
+// in the advisory list. The caller tracks them (private advisory for exploitable ones).
+const preExisting = list => list.filter(f => typeof f.problem === 'string' && f.problem.startsWith('PRE-EXISTING:')).slice(0, 5).map(oneLine)
 const full = f => ({
   severity: f.severity, location: clip(f.location, 120), problem: clip(f.problem, 300), fix: clip(f.fix, 160),
   ...(f.foundBy ? { foundBy: f.foundBy } : {}), ...(f.note ? { note: clip(f.note, 160) } : {}),
@@ -386,42 +434,55 @@ phase('Review')
 if (quick) {
   const side = other(author)
   const r = QUICK_REVIEWERS[side]
-  const res = await reviewAgent(reviewPrompt, { agentType: r.agentType, schema: FINDINGS, label: `review:${side}`, phase: 'Review' }, r.name)
+  const [res, sec] = await parallel([
+    () => reviewAgent(reviewPrompt, { agentType: r.agentType, schema: FINDINGS, label: `review:${side}`, phase: 'Review' }, r.name),
+    () => reviewAgent(securityPrompt, { agentType: r.agentType, schema: FINDINGS, label: `review:security-${side}`, phase: 'Review' }, `${r.name} (security)`),
+  ])
   if (!res) return { mode: 'quick', round, passed: false, error: `${r.name} review failed` }
-  const blocking = res.findings.filter(isBlocking)
+  if (!sec) return { mode: 'quick', round, passed: false, error: `${r.name} security review failed` }
+  // Quick mode has no verifier: security blockers gate unverified (fail closed).
+  const all = res.findings.concat(sec.findings.map(f => ({ ...f, foundBy: `${r.name} (security)` })))
+  const blocking = all.filter(isBlocking)
   const incomplete = [...runtimeProblems]
   const passedQ = blocking.length === 0 && incomplete.length === 0
   return fit({
     mode: 'quick', round, passed: passedQ, complete: incomplete.length === 0, incomplete,
     reviewers: runtimeReviewers(), reviewedBy: r.name, blockingCount: blocking.length,
-    summary: clip(res.summary, 400),
-    blocking: blocking.map(full), advisory: advisoryList(res.findings.filter(f => !isBlocking(f))),
+    summary: clip(res.summary, 400), securitySummary: clip(sec.summary, 300),
+    blocking: blocking.map(full), preExistingSecurity: preExisting(all), advisory: advisoryList(all.filter(f => !isBlocking(f))),
     next: runtimeProblems.length ? runtimeNext : nextStep(passedQ),
   })
 }
 
+// The security lens runs on the provider that did NOT write the work and is verified by the other provider.
+const LANES = [
+  { key: 'claude', side: 'claude', reviewer: REVIEWERS.claude, prompt: reviewPrompt },
+  { key: 'gpt', side: 'gpt', reviewer: REVIEWERS.gpt, prompt: reviewPrompt },
+  { key: `security-${secSide}`, side: secSide, reviewer: { ...REVIEWERS[secSide], name: `${REVIEWERS[secSide].name} (security)` }, prompt: securityPrompt },
+]
 const results = await pipeline(
-  ['claude', 'gpt'],
-  side =>
-    reviewAgent(reviewPrompt, {
-      agentType: REVIEWERS[side].agentType,
+  LANES,
+  lane =>
+    reviewAgent(lane.prompt, {
+      agentType: lane.reviewer.agentType,
       schema: FINDINGS,
-      label: `review:${side}`,
+      label: `review:${lane.key}`,
       phase: 'Review',
-      ...(REVIEWERS[side].reviewEffort ? { effort: REVIEWERS[side].reviewEffort } : {}),
-    }, REVIEWERS[side].name),
-  async (res, side) => {
-    if (!res) return { side, failed: true }
+      ...(lane.reviewer.reviewEffort ? { effort: lane.reviewer.reviewEffort } : {}),
+    }, lane.reviewer.name),
+  async (res, lane) => {
+    const side = lane.side
+    if (!res) return { lane, side, failed: true }
     // Only blocking claims are adversarially verified; everything else is advisory and never gates.
     const toCheck = res.findings.map((f, i) => ({ f, i })).filter(x => isBlocking(x.f))
-    if (toCheck.length === 0) return { side, summary: res.summary, findings: res.findings, verdicts: [] }
+    if (toCheck.length === 0) return { lane, side, summary: res.summary, findings: res.findings, verdicts: [] }
     const verifier = other(side)
     const checkerAgent = verifierFor(side)
     const list = toCheck
       .map(({ f, i }) => `[${i}] (${f.severity}) ${f.location}: ${f.problem}\n    Suggested fix: ${f.fix}`)
       .join('\n')
     const v = await reviewAgent(
-      `Another model (${REVIEWERS[side].name}) reviewed ${target} and reported the findings below.${context}\n\n` +
+      `Another model (${lane.reviewer.name}) reviewed ${target} and reported the findings below.${context}\n\n` +
         'Each was claimed to BLOCK merge. Independently check each one against the actual code. Try to refute it. ' +
         'status: "refuted" only if you positively showed the claim is wrong (cite the code); "uncertain" if you ' +
         'could not confirm or refute it (e.g. could not access or run the relevant code); "blocks" if it is real ' +
@@ -429,10 +490,10 @@ const results = await pipeline(
         'broken build/tests); "not-blocking" if it is real but minor, pre-existing or hypothetical. ' +
         'Return one verdict per index.' + scope + '\n\n' +
         list,
-      { agentType: checkerAgent.agentType, schema: VERDICTS, label: `verify:${side}-by-${verifier}`, phase: 'Verify' },
+      { agentType: checkerAgent.agentType, schema: VERDICTS, label: `verify:${lane.key}-by-${verifier}`, phase: 'Verify' },
       checkerAgent.name,
     )
-    return { side, summary: res.summary, findings: res.findings, verdicts: v ? v.verdicts : null }
+    return { lane, side, summary: res.summary, findings: res.findings, verdicts: v ? v.verdicts : null }
   },
 )
 
@@ -445,11 +506,11 @@ const incomplete = []
 
 // A pipeline item that threw comes back as null; treat it as a failed review, never skip it.
 results.forEach((r, i) => {
-  if (!r) incomplete.push(`${REVIEWERS[['claude', 'gpt'][i]].name} review did not complete`)
+  if (!r) incomplete.push(`${LANES[i].reviewer.name} review did not complete`)
 })
 
 for (const r of results.filter(Boolean)) {
-  const by = REVIEWERS[r.side].name
+  const by = r.lane.reviewer.name
   if (r.failed) {
     log(`${by} review failed`)
     summaries.push({ by, summary: 'REVIEW FAILED' })
@@ -495,6 +556,7 @@ const verdict = fit({
   blocking: confirmed.map(full),
   unverified: unverified.map(full),
   advisory: advisoryList(advisory),
+  preExistingSecurity: preExisting(advisory),
   rejected: rejected.map(f => clip(`${f.location}: ${f.problem} — refuted: ${f.reason}`, 160)).slice(0, 3),
   rejectedCount: rejected.length,
   next: runtimeProblems.length ? runtimeNext : nextStep(passed),

@@ -3,7 +3,7 @@ export const meta = {
   description: 'OpenAI-only independent Sol/Astra review with adversarial cross-model verification',
   whenToUse: 'Review a whole change before merge; quick mode for iteration, deep mode for hard reasoning',
   phases: [
-    { title: 'Review', detail: 'Sol and Astra review independently' },
+    { title: 'Review', detail: 'Sol and Astra review independently, plus a cross-model security lens' },
     { title: 'Verify', detail: 'the other OpenAI model challenges blocking findings' },
   ],
 }
@@ -13,6 +13,12 @@ export const meta = {
 // quick, deep, since, prior, round (1..3), force. Quick mode requires author;
 // legacy gpt/claude authors use Astra. Full mode always uses both models.
 // Delta reviews require an earlier whole-change review in the same mode and prior findings.
+// Security lens (every mode): one extra reviewer from the model that did NOT write the work (same choice as quick
+// mode: author astra -> Sol, otherwise Astra) reviews only trust boundaries (caller-controlled input, authn/authz,
+// tenancy, secure defaults, fail-closed, host parity, injection, secrets). It returns nothing when the change touches
+// no trust boundary. In full mode its blocking findings are verified by the other model; in quick mode they gate
+// unverified (fail closed). Holes that already existed in touched code come back as advisory items prefixed
+// "PRE-EXISTING:" — track them (private advisory for exploitable ones), never drop them.
 const input = typeof args === 'string' ? JSON.parse(args) : (args || {})
 const target = input.target
 if (typeof target !== 'string' || !target.trim()) return { passed: false, error: 'Missing args.target.' }
@@ -145,50 +151,99 @@ const scope = since ? `\nFollow-up round ${round}: review ONLY git diff ${since}
 const priorText = prior ? `\nEarlier findings/decisions (respect dismissals):\n${prior}` : ''
 const rubric = '\nOnly critical/major regressions, data loss, security holes, spec violations, broken builds/tests or out-of-scope behaviour changes block merge. Minor/nit items are advisory. Exclude pre-existing defects, unreachable hypothetical inputs, wording preferences and release notes/PR descriptions. Read actual code; do not guess. Remain read-only and obey execution budgets. Empty findings are valid.'
 const prompt = `Review ${target}.${context}${scope}${priorText}\nCheck correctness, regressions, security and missing/broken tests.${rubric}`
+const securityPrompt =
+  `Security review of ${target}.${context}${scope}${priorText}\n\n` +
+  'You are the SECURITY lens. Ignore general correctness, style and performance; other reviewers cover those. ' +
+  'First decide whether the change touches a trust boundary: request handling (endpoints, headers, query, cookies, ' +
+  'route values, body fields), authentication, authorization, roles/policies, tenancy, identity, validation that ' +
+  'enforces business, state or ownership rules, secrets/credentials/tokens, (de)serialization, file/path/process/SQL/' +
+  'shell handling, outbound network calls, cryptography, logging of sensitive data, generated clients/proxies, or ' +
+  'security-relevant configuration defaults. If it touches none, return an empty findings list and say so in one line.\n' +
+  'Otherwise read the real code paths end to end and check:\n' +
+  '- Caller-controlled input: can any value a caller sends (header, query, cookie, body field, client-side flag) weaken ' +
+  'validation, authorization, tenant or identity checks, or select a less strict code path? Server-side enforcement must ' +
+  'never depend on the client (generated proxies, UI components) behaving well.\n' +
+  '- Secure by default: relaxing a security or validation rule must be an explicit server-side opt-in (attribute, ' +
+  'option), never the default and never caller-selected. A documentation warning is not a mitigation.\n' +
+  '- Anonymous and low-privilege callers: what can public/[AllowAnonymous] endpoints and callers holding only the ' +
+  'required role reach? Ownership, tenant and organization rules must still hold for them.\n' +
+  '- Fail closed: errors, missing configuration, unknown enum values and parse failures must deny, not allow.\n' +
+  '- Parity: every host, transport and language variant of the same behaviour (HTTP, MCP, gRPC, C#/Kotlin/TypeScript) ' +
+  'enforces the same rule.\n' +
+  '- Injection and unsafe handling: SQL, shell, path traversal, templates, unsafe deserialization, SSRF, open redirects.\n' +
+  '- Exposure: credentials, tokens, connection strings or personal data in logs, errors, responses or telemetry; ' +
+  'unsigned or unvalidated cookies/tokens treated as identity.\n' +
+  '- Tests: a security rule that is added or changed needs a spec proving the hostile case is rejected.\n\n' +
+  'For each finding, put a concrete exploit sketch in problem (who sends what, and what happens). blocking=true ' +
+  '(critical/major) for any exploitable hole this change introduces or widens, including a missing hostile-case spec ' +
+  'for a new security rule. A hole that already existed in code this change touches: report it with severity major, ' +
+  'blocking=false, and start problem with "PRE-EXISTING:" so it is tracked; do not omit it. Do not report theoretical ' +
+  'issues without a reachable path. ' +
+  'Deployment context: in Cratis repositories, assume the Cratis platform deployment (services behind Cratis AuthProxy, ' +
+  'which strips client identity and tenant headers and injects verified ones). Rate a hole that AuthProxy fully ' +
+  'neutralises as minor and say so; holes AuthProxy passes through (other headers, bodies, responses, authenticated ' +
+  'callers) keep their full severity. An empty findings list is a valid answer.'
 const call = (side, text, schema, label, phaseName) => reviewAgent(text, {
   agentType: reviewers[side].agentType, effort: reviewers[side].effort,
   schema, label, phase: phaseName,
 }, reviewers[side].name)
 const advisoryText = f => `(${f.severity}) ${f.location}: ${f.problem}`
+// Security holes found in touched code that predate the change: surfaced separately so they are never lost
+// in the advisory list. The caller tracks them (private advisory for exploitable ones).
+const preExisting = list => list.filter(f => typeof f.problem === 'string' && f.problem.startsWith('PRE-EXISTING:')).slice(0, 5).map(advisoryText)
+// The security lens runs on the model that did NOT write the work (same rule as quick mode).
+const secSide = input.author === 'astra' ? 'sol' : 'astra'
 const next = passed => passed ? 'Passed; fix cheap advisory items in the same pass, not another round.'
   : round >= 3 ? 'Not passed at the cap; make a structural fix or ask the user.'
     : `Fix blockers and rerun with since, prior and round: ${round + 1}.`
 phase('Review')
 if (quick) {
   const side = input.author === 'astra' ? 'sol' : 'astra'
-  const res = await call(side, prompt, FINDINGS, `review:${side}`, 'Review')
+  const [res, sec] = await parallel([
+    () => call(side, prompt, FINDINGS, `review:${side}`, 'Review'),
+    () => call(side, securityPrompt, FINDINGS, `review:security-${side}`, 'Review'),
+  ])
   if (!res) return { passed: false, mode: 'quick', error: 'Review failed.' }
-  const blockers = res.findings.filter(blocking)
+  if (!sec) return { passed: false, mode: 'quick', error: 'Security review failed.' }
+  // Quick mode has no verifier: security blockers gate unverified (fail closed).
+  const all = res.findings.concat(sec.findings.map(f => ({ ...f, foundBy: `${reviewers[side].name} (security)` })))
+  const blockers = all.filter(blocking)
   const incomplete = [...runtimeProblems]
   const passedQ = blockers.length === 0 && incomplete.length === 0
   return {
     mode: 'quick', round, passed: passedQ, complete: incomplete.length === 0, incomplete,
     reviewers: runtimeReviewers(), reviewedBy: reviewers[side].name,
-    diversity: 'OpenAI-only cross-model', summary: res.summary,
-    blockingCount: blockers.length, blocking: blockers,
-    advisory: res.findings.filter(f => !blocking(f)).map(advisoryText), next: runtimeProblems.length ? runtimeNext : next(passedQ),
+    diversity: 'OpenAI-only cross-model', summary: res.summary, securitySummary: sec.summary,
+    blockingCount: blockers.length, blocking: blockers, preExistingSecurity: preExisting(all),
+    advisory: all.filter(f => !blocking(f)).map(advisoryText), next: runtimeProblems.length ? runtimeNext : next(passedQ),
   }
 }
-const sides = ['sol', 'astra']
-const results = await pipeline(sides,
-  side => call(side, prompt, FINDINGS, `review:${side}`, 'Review'),
-  async (res, side) => {
-    if (!res) return { side, failed: true }
+// The security lens is verified by the other model, like any other lane.
+const lanes = [
+  { key: 'sol', side: 'sol', name: reviewers.sol.name, prompt },
+  { key: 'astra', side: 'astra', name: reviewers.astra.name, prompt },
+  { key: `security-${secSide}`, side: secSide, name: `${reviewers[secSide].name} (security)`, prompt: securityPrompt },
+]
+const results = await pipeline(lanes,
+  lane => call(lane.side, lane.prompt, FINDINGS, `review:${lane.key}`, 'Review'),
+  async (res, lane) => {
+    const side = lane.side
+    if (!res) return { lane, side, failed: true }
     const claims = res.findings.map((f, index) => ({ ...f, index })).filter(blocking)
-    if (!claims.length) return { side, ...res, verdicts: [] }
+    if (!claims.length) return { lane, side, ...res, verdicts: [] }
     const checker = other(side)
     const verified = await call(checker,
-      `Try to REFUTE each blocking claim from ${reviewers[side].name} about ${target}.${context}${scope}${priorText}\n` +
+      `Try to REFUTE each blocking claim from ${lane.name} about ${target}.${context}${scope}${priorText}\n` +
       'Read the actual code independently. Return exactly one verdict per index: blocks if real and merge-blocking; not-blocking if real but minor, pre-existing or hypothetical; refuted only with positive evidence; uncertain if inaccessible or unresolved. Cite evidence in reason. Do not edit files.\n' +
       JSON.stringify(claims) + rubric,
-      VERDICTS, `verify:${side}-by-${checker}`, 'Verify')
-    return { side, ...res, verdicts: verified ? verified.verdicts : null }
+      VERDICTS, `verify:${lane.key}-by-${checker}`, 'Verify')
+    return { lane, side, ...res, verdicts: verified ? verified.verdicts : null }
   },
 )
 const confirmed = [], unverified = [], advisory = [], rejected = [], incomplete = [], summaries = []
 results.forEach((res, index) => {
-  const side = sides[index]
-  const by = reviewers[side].name
+  const side = lanes[index].side
+  const by = lanes[index].name
   if (!res || res.failed) { incomplete.push(`${by} review failed`); return }
   summaries.push({ by, summary: res.summary })
   if (res.findings.some(blocking) && !res.verdicts) incomplete.push(`${by} verification failed`)
@@ -212,6 +267,6 @@ return {
   mode: deep ? 'deep' : 'full', diversity: 'OpenAI-only cross-model', round, target, passed,
   complete: incomplete.length === 0, incomplete, summaries, reviewers: runtimeReviewers(),
   blockingCount: confirmed.length, unverifiedCount: unverified.length,
-  blocking: confirmed, unverified, advisory: advisory.map(advisoryText),
+  blocking: confirmed, unverified, advisory: advisory.map(advisoryText), preExistingSecurity: preExisting(advisory),
   rejectedCount: rejected.length, rejected: rejected.map(f => `${f.location}: ${f.reason}`), next: runtimeProblems.length ? runtimeNext : next(passed),
 }

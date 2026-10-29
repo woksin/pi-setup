@@ -67,6 +67,8 @@ Answer these with the setup's tools, not hand-rolled `gh`/`ls`/`grep` loops:
 
 The `review` workflow gates only on **blocking** findings: critical or major issues a maintainer would block merge on (regression, data loss, security, spec violation, broken build or tests) that the other provider confirmed. Minor findings and nits come back as `advisory`.
 
+- **Security lens (2026-10-29).** Every `review` run, quick or full, includes a separate security reviewer from the non-author provider. It checks trust boundaries: caller-controlled input that weakens validation or authorization, secure defaults with server-side opt-in only, anonymous and low-privilege callers, fail-closed behaviour, parity across hosts, injection and secret exposure, and hostile-case specs. Do not skip it or work around it. Its result lists `preExistingSecurity` holes in touched code. For each one, track it: in Cratis repositories, open a private draft security advisory (`gh api -X POST repos/<o>/<r>/security-advisories`) when it is exploitable, never a public issue, and report it to the user.
+
 - **Review is proportionate, not maximal (2026-10-21).** Reviews cost hours and still miss regressions. Running the real thing finds more: the app, the sample, the specs, an end-to-end flow. Default budget:
   - **Each delivery or lane change:** one `quick: true` round. A second round only if the first found a blocker. Never more than 2.
   - **Each PR or release candidate:** one full-mode (not deep) review of the whole change, started **in parallel with the gate** (it uses no build slot), never after it as a serial step. If it finds blockers, fix them and run one quick delta round.
