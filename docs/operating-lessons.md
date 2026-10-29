@@ -102,3 +102,15 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Symptom:** self-reported status was mostly accurate, but an independent check found a stale PR, a dead lane and unanswered roll calls.
 - **Rule:** pair every roll call with a read-only git/GitHub audit.
 - **Enforced:** practice (orchestrator).
+
+### Shared ~/.m2 snapshot artifacts leak between worktrees
+- **Symptom:** a gate failed on a test that passed on its base. The test loaded a runtime jar (same fixed `0.0.0-local` version) that another worktree's concurrent gate had installed into the shared `~/.m2`.
+- **Cause:** every worktree installs a locally built artifact under the same coordinates into one shared local repository, so the last install wins for everyone.
+- **Rule:** in any gate that installs a locally built Maven artifact, every Maven call uses a private local repository with the shared one as a read-only tail: `MAVEN_ARGS="-Dmaven.repo.local=<worktree>/.ai-work/<task>/m2 -Dmaven.repo.local.tail=$HOME/.m2/repository"` (Maven 3.9+). Run the install and the consumers in the same environment.
+- **Enforced:** practice (lane and train gates in Stage.Axon); candidate for a pi-phase warning when `mvn install` runs without `maven.repo.local`.
+
+### `lsof +D` reports hard-linked package files as held by other worktrees
+- **Symptom:** a merged worktree could not be deleted because spec runs and hosts in other worktrees seemed to have DLLs from its `bin` folders open. It looked like assembly discovery was loading assemblies from sibling worktrees.
+- **Cause:** package copies in `bin` folders are hard links to one shared inode (up to 279 links). On macOS, `lsof` names an open inode by whichever link is in the vnode cache, so `lsof +D <dir>` lists processes that opened the same file through their own `bin` path. Each process's cwd and `lsof -p PID` showed it was using only its own output.
+- **Rule:** before treating a path as held, check the holder's own view (`lsof -p PID`) or the file's link count (`stat -f %l`). A file with more than one link whose holder opened it through another name is not held through this path, and deleting this link cannot affect that holder. Do not file "foreign assembly load" bugs on `lsof +D` evidence alone.
+- **Enforced:** practice (cleanup safety checks); candidate for the ai-work-lifecycle and pi-cleanup holder check to ignore open files whose link count is above 1 when the holder's own path is elsewhere.

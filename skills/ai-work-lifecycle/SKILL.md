@@ -84,6 +84,33 @@ Know the boundaries before trusting the registry as a disk-hygiene mechanism:
   inside the directory; some repositories track a `build/` or `bin/` path as source.
   Never include a worktree root in such a deletion.
 
+## Retain a verification root across phase gaps
+
+Each lane can register its own exact root with `pi-retain`; use its lane ID as
+`--owner`, not the transient command PID:
+
+```sh
+pi-retain add /absolute/worktree --owner L71 --reason "verification chain" --hours 48
+pi-retain status /absolute/worktree
+pi-retain list
+pi-retain release /absolute/worktree --owner L71
+```
+
+`pi-cleanup` and `bin_sweep.py` skip retained roots and their contents. Retains
+last 24h by default (72h maximum); expired entries remain visible but no longer
+protect anything. Release requires the matching owner (`--force` overrides it).
+Owners must release their roots when the verification chain ends; renew before
+expiry if verification continues. `PI_RETAIN_DIR` overrides the registry for tests.
+This is separate from lifecycle task completion and does not protect against
+other cleanup tools.
+
+- **Lesson:** scheduled cleanup removed `bin/obj` and `node_modules` from active
+  verification chains between phases (Scene, AuthProxy, Screenplay), because
+  protection depended on a live cwd or a running phase. Owners `pi-retain add` their
+  active chain root and release it when the chain ends.
+- `.ai-work` gate and proof copies are the biggest disk consumer. Delete a gate
+  copy's build output once that gate finishes, and only with the owner's release.
+
 ## Removing a worktree
 
 `git worktree remove` without `--force` refuses modified or untracked files but

@@ -111,6 +111,8 @@ from datetime import datetime
 DEFAULT_ROOTS = ["{{REPOS_ROOT}}"]
 STEPS_ALL = ["build", "worktrees", "docker", "caches", "bins"]
 BIN_SWEEP = runpy.run_path(str(Path(__file__).resolve().with_name("bin_sweep.py")))
+retained_reason = BIN_SWEEP["retained_reason"]
+delete_candidate = BIN_SWEEP["delete_candidate"]
 LOG_DIR = os.path.expanduser("~/.pi/agent/logs")
 LOG_FILE = os.path.join(LOG_DIR, "pi-cleanup.log")
 LOCK_FILE = os.path.join(LOG_DIR, "pi-cleanup.lock")
@@ -499,6 +501,10 @@ class Ctx:
         """ACTIVE: a process holds something inside, or modified within `idle` days
         (default --idle-days). worktree=True uses the worktree idleness mtime
         (logs/HEAD, HEAD) and the effective worktree idle threshold."""
+        reason = retained_reason(c.path, recursive=worktree) or (
+            retained_reason(c.gitdir, recursive=worktree) if c.gitdir else None)
+        if reason:
+            return reason
         if worktree:
             idle = wt_idle_days(self.args)
         else:
@@ -570,6 +576,10 @@ def plan_root_build(ctx: Ctx, c: Checkout, queued: set):
         p = os.path.join(c.path, rel)
         d = {"path": p, "name": os.path.basename(rel), "action": "delete", "reason": None}
         row["dirs"].append(d)
+        reason = retained_reason(p)
+        if reason:
+            d.update(action="skip", reason=reason)
+            continue
         if os.path.islink(p) or not os.path.isdir(p):
             d.update(action="skip", reason="not-a-directory")
             continue
@@ -617,7 +627,10 @@ def apply_build(ctx: Ctx, rows, by_path):
 
     def rm(d):
         try:
-            shutil.rmtree(d["path"])
+            reason = delete_candidate(d["path"], shutil.rmtree)
+            if reason:
+                d.update(action="skip", reason=reason)
+                return
             d["result"] = "deleted"
         except Exception as e:  # report and continue; counted as partial
             d["result"] = "failed: " + str(e)[:150]
@@ -866,7 +879,10 @@ def archive_ai_work(r):
     if rc != 0:
         return f"rsync failed (rc={rc}): {err.strip()[:120]}"
     r["archive"] = dest
-    if not any(files for _, _, files in os.walk(dest)):  # nothing worth keeping: drop our empty dir tree
+    reason = retained_reason(dest)
+    if reason:
+        r["note"] = reason + " (empty archive cleanup skipped)"
+    elif not any(files for _, _, files in os.walk(dest)):  # nothing worth keeping: drop our empty dir tree
         shutil.rmtree(dest, ignore_errors=True)
         r["archive"] = None
     return None
@@ -879,6 +895,11 @@ def apply_worktrees(ctx: Ctx, rows, by_path):
         if r["action"] != "remove":
             continue
         c = by_path[r["path"]]
+        reason = retained_reason(r["path"])
+        if reason:
+            r.update(action="keep")
+            r["blockers"].append(reason)
+            continue
         if r["ai_work"]:
             err = archive_ai_work(r)
             if err:
@@ -897,7 +918,11 @@ def apply_worktrees(ctx: Ctx, rows, by_path):
                     rest.update(action="keep")
                     rest["blockers"].append("not processed: stopped after an earlier removal failure")
             return r  # stop processing
-        git(["worktree", "prune"], r["parent"])
+        reason = prune_retention(r["parent"])
+        if not reason:
+            git(["worktree", "prune"], r["parent"])
+        else:
+            r["note"] = reason + " (worktree prune skipped)"
         r.update(action="removed", result="removed")
     return None
 
@@ -1125,6 +1150,9 @@ def plan_session_gzip(ctx: Ctx):
 
 def tmp_state(path, now):
     """Only old, user-owned real directories with an explicitly known prefix."""
+    reason = retained_reason(path)
+    if reason:
+        return None, reason
     try:
         st = os.lstat(path)
         if not os.path.basename(path).startswith(TMP_PREFIXES):
@@ -1197,6 +1225,76 @@ def apply_tmp(ctx, item):
             item["result"] = f"failed: {error}"
 
 
+def prune_retention(repo):
+    reason = retained_reason(repo)
+    if reason or not retained_reason("/"):
+        return reason
+    rc, common, _ = git(["rev-parse", "--git-common-dir"], repo)
+    if rc == 0:
+        reason = retained_reason(os.path.join(repo, common.strip(), "worktrees"))
+        if reason:
+            return reason
+    rc, output, _ = git(["worktree", "list", "--porcelain"], repo)
+    if rc == 0:
+        for entry in parse_worktree_list(output):
+            reason = retained_reason(entry["path"])
+            if reason:
+                return reason
+    return None
+
+
+def cache_retention(item):
+    """Resolve opaque cache-clean commands only while retains exist; never guess a root."""
+    any_reason = retained_reason("/")
+    if not any_reason:
+        return None
+    name = item["name"]
+    if name == "go build cache":
+        return retained_reason(item["gocache"])
+    if name.startswith("nuget ") and "cmd" in item:
+        command = ["dotnet", "nuget", "locals", item["cmd"][3], "--list", "--force-english-output"]
+    elif name == "npm cache":
+        command = ["npm", "config", "get", "cache"]
+    elif name == "yarn cache":
+        command = ["yarn", "cache", "dir"]
+    else:
+        return None
+    rc, output, _ = run(command, timeout=15)
+    paths = [line.strip() for line in output.splitlines() if line.strip().startswith("/")]
+    if name.startswith("nuget "):
+        paths = [line.split(":", 1)[1].strip() for line in output.splitlines()
+                 if ":" in line and line.split(":", 1)[1].strip().startswith("/")]
+    if rc != 0 or len(paths) != 1:
+        return any_reason + " (cache path unknown; refusing opaque clean)"
+    return retained_reason(paths[0])
+
+
+def protect_cache_items(items):
+    """Expose each protected path as a skip rather than silently omitting it."""
+    skips = []
+    for item in items:
+        if item["action"] != "run":
+            continue
+        reason = cache_retention(item) if "cmd" in item else None
+        if reason:
+            item.update(action="skip", reason=reason)
+        for key in ("paths", "files", "repos"):
+            if key not in item:
+                continue
+            allowed = []
+            for value in item[key]:
+                path = value if key == "paths" else value["path" if key == "files" else "repo"]
+                reason = prune_retention(path) if key == "repos" else retained_reason(path)
+                if reason:
+                    skips.append({"name": item["name"] + " " + path, "action": "skip", "reason": reason})
+                else:
+                    allowed.append(value)
+            item[key] = allowed
+            if not allowed:
+                item.update(action="skip", reason=skips[-1]["reason"] if skips else item.get("reason"))
+    items.extend(skips)
+
+
 def plan_caches(ctx: Ctx, checkouts, include_tmp=True):
     """Plan items: {name, action: run|skip, reason, ...}."""
     items = plan_tmp(ctx) if include_tmp else []
@@ -1257,6 +1355,7 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True):
             stale.append({"repo": pth, "lines": out.strip().splitlines()})
     item("git worktree prune", "run" if stale else "skip", None if stale else f"nothing stale in {len(parents)} repos",
          repos=stale)
+    protect_cache_items(items)
     return {"items": items}
 
 
@@ -1274,11 +1373,23 @@ def _sig(st):
     return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
+def remove_unretained(path):
+    reason = retained_reason(path)
+    if reason:
+        print(f"pi-cleanup: skip {path}: {reason}", file=sys.stderr)
+        return False
+    os.remove(path)
+    return True
+
+
 def gzip_session(ctx: Ctx, f: dict):
     """Gzip `f` in place. The original is removed only after verification and a final
     inode/mtime_ns/size + lsof re-check; the residual stat->unlink window is accepted
     because the files are at least --session-age-days old."""
     p = f["path"]
+    reason = retained_reason(p)
+    if reason:
+        return "skipped: " + reason
     dest = p + ".gz"
     tmp = None
     linked = False
@@ -1316,7 +1427,7 @@ def gzip_session(ctx: Ctx, f: dict):
                 raw.flush()
                 os.fsync(raw.fileno())
             if _sig(os.fstat(src.fileno())) != sig:
-                os.remove(tmp)
+                remove_unretained(tmp)
                 return "skipped: changed while compressing"
         h2, n = hashlib.sha256(), 0
         with gzip.open(tmp, "rb") as chk:
@@ -1327,36 +1438,40 @@ def gzip_session(ctx: Ctx, f: dict):
                 n += len(b)
                 h2.update(b)
         if n != st.st_size or h1.digest() != h2.digest():
-            os.remove(tmp)
+            remove_unretained(tmp)
             return "failed: verification mismatch"
         if _sig(os.lstat(p)) != sig:
-            os.remove(tmp)
+            remove_unretained(tmp)
             return "skipped: changed after compressing"
         os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
         try:
             os.link(tmp, dest)  # never overwrites
             linked = True
         except FileExistsError:
-            os.remove(tmp)
+            remove_unretained(tmp)
             return "skipped: .gz already exists"
-        os.remove(tmp)
+        remove_unretained(tmp)
         tmp = None
         # Remaining stat->unlink window is accepted: sources are >= --session-age-days old.
         if _sig(os.lstat(p)) != sig or file_open_state(p) is not False:
-            os.remove(dest)
+            remove_unretained(dest)
             return "skipped: changed or open before removal"
-        os.remove(p)
+        reason = retained_reason(p)
+        if reason:
+            return "skipped: " + reason
+        if not remove_unretained(p):
+            return "skipped: " + (retained_reason(p) or "retained during removal")
         return "gzipped"
     except Exception as e:
         if linked:
             try:
                 if os.path.exists(p):
-                    os.remove(dest)
+                    remove_unretained(dest)
             except OSError:
                 pass
         if tmp:
             try:
-                os.remove(tmp)
+                remove_unretained(tmp)
             except OSError:
                 pass
         return "failed: " + str(e)[:150]
@@ -1366,6 +1481,7 @@ NUGET_PROCS = ["dotnet", "MSBuild", "VBCSCompiler"]
 
 
 def apply_caches(ctx: Ctx, plan):
+    protect_cache_items(plan["items"])
     ctx.snap = take_snapshot()  # refreshed open-file view, used below
     for it in plan["items"]:
         if it["action"] != "run":
@@ -1379,6 +1495,10 @@ def apply_caches(ctx: Ctx, plan):
         if "tmp_path" in it:
             apply_tmp(ctx, it)
         elif "cmd" in it:
+            reason = cache_retention(it)
+            if reason:
+                it.update(action="skip", reason=reason)
+                continue
             if n == "go build cache":
                 busy = procs_running(["go", "compile", "golangci-lint", "gopls"])
                 if busy:
@@ -1397,9 +1517,12 @@ def apply_caches(ctx: Ctx, plan):
                     res["skipped"] += len(it["paths"]) - i
                     res["first_error"] = "dotnet started during trim; stopped"
                     break
+                reason = retained_reason(vd)
                 ok, _ = nuget_eligible(vd, cutoff, root_real)
-                if not ok:
+                if reason or not ok:
                     res["skipped"] += 1
+                    if reason:
+                        it.setdefault("retained", []).append({"path": vd, "reason": reason})
                     continue
                 try:
                     shutil.rmtree(vd)
@@ -1410,7 +1533,7 @@ def apply_caches(ctx: Ctx, plan):
                 ids.add(os.path.dirname(vd))
             for idp in ids:
                 try:
-                    if statmod.S_ISDIR(os.lstat(idp).st_mode):
+                    if not retained_reason(idp) and statmod.S_ISDIR(os.lstat(idp).st_mode):
                         os.rmdir(idp)  # only succeeds when empty
                 except OSError:
                     pass
@@ -1434,6 +1557,10 @@ def apply_caches(ctx: Ctx, plan):
         elif n == "git worktree prune":
             res = {"pruned": 0, "failed": 0}
             for r in it["repos"]:
+                reason = prune_retention(r["repo"])
+                if reason:
+                    it.setdefault("retained", []).append({"path": r["repo"], "reason": reason})
+                    continue
                 rc, out, err = git(["worktree", "prune"], r["repo"], timeout=60)
                 if rc == 0:
                     res["pruned"] += len(r["lines"])
@@ -1481,6 +1608,8 @@ def render_caches(plan, apply, out):
     table(["what", "action", "detail"], rows, out)
     for it in plan["items"]:
         r = it.get("result")
+        for retained in it.get("retained", []):
+            out.append(f"  {retained['path']}: skip {retained['reason']}")
         if isinstance(r, dict) and r.get("first_error"):
             out.append(f"  {it['name']} first error: {r['first_error']}")
 
@@ -1771,6 +1900,10 @@ def _log_line(msg: str) -> None:
 
 
 def trim_log():
+    reason = retained_reason(LOG_FILE)
+    if reason:
+        print(f"pi-cleanup: skip log trim: {reason}", file=sys.stderr)
+        return
     try:
         if os.path.getsize(LOG_FILE) <= LOG_MAX:
             return
@@ -1781,7 +1914,8 @@ def trim_log():
         tmp = LOG_FILE + ".tmp"
         with open(tmp, "wb") as f:
             f.write(data)
-        os.replace(tmp, LOG_FILE)
+        if not retained_reason(LOG_FILE):
+            os.replace(tmp, LOG_FILE)
     except OSError:
         pass
 

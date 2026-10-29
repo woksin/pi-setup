@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Owner-scoped, expiring protection for cleanup roots (PI_RETAIN_DIR overrides state)."""
+import argparse
+import base64
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import sys
+import time
+
+
+def registry_dir():
+    return Path(os.environ.get('PI_RETAIN_DIR', str(Path.home() / '.pi/agent/state/retain')))
+
+
+def canonical(path):
+    return os.path.realpath(os.path.expanduser(str(path)))
+
+
+def marker_path(path):
+    # Reversible names preserve the protected root even if the JSON is unreadable.
+    encoded = base64.urlsafe_b64encode(canonical(path).encode()).decode().rstrip('=')
+    chunks = [encoded[index:index + 160] for index in range(0, len(encoded), 160)]
+    return registry_dir().joinpath(*chunks[:-1], chunks[-1] + '.json')
+
+
+def record_root(file):
+    parts = file.relative_to(registry_dir()).parts
+    encoded = ''.join(parts[:-1]) + parts[-1][:-5]
+    try:
+        path = base64.b64decode(encoded + '=' * (-len(encoded) % 4), altchars=b'-_', validate=True).decode()
+        if os.path.isabs(path) and marker_path(path) == file:
+            return canonical(path)
+    except (ValueError, UnicodeError):
+        pass
+    return None
+
+
+def inside(path, root):
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def valid_record(record, file):
+    if not isinstance(record, dict):
+        return False
+    path = record.get('path')
+    if not isinstance(path, str) or not os.path.isabs(path) or canonical(path) != path:
+        return False
+    if marker_path(path) != file:
+        return False
+    if not all(isinstance(record.get(key), str) and record[key].strip() for key in ('owner', 'reason')):
+        return False
+    dates = [record.get(key) for key in ('created', 'expires')]
+    try:
+        if not all(type(value) in (int, float) and math.isfinite(value) for value in dates):
+            return False
+        return 0 <= dates[1] - dates[0] <= 72 * 3600
+    except (OverflowError, ValueError, TypeError):
+        return False
+
+
+def registry_files(directory):
+    result = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.name.endswith('.json'):
+                result.append(Path(entry.path))
+            elif entry.is_dir(follow_symlinks=False):
+                result.extend(registry_files(Path(entry.path)))
+    return sorted(result)
+
+
+def records():
+    try:
+        files = registry_files(registry_dir())
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        print(f'pi-retain: registry unreadable: {error}; retaining all paths', file=sys.stderr)
+        return [{'path': None, 'owner': 'corrupt', 'error': str(error)}]
+    result = []
+    for file in files:
+        record = None
+        try:
+            record = json.loads(file.read_text())
+            if not valid_record(record, file):
+                raise ValueError('invalid retain record')
+            result.append(record)
+        except (OSError, OverflowError, ValueError, TypeError) as error:
+            path = record_root(file)
+            print(f'pi-retain: corrupt {file}: {error}; retaining {path or "all paths (root unknown)"}',
+                  file=sys.stderr)
+            result.append({'path': path, 'owner': 'corrupt', 'error': str(error), 'file': str(file)})
+    return result
+
+
+def retained_reason(path, recursive=True, now=None):
+    """Recursive operations must also preserve retained descendants of their target."""
+    path = canonical(path)
+    now = time.time() if now is None else now
+    for record in records():
+        if 'error' not in record and record['expires'] <= now:
+            continue
+        root = record['path']
+        if root is None or inside(path, root) or (recursive and inside(root, path)):
+            return 'retained:' + record['owner']
+    return None
+
+
+def registry_lock(timeout=None):
+    """Return the mutation lock, or None after a bounded cleanup wait."""
+    registry_dir().mkdir(parents=True, exist_ok=True)
+    lock = (registry_dir() / '.lock').open('a')
+    try:
+        if timeout is None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            return lock
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return lock
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    lock.close()
+                    return None
+                time.sleep(min(0.01, remaining))
+    except BaseException:
+        lock.close()
+        raise
+
+
+def delete_candidate(path, delete, timeout=0.25):
+    """Serialize the final retain/existence checks and one deletion with add/release."""
+    try:
+        lock = registry_lock(timeout)
+    except OSError as error:
+        print(f'pi-retain: cannot lock {path}: {error}; skipping deletion', file=sys.stderr)
+        return 'retained:lock-timeout'
+    if lock is None:
+        return 'retained:lock-timeout'
+    with lock:
+        reason = retained_reason(path)
+        if reason:
+            return reason
+        if not os.path.exists(path):
+            return 'path-missing'
+        delete(path)
+    return None
+
+
+def write_record(record):
+    directory = registry_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    target = marker_path(record['path'])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(f'.{os.getpid()}.tmp')
+    with temporary.open('x') as stream:
+        json.dump(record, stream, indent=2)
+        stream.write('\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, target)
+
+
+def exact_record(path):
+    file = marker_path(path)
+    if not os.path.lexists(file):
+        return None
+    record = json.loads(file.read_text())
+    if not valid_record(record, file):
+        raise ValueError('corrupt retain record; use release --force to retire it')
+    return record
+
+
+def add(args, now):
+    path = canonical(args.path)
+    if not os.path.exists(path):
+        raise ValueError(f'path does not exist: {path}')
+    if not math.isfinite(args.hours) or not 0 < args.hours <= 72:
+        raise ValueError('--hours must be greater than 0 and at most 72')
+    if not args.owner.strip() or not args.reason.strip():
+        raise ValueError('owner and reason must not be empty')
+    previous = exact_record(path)
+    if previous and previous['expires'] > now and previous['owner'] != args.owner:
+        raise ValueError(f'owner mismatch: retained by {previous["owner"]}')
+    record = dict(path=path, owner=args.owner, reason=args.reason, created=now, expires=now + args.hours * 3600)
+    write_record(record)
+    print(json.dumps(record))
+    return 0
+
+
+def release(args, now):
+    path = canonical(args.path)
+    try:
+        record = exact_record(path)
+    except (OSError, ValueError):
+        if not args.force:
+            raise
+        record = dict(path=path, owner=args.owner, reason='forced release of corrupt record', created=now)
+    if record is None:
+        print(f'not retained: {path}')
+        return 0
+    if record['owner'] != args.owner and not args.force:
+        raise ValueError(f'owner mismatch: retained by {record["owner"]}')
+    # Keep the expired marker for inspection; release never deletes a registry file.
+    record['expires'] = record['created']
+    write_record(record)
+    print(f'released: {path}')
+    return 0
+
+
+def main(argv=None, now=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    create = commands.add_parser('add')
+    create.add_argument('path')
+    create.add_argument('--owner', required=True)
+    create.add_argument('--reason', required=True)
+    create.add_argument('--hours', type=float, default=24)
+    remove = commands.add_parser('release')
+    remove.add_argument('path')
+    remove.add_argument('--owner', required=True)
+    remove.add_argument('--force', action='store_true')
+    commands.add_parser('list')
+    commands.add_parser('status').add_argument('path')
+    args = parser.parse_args(argv)
+    now = time.time() if now is None else now
+    try:
+        if args.command in ('add', 'release'):
+            with registry_lock():
+                return add(args, now) if args.command == 'add' else release(args, now)
+        if args.command == 'status':
+            reason = retained_reason(args.path, recursive=False, now=now)
+            print(reason or 'not retained')
+            return 0 if reason else 1
+        for record in records():
+            state = 'corrupt' if 'error' in record else 'expired' if record['expires'] <= now else 'active'
+            print(json.dumps(dict(record, state=state)))
+        return 0
+    except (OSError, ValueError) as error:
+        print(f'pi-retain: {error}', file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

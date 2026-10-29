@@ -10,6 +10,9 @@ import stat
 import time
 
 GIB = 1024 ** 3
+RETAIN = runpy.run_path(str(Path(__file__).resolve().with_name('pi-retain')))
+retained_reason = RETAIN['retained_reason']
+delete_candidate = RETAIN['delete_candidate']
 
 
 def threshold():
@@ -112,6 +115,27 @@ def candidates(root, runner, deadline, now):
     return bins, size, None
 
 
+def bin_bytes(path, deadline):
+    def failed(error):
+        raise error
+    total = 0
+    for directory, dirs, files in os.walk(path, onerror=failed):
+        if time.monotonic() >= deadline:
+            raise OSError('walk budget exhausted')
+        dirs[:] = [name for name in dirs if not (Path(directory) / name).is_symlink()]
+        for name in files:
+            entry = (Path(directory) / name).lstat()
+            if stat.S_ISREG(entry.st_mode):
+                total += entry.st_size
+    return total
+
+
+def remove_bin(candidate):
+    if candidate.is_symlink():
+        raise OSError('bin identity changed to symlink')
+    shutil.rmtree(candidate)
+
+
 def sweep(roots, runner, apply=False, budget=60):
     limit = threshold()
     deadline = time.monotonic() + budget
@@ -125,7 +149,7 @@ def sweep(roots, runner, apply=False, budget=60):
         root = Path(raw).resolve()
         row = {'path': str(root), 'action': 'skipped', 'reason': '', 'bytes': 0, 'bytes_freed': 0}
         rows.append(row)
-        reason = error
+        reason = retained_reason(root, recursive=False) or error
         if not reason:
             try:
                 if shutil.disk_usage(root).free >= limit * GIB:
@@ -145,6 +169,20 @@ def sweep(roots, runner, apply=False, budget=60):
         if reason:
             row['reason'] = reason
             continue
+        protected = [(path, retained_reason(path)) for path in bins]
+        kept = [{'path': str(path), 'reason': reason} for path, reason in protected if reason]
+        if kept:
+            row['retained'] = kept
+            bins = [path for path, reason in protected if not reason]
+            try:
+                size = sum(bin_bytes(path, deadline) for path in bins)
+            except OSError as error:
+                row['reason'] = f'bin scan failed: {error}'
+                continue
+            row['bytes'] = size
+            if not bins:
+                row['reason'] = kept[0]['reason']
+                continue
         if any(within(p, path) for p in opened for path in bins):
             row['reason'] = 'busy: process has open files in bin'
             continue
@@ -161,13 +199,22 @@ def sweep(roots, runner, apply=False, budget=60):
                 row.update(action='skipped', reason=reason, bytes=0)
                 continue
             try:
+                freed = size
+                deleted = 0
                 for path in bins:
-                    if path.is_symlink():
-                        raise OSError('bin identity changed to symlink')
-                    shutil.rmtree(path)
-                row.update(action='cleared', bytes_freed=size)
+                    reason = delete_candidate(path, remove_bin)
+                    if reason:
+                        row.setdefault('retained', []).append({'path': str(path), 'reason': reason})
+                        freed -= bin_bytes(path, deadline)
+                        continue
+                    deleted += 1
+                row.update(action='cleared' if deleted else 'skipped', bytes_freed=max(0, freed) if deleted else 0)
             except OSError as error:
                 row.update(action='failed', reason=str(error))
+    for row in rows:
+        notes = [item['reason'] + ' ' + item['path'] for item in row.get('retained', [])]
+        if notes:
+            row['reason'] = '; '.join(filter(None, [row['reason'], *notes]))
     return rows
 
 
