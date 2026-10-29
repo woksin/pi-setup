@@ -130,6 +130,7 @@ BUILD_DIRS = {
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".gradle", ".kotlin", "build", "out", "target",
     "wwwroot", "Artifacts",
 }
+BUILD_DIRS_LOWER = {d.lower() for d in BUILD_DIRS}
 BUILD_SKIP_RE = re.compile(r"(^|/)(\.ai-work|\.worktrees|[^/]*-worktrees|\.git)(/|$)")
 
 # ignored paths that are safe to lose with a worktree (from audit_wt.py)
@@ -222,6 +223,7 @@ class PathSet:
                 self._orig.setdefault(p.lower().rstrip("/") or "/", p)
         self._items = sorted(self._orig)
         self._set = set(self._items)
+        self.cwds = None  # optional PathSet of cwd-only paths (see take_snapshot)
 
     def first_inside(self, path: str):
         """A member (original case) equal to `path` or below it, else None."""
@@ -244,6 +246,17 @@ class PathSet:
                 return True
             p = os.path.dirname(p)
         return False
+
+    def iter_inside(self, path: str):
+        """Every member (original case) equal to `path` or below it."""
+        p = path.lower().rstrip("/")
+        if p in self._set:
+            yield self._orig[p]
+        pre = p + "/"
+        i = bisect.bisect_left(self._items, pre)
+        while i < len(self._items) and self._items[i].startswith(pre):
+            yield self._orig[self._items[i]]
+            i += 1
 
 
 class SnapshotError(Exception):
@@ -271,11 +284,58 @@ def take_snapshot() -> PathSet:
         f_cwd = ex.submit(run, ["lsof", "-nP", "-d", "cwd", "-FpRn"], None, 60)
         results = [f_all.result(), f_cwd.result()]
     paths: set = set()
-    for rc, out, err in results:
+    cwds: set = set()
+    for (rc, out, err), into in zip(results, (paths, cwds)):
         if rc in (124, 126, 127) or not out:
             raise SnapshotError(f"lsof failed (rc={rc}): {err.strip()[:200]}")
-        _parse_lsof(out, me, paths)
-    return PathSet(paths)
+        _parse_lsof(out, me, into)
+    paths |= cwds
+    snap = PathSet(paths)
+    snap.cwds = PathSet(cwds)
+    return snap
+
+
+def snapshot_parts(snap: PathSet):
+    """(all paths, cwd paths) as plain lists, so a snapshot can cross a process boundary."""
+    return list(snap._orig.values()), list(snap.cwds._orig.values()) if snap.cwds is not None else None
+
+
+def snapshot_from_parts(parts) -> PathSet:
+    paths, cwds = parts
+    snap = PathSet(paths)
+    snap.cwds = PathSet(cwds) if cwds is not None else None
+    return snap
+
+
+def held_inside(snap: PathSet, path: str, build_output=False, is_build_dir=False):
+    """First lsof-reported cwd/open file inside `path` that really holds it, else None.
+
+    build_output=True (deleting bin/obj/node_modules/... only): package files in build
+    outputs are hard-linked across many worktrees, and lsof reports an open inode under
+    whichever link name is in the vnode cache, so a process in ANOTHER worktree (or the
+    Docker VM) shows up as holding a file here. Such a report (regular file, st_nlink > 1,
+    below a build dir) is ambiguous and unlinking one name never affects a holder of the
+    inode via another name, so it is ignored. Everything else stays fail-closed: cwds,
+    st_nlink == 1, non-regular files, unstat-able paths, and any snapshot without cwd info.
+    Non-build deletions (worktree removal, session gzip, tmp) always use the strict check.
+    """
+    if not build_output or snap.cwds is None:
+        return snap.first_inside(path)
+    hit = snap.cwds.first_inside(path)
+    if hit:
+        return hit
+    base = path.rstrip("/")
+    for p in snap.iter_inside(path):
+        rel = p[len(base):].lower().split("/")[1:-1] if p.lower() != base.lower() else []
+        if is_build_dir or any(part in BUILD_DIRS_LOWER for part in rel):
+            try:
+                st = os.lstat(p)
+            except OSError:
+                return p
+            if statmod.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                continue
+        return p
+    return None
 
 
 # ----------------------------------------------------------------------------
@@ -435,7 +495,7 @@ class Ctx:
         self.mounts: PathSet = PathSet([])
         self.docker_up = None
 
-    def active_reason(self, c: Checkout, idle=None, worktree=False):
+    def active_reason(self, c: Checkout, idle=None, worktree=False, build_output=False):
         """ACTIVE: a process holds something inside, or modified within `idle` days
         (default --idle-days). worktree=True uses the worktree idleness mtime
         (logs/HEAD, HEAD) and the effective worktree idle threshold."""
@@ -443,7 +503,7 @@ class Ctx:
             idle = wt_idle_days(self.args)
         else:
             idle = self.args.idle_days if idle is None else idle
-        hit = self.snap.first_inside(c.path)
+        hit = held_inside(self.snap, c.path, build_output)
         if hit:
             return f"ACTIVE: process cwd/open file {short(hit, 90)}"
         newest = wt_newest_mtime(c) if worktree else newest_mtime(c)
@@ -481,7 +541,7 @@ def plan_root_build(ctx: Ctx, c: Checkout, queued: set):
     if not c.exists:
         row["skip"] = "missing"
         return row
-    reason = ctx.active_reason(c, ctx.args.build_idle_days)
+    reason = ctx.active_reason(c, ctx.args.build_idle_days, build_output=True)
     if reason:
         row["skip"] = reason
         return row
@@ -521,7 +581,7 @@ def plan_root_build(ctx: Ctx, c: Checkout, queued: set):
         if ctx.roots.first_inside(rp) or os.path.exists(os.path.join(p, ".git")):
             d.update(action="skip", reason="nested-git")
             continue
-        if ctx.snap.first_inside(rp):
+        if held_inside(ctx.snap, rp, True, True):
             d.update(action="skip", reason="open-file")
             continue
         if ctx.mounts.overlaps(rp):
@@ -543,14 +603,14 @@ def apply_build(ctx: Ctx, rows, by_path):
         todo = [d for d in row["dirs"] if d["action"] == "delete"]
         if not todo:
             continue
-        reason = ctx.active_reason(by_path[row["path"]], ctx.args.build_idle_days)
+        reason = ctx.active_reason(by_path[row["path"]], ctx.args.build_idle_days, build_output=True)
         if reason:
             row["skip"] = f"{reason} (re-check before delete)"
             for d in todo:
                 d.update(action="skip", reason="root-became-active")
             continue
         for d in todo:
-            if ctx.snap.first_inside(os.path.realpath(d["path"])):
+            if held_inside(ctx.snap, os.path.realpath(d["path"]), True, True):
                 d.update(action="skip", reason="open-file")
             else:
                 jobs.append(d)
@@ -1910,8 +1970,8 @@ def dry_run(args, rep, t0, budget):
     ctx = Ctx(args)
     extend_path()
     ctx.docker_up = budget.measure("docker state", 2, docker_running, None)
-    snapshot = budget.measure("process snapshot", 4, lambda: list(take_snapshot()._orig.values()), None)
-    ctx.snap = PathSet(snapshot) if snapshot is not None else None
+    snapshot = budget.measure("process snapshot", 4, lambda: snapshot_parts(take_snapshot()), None)
+    ctx.snap = snapshot_from_parts(snapshot) if snapshot is not None else None
     checkout_data, notes = budget.measure("discovery", 9, lambda: dry_discover(rep["roots"]), ([], []))
     checkouts = []
     for data in checkout_data:

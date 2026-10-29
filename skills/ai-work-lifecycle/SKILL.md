@@ -97,7 +97,15 @@ database are all ignored. Removing the worktree deletes them silently. So, per w
 3. Its commits must be on `origin/<default>` (`git rev-list --count origin/main..BRANCH`
    is 0). "Reachable from some remote branch" is weaker — that branch can be deleted
    later — so treat it as a separate, lower-confidence category and say so.
-4. No live process or container holds the path (`lsof +D`, `docker ps`).
+4. No live process or container holds the path. Check it per process, not per
+   directory: list candidate processes, then `lsof -p <PID>` (its own open paths)
+   and its cwd (`lsof -a -p <PID> -d cwd`). Do **not** trust `lsof +D <dir>` on its
+   own: bin package DLLs are hard links shared across worktrees (one inode, often
+   20–280 links), and lsof reports an open inode under whichever link name it has
+   cached. So an idle worktree looks "held" by another lane's specs or by the Docker
+   Desktop VM (com.apple.Virtualization). Before trusting a holder, check the file's link count
+   (`stat -f %l`). Deleting one link never affects a process that has the inode open
+   through another name. Containers: `docker ps` mounts.
 5. Remove with `git worktree remove PATH`, then `git worktree prune` in the parent repo.
    Never `--force`; a refusal means stop and look.
 
@@ -108,6 +116,26 @@ checkout, not from inside the worktree being removed. Leaving worktrees behind i
 hundreds accumulate.
 
 Measure reclaimed space with `df` before and after, not by summing estimates.
+Because of hard links, `du` per worktree over-counts. Space is freed only when the
+last link goes, so measure a set of directories with one `du -sk a b c` call
+(each inode is counted once) and expect the net `df` gain to be smaller than the sum.
+
+## Finding large amounts of space (playbook)
+
+When free space is low, look in this order. Measure first, delete second.
+1. **Idle worktrees' build output** (`bin/`, `obj/`, `node_modules/`, `TestResults/`)
+   under `<repos>/.worktrees` and nested `.worktrees/.worktrees`. This is usually the
+   biggest win and always rebuildable. Use the per-process holder check above.
+2. **Merged, clean worktrees** with no live session cwd (`orch sessions --json`).
+   Remove them with the steps above.
+3. **Old pi session logs** (`~/.pi/agent/sessions`). `pi-cleanup` gzips sessions older
+   than `--session-age-days`. Use it rather than ad-hoc compression.
+4. **Docker**: `docker system df`. Only remove specific unused, unpinned images
+   (`~/.pi/agent/docker-guardian/pinned.txt`) by id with `docker rmi` (no force). Never
+   use `prune -a`. Shared layers make the real saving smaller than the report says.
+5. **The NuGet package cache volume**: `dev-doctor --only package-cache-volume`.
+   Measure before and after, and verify a build before deleting any retained cache.
+6. Run `pi-cleanup` (dry run first) for everything it already knows how to do.
 
 ## Keep it small and safe
 

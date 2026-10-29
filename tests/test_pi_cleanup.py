@@ -571,6 +571,39 @@ class BuildPurgeSafetyTests(RepoFixture):
         row = self.plan_build(ctx)['wt']
         self.assertTrue(row['skip'].startswith('ACTIVE') and not row['dirs'])
 
+    def snapshot(self, files, cwds=()):
+        snap = cleanup.PathSet(list(files) + list(cwds))
+        snap.cwds = cleanup.PathSet(list(cwds))
+        return snap
+
+    def test_hard_linked_open_file_in_build_output_is_not_a_hold(self):
+        linked = self.wt / 'bin/linked.dll'
+        os.link(self.wt / 'bin/a.dll', linked)  # st_nlink 2: lsof may name either link
+        ctx = self.context()
+        ctx.snap = self.snapshot([str(linked)])
+        row = self.plan_build(ctx)['wt']
+        self.assertIsNone(row['skip'])
+        self.assertIn('bin', [d['name'] for d in row['dirs'] if d['action'] == 'delete'])
+        with patch.object(cleanup, 'take_snapshot', return_value=self.snapshot([str(linked)])):
+            cleanup.apply_build(ctx, [row], self.by_path)
+        self.assertFalse((self.wt / 'bin').exists())
+
+    def test_single_link_cwd_and_non_regular_reports_still_hold_build_output(self):
+        (self.wt / 'obj/dir').mkdir()
+        for snap in (self.snapshot([str(self.wt / 'bin/a.dll')]),            # st_nlink 1
+                     self.snapshot([], [str(self.wt / 'bin')]),             # cwd
+                     self.snapshot([str(self.wt / 'obj/dir')]),             # not a regular file
+                     self.snapshot([str(self.wt / 'bin/gone.dll')])):       # cannot stat: fail closed
+            ctx = self.context()
+            ctx.snap = snap
+            self.assertTrue(self.plan_build(ctx)['wt']['skip'].startswith('ACTIVE'))
+        os.link(self.wt / 'bin/a.dll', self.wt / 'bin/l.dll')
+        # nlink > 1 outside a build dir is not forgiven
+        os.link(self.wt / 'README.md', self.wt / 'README.link')
+        ctx = self.context()
+        ctx.snap = self.snapshot([str(self.wt / 'README.link')])
+        self.assertTrue(self.plan_build(ctx)['wt']['skip'].startswith('ACTIVE'))
+
     def test_recently_modified_root_is_skipped_with_default_idle(self):
         row = self.plan_build(self.context(idle=False))['wt']
         self.assertTrue(row['skip'].startswith('ACTIVE: modified'), row['skip'])

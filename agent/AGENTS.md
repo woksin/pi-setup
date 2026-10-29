@@ -332,6 +332,7 @@ Plans, handovers, session notes, continuation prompts, status boards, scratch an
 
 ## Disk hygiene — clean up what you create
 
+- **Is a path held? Check per process, not with `lsof +D` (woksin, 2026-10-29).** Bin package DLLs are hard links shared across worktrees (often 20–280 links per inode). `lsof +D <dir>` then reports another lane's process or the Docker VM as holding an idle worktree, which blocks safe cleanup. Use `lsof -p <PID>` and the process cwd, and check link counts. Deleting a link never affects a process holding the inode through another name. For where to find large amounts of space and in what order, follow the playbook in the `ai-work-lifecycle` skill.
 - Disk floor (single source; agent files reference this): 25 GiB free = stop, 40 GiB = cleanup notice. Check `df -h ~` before creating a worktree or a heavy build. Below 40 GiB free, run `~/.pi/agent/bin/pi-cleanup` (dry run) and report, but keep building down to 25 GiB free (2026-10-21). Below 25 GiB start no new worktree or heavy phase and report.
 - One worktree per issue or PR: reuse it for review rounds, rebases and merge tests instead of creating `-r2`, `-review`, `-base`, `-merge` or `wt/<n>` copies. Create worktrees under `<parent>/.worktrees/`, never inside `.ai-work/`.
 - Temporary worktrees (review, baseline, triage or merge-test copies) are removed before the session ends, using the checks below.
