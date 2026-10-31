@@ -22,5 +22,7 @@
   "container_test_detection": "hint",
   "cold_worktree_hint": true,
   "memory_admission": false,
+  "host_pressure": { "mode": "off" },
+  "cpu_budget": { "mode": "off" },
   "failure_categories": true
 }

@@ -277,7 +277,13 @@ def append_ledger(state, record):
             pass  # Even a full/broken stderr must not change the phase's exit.
 
 
-WAIT_REASONS = ("slots", "order", "memory", "other")
+WAIT_REASONS = ("slots", "order", "memory", "other")  # "cpu" (cpu_budget enforce) is added to the output lazily.
+
+
+def would_hold_kind(scan):
+    """'host' or 'cpu' when an observe-mode check would have held this scan (scan['wouldHold'] = '<kind>:<why>')."""
+    kind = str(scan.get("wouldHold") or "").split(":", 1)[0]
+    return kind if kind in ("host", "cpu") else None
 
 
 class WaitTelemetry:
@@ -291,6 +297,7 @@ class WaitTelemetry:
         self.load_sum, self.load_max, self.load_count = 0.0, None, 0
         self.mem_free_min = None
         self.busy = {}
+        self.would, self.would_seconds = None, {}
 
     def record(self, scan):
         try:
@@ -298,14 +305,20 @@ class WaitTelemetry:
                 return
             reason = scan.get("reason", "other")
             now = self.clock()
-            self.seconds[self.current] += now - self.at
+            self.seconds[self.current] = self.seconds.get(self.current, 0.0) + now - self.at
+            self.credit_would_hold(now - self.at)
             self.current, self.at = reason, now
-            self.scans[reason] += 1
+            self.scans[reason] = self.scans.get(reason, 0) + 1
+            self.would = would_hold_kind(scan)
             self.sample_load()
             self.sample_memory(scan.get("memFree"))
             self.sample_pools(scan.get("busy", {}))
         except Exception:
             pass  # Optional telemetry must not interrupt a queued phase.
+
+    def credit_would_hold(self, seconds):
+        if self.would:
+            self.would_seconds[self.would] = self.would_seconds.get(self.would, 0.0) + seconds
 
     def sample_load(self):
         try:
@@ -334,7 +347,8 @@ class WaitTelemetry:
     def close(self, end):
         try:
             if not self.closed:
-                self.seconds[self.current] += max(0, end - self.at)
+                self.seconds[self.current] = self.seconds.get(self.current, 0.0) + max(0, end - self.at)
+                self.credit_would_hold(max(0, end - self.at))
                 self.closed = True
         except Exception:
             pass
@@ -347,8 +361,11 @@ class WaitTelemetry:
             samples.update({pool: dict(mean=round(sample["total"] / sample["n"], 3),
                                        max=sample["max"], of=sample["of"])
                             for pool, sample in self.busy.items()})
-            return dict(waitV=1, waitBreakdown={key: round(value, 3) for key, value in self.seconds.items()},
-                        waitScans=dict(self.scans), waitSamples=samples)
+            fields = dict(waitV=1, waitBreakdown={key: round(value, 3) for key, value in self.seconds.items()},
+                          waitScans=dict(self.scans), waitSamples=samples)
+            if self.would_seconds:  # Observe-mode holds only; absent when no observed pressure/budget hold.
+                fields["waitWouldHold"] = {key: round(value, 3) for key, value in self.would_seconds.items()}
+            return fields
         except Exception:
             return {}
 
@@ -449,6 +466,7 @@ class PhaseLedger:
         self.enqueued = False
         self.wait = None
         self.running_memory = None
+        self.host_pressure = None
         self.failure_categories = True
         self.snapshot_thread = None
         self.git_result = (None, None)
@@ -503,6 +521,11 @@ class PhaseLedger:
         if self.wait:
             self.wait.record(scan)
 
+    def admitted_with_would_hold(self, scan):
+        kind = would_hold_kind(scan)
+        if kind:
+            self.record["wouldHoldAtAdmit"] = kind
+
     def snapshot(self):
         try:
             self.git_result = git_state(self.record["cwd"])
@@ -517,6 +540,8 @@ class PhaseLedger:
             self.record["host"] = {"load1": round(os.getloadavg()[0], 1)}
         except (OSError, AttributeError):
             pass
+        if self.host_pressure is not None:
+            self.record.setdefault("host", {}).update(self.host_pressure.cached_fields())  # cache only, never probes
         self.record["waitS"] = max(0, self.started - self.queued)
         if self.wait:
             self.wait.close(self.started)
@@ -882,6 +907,7 @@ def config(path, *, notes=None):
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
+                    host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
                     failure_categories=True,
                     fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
                     queue_order=dict(QUEUE_ORDER_DEFAULTS), policy=[])
@@ -916,6 +942,12 @@ def config(path, *, notes=None):
             continue
         elif key == "queue_order":
             values[key] = queue_order_config(value, warn)
+            continue
+        elif key == "host_pressure":
+            values[key] = host_pressure_config(value, warn)
+            continue
+        elif key == "cpu_budget":
+            values[key] = cpu_budget_config(value, warn)
             continue
         elif key == "container_test_detection":
             valid = value in ("off", "hint", "promote")
@@ -1363,6 +1395,198 @@ class IntegrationBurst:
             return max(configured, self.settings["slots"])
         except (OSError, ValueError, subprocess.SubprocessError):
             return configured  # Burst is strictly fail-closed, unlike memory admission.
+
+
+HOST_PRESSURE_DEFAULTS = dict(max_pressure_level=2, max_compressor_percent=30,
+                              max_swap_growth_mb_per_min=256, sample_ttl_s=5)
+HOST_SAMPLE_WINDOW_S = 600
+HOST_SAMPLE_MIN_SPAN_S = 60
+HOST_MODES = ("off", "observe", "enforce")
+
+
+def number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def mode_config(name, value, warn, defaults, valid):
+    """Shared shape of the host_pressure and cpu_budget keys: {"mode": off|observe|enforce, ...thresholds}."""
+    off = dict(mode="off")
+    if not isinstance(value, dict):
+        warn(f"invalid {name}; using default {off!r}")
+        return off
+    for key in value.keys() - defaults.keys() - {"mode"}:
+        warn(f"unknown {name} key {key}; ignored")
+    settings = {key: value.get(key, default) for key, default in defaults.items()}
+    mode = value.get("mode", "off")
+    if mode not in HOST_MODES or not valid(settings):
+        warn(f"invalid {name}; using default {off!r}")
+        return off
+    return off if mode == "off" else dict(settings, mode=mode)
+
+
+def host_pressure_config(value, warn=None):
+    def valid(settings):
+        return (type(settings["max_pressure_level"]) is int and settings["max_pressure_level"] >= 1
+                and all(number(settings[key]) and settings[key] > 0 for key in HOST_PRESSURE_DEFAULTS)
+                and settings["max_compressor_percent"] <= 100 and settings["sample_ttl_s"] <= 3600)
+    return mode_config("host_pressure", value, warn or note, HOST_PRESSURE_DEFAULTS, valid)
+
+
+def parse_host_pressure(text):
+    """Output of `sysctl -n vm.swapusage vm.compressor_bytes_used hw.memsize kern.memorystatus_vm_pressure_level
+    kern.memorystatus_level` (one line per name): swapMb (used), cmpPct, pl (1 normal, 2 warn, 4 critical), level."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) != 5:
+        raise ValueError("unrecognized host pressure output")
+    swap = re.search(r"\bused\s*=\s*([0-9.]+)M", lines[0])
+    compressor, memsize, level, free = int(lines[1]), int(lines[2]), int(lines[3]), float(lines[4])
+    if not swap or compressor < 0 or memsize <= 0 or level < 0:
+        raise ValueError("invalid host pressure values")
+    return dict(swapMb=float(swap.group(1)), cmpPct=round(compressor * 100 / memsize, 2), pl=level, level=free)
+
+
+def read_host_pressure(timeout):
+    if sys.platform != "darwin":
+        raise ValueError("host pressure is unsupported on this platform")
+    names = ["vm.swapusage", "vm.compressor_bytes_used", "hw.memsize", "kern.memorystatus_vm_pressure_level",
+             "kern.memorystatus_level"]
+    return parse_host_pressure(subprocess.run(["sysctl", "-n", *names], capture_output=True, text=True, check=True,
+                                              timeout=timeout).stdout)
+
+
+def swap_growth(history):
+    """MB/min between the oldest and newest samples, or None when they are under a minute apart."""
+    if len(history) < 2:
+        return None
+    (first, before), (last, after) = history[0], history[-1]
+    return round((after - before) / ((last - first) / 60), 2) if last - first >= HOST_SAMPLE_MIN_SPAN_S else None
+
+
+class HostPressure:
+    """Pressure level, compressor share and swap growth. One shared sample (state/host-sample.json) serves every
+    waiter; the probe runs in the caller's thread, never under the coordinator lock. Fails open."""
+    def __init__(self, settings, state, probe=read_host_pressure, clock=time.time):
+        self.settings, self.mode = settings, settings["mode"]
+        self.path = state / "host-sample.json"
+        self.probe, self.clock = probe, clock
+        self.noted = self.failure_noted = False
+
+    def cached(self):
+        try:
+            data = json.loads(self.path.read_text())
+            if isinstance(data, dict) and number(data.get("t")) and isinstance(data.get("hist"), list):
+                return data
+        except (OSError, ValueError):
+            pass
+        return None  # missing or corrupt: probe again
+
+    def cached_fields(self):
+        data = self.cached() or {}
+        return {key: data[key] for key in ("pl", "cmpPct", "swapMb", "swapGrowth") if number(data.get(key))}
+
+    def sample(self, deadline):
+        now = self.clock()
+        cached = self.cached()
+        if cached and 0 <= now - cached["t"] < self.settings["sample_ttl_s"]:
+            return cached
+        remaining = deadline - time.monotonic()
+        try:
+            if remaining <= 0:
+                raise TimeoutError("host pressure probe queue deadline expired")
+            reading = self.probe(min(1, remaining))
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            if not self.failure_noted:
+                note(f"host pressure measurement failed ({exc}); admitting (fail-open)")
+                self.failure_noted = True
+            return None
+        history = [item for item in (cached or {}).get("hist", []) if isinstance(item, list) and len(item) == 2
+                   and number(item[0]) and number(item[1]) and 0 <= now - item[0] <= HOST_SAMPLE_WINDOW_S]
+        history.append([now, reading["swapMb"]])
+        data = dict(reading, t=now, hist=history, swapGrowth=swap_growth(history))
+        try:
+            save(self.path, data)
+        except OSError:
+            pass  # An unwritable cache only costs the next waiter a probe.
+        return data
+
+    def reason(self, deadline):
+        data = self.sample(deadline)
+        if data is None:
+            return None
+        limits = self.settings
+        if data["pl"] >= limits["max_pressure_level"]:
+            return f"memory pressure level {data['pl']} >= {limits['max_pressure_level']}"
+        if data["cmpPct"] >= limits["max_compressor_percent"]:
+            return f"compressor {data['cmpPct']:g}% >= {limits['max_compressor_percent']:g}%"
+        growth = data.get("swapGrowth")
+        if growth is not None and growth >= limits["max_swap_growth_mb_per_min"]:
+            return f"swap growth {growth:g} MB/min >= {limits['max_swap_growth_mb_per_min']:g}"
+        return None
+
+    def waiting(self, reason):
+        if not self.noted:
+            note(f"waiting: {reason}")
+            self.noted = True
+
+
+CPU_BUDGET_DEFAULTS = dict(max_units="auto", costs=dict(heavy="msbuild", fast=1, direct=1, integration=2),
+                           max_load_per_core=4.0)
+CPU_POOLS = ("heavy", "fast", "direct", "integration")
+
+
+def cpu_budget_config(value, warn=None):
+    warn = warn or note
+
+    def valid(settings):
+        costs = settings["costs"]
+        if not isinstance(costs, dict) or not costs.keys() <= set(CPU_POOLS):
+            return False
+        if not all(cost == "msbuild" and pool == "heavy" or type(cost) is int and cost >= 0
+                   for pool, cost in costs.items()):
+            return False
+        return ((settings["max_units"] == "auto" or type(settings["max_units"]) is int and settings["max_units"] >= 1)
+                and number(settings["max_load_per_core"]) and settings["max_load_per_core"] > 0)
+    settings = mode_config("cpu_budget", value, warn, CPU_BUDGET_DEFAULTS, valid)
+    if settings["mode"] != "off" and isinstance(value, dict):
+        settings["costs"] = dict(CPU_BUDGET_DEFAULTS["costs"], **value.get("costs", {}))
+    return settings
+
+
+class CpuBudget:
+    """Units per live lease by pool prefix; the unit total and the load average gate every policy except ci."""
+    def __init__(self, settings, msbuild_max_cpu, cpus=None, loadavg=None):
+        self.mode, self.loadavg = settings["mode"], loadavg or (lambda: os.getloadavg())
+        self.cpus = cpus or os.cpu_count() or 1
+        units = settings["max_units"]
+        self.max_units = round(1.5 * self.cpus) if units == "auto" else units
+        msbuild = msbuild_max_cpu if type(msbuild_max_cpu) is int and msbuild_max_cpu > 0 else 2
+        self.costs = {pool: msbuild if cost == "msbuild" else cost for pool, cost in settings["costs"].items()}
+        self.max_load = settings["max_load_per_core"]
+
+    def cost(self, path):
+        return self.costs.get(path.name.split("-", 1)[0], 0)
+
+    def load_per_core(self):
+        try:
+            return self.loadavg()[0] / self.cpus
+        except (OSError, AttributeError):
+            return None  # Unmeasurable load never holds.
+
+    def running_units(self, state, available, prior, live):
+        """Caller holds the coordinator."""
+        return sum(self.cost(path) for path in state.glob("*.lock")
+                   if path.name.startswith(tuple(pool + "-" for pool in CPU_POOLS)) and path not in available
+                   and lease_running(path, prior, live))
+
+    def reason(self, units, candidate, load):
+        need = sum(self.cost(path) for path in candidate)
+        if need <= 0:
+            return None  # ci (and unpriced pools) are never held
+        if units + need > self.max_units:
+            return f"cpu:{units + need}/{self.max_units}"
+        if load is not None and load > self.max_load:
+            return f"cpu:load {load:.1f}/core > {self.max_load:g}"
+        return None
 
 
 def lease_running(path, prior, live):
@@ -2798,13 +3022,22 @@ def record_admission(scan, paths, available, admission):
 
 
 def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None,
-          integration_ceiling=None, *, scan=None):
-    """One bounded admission scan; kernel locks and metadata identity are checked atomically."""
+          integration_ceiling=None, *, scan=None, pressure=None, cpu=None):
+    """One bounded admission scan; kernel locks and metadata identity are checked atomically.
+
+    Every probe (memory, host pressure, load average) runs here, before the coordinator lock is taken."""
     paths = claim_paths(state, candidates, waiter, limits)
-    reason = admission.reason(deadline) if admission and any(
-        path.name.startswith(("heavy-", "fast-", "direct-")) for path in paths) else None
+    gated = any(path.name.startswith(("heavy-", "fast-", "direct-")) for path in paths)
+    reason = admission.reason(deadline) if admission and gated else None
+    host = pressure.reason(deadline) if pressure and gated else None
+    holder = admission
+    if host and pressure.mode == "enforce" and not reason:
+        reason, holder = host, pressure
+    elif host and pressure.mode == "enforce":
+        host = None
+    load = cpu.load_per_core() if cpu else None
     snapshot_paths = paths.copy()
-    if reason:
+    if reason or host or cpu:
         snapshot_paths.update(path for path in state.glob("*.lock")
                               if path.name.startswith(("heavy-", "integration-", "ci-", "fast-", "direct-")))
     if integration_ceiling is not None:
@@ -2838,11 +3071,14 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
                 continue
             available[path] = fd
         record_admission(scan, paths, available, admission)
-        if reason and phases_running(state, available, prior, live):
-            memory_held = True
+        if (reason or host) and phases_running(state, available, prior, live):
+            if reason:
+                memory_held = True
+                if scan is not None:
+                    scan["reason"] = "memory"
+                return None
             if scan is not None:
-                scan["reason"] = "memory"
-            return None
+                scan["wouldHold"] = f"host:{host}"  # observe mode: report, never hold
         eligible = (burst_available(state, available, prior, live, integration_ceiling)
                     if integration_ceiling is not None else available)
         if waiter is not None:
@@ -2852,6 +3088,14 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             candidate = next((c for c in candidates if all(p in eligible for p in c)), [])
             if scan is not None and not candidate:
                 scan["reason"] = "slots"
+        if candidate and cpu and phases_running(state, available, prior, live):
+            budget = cpu.reason(cpu.running_units(state, available, prior, live), candidate, load)
+            if budget and cpu.mode == "enforce":
+                if scan is not None:
+                    scan["reason"] = "cpu"
+                candidate = []
+            elif budget and scan is not None and "wouldHold" not in scan:
+                scan["wouldHold"] = budget
         if candidate and not cancelled() and time.monotonic() < deadline:
             for path in candidate:
                 # Reserve the slot generation: a late nested registration against the previous
@@ -2872,7 +3116,7 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             unlock(fd)
         unlock(coordinator)
         if memory_held:
-            admission.waiting(reason)
+            holder.waiting(reason)
     return None
 
 
@@ -3555,6 +3799,12 @@ def run(args, state, configuration, output=None):
         admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
         burst_settings = options["memory_admission"].get("integration_burst") if admission else None
         burst = IntegrationBurst(admission, burst_settings) if burst_settings else None
+        pressure = (HostPressure(options["host_pressure"], state)
+                    if options["host_pressure"]["mode"] != "off" else None)
+        cpu = (CpuBudget(options["cpu_budget"], options["msbuild_max_cpu"])
+               if options["cpu_budget"]["mode"] != "off" else None)
+        if ledger:
+            ledger.host_pressure = pressure
         if (args.kind == "test" and options["container_test_detection"] == "promote"
                 and container_test_known(state, fingerprint, identity)):
             admission_args.kind = "integration"
@@ -3597,7 +3847,8 @@ def run(args, state, configuration, output=None):
             held = claim(state, phase_candidates(state, admission_args, (heavy, integration, ci_key, token)),
                          deadline, lambda: bool(cancelled[0]),
                          token if waiter_fd is not None else None, PhaseConfig(heavy, integration, settings.options), admission,
-                         integration if burst and admission_args.kind == "integration" else None, scan=scan)
+                         integration if burst and admission_args.kind == "integration" else None, scan=scan,
+                         pressure=pressure, cpu=cpu)
             observe_waiter(admission_args, ledger, scan)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
@@ -3605,6 +3856,8 @@ def run(args, state, configuration, output=None):
                     ledger.outcome("cancelled")
                 return 128 + cancelled[0]
             if held:
+                if ledger:
+                    ledger.admitted_with_would_hold(scan)
                 if time.monotonic() >= deadline:
                     release(state, held, token, True)
                     held = None
