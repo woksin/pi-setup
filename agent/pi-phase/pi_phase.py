@@ -908,7 +908,7 @@ def config(path, *, notes=None):
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
                     host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
-                    failure_categories=True, hang_timeout=dict(mode="off"),
+                    failure_categories=True, hang_timeout=dict(mode="off"), reap_build_servers=dict(mode="off"),
                     fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
                     queue_order=dict(QUEUE_ORDER_DEFAULTS), policy=[])
     try:
@@ -951,6 +951,9 @@ def config(path, *, notes=None):
             continue
         elif key == "hang_timeout":
             values[key] = hang_timeout_config(value, warn)
+            continue
+        elif key == "reap_build_servers":
+            values[key] = reap_build_servers_config(value, warn)
             continue
         elif key == "container_test_detection":
             valid = value in ("off", "hint", "promote")
@@ -1427,6 +1430,15 @@ def mode_config(name, value, warn, defaults, valid):
     return off if mode == "off" else dict(settings, mode=mode)
 
 
+REAP_BUILD_SERVERS_DEFAULTS = dict(idle_s=600, min_age_s=900, max_cpu_ms_per_min=200)
+
+
+def reap_build_servers_config(value, warn=None):
+    def valid(settings):
+        return all(number(settings[key]) and settings[key] > 0 for key in REAP_BUILD_SERVERS_DEFAULTS)
+    return mode_config("reap_build_servers", value, warn or note, REAP_BUILD_SERVERS_DEFAULTS, valid)
+
+
 def host_pressure_config(value, warn=None):
     def valid(settings):
         return (type(settings["max_pressure_level"]) is int and settings["max_pressure_level"] >= 1
@@ -1715,6 +1727,41 @@ def phase_memory(options, kind, ledger):
 
 def msbuild_cap(value, heavy):
     return max(2, (os.cpu_count() or 1) // heavy) if value == "auto" else value
+
+
+COMPILER_ID_PREFIX = "pi-phase-"
+
+
+def shared_compilation_id(env, token):
+    """A phase-specific SharedCompilationId when the user opted into shared compilation (PI_PHASE_SHARED_COMPILATION=1).
+
+    A SharedCompilationId already present in the environment belongs to the caller: it is kept and never cleaned up."""
+    if env.get("PI_PHASE_SHARED_COMPILATION") != "1" or env.get("SharedCompilationId"):
+        return None
+    return COMPILER_ID_PREFIX + re.sub(r"[^A-Za-z0-9]", "", str(token))[:24]
+
+
+def stop_phase_compiler_server(compiler_id, listing=None, kill=os.kill):
+    """SIGTERM only this phase's own server (same user, exact -pipename), after the phase's compiles have ended."""
+    try:
+        listing = listing if listing is not None else subprocess.run(
+            ["ps", "-axo", "pid=,uid=,rss=,command="], capture_output=True, text=True, timeout=5, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    stopped = []
+    for line in listing.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4 or not all(item.isdigit() for item in parts[:3]) or int(parts[1]) != os.getuid():
+            continue
+        words = parts[3].split()
+        if "VBCSCompiler" in words[0] and f"-pipename:{compiler_id}" in words[1:]:
+            try:
+                kill(int(parts[0]), signal.SIGTERM)
+            except OSError:
+                continue
+            stopped.append(int(parts[0]))
+            note(f"stopped phase compiler server pid={parts[0]} rss={int(parts[2]) // 1024}MB")
+    return stopped
 
 
 def shim_environment(directory, cap):
@@ -3848,6 +3895,7 @@ def run(args, state, configuration, output=None):
     registered = False
     waiter_fd = None
     shim_dir = None
+    compiler_id = None
     detector_stopped = threading.Event()
     producer_exit = [None]
     leader_observation = None
@@ -3994,6 +4042,10 @@ def run(args, state, configuration, output=None):
             child_env = dict(os.environ if child_env is None else child_env)
             child_env.setdefault("DOTNET_CLI_USE_MSBUILD_SERVER", "0")
             child_env.setdefault("MSBUILDDISABLENODEREUSE", "1")
+            compiler_id = shared_compilation_id(child_env, token)
+            if compiler_id:
+                child_env["SharedCompilationId"] = compiler_id  # MSBuild reads env vars as properties
+                note(f"compiler server isolated: SharedCompilationId={compiler_id}")
         child_env = holder_environment(state, worktree.root or worktree_root(phase_cwd), held, token,
                                        child_env, worktree.holder) if args.kind != "ci" else child_env
         read_gate, write_gate = os.pipe()
@@ -4124,6 +4176,9 @@ def run(args, state, configuration, output=None):
         if held:
             cleanup_step(errors, "release", proc, lambda: release(state, held, token, safe or proc is None))
         cleanup_step(errors, "worktree_release", proc, lambda: worktree.close(safe or proc is None))
+        if compiler_id and (proc is None or safe):
+            # After the phase's own process group is gone; probes run here, outside the coordinator lock.
+            cleanup_step(errors, "compiler_server_cleanup", proc, lambda: stop_phase_compiler_server(compiler_id))
         if shim_dir is not None:
             cleanup_step(errors, "shim_cleanup", proc, shim_dir.cleanup)
         cleanup_step(errors, "restore_sigint", proc, lambda: signal.signal(signal.SIGINT, old_int))

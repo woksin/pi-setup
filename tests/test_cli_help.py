@@ -31,6 +31,7 @@ TOOLS = {
     "pi-train": ("agent/bin/pi-train", ["init", "fold", "status", "ship"]),
     "pi-usage": ("agent/bin/pi-usage", []),
     "provider-restore": ("agent/bin/provider-restore", []),
+    "reap-build-servers": ("agent/bin/reap-build-servers", []),
     "renice-builders": ("agent/bin/renice-builders", []),
     "secret-sweep": ("agent/bin/secret-sweep", []),
     "session-watchdog": ("agent/bin/session-watchdog", []),
@@ -58,6 +59,7 @@ EXEMPT = {
 GUARDS = {
     "docker-guardian": ('-h|--help', 'export PATH='),
     "renice-builders": ('sys.argv[1:2]', 'sys.exit(main())'),
+    "reap-build-servers": ('sys.argv[1:2]', 'sys.exit(main())'),
     "provider-restore": ('args[0] === "-h"', 'const providers'),
     "release-check": ('-h|--help', 'cd "$(dirname'),
     "pi-setup-tests": ('-h|--help', 'agent="$(cd'),
@@ -67,7 +69,7 @@ REQUIRED = [r"(?i)usage:", r"Examples:", r"Exit codes:", r"See also:"]
 
 # Tools whose first argument is data (a lane, directory, provider, kind or day count): a bare
 # `help` there is valid input, so only -h/--help may select help.
-POSITIONAL_DATA = ["inbox-watch", "pi-setup-tests", "publish-check", "provider-restore", "cratis-local-run", "pi-usage", "renice-builders", "docker-guardian", "release-check"]
+POSITIONAL_DATA = ["inbox-watch", "pi-setup-tests", "publish-check", "provider-restore", "cratis-local-run", "pi-usage", "renice-builders", "reap-build-servers", "docker-guardian", "release-check"]
 BARE_HELP = re.compile(r"--help\|help\)|\"--help\", \"help\"|=== \"help\"")
 
 

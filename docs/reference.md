@@ -27,6 +27,7 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 ### pi-phase options added by #81 (all off by default)
 
 - `hang_timeout` config key and `pi-phase run --no-hang-timeout`: fail-fast `--blame-hang-timeout` for direct VSTest `dotnet test` iteration runs. Details in the [pi-phase README](../agent/pi-phase/README.md).
+- `reap_build_servers` config key (default `{"mode": "off"}`): enables `reap-build-servers`. With `PI_PHASE_SHARED_COMPILATION=1` each phase gets its own `SharedCompilationId` and stops only that server when it ends.
 
 ## Pull requests and trains
 
@@ -71,6 +72,7 @@ Lanes are several coordinated sessions. See [Lanes](../README.md#parallel-sessio
 | `disk-growth` | Samples free disk space and alerts on a fast drop. Runs on a schedule. | `disk-growth --help` | [source](../agent/bin/disk-growth) |
 | `docker-guardian` | **Acts.** Keeps Docker Desktop usable: restarts it when unresponsive and removes stale containers and images. Runs on a schedule. | `docker-guardian --help` | [source](../agent/bin/docker-guardian) |
 | `renice-builders` | **Acts.** Lowers the CPU priority of shared .NET build servers. Run by `docker-guardian`. | `renice-builders --help` | [source](../agent/bin/renice-builders) |
+| `reap-build-servers` | **Acts only in `enforce` mode** (config key `reap_build_servers`, default off). Stops idle orphaned Roslyn/MSBuild servers with SIGTERM. Run by `docker-guardian`. | `reap-build-servers --help` | [source](../agent/bin/reap-build-servers) |
 | `secret-sweep` | Daily read-only gitleaks sweep. Reports contain metadata, never the matched values. | `secret-sweep --help` | [source](../agent/bin/secret-sweep) |
 | `ai-work-lifecycle` | Creates, tracks and cleans temporary task outputs under `.ai-work/`. See the [README](../tools/ai-work-lifecycle/README.md) and [REFERENCE](../tools/ai-work-lifecycle/REFERENCE.md). | `ai-work-lifecycle --help` | [source](../tools/ai-work-lifecycle/ai-work-lifecycle.py) |
 | `sweep-known-roots` | Sweeps registered `ai-work-lifecycle` tasks across known repositories (dry run by default). Installed as a script, not on PATH; pi-setup does not schedule it, so run it yourself. | `python3 ~/.local/share/ai-work-lifecycle/sweep-known-roots.py --help` | [source](../tools/ai-work-lifecycle/sweep-known-roots.py) |
