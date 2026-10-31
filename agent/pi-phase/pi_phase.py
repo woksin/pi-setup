@@ -2172,9 +2172,10 @@ def nested_group(state, holder, pgid, safe=None):
         return True
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
-        if safe is None and any(metadata((state / name).with_suffix(".json")).get("token") != holder["token"]
-                                for name in holder["slots"]):
-            return False  # Registration succeeds only if every slot is still owned.
+        if safe is None and any(
+                (info := metadata((state / name).with_suffix(".json"))).get("token") != holder["token"]
+                or info.get("retired") for name in holder["slots"]):
+            return False  # Registration succeeds only while the parent still owns every slot.
         for name in holder["slots"]:
             path = (state / name).with_suffix(".json")
             info = metadata(path)
@@ -2511,16 +2512,39 @@ def revoke_priority(state):
     return 0
 
 
-def high_count(state):
-    """Caller holds the coordinator; count queued and leased HIGH tokens only once."""
+def high_slot_paths(state):
+    return list(state.glob("heavy-*.lock")) + list(state.glob("fast-*.lock")) + list(state.glob("direct-*.lock"))
+
+
+def observe_high(state):
+    """Probe orphan-guarded HIGH leases; call outside the coordinator and pass to high_count."""
+    observed = {}
+    for path in high_slot_paths(state):
+        data = metadata(path.with_suffix(".json"))
+        if data.get("priority") == "high" and lease_groups(data) and not readonly_busy(path):
+            observed[path] = (data, group_alive(data))
+    return observed
+
+
+def high_count(state, observed=None):
+    """Caller holds the coordinator; count queued and leased HIGH tokens only once.
+
+    Orphan-group probes come from observe_high() made before the coordinator was taken. An
+    observation is used only if the metadata is unchanged; anything else counts as occupied.
+    Without an observation (direct callers) probes run inline.
+    """
     tokens = {w["token"] for w in all_waiters(state) if w["priority"] == "high"}
-    for path in list(state.glob("heavy-*.lock")) + list(state.glob("fast-*.lock")) + list(state.glob("direct-*.lock")):
+    for path in high_slot_paths(state):
         data = metadata(path.with_suffix(".json"))
         if data.get("priority") != "high":
             continue
         busy = readonly_busy(path)
         if not busy and lease_groups(data):
-            busy = group_alive(data)
+            if observed is None:
+                busy = group_alive(data)
+            else:
+                seen = observed.get(path)
+                busy = seen is None or seen[0] != data or seen[1] is not False
         if busy:
             tokens.add(data.get("token", path.name))
     return len(tokens)
@@ -2536,11 +2560,11 @@ def caller_identity():
     return (session[:200] if session else None, lane[:200] if lane else None)
 
 
-def approved_priority(state, priority, cap):
+def approved_priority(state, priority, cap, observed=None):
     """Caller holds the coordinator; share approval and cap semantics with run."""
     if priority != "high":
         return priority, None
-    if high_count(state) >= cap:
+    if high_count(state, observed) >= cap:
         if priority_grant(state) is None:
             raise ValueError(APPROVAL_REQUIRED)
         return "normal", f"high-priority cap ({cap}) reached; queued as normal"
@@ -2550,6 +2574,7 @@ def approved_priority(state, priority, cap):
 
 def register_waiter(state, args, token):
     """Nonblocking registration, including atomic grant consumption and FIFO sequence."""
+    observed = observe_high(state) if args.priority == "high" else None
     coordinator = lock_file(state / "coordinator.lock")
     if coordinator is None:
         return False, None
@@ -2557,7 +2582,7 @@ def register_waiter(state, args, token):
     fd = None
     downgrade_note = None
     try:
-        args.priority, downgrade_note = approved_priority(state, args.priority, getattr(args, "max_high", 3))
+        args.priority, downgrade_note = approved_priority(state, args.priority, getattr(args, "max_high", 3), observed)
         if slotless_policy(args):
             return True, None
         path.parent.mkdir(mode=0o700, exist_ok=True)
@@ -2828,6 +2853,12 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             if scan is not None and not candidate:
                 scan["reason"] = "slots"
         if candidate and not cancelled() and time.monotonic() < deadline:
+            for path in candidate:
+                # Reserve the slot generation: a late nested registration against the previous
+                # owner is refused from now on, before the claimant publishes its own record.
+                previous = metadata(path.with_suffix(".json"))
+                if previous.get("token") and not previous.get("retired"):
+                    save(path.with_suffix(".json"), dict(previous, retired=True))
             if waiter is not None:
                 queued_path = waiter_path(state, waiter)
                 info = metadata(queued_path)
@@ -2859,6 +2890,7 @@ def release(state, held, token, safe):
                 if entry.get("token") == token:
                     if entry.get("nestedGroups"):
                         entry.pop("pgid", None)
+                        entry["retired"] = True  # Ownership ended: late nested registrations are refused.
                         save(path.with_suffix(".json"), entry)
                     else:
                         remove_lease(path)
@@ -2962,6 +2994,7 @@ def reprioritize(state, configuration, args):
     options = config(configuration).options
     cap = options["max_high"]
     order = options["queue_order"]
+    observed = observe_high(state) if args.priority == "high" else None
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
         matches, owned = reprioritize_matches(state, args.target)
@@ -2978,7 +3011,7 @@ def reprioritize(state, configuration, args):
         previous = waiter["priority"]
         if previous == args.priority:
             return 0
-        priority, message = approved_priority(state, args.priority, cap)
+        priority, message = approved_priority(state, args.priority, cap, observed)
         waiter["priority"] = priority
         # A waiter lowered to low gets the same promotion deadline a low run would have had,
         # measured from its original enqueue time, so it cannot starve behind normal work.
@@ -3053,6 +3086,7 @@ def status(state, configuration=CONFIG):
         note(f"fast=0/{fast_slots} queued=0")
         note(f"high=0/{cap}")
         return 0
+    observed = observe_high(state)
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
         owners = []
@@ -3067,7 +3101,7 @@ def status(state, configuration=CONFIG):
             owners.append((path, data, busy))
         waiters = all_waiters(state, now=time.time())
         grant = priority_grant(state)
-        high = high_count(state)
+        high = high_count(state, observed)
     # No slow ps probe or terminal write while holding the shared coordinator.
     live = live_groups(2) if any(not busy and lease_groups(data) for _, data, busy in owners) else set()
     try:

@@ -3271,6 +3271,58 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(pi_phase.metadata(state / "heavy-0.json")["nestedGroups"], [123])
         self.assertTrue(pi_phase.nested_group(state, None, 123))
 
+    def test_late_nested_registration_after_release_and_independent_claim_is_rejected(self):
+        state = self.state
+        state.mkdir(parents=True, exist_ok=True)
+        path = state / "heavy-0.lock"
+        holder = dict(token="a" * 32, slots=["heavy-0.lock"])
+        fd = pi_phase.lock_file(path)
+        pi_phase.save(path.with_suffix(".json"), dict(token=holder["token"], pgid=50))
+        self.assertTrue(pi_phase.nested_group(state, holder, 123))  # Earlier nested group.
+        pi_phase.release(state, [(path, fd)], holder["token"], True)  # Parent releases.
+        self.assertTrue(pi_phase.metadata(path.with_suffix(".json"))["retired"])
+        self.assertTrue(pi_phase.nested_group(state, holder, 123, True))  # Last nested group ends; token kept.
+        with patch.object(pi_phase, "live_groups", return_value=set()):
+            held = pi_phase.claim(state, [[path]], time.monotonic() + 2, lambda: False)  # Independent claim.
+        self.assertTrue(held)
+        self.addCleanup(lambda: [os.close(f) for _, f in held])
+        # A nested invocation that authenticated before the release now registers late.
+        self.assertFalse(pi_phase.nested_group(state, holder, 456))
+        claimant = dict(token="b" * 32, pgid=77)
+        pi_phase.publish(held, claimant)
+        self.assertFalse(pi_phase.nested_group(state, holder, 456))
+        self.assertEqual(pi_phase.metadata(path.with_suffix(".json")), claimant)
+
+    def test_high_count_probes_outside_coordinator_and_revalidates(self):
+        state = self.state
+        state.mkdir(parents=True, exist_ok=True)
+        path = state / "heavy-0.lock"
+        path.touch()
+        pi_phase.save(path.with_suffix(".json"), dict(token="h" * 32, priority="high", pgid=4242))
+        held_during_probe = []
+
+        def slow_probe(info, timeouts=(2,)):
+            fd = pi_phase.lock_file(state / "coordinator.lock")
+            held_during_probe.append(fd is not None)
+            if fd is not None:
+                pi_phase.unlock(fd)
+            return False
+
+        args = SimpleNamespace(kind="build", label="x", priority="high", fast=False, max_high=3, policy="direct")
+        with patch.object(pi_phase, "group_alive", side_effect=slow_probe) as probe, \
+                patch.object(pi_phase, "consume_priority"):
+            observed = pi_phase.observe_high(state)
+            _, fd = pi_phase.register_waiter(state, args, "reg")
+            self.assertIsNone(fd)  # direct policy: slotless, nothing queued
+            self.assertEqual(probe.call_count, 2)  # Both observations happened before the lock.
+            self.assertEqual(held_during_probe, [True, True])
+            self.assertEqual(pi_phase.high_count(state, observed), 0)
+            self.assertEqual(probe.call_count, 2)  # No probe inside the counting call.
+        # Changed metadata or unobserved ownership is counted conservatively.
+        pi_phase.save(path.with_suffix(".json"), dict(token="i" * 32, priority="high", pgid=4242))
+        self.assertEqual(pi_phase.high_count(state, observed), 1)
+        self.assertEqual(pi_phase.high_count(state, {}), 1)
+
     def test_cleanup_can_observe_more_members_than_diagnostic_limit(self):
         listing = "\n".join(f"{pid} 1 42 {os.getuid()} S" for pid in range(100, 140))
         self.assertEqual(len(pi_phase.cleanup_snapshot_rows(listing, 42)[0]), 32)
