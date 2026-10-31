@@ -460,6 +460,7 @@ class PhaseLedger:
                            stack=getattr(args, "stack", None) or command_stack(command),
                            queuedAt=utc_stamp(), startedAt=None, endedAt=None, waitS=0, runS=0,
                            exit=None, outcome="rejected", head=None, dirty=None, verified=False, envHash=env_hash(),
+                           profile=getattr(args, "profile", None) or "full",
                            argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest(),
                            fingerprint=test_fingerprint(cwd, command) if cwd is not None else None)
         self.args, self.command = args, command
@@ -620,7 +621,7 @@ def rejected_ledger(argv):
         return None
     options, command = [], []
     valued = {"--kind", "--label", "--priority", "--timeout", "--queue-timeout", "--repo", "--pr",
-              "--commit", "--log", "--tail", "--vstest-hang-minutes", "--stack", "--policy"}
+              "--commit", "--log", "--tail", "--vstest-hang-minutes", "--stack", "--policy", "--profile"}
     index = 1
     while index < len(argv):
         arg = argv[index]
@@ -2299,6 +2300,29 @@ def apply_hang_timeout(command, args, settings, cwd):
     note(f"hang timeout {seconds}s injected (hang_timeout; pass --no-hang-timeout to opt out)")
     boundary = dump_option_end(command)
     return [*command[:boundary], *injected, *command[boundary:]]
+
+
+PROFILES = ("iterate", "full")
+ITERATE_PROPERTIES = ("RunAnalyzers=false", "EnforceCodeStyleInBuild=false")
+
+
+def apply_profile(command, profile, kind):
+    """The opt-in iterate profile: no analyzers or style enforcement for a direct `dotnet build|test` argv.
+
+    Shell strings, scripts and other tools are left alone (and a note says so); a property the caller already
+    sets is respected. Iterate runs are recorded as such and are never ship evidence."""
+    if profile != "iterate" or kind not in ("build", "test", "integration"):
+        return command
+    inner = unwrap_command(command, stop_at_shell=True)
+    if not inner or Path(inner[0]).name != "dotnet" or inner[1:2] not in (["build"], ["test"]):
+        note("profile iterate: no dotnet build/test argv to adjust; running unchanged")
+        return command
+    added = [f"-p:{item}" for item in ITERATE_PROPERTIES
+             if not any(re.match(rf"^[-/]p(roperty)?[:=]{item.split('=')[0]}=", argument, re.I) for argument in inner)]
+    note("profile iterate: " + (" ".join(added) or "caller already sets the properties")
+         + " (analyzers/style off; not ship evidence)")
+    boundary = dump_option_end(command)
+    return [*command[:boundary], *added, *command[boundary:]]
 
 
 def prepare_dump_command(command, diagnose_hang=False):
@@ -4000,6 +4024,7 @@ def run(args, state, configuration, output=None):
         config_notes = set()
         settings = config(configuration, notes=config_notes)
         options = settings.options
+        command = apply_profile(command, getattr(args, "profile", "full"), args.kind)
         command = apply_hang_timeout(command, admission_args, options["hang_timeout"], phase_cwd)
         identity = work_identity(os.getcwd(), original_command, args.kind)
         prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity)
@@ -4375,6 +4400,8 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--timeout", type=float, default=None, help="execution seconds (default 300 build/test/integration, 120 ci)")
     runner.add_argument("--queue-timeout", type=float, default=120, help="separate permit wait in seconds")
     runner.add_argument("--approved-long-timeout", action="store_true", help="declare explicit user approval for execution >600 seconds")
+    runner.add_argument("--profile", choices=PROFILES, default="full",
+                        help="iterate: no analyzers/style enforcement for dotnet build/test (never ship evidence); default full")
     runner.add_argument("--rerun", action="store_true", help="run even if this exact state already passed")
     runner.add_argument("--expect-red", action="store_true", help="tag an intentional TDD failure; exit code is unchanged")
     add_worktree_arguments(runner)

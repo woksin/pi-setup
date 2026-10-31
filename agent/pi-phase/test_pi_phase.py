@@ -845,7 +845,7 @@ class PhaseTests(unittest.TestCase):
         record = records[0]
         self.assertEqual(set(record), {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
-                                      "head", "dirty", "argvHash", "stack", "envHash", "verified", "fingerprint", "fast", "policy", "source",
+                                      "head", "dirty", "argvHash", "stack", "envHash", "profile", "verified", "fingerprint", "fast", "policy", "source",
                                   "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis",
                                   "waitV", "waitBreakdown", "waitScans", "waitSamples",
                                   "host", "peakRssMb", "peakProcRssMb"})

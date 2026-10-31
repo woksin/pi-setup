@@ -71,6 +71,18 @@ test('skipped, unverified, dirty, wrong-head, wrong-kind records cannot satisfy 
   await assert.rejects(gateEvidence(f.ctx, manifest, config), /missing release, specs/);
 });
 
+test('iterate-profile records are never ship evidence; full and legacy (no profile) records are', async t => {
+  const single = { 'Test/Repo': [components[0]] };
+  const iterate = await fixture(t, [{ ...record, profile: 'iterate' }]);
+  await assert.rejects(gateEvidence(iterate.ctx, manifest, { requireGate: true, gateComponents: single }), /missing release/);
+  const anyGate = await fixture(t, [{ ...record, profile: 'iterate' }]);
+  await assert.rejects(gateEvidence(anyGate.ctx, manifest, { requireGate: true }, { allowUnconfiguredGate: true }), /no verified Tier 1/);
+  for (const profile of ['full', undefined]) {
+    const f = await fixture(t, [{ ...record, profile }]);
+    assert.match(await gateEvidence(f.ctx, manifest, { requireGate: true, gateComponents: single }), /release: build: TIER1 release/);
+  }
+});
+
 test('component configuration rejects malformed regexes, kinds and schemas with TrainError', async t => {
   const f = await fixture(t);
   await mkdir(f.ctx.env.PI_TRAIN_DIR);

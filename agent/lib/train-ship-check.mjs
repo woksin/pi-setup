@@ -64,7 +64,8 @@ async function ledgerEntries(directory) {
 
 function validGateRecord(record, manifest) {
   return record.outcome === 'passed' && record.verified === true && record.head === manifest.head
-    && record.dirty === 'clean' && ['build', 'test'].includes(record.kind);
+    && record.dirty === 'clean' && ['build', 'test'].includes(record.kind)
+    && (record.profile ?? 'full') === 'full'; // records predating profiles were full; iterate is never evidence
 }
 
 function describeEvidence(record) {

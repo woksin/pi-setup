@@ -134,6 +134,10 @@ For example, call `job_start` with the following arguments to retry a test phase
 
 Preserve your actual phase arguments, command and cwd; the command and label above are generic examples. The outer deadline must cover **queue + execution + cleanup** (here 2400 + 300 + 120 seconds of startup/cleanup allowance). There is no automatic retry or detachment: the caller must launch the background job.
 
+## Iteration profile (`--profile iterate|full`)
+
+`pi-phase run --profile iterate` is an opt-in fast inner loop; the default `full` changes nothing. For a direct `dotnet build` or `dotnet test` argv (through `env`/`nice`; never shell strings or scripts, which run unchanged with a note) it adds `-p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false` before any `--` runsettings separator, leaving properties you already set alone. Measured: analyzers are about 78% of a Core compile. The ledger records `profile`; it is part of the cross-worktree `gateKey`, so an iterate pass never satisfies a full run; and `pi-train ship` rejects iterate records as Tier 1 evidence (records without `profile` predate it and count as full). Iterate while coding, then run a full-profile Release build of the touched projects before delivery; Tier 1 is unchanged.
+
 ## .NET worker lifetime and orchestration guard
 
 For MSBuild-backed `build`, `test`, `publish`, `pack`, `msbuild`, and `restore`, the dotnet shim also injects `-p:UseSharedCompilation=false` and `-nodeReuse:false`. These defaults prevent shared compiler/MSBuild nodes from outliving a phase. Explicit caller properties/node-reuse flags win; `PI_PHASE_SHARED_COMPILATION=1` opts out of both lifetime defaults without removing the CPU cap. `dotnet run`, metadata commands, assembly-based tests and Microsoft.Testing.Platform tests are unchanged.
