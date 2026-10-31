@@ -353,6 +353,81 @@ class WaitTelemetry:
             return {}
 
 
+FAILURE_TAIL_BYTES = 256 * 1024
+FAILURE_CODE = re.compile(rb"\berror ((?:[A-Z][A-Za-z]{0,9}|xUnit)\d{3,5})\s*:")
+FAILURE_RESTORE = re.compile(rb"\berror NU\d{4}\b|\bNETSDK1004\b|unable to load the service index", re.I)
+FAILURE_INFRA = re.compile(
+    rb"\bMSB(?:3021|3026|3027|4018|4166)\b|No space left on device|"
+    rb"Cannot connect to the Docker daemon|address already in use|OutOfMemoryException", re.I)
+FAILURE_SUMMARY = re.compile(
+    rb"\bfailed\s*:\s*([1-9]\d*)\b|\bTests\s*:?\s*([1-9]\d*)\s+failed\b|"
+    rb"\b([1-9]\d*)\s+failing\b", re.I)
+
+
+def failure_match(category, tail, match, **fields):
+    return {"category": category, "offset": tail.rfind(b"\n", 0, match.start()) + 1, **fields}
+
+
+def classify_failure(tail: bytes, code: int, outcome: str, expect_red: bool) -> dict:
+    """Classify an already bounded log tail; never determine a phase's outcome."""
+    if outcome == "timeout":
+        match = re.search(rb"inactivity time of .*? elapsed|hang diagnostics", tail, re.I)
+        return failure_match("timeout", tail, match, detail="hang") if match else {"category": "timeout"}
+    if code == 76:
+        return {"category": "infrastructure", "detail": "rss-cap"}
+    if code in (137, 143):
+        return {"category": "infrastructure", "detail": "killed"}
+    if expect_red:
+        return {"category": "expected-red"}
+    match = FAILURE_RESTORE.search(tail)
+    if match:
+        return failure_match("restore", tail, match)
+    match = FAILURE_INFRA.search(tail)
+    if match:
+        return failure_match("infrastructure", tail, match)
+    codes = list(FAILURE_CODE.finditer(tail))
+    if codes:
+        return failure_codes(tail, codes)
+    match = FAILURE_SUMMARY.search(tail)
+    if match:
+        count = next(value for value in match.groups() if value is not None)
+        return failure_match("assertion", tail, match, failedTests=int(count))
+    match = re.search(rb"Test host process crashed", tail, re.I)
+    if match:
+        return failure_match("infrastructure", tail, match)
+    return {"category": "unknown"}
+
+
+def failure_codes(tail, codes):
+    compile_prefixes = (b"CS", b"BC", b"FS", b"RZ", b"TS", b"MSB")
+    category = "analyzer"
+    if any(re.match(rb"[A-Za-z]+", match[1])[0] in compile_prefixes for match in codes):
+        category = "compile"
+    unique = list(dict.fromkeys(match[1].decode("ascii")[:12] for match in codes))[:5]
+    return failure_match(category, tail, codes[0], codes=unique)
+
+
+def failure_diagnostic(log, code, outcome, expect_red):
+    """Read once, after completion, without external parsers or unbounded I/O."""
+    if not log:
+        return classify_failure(b"", code, outcome, expect_red)
+    with open(log, "rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        start = max(0, stream.tell() - FAILURE_TAIL_BYTES)
+        stream.seek(start)
+        tail = stream.read(FAILURE_TAIL_BYTES)
+    if start:
+        # The window may start mid-line. Only complete lines have a known byte offset.
+        first_line = tail.find(b"\n") + 1
+        start += first_line
+        tail = tail[first_line:] if first_line else b""
+    result = classify_failure(tail, code, outcome, expect_red)
+    if "offset" in result:
+        result["offset"] += start
+    result["log"] = str(log)[:240]
+    return result
+
+
 class PhaseLedger:
     def __init__(self, args):
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -373,6 +448,8 @@ class PhaseLedger:
         self.started = None
         self.enqueued = False
         self.wait = None
+        self.running_memory = None
+        self.failure_categories = True
         self.snapshot_thread = None
         self.git_result = (None, None)
         self.snapshot_ready = False
@@ -387,14 +464,27 @@ class PhaseLedger:
 
     def passed_state(self, state):
         if not self.snapshot_ready or self.record["dirty"] is None:
-            return None
+            return None, None
         try:
             records, _ = read_ledger(state, days=14)
         except (OSError, ValueError):
-            return None  # Unreadable history must not prevent execution.
-        keys = ("cwd", "kind", "label", "argvHash", "head", "dirty", "stack", "envHash")
-        return next((r for r in reversed(records) if r["outcome"] == "passed" and r.get("verified") is True
-                     and all(r.get(k) == self.record[k] for k in keys)), None)
+            return None, None  # Unreadable history must not prevent execution.
+        matches = [r for r in reversed(records) if self.matches_state(r)]
+        passed = next((r for r in matches if r["outcome"] == "passed" and r.get("label") == self.record["label"]), None)
+        failed = next((r for r in matches if repeat_failure(r)), None)
+        return passed, failed
+
+    def matches_state(self, record):
+        keys = ("cwd", "kind", "argvHash", "head", "dirty", "stack", "envHash")
+        return record.get("verified") is True and all(record.get(key) == self.record[key] for key in keys)
+
+    def record_failure(self, log, code, expect_red):
+        if not self.failure_categories or code == 0:
+            return
+        try:
+            self.record["failure"] = failure_diagnostic(log, code, self.record["outcome"], expect_red)
+        except Exception:
+            pass  # Diagnostics must never change a phase's result.
 
     def enqueue(self):
         self.record["queuedAt"] = utc_stamp()
@@ -423,6 +513,10 @@ class PhaseLedger:
         self.record["outcome"] = "failed"
         self.record["startedAt"] = utc_stamp()
         self.started = time.monotonic()
+        try:
+            self.record["host"] = {"load1": round(os.getloadavg()[0], 1)}
+        except (OSError, AttributeError):
+            pass
         self.record["waitS"] = max(0, self.started - self.queued)
         if self.wait:
             self.wait.close(self.started)
@@ -461,7 +555,13 @@ class PhaseLedger:
                 pass  # Failed verification never changes the producer's result.
         if self.wait and self.record["outcome"] != "skipped":
             self.record.update(self.wait.fields())
+        self.finish_memory()
         append_ledger(state, self.record)
+
+    def finish_memory(self):
+        if self.running_memory is not None:
+            self.record.update(peakRssMb=int(self.running_memory.peak_rss_mb),
+                               peakProcRssMb=int(self.running_memory.peak_proc_rss_mb))
 
 
 def rejected_ledger(argv):
@@ -540,6 +640,51 @@ def read_ledger(state, days=7, kind=None, stack=None):
 
 def percentile(values, percent):
     return sorted(values)[math.ceil(len(values) * percent / 100) - 1] if values else None
+
+
+def repeat_failure(record):
+    failure = record.get("failure") or {}
+    return record.get("outcome") == "failed" and failure.get("category") in ("compile", "analyzer", "assertion")
+
+
+def warn_repeat_failure(record):
+    if record is not None:
+        category = record["failure"]["category"]
+        note(f"same state previously failed ({category}); change code before rerunning or inspect the previous log")
+
+
+def summary_stats(state, args):
+    if args.failures:
+        return failure_stats(state, args)
+    return stats(state, args.days, args.kind, args.json, args.stack)
+
+
+def failure_stats(state, args):
+    records, skipped = read_ledger(state, args.days)
+    records = failure_records(records, args)
+    counts = {}
+    for record in records:
+        key = (record.get("kind", "?"), (record.get("failure") or {}).get("category", "unknown"))
+        counts[key] = counts.get(key, 0) + 1
+    rows = [dict(kind=kind, category=category, count=count)
+            for (kind, category), count in sorted(counts.items())]
+    print_failure_stats(rows, skipped, args)
+    return 0
+
+
+def failure_records(records, args):
+    records = (r for r in records if r.get("outcome") in ("failed", "timeout", "cancelled"))
+    records = (r for r in records if not args.kind or r.get("kind") == args.kind)
+    return (r for r in records if not args.stack or r.get("stack") == args.stack)
+
+
+def print_failure_stats(rows, skipped, args):
+    if args.json:
+        print(json.dumps({"days": args.days, "skipped": skipped, "rows": rows}, sort_keys=True))
+        return
+    print(f"pi-phase: failures last {args.days}d ({skipped} malformed records skipped)")
+    for row in rows:
+        print("{kind:10s} {category:14s} count={count:3d}".format(**row))
 
 
 def stats(state, days, kind, as_json, stack=None):
@@ -737,6 +882,7 @@ def config(path, *, notes=None):
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
+                    failure_categories=True,
                     fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
                     queue_order=dict(QUEUE_ORDER_DEFAULTS), policy=[])
     try:
@@ -1289,11 +1435,14 @@ def low_memory_reason(swap_floor_mb):
 class RunningMemory:
     """Re-checks memory while a phase runs: RSS cap kill (descendant above rss_cap_mb) and a swap warning."""
     def __init__(self, rss_cap_mb, swap_floor_mb, warn=True):
+        self.enabled = True
         self.cap = rss_cap_mb
         self.floor = swap_floor_mb
         self.warn = warn
         self.last_warning = None
         self.streaks = {}  # (pid, start time) -> consecutive over-cap samples
+        self.peak_rss_mb = 0
+        self.peak_proc_rss_mb = 0
 
     def offender(self, root_pid):
         """(pid, rss_mb, command) of the largest process that was above the cap in OVER_CAP_SAMPLES consecutive
@@ -1305,17 +1454,36 @@ class RunningMemory:
             if reason:
                 self.last_warning = now
                 note(f"warning: {reason} while phase is running (no action taken)")
-        if not self.cap:
-            return None
         try:
-            samples = sample_tree(root_pid)
+            samples = self.sample(root_pid)
         except (OSError, ValueError, subprocess.SubprocessError):
             self.streaks = {}  # a failed measurement breaks every streak: "consecutive" means consecutive samples
             return None  # fail-open: never kill on a failed measurement
+        self.sample_peaks(samples)
+        if not self.cap:
+            return None
         over = {(item[0], item[3] if len(item) > 3 else None): item for item in samples if item[1] > self.cap}
         self.streaks = {identity: self.streaks.get(identity, 0) + 1 for identity in over}
         sustained = [over[identity] for identity, count in self.streaks.items() if count >= OVER_CAP_SAMPLES]
         return max(sustained, key=lambda item: item[1]) if sustained else None
+
+    def sample(self, root_pid):
+        return sample_tree(root_pid) if self.enabled else []
+
+    def sample_peaks(self, samples):
+        self.peak_rss_mb = max(self.peak_rss_mb, sum(item[1] for item in samples))
+        self.peak_proc_rss_mb = max(self.peak_proc_rss_mb, max((item[1] for item in samples), default=0))
+
+
+def phase_memory(options, kind, ledger):
+    enabled = kind in ("build", "test", "integration")
+    memory = RunningMemory(options["rss_cap_mb"] if enabled else 0,
+                           (options["memory_admission"] or {}).get("min_swap_free_mb", DEFAULT_MIN_SWAP_FREE_MB),
+                           enabled)
+    memory.enabled = enabled
+    if ledger and enabled:
+        ledger.running_memory = memory
+    return memory
 
 
 def msbuild_cap(value, heavy):
@@ -3332,10 +3500,12 @@ def run(args, state, configuration, output=None):
         identity = work_identity(os.getcwd(), original_command, args.kind)
         prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity)
         if ledger:
+            ledger.failure_categories = options["failure_categories"]
             ledger.prepare_snapshot()
+            passed, failed = ledger.passed_state(state)
+            warn_repeat_failure(failed)
             if (not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1" and args.kind != "ci"
                     and (args.kind != "integration" or options["skip_passed_integration"])):
-                passed = ledger.passed_state(state)
                 if passed:
                     note(f"skipped: this exact state already passed at {passed['ts']} "
                          f"(kind={args.kind} label={args.label} head={passed['head'][:7]} "
@@ -3493,9 +3663,7 @@ def run(args, state, configuration, output=None):
                              args=(state, fingerprint, detection_started, detector_stopped, attribution, identity.family_key),
                              daemon=True).start()
         next_heartbeat = started + HEARTBEAT
-        running_memory = RunningMemory(options["rss_cap_mb"] if args.kind in ("build", "test", "integration") else 0,
-                                       (options["memory_admission"] or {}).get("min_swap_free_mb", DEFAULT_MIN_SWAP_FREE_MB),
-                                       args.kind in ("build", "test", "integration"))
+        running_memory = phase_memory(options, args.kind, ledger)
         next_memory = started + MEMORY_SAMPLE_INTERVAL
         while True:
             if cancelled[0]:
@@ -3656,6 +3824,7 @@ def main(argv=None, *, state=None, configuration=None):
     summary.add_argument("--kind", choices=KINDS)
     summary.add_argument("--json", action="store_true")
     summary.add_argument("--stack", type=stack_name)
+    summary.add_argument("--failures", action="store_true", help="group failures by kind and category")
     waiting = commands.add_parser("wait", help="estimate the wait for a new normal-priority phase")
     waiting.add_argument("--eta", action="store_true", required=True)
     waiting.add_argument("--kind", choices=KINDS, default="build")
@@ -3675,6 +3844,7 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--queue-timeout", type=float, default=120, help="separate permit wait in seconds")
     runner.add_argument("--approved-long-timeout", action="store_true", help="declare explicit user approval for execution >600 seconds")
     runner.add_argument("--rerun", action="store_true", help="run even if this exact state already passed")
+    runner.add_argument("--expect-red", action="store_true", help="tag an intentional TDD failure; exit code is unchanged")
     add_worktree_arguments(runner)
     runner.add_argument("--repo", help="ci watcher repo identity")
     runner.add_argument("--pr", help="ci watcher PR identity")
@@ -3722,7 +3892,7 @@ def main(argv=None, *, state=None, configuration=None):
         if args.action == "stats":
             if args.days < 1:
                 parser.error("--days must be positive")
-            return stats(state, args.days, args.kind, args.json, args.stack)
+            return summary_stats(state, args)
         if args.action == "wait":
             return wait_eta(state, configuration, args.kind, args)
         if args.action == "status":
@@ -3754,6 +3924,7 @@ def main(argv=None, *, state=None, configuration=None):
                 print(f"pi-phase: {exc}", file=sys.stderr, flush=True)
                 return_code = 125
         if ledger:
+            ledger.record_failure(args.log, return_code, args.expect_red)
             ledger.finish(state, return_code)
     return return_code
 

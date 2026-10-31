@@ -847,7 +847,8 @@ class PhaseTests(unittest.TestCase):
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
                                       "head", "dirty", "argvHash", "stack", "envHash", "verified", "fingerprint", "fast", "policy", "source",
                                   "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis",
-                                  "waitV", "waitBreakdown", "waitScans", "waitSamples"})
+                                  "waitV", "waitBreakdown", "waitScans", "waitSamples",
+                                  "host", "peakRssMb", "peakProcRssMb"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
@@ -1310,7 +1311,7 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(settings, (2, 1))
         self.assertEqual(settings.options, dict(policy=[], msbuild_max_cpu=0, container_test_detection="hint",
                                                 cold_worktree_hint=True, memory_admission=False, phase_nice=0,
-                                                rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
+                                                rss_cap_mb=12288, skip_passed_integration=False, max_high=3, failure_categories=True,
                                                 fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
     queue_order=dict(mode="shortest-first", aging_s=600, default_expected_s=180, low_promote_after_s=900)))
         for cores, slots, expected in ((12, 2, 6), (12, 4, 3), (1, 4, 2), (None, 2, 2)):
@@ -1339,7 +1340,7 @@ class PhaseTests(unittest.TestCase):
         self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
         self.assertEqual(pi_phase.config(self.config).options,
                          dict(policy=[], msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0,
-                              rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
+                              rss_cap_mb=12288, skip_passed_integration=False, max_high=3, failure_categories=True,
                               fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
     queue_order=dict(mode="shortest-first", aging_s=600, default_expected_s=180, low_promote_after_s=900)))
 
@@ -1699,6 +1700,7 @@ class PhaseTests(unittest.TestCase):
                                     ("unsuccessful claim", [0, 0, 0, 2], None)):
             with self.subTest(path=path):
                 ledger = Mock(record={})
+                ledger.passed_state.return_value = (None, None)
                 args = SimpleNamespace(label="queue", timeout=1, queue_timeout=2,
                     approved_long_timeout=False, kind="build", priority="normal", policy="queued",
                     repo=None, pr=None, commit=None, command=["synthetic"],
