@@ -213,8 +213,25 @@ def release(args, now):
     return 0
 
 
+EPILOG = """
+Examples:
+  pi-retain add <path> --owner <task> --reason "active gate" --hours 24
+  pi-retain release <path> --owner <task>
+  pi-retain list
+  pi-retain status <path>
+
+Exit codes:
+  0  success (status: path is retained)
+  1  status: path is not retained
+  2  error (bad input, owner mismatch, I/O failure)
+
+See also: pi-cleanup, ai-work-lifecycle
+"""
+
+
 def main(argv=None, now=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog=EPILOG)
     commands = parser.add_subparsers(dest='command', required=True)
     create = commands.add_parser('add')
     create.add_argument('path')
