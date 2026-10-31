@@ -186,5 +186,35 @@ class GateDedupeTests(unittest.TestCase):
         self.assertNotEqual(*keys)
 
 
+    def test_iterate_pass_never_skips_a_full_run_and_vice_versa(self):
+        self.write_config()
+        self.run_gate(self.a, extra=("--profile", "iterate"))
+        self.assertNotIn("already passed", self.run_gate(self.a))  # full is not satisfied by iterate
+        self.assertEqual(self.runs(), 2)
+        self.assertIn("already passed", self.run_gate(self.a))  # the full record now skips full
+        self.assertEqual(self.runs(), 2)
+        self.assertIn("already passed", self.run_gate(self.a, extra=("--profile", "iterate")))
+        self.state_reset()
+        self.run_gate(self.a)
+        self.assertNotIn("already passed", self.run_gate(self.a, extra=("--profile", "iterate")))
+        self.assertEqual(self.runs(), 2)
+
+    def state_reset(self):
+        for path in (self.state / "ledger").glob("*.jsonl"):
+            path.unlink()
+        self.counter.unlink()
+
+    def test_records_without_a_profile_still_match_a_full_run_only(self):
+        self.write_config()
+        self.run_gate(self.a)
+        files = list((self.state / "ledger").glob("*.jsonl"))
+        record = json.loads(files[0].read_text().splitlines()[0])
+        del record["profile"]
+        files[0].write_text(json.dumps(record) + "\n")
+        self.assertIn("already passed", self.run_gate(self.a))
+        self.assertNotIn("already passed", self.run_gate(self.a, extra=("--profile", "iterate")))
+        self.assertEqual(self.runs(), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

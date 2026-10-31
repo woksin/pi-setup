@@ -520,6 +520,9 @@ class PhaseLedger:
 
     def matches_state(self, record):
         keys = ("cwd", "kind", "argvHash", "head", "dirty", "stack", "envHash")
+        # Records predating profiles were full; iterate and full results never satisfy each other.
+        if (record.get("profile") or "full") != self.record["profile"]:
+            return False
         return record.get("verified") is True and all(record.get(key) == self.record[key] for key in keys)
 
     def record_failure(self, log, code, expect_red):

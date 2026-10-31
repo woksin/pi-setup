@@ -8,7 +8,7 @@ import { TrainError } from './train-gh.mjs';
 
 const manifest = { repo: 'Test/Repo', head: 'abcdef0123456789' };
 const components = [{ id: 'release', kind: 'build', label: 'tier1 release' }, { id: 'specs', kind: 'test', label: 'tier1 spec' }];
-const config = { requireGate: true, gateComponents: { 'Test/Repo': components } };
+const config = { gateComponents: { 'Test/Repo': components } };
 const record = { outcome: 'passed', verified: true, head: manifest.head, dirty: 'clean', kind: 'build', label: 'TIER1 release' };
 
 async function fixture(t: any, records: any[] = []) {
@@ -23,7 +23,7 @@ async function fixture(t: any, records: any[] = []) {
 test('a repository without a component set fails closed, naming the override', async t => {
   const f = await fixture(t, [record]);
   await assert.rejects(gateEvidence(f.ctx, manifest, {}), { message: /no gateComponents configured for Test\/Repo.*--allow-unconfigured-gate/ });
-  await assert.rejects(gateEvidence(f.ctx, manifest, { requireGate: false }, { allowUnconfiguredGate: false }), TrainError);
+  await assert.rejects(gateEvidence(f.ctx, manifest, {}, { allowUnconfiguredGate: false }), TrainError);
   assert.deepEqual(f.warnings, []);
 });
 
@@ -32,7 +32,7 @@ test('--allow-unconfigured-gate accepts legacy evidence with a logged warning', 
   assert.match(await gateEvidence(f.ctx, manifest, {}, { allowUnconfiguredGate: true }), /build: TIER1 release/);
   assert.deepEqual(f.warnings, ['warning: --allow-unconfigured-gate: no gateComponents for Test/Repo; accepting any verified clean build/test']);
   const none = await fixture(t, []);
-  await assert.rejects(gateEvidence(none.ctx, manifest, { requireGate: true }, { allowUnconfiguredGate: true }), /no verified Tier 1/);
+  await assert.rejects(gateEvidence(none.ctx, manifest, {}, { allowUnconfiguredGate: true }), /no verified Tier 1/);
 });
 
 test('shipConfig supplies the built-in Chronicle component set and lets the user config override it', async t => {
@@ -44,7 +44,7 @@ test('shipConfig supplies the built-in Chronicle component set and lets the user
   const g = await fixture(t, ledger);
   assert.match(await gateEvidence(g.ctx, chronicle, config), /release: build: 12 tier1 release build/);
   const wrong = await fixture(t, [{ ...record, label: 'tier1 specs build' }]);
-  await assert.rejects(gateEvidence(wrong.ctx, chronicle, { ...config, requireGate: true }), /missing release, specs/);
+  await assert.rejects(gateEvidence(wrong.ctx, chronicle, config), /missing release, specs/);
   await mkdir(f.ctx.env.PI_TRAIN_DIR);
   await writeFile(join(f.ctx.env.PI_TRAIN_DIR, 'config.json'), JSON.stringify({ gateComponents: { 'Cratis/Chronicle': [{ id: 'only', kind: 'build', label: 'x' }] } }));
   assert.deepEqual((await shipConfig(f.ctx)).gateComponents['Cratis/Chronicle'].map((c: any) => c.id), ['only']);
@@ -58,11 +58,16 @@ test('every configured component is listed, matched case-insensitively by kind a
   assert.deepEqual(f.warnings, []);
 });
 
-test('missing components reject required gates or warn and return the same message', async t => {
+test('missing components always throw, even with the legacy requireGate: false key', async t => {
   const f = await fixture(t, [record]);
   await assert.rejects(gateEvidence(f.ctx, manifest, config), { message: 'Tier 1 incomplete for abcdef0: missing specs' });
-  assert.equal(await gateEvidence(f.ctx, manifest, { ...config, requireGate: false }), 'Tier 1 incomplete for abcdef0: missing specs');
-  assert.deepEqual(f.warnings, ['warning: Tier 1 incomplete for abcdef0: missing specs']);
+  await assert.rejects(gateEvidence(f.ctx, manifest, { ...config, requireGate: false }), { message: 'Tier 1 incomplete for abcdef0: missing specs' });
+  assert.deepEqual(f.warnings, []);
+});
+
+test('configured components with only iterate records throw', async t => {
+  const f = await fixture(t, [{ ...record, profile: 'iterate' }, { ...record, kind: 'test', label: 'tier1 spec', profile: 'iterate' }]);
+  await assert.rejects(gateEvidence(f.ctx, manifest, config), /missing release, specs/);
 });
 
 test('skipped, unverified, dirty, wrong-head, wrong-kind records cannot satisfy a component', async t => {
@@ -74,12 +79,12 @@ test('skipped, unverified, dirty, wrong-head, wrong-kind records cannot satisfy 
 test('iterate-profile records are never ship evidence; full and legacy (no profile) records are', async t => {
   const single = { 'Test/Repo': [components[0]] };
   const iterate = await fixture(t, [{ ...record, profile: 'iterate' }]);
-  await assert.rejects(gateEvidence(iterate.ctx, manifest, { requireGate: true, gateComponents: single }), /missing release/);
+  await assert.rejects(gateEvidence(iterate.ctx, manifest, { gateComponents: single }), /missing release/);
   const anyGate = await fixture(t, [{ ...record, profile: 'iterate' }]);
-  await assert.rejects(gateEvidence(anyGate.ctx, manifest, { requireGate: true }, { allowUnconfiguredGate: true }), /no verified Tier 1/);
+  await assert.rejects(gateEvidence(anyGate.ctx, manifest, {}, { allowUnconfiguredGate: true }), /no verified Tier 1/);
   for (const profile of ['full', undefined]) {
     const f = await fixture(t, [{ ...record, profile }]);
-    assert.match(await gateEvidence(f.ctx, manifest, { requireGate: true, gateComponents: single }), /release: build: TIER1 release/);
+    assert.match(await gateEvidence(f.ctx, manifest, { gateComponents: single }), /release: build: TIER1 release/);
   }
 });
 

@@ -72,27 +72,21 @@ function describeEvidence(record) {
   return `${record.kind}: ${record.label ?? ''} (${record.ts ?? ''})`;
 }
 
-function missingEvidence(ctx, config, message) {
-  if (config.requireGate === true) throw new TrainError(message);
-  ctx.err(`warning: ${message}`);
-  return message;
-}
-
-function componentEvidence(ctx, manifest, config, records) {
+function componentEvidence(manifest, config, records) {
   const matches = config.gateComponents[manifest.repo].map(component => ({ component, record: records.find(record =>
     record.kind === component.kind && new RegExp(component.label, 'i').test(record.label ?? '')) }));
   const missing = matches.filter(match => !match.record).map(match => match.component.id);
-  if (missing.length) return missingEvidence(ctx, config, `Tier 1 incomplete for ${manifest.head.slice(0, 7)}: missing ${missing.join(', ')}`);
+  if (missing.length) throw new TrainError(`Tier 1 incomplete for ${manifest.head.slice(0, 7)}: missing ${missing.join(', ')}`);
   return matches.map(({ component, record }) => `${component.id}: ${describeEvidence(record)}`).join('\n');
 }
 
-function unconfiguredEvidence(ctx, manifest, config, evidence, options) {
+function unconfiguredEvidence(ctx, manifest, evidence, options) {
   if (!options.allowUnconfiguredGate) {
     throw new TrainError(`no gateComponents configured for ${manifest.repo}; add a Tier 1 component set to the train config or pass --allow-unconfigured-gate`);
   }
   ctx.err(`warning: --allow-unconfigured-gate: no gateComponents for ${manifest.repo}; accepting any verified clean build/test`);
   if (evidence.length) return evidence.map(describeEvidence).join('\n');
-  return missingEvidence(ctx, config, `no verified Tier 1 for ${manifest.head.slice(0, 7)}`);
+  throw new TrainError(`no verified Tier 1 for ${manifest.head.slice(0, 7)}`);
 }
 
 export async function gateEvidence(ctx, manifest, config, options = {}) {
@@ -101,8 +95,8 @@ export async function gateEvidence(ctx, manifest, config, options = {}) {
   const records = await ledgerEntries(directory);
   const evidence = records.filter(record => validGateRecord(record, manifest));
   const components = config.gateComponents?.[manifest.repo];
-  if (components) return componentEvidence(ctx, manifest, config, evidence);
-  return unconfiguredEvidence(ctx, manifest, config, evidence, options);
+  if (components) return componentEvidence(manifest, config, evidence);
+  return unconfiguredEvidence(ctx, manifest, evidence, options);
 }
 
 function pending(item) {
