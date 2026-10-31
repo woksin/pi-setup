@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Stop idle, orphaned .NET build servers (observe by default; off unless configured).
+
+Reads the merged pi-phase config key `reap_build_servers` (default {"mode": "off"}):
+  {"mode": "observe"|"enforce", "idle_s": 600, "min_age_s": 900, "max_cpu_ms_per_min": 200}
+
+Candidates are processes of the current user whose parent is init (ppid 1) and that are a VBCSCompiler
+or an MSBuild `/nodemode:` node started with `/nodeReuse:true`, running from a dotnet `sdk/` directory.
+Servers owned by a pi-phase phase (`-pipename:pi-phase-...`) are the phase's to clean up and are skipped.
+A server is idle when its CPU use stays below the threshold on every pass for at least `idle_s`; a compile
+burns seconds of CPU, so a server serving a compile is never idle. The idle timer resets on any busier
+pass or when pid+start time change (PID reuse). Immediately before each SIGTERM that one pid is re-read
+and revalidated. SIGTERM only, never SIGKILL. Runs no probe under the pi-phase coordinator lock.
+Prints a line only when something is (or would be) reaped. Exit status is always 0.
+"""
+import contextlib
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+PS_COLUMNS = "pid=,ppid=,uid=,lstart=,time=,rss=,command="
+
+
+def parse_cpu(text):
+    """ps TIME: [[dd-]hh:]mm:ss[.ff] -> seconds."""
+    days, _, rest = text.rpartition("-")
+    parts = rest.split(":")
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + float(part)
+    return seconds + (int(days) * 86400 if days else 0)
+
+
+def parse_line(line):
+    """-> dict(pid, ppid, uid, lstart, cpu_s, rss_mb, command) or None."""
+    parts = line.split(None, 10)
+    if len(parts) < 11 or not all(parts[index].isdigit() for index in (0, 1, 2, 9)):
+        return None
+    try:
+        cpu = parse_cpu(parts[8])
+    except ValueError:
+        return None
+    return dict(pid=int(parts[0]), ppid=int(parts[1]), uid=int(parts[2]), lstart=" ".join(parts[3:8]),
+                cpu_s=cpu, rss_mb=int(parts[9]) // 1024, command=parts[10])
+
+
+def is_candidate(row, uid):
+    if row["uid"] != uid or row["ppid"] != 1:
+        return False
+    words = row["command"].split()
+    if not words or "/sdk/" not in row["command"].replace("\\", "/"):
+        return False
+    if any(word.startswith("-pipename:pi-phase-") for word in words):
+        return False  # owned by a phase; it stops its own server
+    lower = row["command"].lower()
+    if "vbcscompiler" in os.path.basename(words[0]).lower() or any("vbcscompiler" in w.lower() for w in words[:2]):
+        return True
+    return "msbuild.dll" in lower and "/nodemode:" in lower and "/nodereuse:true" in lower
+
+
+def load_state(path):
+    try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError
+        return {key: value for key, value in data.items()
+                if isinstance(value, dict) and {"lstart", "cpu_s", "idle_since", "seen"} <= value.keys()}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(path, state):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, prefix=".reaper-") as handle:
+            json.dump(state, handle)
+        os.replace(handle.name, path)
+    except OSError:
+        pass
+
+
+def ps_rows(run, *extra):
+    try:
+        out = run(["ps", *extra, "-o", PS_COLUMNS], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [row for row in map(parse_line, out.splitlines()) if row]
+
+
+def under_threshold(record, row, now, limit_ms):
+    """CPU burnt since the recorded pass stays within the idle budget (window floored at one minute)."""
+    window = max(now - record["seen"], 60.0)
+    return (row["cpu_s"] - record["cpu_s"]) * 1000 <= limit_ms * window / 60.0
+
+
+def evaluate(rows, state, settings, now, uid):
+    """Advance the idle state; return (new_state, [(row, idle_seconds)]) for servers idle long enough."""
+    new, due = {}, []
+    for row in rows:
+        if not is_candidate(row, uid):
+            continue
+        key = str(row["pid"])
+        record = state.get(key)
+        if not record or record["lstart"] != row["lstart"] or row["cpu_s"] < record["cpu_s"]:
+            record = dict(lstart=row["lstart"], cpu_s=row["cpu_s"], idle_since=now, seen=now)
+        else:
+            if now - record["seen"] < 5:
+                new[key] = record  # same pass window; do not measure a rate over noise
+                continue
+            if not under_threshold(record, row, now, settings["max_cpu_ms_per_min"]):
+                record["idle_since"] = now
+            record.update(cpu_s=row["cpu_s"], seen=now)
+        new[key] = record
+        if now - record["idle_since"] >= settings["idle_s"] and parse_age(row, now) >= settings["min_age_s"]:
+            due.append((row, now - record["idle_since"]))
+    return new, due
+
+
+def parse_age(row, now):
+    try:
+        return now - time.mktime(time.strptime(row["lstart"], "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        return 0.0
+
+
+def revalidate(row, record, settings, now, uid, run):
+    """Re-read exactly this pid right before signalling it."""
+    rows = ps_rows(run, "-p", str(row["pid"]))
+    if not rows or rows[0]["lstart"] != row["lstart"] or not is_candidate(rows[0], uid):
+        return False
+    return under_threshold(record, rows[0], now, settings["max_cpu_ms_per_min"])
+
+
+def load_settings():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pi-phase"))
+    import pi_phase
+    with contextlib.redirect_stdout(open(os.devnull, "w")):
+        return pi_phase.config(pi_phase.CONFIG).options["reap_build_servers"], pi_phase.STATE
+
+
+def main(run=subprocess.run, kill=os.kill, clock=time.time, settings=None, state_dir=None, uid=None):
+    try:
+        if settings is None:
+            settings, default_state = load_settings()
+            state_dir = state_dir or default_state
+        if settings.get("mode", "off") not in ("observe", "enforce"):
+            return 0
+        uid = os.getuid() if uid is None else uid
+        rows = ps_rows(run, "-ax")
+        if rows is None:
+            return 0
+        path = Path(state_dir) / "reaper.json"
+        now = clock()
+        state, due = evaluate(rows, load_state(path), settings, now, uid)
+        save_state(path, state)
+        for row, idle in due:
+            if settings["mode"] == "observe":
+                print(f"reap-build-servers: would reap pid={row['pid']} rss={row['rss_mb']}MB idle={int(idle)}s")
+            elif revalidate(row, state[str(row["pid"])], settings, clock(), uid, run):
+                try:
+                    kill(row["pid"], signal.SIGTERM)
+                except OSError:
+                    continue
+                print(f"reap-build-servers: reaped pid={row['pid']} rss={row['rss_mb']}MB idle={int(idle)}s")
+    except Exception:  # never disturb the guardian loop
+        return 0
+    return 0
+
+
+HELP = """Usage: reap-build-servers [-h|--help]
+Stop idle, orphaned Roslyn compiler servers and reusable MSBuild nodes of the current user.
+Without -h/--help it ACTS only when config key reap_build_servers has mode "enforce" ("observe" only prints
+what it would reap; the default "off" does nothing). SIGTERM only, never SIGKILL; skips servers owned by a
+pi-phase phase; re-validates each pid just before signalling it. Other arguments are ignored.
+
+Examples:
+  reap-build-servers --help   # this text, no side effects
+  reap-build-servers          # one pass (state-changing only in enforce mode); silent when nothing to do
+Exit codes:
+  0 always
+See also: docs/reference.md, renice-builders --help, docker-guardian --help
+"""
+
+
+if __name__ == "__main__":
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:2]):
+        print(HELP, end="")
+        sys.exit(0)
+    sys.exit(main())

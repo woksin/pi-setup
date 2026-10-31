@@ -1,7 +1,7 @@
 """Per-user host-wide, cooperative phase leases. POSIX flock and process groups required.
 
-Only the child's own process group is signalled. The producer inherits the lease FD;
-metadata guards against a dead supervisor whose descendant closed inherited FDs.
+Only the child's own process group is signalled. Lock FDs stay in the supervisor;
+metadata guards against orphaned producers and authenticated nested phases.
 """
 import argparse
 from collections import deque, namedtuple
@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import signal
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -277,7 +278,13 @@ def append_ledger(state, record):
             pass  # Even a full/broken stderr must not change the phase's exit.
 
 
-WAIT_REASONS = ("slots", "order", "memory", "other")
+WAIT_REASONS = ("slots", "order", "memory", "other")  # "cpu" (cpu_budget enforce) is added to the output lazily.
+
+
+def would_hold_kind(scan):
+    """'host' or 'cpu' when an observe-mode check would have held this scan (scan['wouldHold'] = '<kind>:<why>')."""
+    kind = str(scan.get("wouldHold") or "").split(":", 1)[0]
+    return kind if kind in ("host", "cpu") else None
 
 
 class WaitTelemetry:
@@ -291,6 +298,7 @@ class WaitTelemetry:
         self.load_sum, self.load_max, self.load_count = 0.0, None, 0
         self.mem_free_min = None
         self.busy = {}
+        self.would, self.would_seconds = None, {}
 
     def record(self, scan):
         try:
@@ -298,14 +306,20 @@ class WaitTelemetry:
                 return
             reason = scan.get("reason", "other")
             now = self.clock()
-            self.seconds[self.current] += now - self.at
+            self.seconds[self.current] = self.seconds.get(self.current, 0.0) + now - self.at
+            self.credit_would_hold(now - self.at)
             self.current, self.at = reason, now
-            self.scans[reason] += 1
+            self.scans[reason] = self.scans.get(reason, 0) + 1
+            self.would = would_hold_kind(scan)
             self.sample_load()
             self.sample_memory(scan.get("memFree"))
             self.sample_pools(scan.get("busy", {}))
         except Exception:
             pass  # Optional telemetry must not interrupt a queued phase.
+
+    def credit_would_hold(self, seconds):
+        if self.would:
+            self.would_seconds[self.would] = self.would_seconds.get(self.would, 0.0) + seconds
 
     def sample_load(self):
         try:
@@ -334,7 +348,8 @@ class WaitTelemetry:
     def close(self, end):
         try:
             if not self.closed:
-                self.seconds[self.current] += max(0, end - self.at)
+                self.seconds[self.current] = self.seconds.get(self.current, 0.0) + max(0, end - self.at)
+                self.credit_would_hold(max(0, end - self.at))
                 self.closed = True
         except Exception:
             pass
@@ -347,10 +362,88 @@ class WaitTelemetry:
             samples.update({pool: dict(mean=round(sample["total"] / sample["n"], 3),
                                        max=sample["max"], of=sample["of"])
                             for pool, sample in self.busy.items()})
-            return dict(waitV=1, waitBreakdown={key: round(value, 3) for key, value in self.seconds.items()},
-                        waitScans=dict(self.scans), waitSamples=samples)
+            fields = dict(waitV=1, waitBreakdown={key: round(value, 3) for key, value in self.seconds.items()},
+                          waitScans=dict(self.scans), waitSamples=samples)
+            if self.would_seconds:  # Observe-mode holds only; absent when no observed pressure/budget hold.
+                fields["waitWouldHold"] = {key: round(value, 3) for key, value in self.would_seconds.items()}
+            return fields
         except Exception:
             return {}
+
+
+FAILURE_TAIL_BYTES = 256 * 1024
+FAILURE_CODE = re.compile(rb"\berror ((?:[A-Z][A-Za-z]{0,9}|xUnit)\d{3,5})\s*:")
+FAILURE_RESTORE = re.compile(rb"\berror NU\d{4}\b|\bNETSDK1004\b|unable to load the service index", re.I)
+FAILURE_INFRA = re.compile(
+    rb"\bMSB(?:3021|3026|3027|4018|4166)\b|No space left on device|"
+    rb"Cannot connect to the Docker daemon|address already in use|OutOfMemoryException", re.I)
+FAILURE_SUMMARY = re.compile(
+    rb"\bfailed\s*:\s*([1-9]\d*)\b|\bTests\s*:?\s*([1-9]\d*)\s+failed\b|"
+    rb"\b([1-9]\d*)\s+failing\b", re.I)
+
+
+def failure_match(category, tail, match, **fields):
+    return {"category": category, "offset": tail.rfind(b"\n", 0, match.start()) + 1, **fields}
+
+
+def classify_failure(tail: bytes, code: int, outcome: str, expect_red: bool) -> dict:
+    """Classify an already bounded log tail; never determine a phase's outcome."""
+    if outcome == "timeout":
+        match = re.search(rb"inactivity time of .*? elapsed|hang diagnostics", tail, re.I)
+        return failure_match("timeout", tail, match, detail="hang") if match else {"category": "timeout"}
+    if code == 76:
+        return {"category": "infrastructure", "detail": "rss-cap"}
+    if code in (137, 143):
+        return {"category": "infrastructure", "detail": "killed"}
+    if expect_red:
+        return {"category": "expected-red"}
+    match = FAILURE_RESTORE.search(tail)
+    if match:
+        return failure_match("restore", tail, match)
+    match = FAILURE_INFRA.search(tail)
+    if match:
+        return failure_match("infrastructure", tail, match)
+    codes = list(FAILURE_CODE.finditer(tail))
+    if codes:
+        return failure_codes(tail, codes)
+    match = FAILURE_SUMMARY.search(tail)
+    if match:
+        count = next(value for value in match.groups() if value is not None)
+        return failure_match("assertion", tail, match, failedTests=int(count))
+    match = re.search(rb"Test host process crashed", tail, re.I)
+    if match:
+        return failure_match("infrastructure", tail, match)
+    return {"category": "unknown"}
+
+
+def failure_codes(tail, codes):
+    compile_prefixes = (b"CS", b"BC", b"FS", b"RZ", b"TS", b"MSB")
+    category = "analyzer"
+    if any(re.match(rb"[A-Za-z]+", match[1])[0] in compile_prefixes for match in codes):
+        category = "compile"
+    unique = list(dict.fromkeys(match[1].decode("ascii")[:12] for match in codes))[:5]
+    return failure_match(category, tail, codes[0], codes=unique)
+
+
+def failure_diagnostic(log, code, outcome, expect_red):
+    """Read once, after completion, without external parsers or unbounded I/O."""
+    if not log:
+        return classify_failure(b"", code, outcome, expect_red)
+    with open(log, "rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        start = max(0, stream.tell() - FAILURE_TAIL_BYTES)
+        stream.seek(start)
+        tail = stream.read(FAILURE_TAIL_BYTES)
+    if start:
+        # The window may start mid-line. Only complete lines have a known byte offset.
+        first_line = tail.find(b"\n") + 1
+        start += first_line
+        tail = tail[first_line:] if first_line else b""
+    result = classify_failure(tail, code, outcome, expect_red)
+    if "offset" in result:
+        result["offset"] += start
+    result["log"] = str(log)[:240]
+    return result
 
 
 class PhaseLedger:
@@ -367,12 +460,18 @@ class PhaseLedger:
                            stack=getattr(args, "stack", None) or command_stack(command),
                            queuedAt=utc_stamp(), startedAt=None, endedAt=None, waitS=0, runS=0,
                            exit=None, outcome="rejected", head=None, dirty=None, verified=False, envHash=env_hash(),
+                           profile=getattr(args, "profile", None) or "full",
                            argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest(),
                            fingerprint=test_fingerprint(cwd, command) if cwd is not None else None)
+        self.args, self.command = args, command
+        self.records = []
         self.queued = time.monotonic()
         self.started = None
         self.enqueued = False
         self.wait = None
+        self.running_memory = None
+        self.host_pressure = None
+        self.failure_categories = True
         self.snapshot_thread = None
         self.git_result = (None, None)
         self.snapshot_ready = False
@@ -384,17 +483,55 @@ class PhaseLedger:
             self.snapshot_ready = all(value is not None for value in result)
         except Exception:
             pass  # Timeout/non-Git cwd retains the post-registration best-effort snapshot.
+        self.compute_gate_key()
+
+    def compute_gate_key(self):
+        if self.snapshot_ready and self.record["kind"] != "ci":
+            try:
+                key = gate_key(self.record["cwd"], self.command, self.record["kind"], self.record["head"],
+                               self.record["dirty"], self.record["stack"], self.record["envHash"],
+                               getattr(self.args, "profile", None) or "full")
+            except Exception:
+                key = None  # Optional metadata; a failure only disables deduplication.
+            if key:
+                self.record["gateKey"] = key
 
     def passed_state(self, state):
         if not self.snapshot_ready or self.record["dirty"] is None:
-            return None
+            return None, None
         try:
             records, _ = read_ledger(state, days=14)
         except (OSError, ValueError):
-            return None  # Unreadable history must not prevent execution.
-        keys = ("cwd", "kind", "label", "argvHash", "head", "dirty", "stack", "envHash")
-        return next((r for r in reversed(records) if r["outcome"] == "passed" and r.get("verified") is True
-                     and all(r.get(k) == self.record[k] for k in keys)), None)
+            return None, None  # Unreadable history must not prevent execution.
+        self.records = records
+        matches = [r for r in reversed(records) if self.matches_state(r)]
+        passed = next((r for r in matches if r["outcome"] == "passed" and r.get("label") == self.record["label"]), None)
+        failed = next((r for r in matches if repeat_failure(r)), None)
+        return passed, failed
+
+    def cross_worktree_passed(self):
+        """A verified passed build/test record of the same gateKey from any worktree (never integration or ci)."""
+        key = self.record.get("gateKey")
+        if not key or self.record["kind"] not in ("build", "test"):
+            return None
+        return next((r for r in reversed(self.records)
+                     if r.get("gateKey") == key and r.get("verified") is True and r.get("outcome") == "passed"
+                     and r.get("kind") == self.record["kind"]), None)
+
+    def matches_state(self, record):
+        keys = ("cwd", "kind", "argvHash", "head", "dirty", "stack", "envHash")
+        # Records predating profiles were full; iterate and full results never satisfy each other.
+        if (record.get("profile") or "full") != self.record["profile"]:
+            return False
+        return record.get("verified") is True and all(record.get(key) == self.record[key] for key in keys)
+
+    def record_failure(self, log, code, expect_red):
+        if not self.failure_categories or code == 0:
+            return
+        try:
+            self.record["failure"] = failure_diagnostic(log, code, self.record["outcome"], expect_red)
+        except Exception:
+            pass  # Diagnostics must never change a phase's result.
 
     def enqueue(self):
         self.record["queuedAt"] = utc_stamp()
@@ -413,6 +550,11 @@ class PhaseLedger:
         if self.wait:
             self.wait.record(scan)
 
+    def admitted_with_would_hold(self, scan):
+        kind = would_hold_kind(scan)
+        if kind:
+            self.record["wouldHoldAtAdmit"] = kind
+
     def snapshot(self):
         try:
             self.git_result = git_state(self.record["cwd"])
@@ -423,6 +565,12 @@ class PhaseLedger:
         self.record["outcome"] = "failed"
         self.record["startedAt"] = utc_stamp()
         self.started = time.monotonic()
+        try:
+            self.record["host"] = {"load1": round(os.getloadavg()[0], 1)}
+        except (OSError, AttributeError):
+            pass
+        if self.host_pressure is not None:
+            self.record.setdefault("host", {}).update(self.host_pressure.cached_fields())  # cache only, never probes
         self.record["waitS"] = max(0, self.started - self.queued)
         if self.wait:
             self.wait.close(self.started)
@@ -461,7 +609,13 @@ class PhaseLedger:
                 pass  # Failed verification never changes the producer's result.
         if self.wait and self.record["outcome"] != "skipped":
             self.record.update(self.wait.fields())
+        self.finish_memory()
         append_ledger(state, self.record)
+
+    def finish_memory(self):
+        if self.running_memory is not None:
+            self.record.update(peakRssMb=int(self.running_memory.peak_rss_mb),
+                               peakProcRssMb=int(self.running_memory.peak_proc_rss_mb))
 
 
 def rejected_ledger(argv):
@@ -470,7 +624,7 @@ def rejected_ledger(argv):
         return None
     options, command = [], []
     valued = {"--kind", "--label", "--priority", "--timeout", "--queue-timeout", "--repo", "--pr",
-              "--commit", "--log", "--tail", "--vstest-hang-minutes", "--stack", "--policy"}
+              "--commit", "--log", "--tail", "--vstest-hang-minutes", "--stack", "--policy", "--profile"}
     index = 1
     while index < len(argv):
         arg = argv[index]
@@ -540,6 +694,51 @@ def read_ledger(state, days=7, kind=None, stack=None):
 
 def percentile(values, percent):
     return sorted(values)[math.ceil(len(values) * percent / 100) - 1] if values else None
+
+
+def repeat_failure(record):
+    failure = record.get("failure") or {}
+    return record.get("outcome") == "failed" and failure.get("category") in ("compile", "analyzer", "assertion")
+
+
+def warn_repeat_failure(record):
+    if record is not None:
+        category = record["failure"]["category"]
+        note(f"same state previously failed ({category}); change code before rerunning or inspect the previous log")
+
+
+def summary_stats(state, args):
+    if args.failures:
+        return failure_stats(state, args)
+    return stats(state, args.days, args.kind, args.json, args.stack)
+
+
+def failure_stats(state, args):
+    records, skipped = read_ledger(state, args.days)
+    records = failure_records(records, args)
+    counts = {}
+    for record in records:
+        key = (record.get("kind", "?"), (record.get("failure") or {}).get("category", "unknown"))
+        counts[key] = counts.get(key, 0) + 1
+    rows = [dict(kind=kind, category=category, count=count)
+            for (kind, category), count in sorted(counts.items())]
+    print_failure_stats(rows, skipped, args)
+    return 0
+
+
+def failure_records(records, args):
+    records = (r for r in records if r.get("outcome") in ("failed", "timeout", "cancelled"))
+    records = (r for r in records if not args.kind or r.get("kind") == args.kind)
+    return (r for r in records if not args.stack or r.get("stack") == args.stack)
+
+
+def print_failure_stats(rows, skipped, args):
+    if args.json:
+        print(json.dumps({"days": args.days, "skipped": skipped, "rows": rows}, sort_keys=True))
+        return
+    print(f"pi-phase: failures last {args.days}d ({skipped} malformed records skipped)")
+    for row in rows:
+        print("{kind:10s} {category:14s} count={count:3d}".format(**row))
 
 
 def stats(state, days, kind, as_json, stack=None):
@@ -626,7 +825,7 @@ def wait_eta(state, configuration, kind, request=None):
                 if resource not in free:
                     continue
                 data = metadata(path.with_suffix(".json"))
-                if not (readonly_busy(path) or data.get("unreadable") or live is None or data.get("pgid") in live):
+                if not (readonly_busy(path) or data.get("unreadable") or live is None or lease_groups(data) & live):
                     continue
                 free[resource] -= 1
                 running.add(data.get("token", path.stem))
@@ -737,6 +936,9 @@ def config(path, *, notes=None):
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
+                    host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
+                    failure_categories=True, hang_timeout=dict(mode="off"), reap_build_servers=dict(mode="off"),
+                    skip_cross_worktree=False,
                     fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
                     queue_order=dict(QUEUE_ORDER_DEFAULTS), policy=[])
     try:
@@ -770,6 +972,18 @@ def config(path, *, notes=None):
             continue
         elif key == "queue_order":
             values[key] = queue_order_config(value, warn)
+            continue
+        elif key == "host_pressure":
+            values[key] = host_pressure_config(value, warn)
+            continue
+        elif key == "cpu_budget":
+            values[key] = cpu_budget_config(value, warn)
+            continue
+        elif key == "hang_timeout":
+            values[key] = hang_timeout_config(value, warn)
+            continue
+        elif key == "reap_build_servers":
+            values[key] = reap_build_servers_config(value, warn)
             continue
         elif key == "container_test_detection":
             valid = value in ("off", "hint", "promote")
@@ -1219,6 +1433,207 @@ class IntegrationBurst:
             return configured  # Burst is strictly fail-closed, unlike memory admission.
 
 
+HOST_PRESSURE_DEFAULTS = dict(max_pressure_level=2, max_compressor_percent=30,
+                              max_swap_growth_mb_per_min=256, sample_ttl_s=5)
+HOST_SAMPLE_WINDOW_S = 600
+HOST_SAMPLE_MIN_SPAN_S = 60
+HOST_MODES = ("off", "observe", "enforce")
+
+
+def number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def mode_config(name, value, warn, defaults, valid):
+    """Shared shape of the host_pressure and cpu_budget keys: {"mode": off|observe|enforce, ...thresholds}."""
+    off = dict(mode="off")
+    if not isinstance(value, dict):
+        warn(f"invalid {name}; using default {off!r}")
+        return off
+    for key in value.keys() - defaults.keys() - {"mode"}:
+        warn(f"unknown {name} key {key}; ignored")
+    settings = {key: value.get(key, default) for key, default in defaults.items()}
+    mode = value.get("mode", "off")
+    if mode not in HOST_MODES or not valid(settings):
+        warn(f"invalid {name}; using default {off!r}")
+        return off
+    return off if mode == "off" else dict(settings, mode=mode)
+
+
+REAP_BUILD_SERVERS_DEFAULTS = dict(idle_s=600, min_age_s=900, max_cpu_ms_per_min=200)
+
+
+def reap_build_servers_config(value, warn=None):
+    def valid(settings):
+        return all(number(settings[key]) and settings[key] > 0 for key in REAP_BUILD_SERVERS_DEFAULTS)
+    return mode_config("reap_build_servers", value, warn or note, REAP_BUILD_SERVERS_DEFAULTS, valid)
+
+
+def host_pressure_config(value, warn=None):
+    def valid(settings):
+        return (type(settings["max_pressure_level"]) is int and settings["max_pressure_level"] >= 1
+                and all(number(settings[key]) and settings[key] > 0 for key in HOST_PRESSURE_DEFAULTS)
+                and settings["max_compressor_percent"] <= 100 and settings["sample_ttl_s"] <= 3600)
+    return mode_config("host_pressure", value, warn or note, HOST_PRESSURE_DEFAULTS, valid)
+
+
+def parse_host_pressure(text):
+    """Output of `sysctl -n vm.swapusage vm.compressor_bytes_used hw.memsize kern.memorystatus_vm_pressure_level
+    kern.memorystatus_level` (one line per name): swapMb (used), cmpPct, pl (1 normal, 2 warn, 4 critical), level."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) != 5:
+        raise ValueError("unrecognized host pressure output")
+    swap = re.search(r"\bused\s*=\s*([0-9.]+)M", lines[0])
+    compressor, memsize, level, free = int(lines[1]), int(lines[2]), int(lines[3]), float(lines[4])
+    if not swap or compressor < 0 or memsize <= 0 or level < 0:
+        raise ValueError("invalid host pressure values")
+    return dict(swapMb=float(swap.group(1)), cmpPct=round(compressor * 100 / memsize, 2), pl=level, level=free)
+
+
+def read_host_pressure(timeout):
+    if sys.platform != "darwin":
+        raise ValueError("host pressure is unsupported on this platform")
+    names = ["vm.swapusage", "vm.compressor_bytes_used", "hw.memsize", "kern.memorystatus_vm_pressure_level",
+             "kern.memorystatus_level"]
+    return parse_host_pressure(subprocess.run(["sysctl", "-n", *names], capture_output=True, text=True, check=True,
+                                              timeout=timeout).stdout)
+
+
+def swap_growth(history):
+    """MB/min between the oldest and newest samples, or None when they are under a minute apart."""
+    if len(history) < 2:
+        return None
+    (first, before), (last, after) = history[0], history[-1]
+    return round((after - before) / ((last - first) / 60), 2) if last - first >= HOST_SAMPLE_MIN_SPAN_S else None
+
+
+class HostPressure:
+    """Pressure level, compressor share and swap growth. One shared sample (state/host-sample.json) serves every
+    waiter; the probe runs in the caller's thread, never under the coordinator lock. Fails open."""
+    def __init__(self, settings, state, probe=read_host_pressure, clock=time.time):
+        self.settings, self.mode = settings, settings["mode"]
+        self.path = state / "host-sample.json"
+        self.probe, self.clock = probe, clock
+        self.noted = self.failure_noted = False
+
+    def cached(self):
+        try:
+            data = json.loads(self.path.read_text())
+            if isinstance(data, dict) and number(data.get("t")) and isinstance(data.get("hist"), list):
+                return data
+        except (OSError, ValueError):
+            pass
+        return None  # missing or corrupt: probe again
+
+    def cached_fields(self):
+        data = self.cached() or {}
+        return {key: data[key] for key in ("pl", "cmpPct", "swapMb", "swapGrowth") if number(data.get(key))}
+
+    def sample(self, deadline):
+        now = self.clock()
+        cached = self.cached()
+        if cached and 0 <= now - cached["t"] < self.settings["sample_ttl_s"]:
+            return cached
+        remaining = deadline - time.monotonic()
+        try:
+            if remaining <= 0:
+                raise TimeoutError("host pressure probe queue deadline expired")
+            reading = self.probe(min(1, remaining))
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            if not self.failure_noted:
+                note(f"host pressure measurement failed ({exc}); admitting (fail-open)")
+                self.failure_noted = True
+            return None
+        history = [item for item in (cached or {}).get("hist", []) if isinstance(item, list) and len(item) == 2
+                   and number(item[0]) and number(item[1]) and 0 <= now - item[0] <= HOST_SAMPLE_WINDOW_S]
+        history.append([now, reading["swapMb"]])
+        data = dict(reading, t=now, hist=history, swapGrowth=swap_growth(history))
+        try:
+            save(self.path, data)
+        except OSError:
+            pass  # An unwritable cache only costs the next waiter a probe.
+        return data
+
+    def reason(self, deadline):
+        data = self.sample(deadline)
+        if data is None:
+            return None
+        limits = self.settings
+        if data["pl"] >= limits["max_pressure_level"]:
+            return f"memory pressure level {data['pl']} >= {limits['max_pressure_level']}"
+        if data["cmpPct"] >= limits["max_compressor_percent"]:
+            return f"compressor {data['cmpPct']:g}% >= {limits['max_compressor_percent']:g}%"
+        growth = data.get("swapGrowth")
+        if growth is not None and growth >= limits["max_swap_growth_mb_per_min"]:
+            return f"swap growth {growth:g} MB/min >= {limits['max_swap_growth_mb_per_min']:g}"
+        return None
+
+    def waiting(self, reason):
+        if not self.noted:
+            note(f"waiting: {reason}")
+            self.noted = True
+
+
+CPU_BUDGET_DEFAULTS = dict(max_units="auto", costs=dict(heavy="msbuild", fast=1, direct=1, integration=2),
+                           max_load_per_core=4.0)
+CPU_POOLS = ("heavy", "fast", "direct", "integration")
+
+
+def cpu_budget_config(value, warn=None):
+    warn = warn or note
+
+    def valid(settings):
+        costs = settings["costs"]
+        if not isinstance(costs, dict) or not costs.keys() <= set(CPU_POOLS):
+            return False
+        if not all(cost == "msbuild" and pool == "heavy" or type(cost) is int and cost >= 0
+                   for pool, cost in costs.items()):
+            return False
+        return ((settings["max_units"] == "auto" or type(settings["max_units"]) is int and settings["max_units"] >= 1)
+                and number(settings["max_load_per_core"]) and settings["max_load_per_core"] > 0)
+    settings = mode_config("cpu_budget", value, warn, CPU_BUDGET_DEFAULTS, valid)
+    if settings["mode"] != "off" and isinstance(value, dict):
+        settings["costs"] = dict(CPU_BUDGET_DEFAULTS["costs"], **value.get("costs", {}))
+    return settings
+
+
+class CpuBudget:
+    """Units per live lease by pool prefix; the unit total and the load average gate every policy except ci."""
+    def __init__(self, settings, msbuild_max_cpu, cpus=None, loadavg=None):
+        self.mode, self.loadavg = settings["mode"], loadavg or (lambda: os.getloadavg())
+        self.cpus = cpus or os.cpu_count() or 1
+        units = settings["max_units"]
+        self.max_units = round(1.5 * self.cpus) if units == "auto" else units
+        msbuild = msbuild_max_cpu if type(msbuild_max_cpu) is int and msbuild_max_cpu > 0 else 2
+        self.costs = {pool: msbuild if cost == "msbuild" else cost for pool, cost in settings["costs"].items()}
+        self.max_load = settings["max_load_per_core"]
+
+    def cost(self, path):
+        return self.costs.get(path.name.split("-", 1)[0], 0)
+
+    def load_per_core(self):
+        try:
+            return self.loadavg()[0] / self.cpus
+        except (OSError, AttributeError):
+            return None  # Unmeasurable load never holds.
+
+    def running_units(self, state, available, prior, live):
+        """Caller holds the coordinator."""
+        return sum(self.cost(path) for path in state.glob("*.lock")
+                   if path.name.startswith(tuple(pool + "-" for pool in CPU_POOLS)) and path not in available
+                   and lease_running(path, prior, live))
+
+    def reason(self, units, candidate, load):
+        need = sum(self.cost(path) for path in candidate)
+        if need <= 0:
+            return None  # ci (and unpriced pools) are never held
+        if units + need > self.max_units:
+            return f"cpu:{units + need}/{self.max_units}"
+        if load is not None and load > self.max_load:
+            return f"cpu:load {load:.1f}/core > {self.max_load:g}"
+        return None
+
+
 def lease_running(path, prior, live):
     """Caller holds the coordinator; account for both locked and orphan leases."""
     fd = lock_file(path)
@@ -1226,7 +1641,7 @@ def lease_running(path, prior, live):
         return True
     try:
         entry = metadata(path.with_suffix(".json"))
-        return entry != prior.get(path) or entry.get("unreadable") or entry.get("pgid") in live
+        return entry != prior.get(path) or entry.get("unreadable") or bool(lease_groups(entry) & live)
     finally:
         unlock(fd)
 
@@ -1289,11 +1704,14 @@ def low_memory_reason(swap_floor_mb):
 class RunningMemory:
     """Re-checks memory while a phase runs: RSS cap kill (descendant above rss_cap_mb) and a swap warning."""
     def __init__(self, rss_cap_mb, swap_floor_mb, warn=True):
+        self.enabled = True
         self.cap = rss_cap_mb
         self.floor = swap_floor_mb
         self.warn = warn
         self.last_warning = None
         self.streaks = {}  # (pid, start time) -> consecutive over-cap samples
+        self.peak_rss_mb = 0
+        self.peak_proc_rss_mb = 0
 
     def offender(self, root_pid):
         """(pid, rss_mb, command) of the largest process that was above the cap in OVER_CAP_SAMPLES consecutive
@@ -1305,21 +1723,75 @@ class RunningMemory:
             if reason:
                 self.last_warning = now
                 note(f"warning: {reason} while phase is running (no action taken)")
-        if not self.cap:
-            return None
         try:
-            samples = sample_tree(root_pid)
+            samples = self.sample(root_pid)
         except (OSError, ValueError, subprocess.SubprocessError):
             self.streaks = {}  # a failed measurement breaks every streak: "consecutive" means consecutive samples
             return None  # fail-open: never kill on a failed measurement
+        self.sample_peaks(samples)
+        if not self.cap:
+            return None
         over = {(item[0], item[3] if len(item) > 3 else None): item for item in samples if item[1] > self.cap}
         self.streaks = {identity: self.streaks.get(identity, 0) + 1 for identity in over}
         sustained = [over[identity] for identity, count in self.streaks.items() if count >= OVER_CAP_SAMPLES]
         return max(sustained, key=lambda item: item[1]) if sustained else None
 
+    def sample(self, root_pid):
+        return sample_tree(root_pid) if self.enabled else []
+
+    def sample_peaks(self, samples):
+        self.peak_rss_mb = max(self.peak_rss_mb, sum(item[1] for item in samples))
+        self.peak_proc_rss_mb = max(self.peak_proc_rss_mb, max((item[1] for item in samples), default=0))
+
+
+def phase_memory(options, kind, ledger):
+    enabled = kind in ("build", "test", "integration")
+    memory = RunningMemory(options["rss_cap_mb"] if enabled else 0,
+                           (options["memory_admission"] or {}).get("min_swap_free_mb", DEFAULT_MIN_SWAP_FREE_MB),
+                           enabled)
+    memory.enabled = enabled
+    if ledger and enabled:
+        ledger.running_memory = memory
+    return memory
+
 
 def msbuild_cap(value, heavy):
     return max(2, (os.cpu_count() or 1) // heavy) if value == "auto" else value
+
+
+COMPILER_ID_PREFIX = "pi-phase-"
+
+
+def shared_compilation_id(env, token):
+    """A phase-specific SharedCompilationId when the user opted into shared compilation (PI_PHASE_SHARED_COMPILATION=1).
+
+    A SharedCompilationId already present in the environment belongs to the caller: it is kept and never cleaned up."""
+    if env.get("PI_PHASE_SHARED_COMPILATION") != "1" or env.get("SharedCompilationId"):
+        return None
+    return COMPILER_ID_PREFIX + re.sub(r"[^A-Za-z0-9]", "", str(token))[:24]
+
+
+def stop_phase_compiler_server(compiler_id, listing=None, kill=os.kill):
+    """SIGTERM only this phase's own server (same user, exact -pipename), after the phase's compiles have ended."""
+    try:
+        listing = listing if listing is not None else subprocess.run(
+            ["ps", "-axo", "pid=,uid=,rss=,command="], capture_output=True, text=True, timeout=5, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    stopped = []
+    for line in listing.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4 or not all(item.isdigit() for item in parts[:3]) or int(parts[1]) != os.getuid():
+            continue
+        words = parts[3].split()
+        if "VBCSCompiler" in words[0] and f"-pipename:{compiler_id}" in words[1:]:
+            try:
+                kill(int(parts[0]), signal.SIGTERM)
+            except OSError:
+                continue
+            stopped.append(int(parts[0]))
+            note(f"stopped phase compiler server pid={parts[0]} rss={int(parts[2]) // 1024}MB")
+    return stopped
 
 
 def shim_environment(directory, cap):
@@ -1366,8 +1838,8 @@ def digest(*parts):
     return hashlib.sha1("\0".join(parts).encode()).hexdigest()
 
 
-def repository_location(cwd):
-    """(common git dir without .git, path of cwd relative to the checkout), one bounded git call."""
+def repository_layout(cwd):
+    """(common git dir without .git, path of cwd relative to the checkout, real checkout top, top as git printed it)."""
     try:
         real = os.path.realpath(cwd)
     except OSError:
@@ -1380,9 +1852,76 @@ def repository_location(cwd):
         common, top = os.path.realpath(lines[0]), os.path.realpath(lines[1])
         if Path(common).name == ".git":
             common = str(Path(common).parent)
-        return common, os.path.relpath(real, top)
+        return common, os.path.relpath(real, top), top, lines[1]
     except (OSError, IndexError, subprocess.SubprocessError):
-        return real, ""
+        return real, "", None, None
+
+
+def repository_location(cwd):
+    """(common git dir without .git, path of cwd relative to the checkout), one bounded git call."""
+    common, rel, _, _ = repository_layout(cwd)
+    return common, rel
+
+
+GATE_OPERAND_LIMIT = 1_000_000
+
+
+def gate_argv_hash(command, cwd, top, given_top):
+    """Argv with the worktree top replaced by <root>, plus the content of every operand file inside the top."""
+    roots = sorted({item for item in (top, given_top) if item}, key=len, reverse=True)
+    parts, contents = [], []
+    for argument in command:
+        shown = argument
+        for root in roots:
+            shown = shown.replace(root, "<root>")
+        parts.append(shown)
+        try:
+            path = Path(argument) if os.path.isabs(argument) else Path(cwd) / argument
+            real = os.path.realpath(path)
+            if (os.path.commonpath([real, top]) == top and os.path.isfile(real)
+                    and os.path.getsize(real) <= GATE_OPERAND_LIMIT):
+                contents.append(f"{os.path.relpath(real, top)}:{hashlib.sha256(Path(real).read_bytes()).hexdigest()}")
+        except (OSError, ValueError):
+            continue
+    return digest(*parts, "--", *contents)
+
+
+def gate_toolchain_hash(command, cwd, top):
+    """global.json bytes up to the checkout top, installed SDK names and the resolved tool executable."""
+    parts = []
+    directory = Path(os.path.realpath(cwd))
+    for candidate in (directory, *directory.parents):
+        file = candidate / "global.json"
+        if file.is_file():
+            try:
+                parts.append(hashlib.sha256(file.read_bytes()).hexdigest())
+            except OSError:
+                parts.append("unreadable")
+            break
+        if str(candidate) == top:
+            break
+    dotnet = shutil.which("dotnet")
+    if dotnet:
+        sdk = Path(os.path.realpath(dotnet)).parent / "sdk"
+        try:
+            parts.append(",".join(sorted(item.name for item in sdk.iterdir())))
+        except OSError:
+            parts.append("no-sdk-list")
+    argv = unwrap_command(command) or command
+    tool = shutil.which(argv[0]) if argv else None
+    parts.append(os.path.realpath(tool) if tool else "")
+    return digest(*parts)
+
+
+def gate_key(cwd, command, kind, head, dirty, stack, env, profile):
+    """Worktree-independent identity of one gate run; None when it cannot be computed safely."""
+    if head is None or dirty is None:
+        return None
+    common, rel, top, given_top = repository_layout(cwd)
+    if top is None:
+        return None
+    return digest("gate-v1", digest(common), rel or ".", kind, head, dirty, stack or "", env,
+                  gate_argv_hash(command, cwd, top, given_top), gate_toolchain_hash(command, cwd, top), profile)
 
 
 def strip_target(argument):
@@ -1516,7 +2055,7 @@ def begin_test_attribution(state, token):
     prior = {p: metadata(p.with_suffix(".json")) for p in paths}
     competitors = [entry for entry in prior.values() if entry.get("token") != token
                    and entry.get("kind") not in ("build", "ci")]
-    live = live_groups(0.5) if any(entry.get("pgid") for entry in competitors) else set()
+    live = live_groups(0.5) if any(lease_groups(entry) for entry in competitors) else set()
     solo = live is not None
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
@@ -1531,7 +2070,7 @@ def begin_test_attribution(state, token):
             if fd is not None:
                 unlock(fd)
             if (busy or entry.get("unreadable") or entry != prior.get(path, {})
-                    or live is None or entry.get("pgid") in live):
+                    or live is None or lease_groups(entry) & live):
                 solo = False
         save(state / "test-generation.json", {"token": token})
     return token if solo else None
@@ -1683,6 +2222,110 @@ def hang_dump_defaults(command, diagnose_hang=False):
         if any(flag in options for flag in flags) and dump_type not in options:
             defaults[dump_type] = value
     return defaults
+
+
+HANG_TIMEOUT_DEFAULTS = dict(seconds=150, kinds=["test"], paths=[])
+HANG_TIMEOUT_MARGIN_S = 30
+
+
+def hang_timeout_config(value, warn=None):
+    """{"mode": "off"|"on", "seconds", "kinds", "paths"}; anything invalid means off."""
+    warn = warn or note
+    off = dict(mode="off")
+    if not isinstance(value, dict):
+        warn(f"invalid hang_timeout; using default {off!r}")
+        return off
+    for key in value.keys() - HANG_TIMEOUT_DEFAULTS.keys() - {"mode"}:
+        warn(f"unknown hang_timeout key {key}; ignored")
+    settings = {key: value.get(key, default) for key, default in HANG_TIMEOUT_DEFAULTS.items()}
+    valid = (type(settings["seconds"]) is int and 1 <= settings["seconds"] <= 3600
+             and isinstance(settings["kinds"], list) and set(settings["kinds"]) <= {"build", "test"}
+             and isinstance(settings["paths"], list) and all(type(item) is str for item in settings["paths"]))
+    if value.get("mode", "off") not in ("off", "on") or not valid:
+        warn(f"invalid hang_timeout; using default {off!r}")
+        return off
+    return off if value.get("mode", "off") == "off" else dict(settings, mode="on")
+
+
+def test_runner_is_mtp(cwd):
+    """True (or unknown) when the nearest global.json up to the git top selects Microsoft.Testing.Platform."""
+    directory = Path(os.path.realpath(cwd))
+    for candidate in (directory, *directory.parents):
+        file = candidate / "global.json"
+        if file.is_file():
+            try:
+                data = json.loads(file.read_text())
+                runner = data.get("test", {}).get("runner")
+            except (OSError, ValueError, AttributeError):
+                return True  # Unreadable runner choice: do not risk an unsupported option.
+            return runner == "Microsoft.Testing.Platform"
+        if (candidate / ".git").exists():
+            break
+    return False
+
+
+def hang_timeout_skip_reason(command, args, settings, cwd):
+    """None when the hang timeout applies, else why not (empty string for silent skips)."""
+    if settings["mode"] != "on" or args.kind not in settings["kinds"] or args.kind in ("integration", "ci"):
+        return ""
+    if (getattr(args, "no_hang_timeout", False) or args.diagnose_hang
+            or args.vstest_hang_minutes is not None):
+        return ""
+    inner = unwrap_command(command, stop_at_shell=True)
+    if not inner or Path(inner[0]).name != "dotnet" or inner[1:2] != ["test"]:
+        return ""  # Shell strings and scripts (Tier 1 gates) keep CI's timeouts.
+    if any(re.match(r"--(blame|hangdump|testing-platform)", argument) for argument in inner):
+        return ""
+    real = os.path.realpath(cwd)
+    inherited = main_worktree(real) if settings["paths"] else None
+    candidates = (real, inherited) if inherited is not None else (real,)
+    if settings["paths"] and not any(fnmatch.fnmatchcase(path, os.path.expanduser(pattern))
+                                     for path in candidates for pattern in settings["paths"]):
+        return ""
+    if settings["seconds"] > args.timeout - HANG_TIMEOUT_MARGIN_S:
+        return ""
+    if test_runner_is_mtp(real):
+        return "hang timeout skipped: global.json selects Microsoft.Testing.Platform"
+    return None
+
+
+def apply_hang_timeout(command, args, settings, cwd):
+    """Append --blame-hang-timeout (no dump) to a direct VSTest dotnet test at the dump-injection boundary."""
+    reason = hang_timeout_skip_reason(command, args, settings, cwd)
+    if reason is not None:
+        if reason:
+            note(reason)
+        return command
+    seconds = settings["seconds"]
+    injected = ["--blame-hang-timeout", f"{seconds}s", "--blame-hang-dump-type", "none"]
+    if getattr(args, "ledger", None) is not None:
+        args.ledger.record["hangTimeoutS"] = seconds
+    note(f"hang timeout {seconds}s injected (hang_timeout; pass --no-hang-timeout to opt out)")
+    boundary = dump_option_end(command)
+    return [*command[:boundary], *injected, *command[boundary:]]
+
+
+PROFILES = ("iterate", "full")
+ITERATE_PROPERTIES = ("RunAnalyzers=false", "EnforceCodeStyleInBuild=false")
+
+
+def apply_profile(command, profile, kind):
+    """The opt-in iterate profile: no analyzers or style enforcement for a direct `dotnet build|test` argv.
+
+    Shell strings, scripts and other tools are left alone (and a note says so); a property the caller already
+    sets is respected. Iterate runs are recorded as such and are never ship evidence."""
+    if profile != "iterate" or kind not in ("build", "test", "integration"):
+        return command
+    inner = unwrap_command(command, stop_at_shell=True)
+    if not inner or Path(inner[0]).name != "dotnet" or inner[1:2] not in (["build"], ["test"]):
+        note("profile iterate: no dotnet build/test argv to adjust; running unchanged")
+        return command
+    added = [f"-p:{item}" for item in ITERATE_PROPERTIES
+             if not any(re.match(rf"^[-/]p(roperty)?[:=]{item.split('=')[0]}=", argument, re.I) for argument in inner)]
+    note("profile iterate: " + (" ".join(added) or "caller already sets the properties")
+         + " (analyzers/style off; not ship evidence)")
+    boundary = dump_option_end(command)
+    return [*command[:boundary], *added, *command[boundary:]]
 
 
 def prepare_dump_command(command, diagnose_hang=False):
@@ -1848,7 +2491,8 @@ def cold_worktree(cwd):
 
 
 def lock_file(path):
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)
+    os.set_inheritable(fd, False)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -1863,7 +2507,10 @@ def unlock(fd):
 
 
 WORKTREE_ENV = "PI_PHASE_WORKTREE_LOCK"
-WORKTREE_HELD_ENV = "PI_PHASE_WORKTREE_HELD"
+HOLDER_ENV = "PI_PHASE_HOLDER"
+HOLDER_ROOT_ENV = "PI_PHASE_HOLDER_ROOT"
+HOLDER_SLOTS_ENV = "PI_PHASE_HOLDER_SLOTS"
+HOLDER_STATE_ENV = "PI_PHASE_HOLDER_STATE"
 
 
 def worktree_root(cwd):
@@ -1901,10 +2548,6 @@ class WorktreeLease:
         self.path, self.fd, self.info, self.inherited = path, fd, info, inherited
         self.group_path = path.with_suffix(".groups") / f"{uuid.uuid4().hex}.json"
 
-    def environment(self, state):
-        return {WORKTREE_HELD_ENV: json.dumps(dict(fd=self.fd, state=os.path.realpath(state),
-                                                  root=self.info["root"], token=self.info["token"]))}
-
     def publish(self, pgid):
         self.group_path.parent.mkdir(mode=0o700, exist_ok=True)
         # Each invocation has its own record: nested publishers cannot overwrite peers.
@@ -1917,6 +2560,7 @@ class WorktreeLease:
         if not self.inherited:
             # The caller verified this producer group empty: its numeric id can be reused.
             self.info.pop("pgid", None)
+            self.info["retired"] = True
             save(self.path.with_suffix(".json"), self.info)
         self.group_path.unlink(missing_ok=True)
 
@@ -1925,39 +2569,101 @@ class WorktreeLease:
             if safe:
                 self.retire_group()
         finally:
-            # Descendants can still own the description and need the holder identity.
-            # Leave holder metadata for the next successful independent claimant.
-            os.close(self.fd)
+            # Nested leases have a group guard but never a lock descriptor.
+            if self.fd is not None:
+                os.close(self.fd)
 
 
-def worktree_hint(state, root):
-    hint = json.loads(os.environ.get(WORKTREE_HELD_ENV, "null"))
-    if not isinstance(hint, dict):
-        return None
-    identity = (hint.get("state"), hint.get("root"))
-    return hint if identity == (os.path.realpath(state), root) else None
+def process_snapshot():
+    listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="],
+                             capture_output=True, text=True, timeout=2, check=True).stdout
+    return {int(p[0]): (int(p[1]), int(p[2]), p[3])
+            for line in listing.splitlines() if len(p := line.split()) == 4}
 
 
-def inherited_worktree(state, path, root):
-    """Hints are not authority: only the already-locked open-file description qualifies."""
+def holder_ancestry(info):
+    """A token alone is not authority: require a live holder and producer ancestry."""
     try:
-        hint = worktree_hint(state, root)
-        if hint is None:
-            return None
-        fd = hint["fd"]
-        actual, expected = os.fstat(fd), path.stat()
-        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
-            return None
-        info = metadata(path.with_suffix(".json"))
-        if (info.get("token"), info.get("root")) != (hint.get("token"), root):
-            return None
-        if not readonly_busy(path):
-            return None
-        # A separate open of the same inode fails here. Never LOCK_UN a shared description.
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return WorktreeLease(path, os.dup(fd), info, inherited=True)
-    except (OSError, ValueError, KeyError, TypeError):
+        rows = process_snapshot()
+        producer, holder = info["pid"], info["holderPid"]
+        if any(pid not in rows or rows[pid][2].startswith("Z") for pid in (producer, holder)):
+            return False
+        if rows[producer][1] != info["pgid"] or rows[producer][0] != holder:
+            return False
+        current, seen = os.getpid(), set()
+        if rows.get(current, (None, None, ""))[1] == info["pgid"]:
+            return True
+        while current in rows and current not in seen:
+            if current == producer:
+                return True
+            seen.add(current)
+            current = rows[current][0]
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        pass
+    return False
+
+
+def nested_holder(state, root):
+    """Validate live slot ownership under the coordinator; never inherit lock FDs."""
+    token = os.environ.get(HOLDER_ENV, "")
+    if (not re.fullmatch(r"[a-f0-9]{32}", token)
+            or os.environ.get(HOLDER_STATE_ENV) != os.path.realpath(state)
+            or os.environ.get(HOLDER_ROOT_ENV) != root):
         return None
+    try:
+        slots = json.loads(os.environ.get(HOLDER_SLOTS_ENV, "null"))
+        if (not isinstance(slots, list) or not slots or len(slots) > 3
+                or any(not isinstance(name, str) or not re.fullmatch(
+                    r"(?:heavy|integration|fast)-[0-9]+\.lock|direct-[a-f0-9]{32}\.lock", name) for name in slots)):
+            return None
+        with open(state / "coordinator.lock", "a+b") as coordinator:
+            fcntl.flock(coordinator, fcntl.LOCK_EX)
+            records = [metadata((state / name).with_suffix(".json")) for name in slots]
+            info = records[0]
+            if (any(record != info for record in records) or info.get("token") != token
+                    or info.get("root") != root or not all(readonly_busy(state / name) for name in slots)):
+                return None
+        if holder_ancestry(info):
+            return dict(info, slots=slots)
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def holder_environment(state, root, held, token, environment, holder=None):
+    environment = dict(os.environ if environment is None else environment)
+    for name in (HOLDER_ENV, HOLDER_ROOT_ENV, HOLDER_SLOTS_ENV, HOLDER_STATE_ENV, "PI_PHASE_WORKTREE_HELD"):
+        environment.pop(name, None)
+    if holder or held:
+        environment.update({HOLDER_ENV: holder["token"] if holder else token,
+                            HOLDER_ROOT_ENV: root, HOLDER_STATE_ENV: os.path.realpath(state),
+                            HOLDER_SLOTS_ENV: json.dumps(holder["slots"] if holder else [p.name for p, _ in held])})
+    return environment
+
+
+def nested_group(state, holder, pgid, safe=None):
+    """Preserve slot orphan guards even if the outer supervisor exits first."""
+    if not holder:
+        return True
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        if safe is None and any(
+                (info := metadata((state / name).with_suffix(".json"))).get("token") != holder["token"]
+                or info.get("retired") for name in holder["slots"]):
+            return False  # Registration succeeds only while the parent still owns every slot.
+        for name in holder["slots"]:
+            path = (state / name).with_suffix(".json")
+            info = metadata(path)
+            if info.get("token") != holder["token"]:
+                continue
+            groups = set(info.get("nestedGroups", []))
+            if safe is None:
+                groups.add(pgid)
+            elif safe:
+                groups.discard(pgid)
+            info["nestedGroups"] = sorted(groups)
+            save(path, info)
+    return True
 
 
 def worktree_waiters(state, readonly=False):
@@ -1989,6 +2695,7 @@ class WorktreeAdmission:
         self.state, self.args, self.token = state, args, token
         self.root = None
         self.lease = None
+        self.holder = None
         self.result = "error"
 
     def register(self):
@@ -2027,9 +2734,10 @@ class WorktreeAdmission:
                 os.close(fd)
 
     def publish_holder(self, fd, previous):
-        for group in worktree_group_paths(self.path):
+        residual = list(worktree_group_paths(self.path))
+        for group in residual:
             group.unlink(missing_ok=True)
-        if previous:
+        if previous and (residual or not previous.get("retired")):
             note(f"recovered stale worktree lock (was {previous.get('label', '?')} pid {previous.get('pid', '?')})")
         info = dict(token=self.token, pid=os.getpid(), label=self.args.label, kind=self.args.kind,
                     root=self.root, policy=self.args.policy, acquired=time.time())
@@ -2063,6 +2771,9 @@ class WorktreeAdmission:
 
     def acquire(self, deadline, cancelled, ledger):
         if os.environ.get(WORKTREE_ENV) == "0":
+            self.root = worktree_root(os.getcwd())
+            if self.args.kind != "ci":
+                self.holder = nested_holder(self.state, self.root)
             self.result = "disabled"
             return None
         started = time.monotonic()
@@ -2077,14 +2788,19 @@ class WorktreeAdmission:
                 ledger.queued = time.monotonic()
 
     def admit(self, deadline, cancelled):
-        if self.args.kind == "ci" or self.opt_out:
+        if self.args.kind == "ci":
             return "skipped", None
         self.root = worktree_root(os.getcwd())
+        self.holder = nested_holder(self.state, self.root)
+        if self.opt_out:
+            return "skipped", None
         self.path, self.info_path, self.key = worktree_paths(self.state, self.root)
-        self.lease = inherited_worktree(self.state, self.path, self.root)
-        if self.lease:
-            note(f"worktree lock inherited from parent phase {self.lease.info.get('label', '?')}")
-            return "inherited", self.lease
+        info = metadata(self.info_path)
+        if (self.holder and info.get("token") == self.holder["token"] and readonly_busy(self.path)):
+            self.lease = WorktreeLease(self.path, None, info, inherited=True)
+            note(f"nested admission under parent phase {self.holder.get('label', '?')}")
+            return "nested", self.lease
+        self.holder = None
         return self.wait(deadline, cancelled)
 
     def exit_code(self, value, cancelled, ledger):
@@ -2098,14 +2814,6 @@ class WorktreeAdmission:
             return 75
         note("cancelled while waiting for worktree lock")
         return 128 + cancelled()
-
-    def environment(self, environment):
-        if self.lease:
-            return dict(os.environ if environment is None else environment, **self.lease.environment(self.state))
-        return environment
-
-    def descriptors(self):
-        return [self.lease.fd] if self.lease else []
 
     def publish(self, pgid):
         if self.lease:
@@ -2171,17 +2879,22 @@ def live_groups(timeout):
         return None  # Unknown: never admit an orphaned slot on a failed probe.
 
 
+def lease_groups(info):
+    return {pgid for pgid in [info.get("pgid"), *info.get("nestedGroups", [])]
+            if type(pgid) is int and pgid > 1}
+
+
 def group_alive(info, timeouts=(2,)):
-    pgid = info.get("pgid")
-    if type(pgid) is not int or pgid <= 1:
-        return False
-    try:
-        os.killpg(pgid, 0)
-        return live_group_members(pgid, timeouts)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return live_group_members(pgid, timeouts)
+    for pgid in lease_groups(info):
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass
+        if live_group_members(pgid, timeouts):
+            return True
+    return False
 
 
 def metadata(path):
@@ -2274,22 +2987,39 @@ def revoke_priority(state):
     return 0
 
 
-def high_count(state):
-    """Caller holds the coordinator; count queued and leased HIGH tokens only once."""
+def high_slot_paths(state):
+    return list(state.glob("heavy-*.lock")) + list(state.glob("fast-*.lock")) + list(state.glob("direct-*.lock"))
+
+
+def observe_high(state):
+    """Probe orphan-guarded HIGH leases; call outside the coordinator and pass to high_count."""
+    observed = {}
+    for path in high_slot_paths(state):
+        data = metadata(path.with_suffix(".json"))
+        if data.get("priority") == "high" and lease_groups(data) and not readonly_busy(path):
+            observed[path] = (data, group_alive(data))
+    return observed
+
+
+def high_count(state, observed=None):
+    """Caller holds the coordinator; count queued and leased HIGH tokens only once.
+
+    Orphan-group probes come from observe_high() made before the coordinator was taken. An
+    observation is used only if the metadata is unchanged; anything else counts as occupied.
+    Without an observation (direct callers) probes run inline.
+    """
     tokens = {w["token"] for w in all_waiters(state) if w["priority"] == "high"}
-    for path in list(state.glob("heavy-*.lock")) + list(state.glob("fast-*.lock")) + list(state.glob("direct-*.lock")):
+    for path in high_slot_paths(state):
         data = metadata(path.with_suffix(".json"))
         if data.get("priority") != "high":
             continue
         busy = readonly_busy(path)
-        if not busy and data.get("pgid"):
-            try:
-                os.killpg(data["pgid"], 0)
-                busy = True
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                busy = True
+        if not busy and lease_groups(data):
+            if observed is None:
+                busy = group_alive(data)
+            else:
+                seen = observed.get(path)
+                busy = seen is None or seen[0] != data or seen[1] is not False
         if busy:
             tokens.add(data.get("token", path.name))
     return len(tokens)
@@ -2305,11 +3035,11 @@ def caller_identity():
     return (session[:200] if session else None, lane[:200] if lane else None)
 
 
-def approved_priority(state, priority, cap):
+def approved_priority(state, priority, cap, observed=None):
     """Caller holds the coordinator; share approval and cap semantics with run."""
     if priority != "high":
         return priority, None
-    if high_count(state) >= cap:
+    if high_count(state, observed) >= cap:
         if priority_grant(state) is None:
             raise ValueError(APPROVAL_REQUIRED)
         return "normal", f"high-priority cap ({cap}) reached; queued as normal"
@@ -2319,6 +3049,7 @@ def approved_priority(state, priority, cap):
 
 def register_waiter(state, args, token):
     """Nonblocking registration, including atomic grant consumption and FIFO sequence."""
+    observed = observe_high(state) if args.priority == "high" else None
     coordinator = lock_file(state / "coordinator.lock")
     if coordinator is None:
         return False, None
@@ -2326,7 +3057,7 @@ def register_waiter(state, args, token):
     fd = None
     downgrade_note = None
     try:
-        args.priority, downgrade_note = approved_priority(state, args.priority, getattr(args, "max_high", 3))
+        args.priority, downgrade_note = approved_priority(state, args.priority, getattr(args, "max_high", 3), observed)
         if slotless_policy(args):
             return True, None
         path.parent.mkdir(mode=0o700, exist_ok=True)
@@ -2542,13 +3273,22 @@ def record_admission(scan, paths, available, admission):
 
 
 def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None,
-          integration_ceiling=None, *, scan=None):
-    """One bounded admission scan; kernel locks and metadata identity are checked atomically."""
+          integration_ceiling=None, *, scan=None, pressure=None, cpu=None):
+    """One bounded admission scan; kernel locks and metadata identity are checked atomically.
+
+    Every probe (memory, host pressure, load average) runs here, before the coordinator lock is taken."""
     paths = claim_paths(state, candidates, waiter, limits)
-    reason = admission.reason(deadline) if admission and any(
-        path.name.startswith(("heavy-", "fast-", "direct-")) for path in paths) else None
+    gated = any(path.name.startswith(("heavy-", "fast-", "direct-")) for path in paths)
+    reason = admission.reason(deadline) if admission and gated else None
+    host = pressure.reason(deadline) if pressure and gated else None
+    holder = admission
+    if host and pressure.mode == "enforce" and not reason:
+        reason, holder = host, pressure
+    elif host and pressure.mode == "enforce":
+        host = None
+    load = cpu.load_per_core() if cpu else None
     snapshot_paths = paths.copy()
-    if reason:
+    if reason or host or cpu:
         snapshot_paths.update(path for path in state.glob("*.lock")
                               if path.name.startswith(("heavy-", "integration-", "ci-", "fast-", "direct-")))
     if integration_ceiling is not None:
@@ -2558,8 +3298,7 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
         if cancelled() or time.monotonic() >= deadline:
             return None
         prior[path] = metadata(path.with_suffix(".json"))
-    needs_probe = any(type(entry.get("pgid")) is int and entry["pgid"] > 1
-                      for entry in prior.values())
+    needs_probe = any(lease_groups(entry) for entry in prior.values())
     live = live_groups(min(0.5, deadline - time.monotonic())) if needs_probe else set()
     if live is None or cancelled() or time.monotonic() >= deadline:
         return None
@@ -2578,16 +3317,19 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             # A new owner may have changed metadata since our snapshot.
             # Never trust a stale negative process-list result for that owner.
             entry = metadata(path.with_suffix(".json"))
-            if entry != prior[path] or entry.get("unreadable") or entry.get("pgid") in live:
+            if entry != prior[path] or entry.get("unreadable") or lease_groups(entry) & live:
                 unlock(fd)
                 continue
             available[path] = fd
         record_admission(scan, paths, available, admission)
-        if reason and phases_running(state, available, prior, live):
-            memory_held = True
+        if (reason or host) and phases_running(state, available, prior, live):
+            if reason:
+                memory_held = True
+                if scan is not None:
+                    scan["reason"] = "memory"
+                return None
             if scan is not None:
-                scan["reason"] = "memory"
-            return None
+                scan["wouldHold"] = f"host:{host}"  # observe mode: report, never hold
         eligible = (burst_available(state, available, prior, live, integration_ceiling)
                     if integration_ceiling is not None else available)
         if waiter is not None:
@@ -2597,7 +3339,21 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             candidate = next((c for c in candidates if all(p in eligible for p in c)), [])
             if scan is not None and not candidate:
                 scan["reason"] = "slots"
+        if candidate and cpu and phases_running(state, available, prior, live):
+            budget = cpu.reason(cpu.running_units(state, available, prior, live), candidate, load)
+            if budget and cpu.mode == "enforce":
+                if scan is not None:
+                    scan["reason"] = "cpu"
+                candidate = []
+            elif budget and scan is not None and "wouldHold" not in scan:
+                scan["wouldHold"] = budget
         if candidate and not cancelled() and time.monotonic() < deadline:
+            for path in candidate:
+                # Reserve the slot generation: a late nested registration against the previous
+                # owner is refused from now on, before the claimant publishes its own record.
+                previous = metadata(path.with_suffix(".json"))
+                if previous.get("token") and not previous.get("retired"):
+                    save(path.with_suffix(".json"), dict(previous, retired=True))
             if waiter is not None:
                 queued_path = waiter_path(state, waiter)
                 info = metadata(queued_path)
@@ -2611,7 +3367,7 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             unlock(fd)
         unlock(coordinator)
         if memory_held:
-            admission.waiting(reason)
+            holder.waiting(reason)
     return None
 
 
@@ -2627,10 +3383,14 @@ def release(state, held, token, safe):
             for path, _ in held:
                 entry = metadata(path.with_suffix(".json"))
                 if entry.get("token") == token:
-                    remove_lease(path)
+                    if entry.get("nestedGroups"):
+                        entry.pop("pgid", None)
+                        entry["retired"] = True  # Ownership ended: late nested registrations are refused.
+                        save(path.with_suffix(".json"), entry)
+                    else:
+                        remove_lease(path)
         for _, fd in held:
-            # Never explicitly unlock a shared open-file description if the
-            # producer may still hold its inherited FD after supervisor failure.
+            # Supervisor-only references: orphan group metadata guards crashes.
             os.close(fd)
 
 
@@ -2729,6 +3489,7 @@ def reprioritize(state, configuration, args):
     options = config(configuration).options
     cap = options["max_high"]
     order = options["queue_order"]
+    observed = observe_high(state) if args.priority == "high" else None
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
         matches, owned = reprioritize_matches(state, args.target)
@@ -2745,7 +3506,7 @@ def reprioritize(state, configuration, args):
         previous = waiter["priority"]
         if previous == args.priority:
             return 0
-        priority, message = approved_priority(state, args.priority, cap)
+        priority, message = approved_priority(state, args.priority, cap, observed)
         waiter["priority"] = priority
         # A waiter lowered to low gets the same promotion deadline a low run would have had,
         # measured from its original enqueue time, so it cannot starve behind normal work.
@@ -2820,6 +3581,7 @@ def status(state, configuration=CONFIG):
         note(f"fast=0/{fast_slots} queued=0")
         note(f"high=0/{cap}")
         return 0
+    observed = observe_high(state)
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
         owners = []
@@ -2834,14 +3596,18 @@ def status(state, configuration=CONFIG):
             owners.append((path, data, busy))
         waiters = all_waiters(state, now=time.time())
         grant = priority_grant(state)
-        high = high_count(state)
+        high = high_count(state, observed)
     # No slow ps probe or terminal write while holding the shared coordinator.
-    live = live_groups(2) if any(not busy and data.get("pgid") for _, data, busy in owners) else set()
+    live = live_groups(2) if any(not busy and lease_groups(data) for _, data, busy in owners) else set()
+    try:
+        processes = process_snapshot() if owners else {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        processes = None
     seen = set()
     fast_running = 0
     used = dict(heavy=0, integration=0)
     for path, data, busy in owners:
-        orphan = (data.get("unreadable") or live is None or data.get("pgid") in live) if not busy else False
+        orphan = (data.get("unreadable") or live is None or bool(lease_groups(data) & live)) if not busy else False
         if not busy and not orphan:
             continue
         for pool in used:
@@ -2852,9 +3618,17 @@ def status(state, configuration=CONFIG):
         seen.add(token)
         fast_running += path.name.startswith("fast-")
         age = max(0, int(time.time() - data.get("started", time.time())))
+        phase_state = "orphan-group" if orphan else "running"
+        if processes is not None and type(data.get("pid")) is int:
+            producer = processes.get(data["pid"])
+            if producer is None or producer[2].startswith("Z"):
+                lingering = sorted(pid for pid, (_, pgid, state) in processes.items()
+                                   if pgid in lease_groups(data) and not state.startswith("Z"))
+                phase_state = f"draining pids={','.join(map(str, lingering)) or 'none'}" + (
+                    " orphan-group" if orphan else "")
         note(f"{data.get('kind', 'unknown')} {data.get('label', 'unknown')} "
              f"pid={data.get('pid', '?')} cwd={data.get('cwd', '?')} "
-             f"elapsed={age}s {'orphan-group' if orphan else 'running'}"
+             f"elapsed={age}s {phase_state}"
              f"{' fast' if data.get('fast') or path.name.startswith('fast-') else ''}"
              f" policy={data.get('policy', 'queued')} source={data.get('source', 'default')}")
     if not seen:
@@ -2952,7 +3726,7 @@ def cleanup_snapshot_row(line):
     return (*identities, parts[4])
 
 
-def cleanup_snapshot_rows(listing, pgid):
+def cleanup_snapshot_rows(listing, pgid, member_limit=32):
     """Accept only bounded numeric identities and ps state tokens, never raw text."""
     if len(listing) > 262144 or len(listing.encode("utf-8")) > 262144:
         return [], 0, 0, "oversized"
@@ -2960,17 +3734,17 @@ def cleanup_snapshot_rows(listing, pgid):
     malformed = parsed.count(None)
     rows = [row for row in parsed if row is not None and row[2] == pgid]
     status = "incomplete" if malformed or len(rows) > 32 else "complete"
-    return rows[:32], len(rows), malformed, status
+    return rows[:member_limit], len(rows), malformed, status
 
 
-def cleanup_snapshot_observation(pgid):
-    """One read-only, non-atomic observation; never used for safety decisions."""
+def cleanup_snapshot_observation(pgid, member_limit=32):
+    """One bounded non-atomic observation; not proof of exit or signal authority."""
     try:
         result = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,uid=,stat="],
                                 capture_output=True, text=True, timeout=1, check=False)
         if result.returncode != 0:
             return [], f"completeness=unknown failure=nonzero returncode={int(result.returncode)}", "unknown"
-        rows, matched, malformed, status = cleanup_snapshot_rows(result.stdout, pgid)
+        rows, matched, malformed, status = cleanup_snapshot_rows(result.stdout, pgid, member_limit)
         presence = "present" if any(row[0] == pgid for row in rows) else "absent_at_snapshot"
         if status != "complete" and presence != "present":
             presence = "unknown"
@@ -2983,38 +3757,77 @@ def cleanup_snapshot_observation(pgid):
         return [], f"completeness=unknown failure=oserror errno={number}", "unknown"
 
 
-def cleanup_snapshot(pgid, sig, leader_observation=None):
+def cleanup_snapshot(pgid, sig, leader_observation=None, snapshot=None):
     """Best effort, at most 32 rows / 8 KiB emitted; failures never escape."""
     try:
-        rows, status, presence = cleanup_snapshot_observation(pgid)
+        rows, status, presence = snapshot if snapshot is not None else cleanup_snapshot_observation(pgid)
         source, observed_exit = leader_observation or ("unknown", None)
         if source not in ("waitid_wnowait", "ps_zombie"):
             source = "unknown"
         exit_value = observed_exit if type(observed_exit) is int else "unknown"
         failure_note(f"cleanup_snapshot pgid={pgid} signal={sig.name} observer=ps non_atomic=1 "
                      f"{status} leader_presence={presence} leader_observation={source} producer_exit={exit_value}")
-        for pid, ppid, group, uid, state in rows:
+        for pid, ppid, group, uid, state in rows[:32]:
             failure_note(f"cleanup_snapshot pid={pid} ppid={ppid} pgid={group} uid={uid} state={state}")
     except Exception:
         failure_note("cleanup_snapshot completeness=unknown failure=observer_error")
 
 
+def eligible_member(pgid, row):
+    """Same-user, non-zombie, non-leader member observed in this group."""
+    pid, _, group, uid, state = row
+    return pid != pgid and group == pgid and uid == os.getuid() and not state.startswith("Z")
+
+
+def signal_group_members(pgid, sig, rows):
+    """macOS may deny killpg when the reserved leader is a reparented zombie.
+
+    Fall back only to observed, same-user live members, rechecking PGID immediately
+    before each signal. Never signal the leader or anything outside this group.
+    """
+    signalled = []
+    for row in rows:
+        pid = row[0]
+        if not eligible_member(pgid, row):
+            continue
+        try:
+            if os.getpgid(pid) != pgid:
+                continue
+            os.kill(pid, sig)
+            signalled.append(pid)
+        except OSError:
+            continue
+    return signalled
+
+
 def stop_group(pgid, leader_observation=None):
-    snapshot_taken = False
+    snapshot = None  # At most one bounded observation per invocation, taken on the first EPERM.
+    signalled = set()
     for sig, delay in ((signal.SIGTERM, 0.6), (signal.SIGKILL, 0.2)):
         try:
             os.killpg(pgid, sig)
         except ProcessLookupError:
             pass
         except PermissionError:
-            live = group_liveness(pgid, CLEANUP_PROBE_TIMEOUTS)
-            if not snapshot_taken:
-                snapshot_taken = True
-                cleanup_snapshot(pgid, sig, leader_observation)
-            if live is not False:
-                failure_note(f"killpg signal={sig.name} pgid={pgid} liveness={'live' if live else 'unknown'}")
-                raise
+            if snapshot is None:
+                snapshot = cleanup_snapshot_observation(pgid, member_limit=None)
+                cleanup_snapshot(pgid, sig, leader_observation, snapshot)
+            rows = snapshot[0]
+            targets = []
+            if any(eligible_member(pgid, row) for row in rows):
+                # Opportunistic only: a failed fallback preserves the original denial.
+                if group_liveness(pgid, (0.5,)) is not False:
+                    targets = signal_group_members(pgid, sig, rows)
+            if targets:
+                signalled.update(targets)
+                failure_note(f"cleanup pgid={pgid} signal={sig.name} pids={','.join(map(str, targets))}")
+            else:
+                live = group_liveness(pgid, CLEANUP_PROBE_TIMEOUTS)
+                if live is not False:
+                    failure_note(f"killpg signal={sig.name} pgid={pgid} liveness={'live' if live else 'unknown'}")
+                    raise
         time.sleep(delay)
+    return sorted(signalled)
 
 
 def failure_note(message):
@@ -3202,6 +4015,7 @@ def run(args, state, configuration, output=None):
     registered = False
     waiter_fd = None
     shim_dir = None
+    compiler_id = None
     detector_stopped = threading.Event()
     producer_exit = [None]
     leader_observation = None
@@ -3213,17 +4027,33 @@ def run(args, state, configuration, output=None):
         config_notes = set()
         settings = config(configuration, notes=config_notes)
         options = settings.options
+        command = apply_profile(command, getattr(args, "profile", "full"), args.kind)
+        command = apply_hang_timeout(command, admission_args, options["hang_timeout"], phase_cwd)
         identity = work_identity(os.getcwd(), original_command, args.kind)
         prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity)
         if ledger:
+            ledger.failure_categories = options["failure_categories"]
             ledger.prepare_snapshot()
+            passed, failed = ledger.passed_state(state)
+            warn_repeat_failure(failed)
             if (not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1" and args.kind != "ci"
                     and (args.kind != "integration" or options["skip_passed_integration"])):
-                passed = ledger.passed_state(state)
                 if passed:
                     note(f"skipped: this exact state already passed at {passed['ts']} "
                          f"(kind={args.kind} label={args.label} head={passed['head'][:7]} "
                          f"run={passed['runS']:g}s); pass --rerun to run again")
+                    ledger.outcome("skipped")
+                    return 0
+            if (options["skip_cross_worktree"] and not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1"
+                    and args.kind in ("build", "test")):
+                if ledger.record["dirty"] is None and ledger.record["head"] is not None:
+                    note("tree state too large to hash; not deduplicating")
+                other = ledger.cross_worktree_passed()
+                if other:
+                    note(f"skipped: an identical gate already passed in {other.get('cwd')} at {other['ts']} "
+                         f"(kind={args.kind} head={other['head'][:7]} run={other['runS']:g}s); "
+                         "pass --rerun to run again")
+                    ledger.record["dedupedFrom"] = other["ts"]
                     ledger.outcome("skipped")
                     return 0
         queued = time.monotonic()
@@ -3235,11 +4065,20 @@ def run(args, state, configuration, output=None):
         admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
         burst_settings = options["memory_admission"].get("integration_burst") if admission else None
         burst = IntegrationBurst(admission, burst_settings) if burst_settings else None
+        pressure = (HostPressure(options["host_pressure"], state)
+                    if options["host_pressure"]["mode"] != "off" else None)
+        cpu = (CpuBudget(options["cpu_budget"], options["msbuild_max_cpu"])
+               if options["cpu_budget"]["mode"] != "off" else None)
+        if ledger:
+            ledger.host_pressure = pressure
         if (args.kind == "test" and options["container_test_detection"] == "promote"
                 and container_test_known(state, fingerprint, identity)):
             admission_args.kind = "integration"
             note("recorded container test: also claiming an integration permit (container_test_detection)")
-        while True:
+        heavy, integration = settings
+        if worktree.holder:
+            held = []
+        while worktree.holder is None:
             if cancelled[0]:
                 note("cancelled while queued")
                 if ledger:
@@ -3274,7 +4113,8 @@ def run(args, state, configuration, output=None):
             held = claim(state, phase_candidates(state, admission_args, (heavy, integration, ci_key, token)),
                          deadline, lambda: bool(cancelled[0]),
                          token if waiter_fd is not None else None, PhaseConfig(heavy, integration, settings.options), admission,
-                         integration if burst and admission_args.kind == "integration" else None, scan=scan)
+                         integration if burst and admission_args.kind == "integration" else None, scan=scan,
+                         pressure=pressure, cpu=cpu)
             observe_waiter(admission_args, ledger, scan)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
@@ -3282,6 +4122,8 @@ def run(args, state, configuration, output=None):
                     ledger.outcome("cancelled")
                 return 128 + cancelled[0]
             if held:
+                if ledger:
+                    ledger.admitted_with_would_hold(scan)
                 if time.monotonic() >= deadline:
                     release(state, held, token, True)
                     held = None
@@ -3329,21 +4171,34 @@ def run(args, state, configuration, output=None):
             note(f"nice {options['phase_nice']} (phase_nice)")
         if options["cold_worktree_hint"] and args.kind in ("build", "test") and cold_worktree(os.getcwd()):
             note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
-        child_env = worktree.environment(child_env)
+        if args.kind in ("build", "test", "integration"):
+            child_env = dict(os.environ if child_env is None else child_env)
+            child_env.setdefault("DOTNET_CLI_USE_MSBUILD_SERVER", "0")
+            child_env.setdefault("MSBUILDDISABLENODEREUSE", "1")
+            compiler_id = shared_compilation_id(child_env, token)
+            if compiler_id:
+                child_env["SharedCompilationId"] = compiler_id  # MSBuild reads env vars as properties
+                note(f"compiler server isolated: SharedCompilationId={compiler_id}")
+        child_env = holder_environment(state, worktree.root or worktree_root(phase_cwd), held, token,
+                                       child_env, worktree.holder) if args.kind != "ci" else child_env
         read_gate, write_gate = os.pipe()
         try:
             launcher = [sys.executable, str(Path(__file__).resolve()), "_launch", str(read_gate), "--", *command]
             output_options = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
             operation = "Popen"
-            proc = subprocess.Popen(launcher, pass_fds=[read_gate, *(fd for _, fd in held), *worktree.descriptors()],
+            proc = subprocess.Popen(launcher, pass_fds=[read_gate], close_fds=True,
                                     start_new_session=True, env=child_env, **output_options)
             os.close(read_gate)
             read_gate = -1
             operation = "publish"
-            publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, cwd=os.getcwd(),
+            publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, holderPid=os.getpid(),
+                               root=worktree.root, cwd=os.getcwd(),
                                label=args.label, kind=args.kind, priority=admission_args.priority, started=time.time(),
                                fast=admission_args.fast, policy=admission_args.policy, source=admission_args.source))
             worktree.publish(proc.pid)
+            if not nested_group(state, worktree.holder, proc.pid):
+                note("parent phase released its slots during nested registration; command not started")
+                return 125
             if cancelled[0]:
                 note("cancelled before execution; command not started")
                 if ledger:
@@ -3365,9 +4220,7 @@ def run(args, state, configuration, output=None):
                              args=(state, fingerprint, detection_started, detector_stopped, attribution, identity.family_key),
                              daemon=True).start()
         next_heartbeat = started + HEARTBEAT
-        running_memory = RunningMemory(options["rss_cap_mb"] if args.kind in ("build", "test", "integration") else 0,
-                                       (options["memory_admission"] or {}).get("min_swap_free_mb", DEFAULT_MIN_SWAP_FREE_MB),
-                                       args.kind in ("build", "test", "integration"))
+        running_memory = phase_memory(options, args.kind, ledger)
         next_memory = started + MEMORY_SAMPLE_INTERVAL
         while True:
             if cancelled[0]:
@@ -3404,7 +4257,7 @@ def run(args, state, configuration, output=None):
         # Keep the group leader unreaped through both signals so its PGID cannot
         # be reused by an unrelated process, even when it exited first.
         operation = "stop_group"
-        stop_group(proc.pid, leader_observation)
+        cleanup_pids = stop_group(proc.pid, leader_observation)
         try:
             operation = "wait"
             proc.wait(timeout=2)
@@ -3422,7 +4275,8 @@ def run(args, state, configuration, output=None):
             return_code = 125
         if return_code == 125:
             producer_outcome(proc, producer_exit)
-        note(f"finished kind={args.kind} label={args.label} exit={return_code}")
+        note(f"finished kind={args.kind} label={args.label} exit={return_code}"
+             + (f" cleanup_pids={','.join(map(str, cleanup_pids))}" if cleanup_pids else ""))
         if args.kind in ("test", "integration"):
             warn_large_dumps(phase_cwd)
         return return_code
@@ -3449,9 +4303,15 @@ def run(args, state, configuration, output=None):
             alive = cleanup_step(errors, "group_alive", proc,
                                  lambda: group_alive({"pgid": proc.pid}, timeouts=CLEANUP_PROBE_TIMEOUTS))
             safe = alive is False
+        if proc is not None:
+            cleanup_step(errors, "nested_release", proc,
+                         lambda: nested_group(state, worktree.holder, proc.pid, safe))
         if held:
             cleanup_step(errors, "release", proc, lambda: release(state, held, token, safe or proc is None))
         cleanup_step(errors, "worktree_release", proc, lambda: worktree.close(safe or proc is None))
+        if compiler_id and (proc is None or safe):
+            # After the phase's own process group is gone; probes run here, outside the coordinator lock.
+            cleanup_step(errors, "compiler_server_cleanup", proc, lambda: stop_phase_compiler_server(compiler_id))
         if shim_dir is not None:
             cleanup_step(errors, "shim_cleanup", proc, shim_dir.cleanup)
         cleanup_step(errors, "restore_sigint", proc, lambda: signal.signal(signal.SIGINT, old_int))
@@ -3524,6 +4384,7 @@ def main(argv=None, *, state=None, configuration=None):
     summary.add_argument("--kind", choices=KINDS)
     summary.add_argument("--json", action="store_true")
     summary.add_argument("--stack", type=stack_name)
+    summary.add_argument("--failures", action="store_true", help="group failures by kind and category")
     waiting = commands.add_parser("wait", help="estimate the wait for a new normal-priority phase")
     waiting.add_argument("--eta", action="store_true", required=True)
     waiting.add_argument("--kind", choices=KINDS, default="build")
@@ -3542,12 +4403,16 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--timeout", type=float, default=None, help="execution seconds (default 300 build/test/integration, 120 ci)")
     runner.add_argument("--queue-timeout", type=float, default=120, help="separate permit wait in seconds")
     runner.add_argument("--approved-long-timeout", action="store_true", help="declare explicit user approval for execution >600 seconds")
+    runner.add_argument("--profile", choices=PROFILES, default="full",
+                        help="iterate: no analyzers/style enforcement for dotnet build/test (never ship evidence); default full")
     runner.add_argument("--rerun", action="store_true", help="run even if this exact state already passed")
+    runner.add_argument("--expect-red", action="store_true", help="tag an intentional TDD failure; exit code is unchanged")
     add_worktree_arguments(runner)
     runner.add_argument("--repo", help="ci watcher repo identity")
     runner.add_argument("--pr", help="ci watcher PR identity")
     runner.add_argument("--commit", help="ci watcher commit identity")
     runner.add_argument("--vstest-hang-minutes", type=int, help="opt-in VSTest-only hang diagnostics without dumps")
+    runner.add_argument("--no-hang-timeout", action="store_true", help="skip the configured hang_timeout injection")
     runner.add_argument("--vstest-confirmed", action="store_true", help="attest project uses VSTest, not MTP")
     runner.add_argument("--diagnose-hang", action="store_true", help="declare active hang diagnosis; suppress mini-dump warnings only")
     runner.add_argument("--log", help="write producer stdout/stderr to FILE instead of streaming", metavar="FILE")
@@ -3590,7 +4455,7 @@ def main(argv=None, *, state=None, configuration=None):
         if args.action == "stats":
             if args.days < 1:
                 parser.error("--days must be positive")
-            return stats(state, args.days, args.kind, args.json, args.stack)
+            return summary_stats(state, args)
         if args.action == "wait":
             return wait_eta(state, configuration, args.kind, args)
         if args.action == "status":
@@ -3622,6 +4487,7 @@ def main(argv=None, *, state=None, configuration=None):
                 print(f"pi-phase: {exc}", file=sys.stderr, flush=True)
                 return_code = 125
         if ledger:
+            ledger.record_failure(args.log, return_code, args.expect_red)
             ledger.finish(state, return_code)
     return return_code
 

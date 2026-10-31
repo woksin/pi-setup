@@ -49,7 +49,7 @@ export async function shipTrain(ctx, api, options, repo) {
     const prs = await checkShip(api, manifest, options);
     await checkPackageLeaks(ctx, manifest);
     const config = await shipConfig(ctx);
-    const evidence = await gateEvidence(ctx, manifest, config);
+    const evidence = await gateEvidence(ctx, manifest, config, options);
     const label = shipLabel(options, prs);
     const summary = options.summaryFile ? await readFile(resolve(ctx.cwd, options.summaryFile), 'utf8') : '';
     const body = shipBody(manifest, summary), notes = reviewerNotes(manifest, evidence);

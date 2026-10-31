@@ -24,7 +24,29 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 | `cratis-local-run` | Wrapper that sends each step of a cross-repository check through `pi-phase`. | `cratis-local-run --help` | [source](../agent/bin/cratis-local-run) |
 | `pi-setup-tests` | Runs the `lib/*.test.ts` tests of an agent directory. | `pi-setup-tests --help` | [source](../agent/bin/pi-setup-tests) |
 
+### pi-phase options added by #81 (all off by default)
+
+- `hang_timeout` config key and `pi-phase run --no-hang-timeout`: fail-fast `--blame-hang-timeout` for direct VSTest `dotnet test` iteration runs. Details in the [pi-phase README](../agent/pi-phase/README.md).
+- `pi-phase run --profile iterate|full` (default `full`): `iterate` adds `-p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false` to direct `dotnet build`/`test`; recorded in the ledger and rejected as `pi-train ship` evidence. See the [pi-phase README](../agent/pi-phase/README.md#iteration-profile---profile-iteratefull).
+- `skip_cross_worktree` config key (default `false`): skip a build/test whose identical gate already passed in another worktree of the repository; never integration, `--rerun` forces a run.
+- `reap_build_servers` config key (default `{"mode": "off"}`): enables `reap-build-servers`. With `PI_PHASE_SHARED_COMPILATION=1` each phase gets its own `SharedCompilationId` and stops only that server when it ends.
+
 ## Pull requests and trains
+
+Train shipping reads `.pi/trains/config.json`. Configure `gateComponents` by exact repository name to require every component for the current train HEAD:
+
+```json
+{
+  "gateComponents": {
+    "Cratis/Chronicle": [
+      { "id": "release", "kind": "build", "label": "tier1 release" },
+      { "id": "specs", "kind": "test", "label": "tier1 spec" }
+    ]
+  }
+}
+```
+
+Each component needs a unique nonempty `id`, `kind` (`build` or `test`) and a case-insensitive regex `label`. Only passed, verified, clean records for the exact HEAD count. Integration is never Tier 1. Missing or incomplete Tier 1 evidence always blocks shipping (fail closed; the former `requireGate` key is an accepted no-op, "always on"). Iterate-profile records never count. `Cratis/Chronicle` has a built-in component set (`agent/lib/train-gate-defaults.json`, from Chronicle's CI: a Release build and the non-integration specs; label the Release build phase `<train>-t1-build` (or `tier1 release`) and the spec phases `<train>-t1-<project>` (or `tier1 specs`), as Chronicle trains already do), which a `gateComponents` entry in the config replaces. Without any component list for the repository, shipping fails closed; `pi-train ship --allow-unconfigured-gate` overrides that, logs a warning and accepts any verified clean build/test. Ledger records need no new fields. Gate estimates prefer the median of at least three measured clean passing chains, otherwise the sum of per-kind build/test p90s; integration is excluded.
 
 | Tool | Purpose | Help | Source |
 |---|---|---|---|
@@ -48,9 +70,11 @@ Lanes are several coordinated sessions. See [Lanes](../README.md#parallel-sessio
 |---|---|---|---|
 | `dev-doctor` | Read-only diagnostics for slow gates, queues, swap and Docker memory. | `dev-doctor --help` | [source](../agent/bin/dev-doctor) |
 | `pi-cleanup` | Disk cleanup for checkouts, worktrees and Docker. Dry run by default; `--apply` executes. | `pi-cleanup --help` | [source](../agent/bin/pi-cleanup) |
+| `pi-retain` | Owner-scoped, expiring protection for cleanup roots, so scheduled cleanup skips active verification chains. | `pi-retain --help` | [source](../agent/bin/pi-retain) |
 | `disk-growth` | Samples free disk space and alerts on a fast drop. Runs on a schedule. | `disk-growth --help` | [source](../agent/bin/disk-growth) |
 | `docker-guardian` | **Acts.** Keeps Docker Desktop usable: restarts it when unresponsive and removes stale containers and images. Runs on a schedule. | `docker-guardian --help` | [source](../agent/bin/docker-guardian) |
 | `renice-builders` | **Acts.** Lowers the CPU priority of shared .NET build servers. Run by `docker-guardian`. | `renice-builders --help` | [source](../agent/bin/renice-builders) |
+| `reap-build-servers` | **Acts only in `enforce` mode** (config key `reap_build_servers`, default off). Stops idle orphaned Roslyn/MSBuild servers with SIGTERM. Run by `docker-guardian`. | `reap-build-servers --help` | [source](../agent/bin/reap-build-servers) |
 | `secret-sweep` | Daily read-only gitleaks sweep. Reports contain metadata, never the matched values. | `secret-sweep --help` | [source](../agent/bin/secret-sweep) |
 | `ai-work-lifecycle` | Creates, tracks and cleans temporary task outputs under `.ai-work/`. See the [README](../tools/ai-work-lifecycle/README.md) and [REFERENCE](../tools/ai-work-lifecycle/REFERENCE.md). | `ai-work-lifecycle --help` | [source](../tools/ai-work-lifecycle/ai-work-lifecycle.py) |
 | `sweep-known-roots` | Sweeps registered `ai-work-lifecycle` tasks across known repositories (dry run by default). Installed as a script, not on PATH; pi-setup does not schedule it, so run it yourself. | `python3 ~/.local/share/ai-work-lifecycle/sweep-known-roots.py --help` | [source](../tools/ai-work-lifecycle/sweep-known-roots.py) |

@@ -804,20 +804,33 @@ test('adopt attaches an unchecked-out branch without recreating it; dry run crea
   assert.equal(f.calls.some(call => call.args.includes('branch') && call.args.includes(TRAIN)), false);
 });
 
-async function readyToShip(t: any) {
+async function readyToShip(t: any, closed = false, seed = true) {
   const f = await setup(t);
   f.state.pr.labels = [{ name: 'patch' }, { name: 'minor' }];
   assert.equal(await f.invoke('fold', '7'), 0, f.errors.join('\n'));
+  // Ship tests exercise the legacy any-build/test evidence; the fail-closed default has its own test.
+  if (seed) { // ship is fail-closed: seed verified Tier 1 evidence for the merge head
+    const ledger = join(f.root, '.pi/agent/pi-phase/state/ledger'); await mkdir(ledger, { recursive: true });
+    await writeFile(join(ledger, '2000-01-01.jsonl'), JSON.stringify({ outcome: 'passed', verified: true, head: MERGE, dirty: 'clean', kind: 'test', label: 'Tier 1' }) + '\n');
+  }
+  if (!closed) { const invoke = f.invoke; f.invoke = (...args: string[]) => invoke(...(args[0] === 'ship' ? [...args, '--allow-unconfigured-gate'] : args)); }
   return f;
 }
 
-test('ship creates a PR, aggregates notes, warns without gate evidence, links items and is idempotent', async t => {
+test('ship fails closed without a Tier 1 component set, and the override is logged', async t => {
+  const f = await readyToShip(t, true);
+  assert.equal(await f.invoke('ship'), 1); assert.match(f.errors.join('\n'), /no gateComponents configured for acme\/widget.*--allow-unconfigured-gate/);
+  assert.equal(f.state.pushes, 0);
+  assert.equal(await f.invoke('ship', '--allow-unconfigured-gate'), 0, f.errors.join('\n'));
+  assert.match(f.errors.join('\n'), /--allow-unconfigured-gate: no gateComponents for acme\/widget/);
+});
+
+test('ship creates a PR, aggregates notes, links items and is idempotent', async t => {
   const f = await readyToShip(t);
   assert.equal(await f.invoke('ship'), 0, f.errors.join('\n'));
   const shipped = await f.read();
   assert.equal(shipped.pr, 42); assert.equal(shipped.shippedHead, MERGE); assert.equal(shipped.label, 'minor');
   assert.match(f.state.trainPR.body, /## Fixed\n\n- Fix widgets/);
-  assert.match(f.errors.join('\n'), /no verified Tier 1 for ccccccc/);
   assert.equal(f.state.pushes, 1); assert.equal(f.state.creates, 1);
   const comments = f.state.comments;
   assert.equal(await f.invoke('ship'), 0, f.errors.join('\n'));
@@ -881,7 +894,7 @@ test('no-release fallback requires every folded PR to opt out; mixed or missing 
 });
 
 test('ship gate requirement accepts only verified clean build/test records for the train head', async t => {
-  const f = await readyToShip(t);
+  const f = await readyToShip(t, false, false);
   await writeFile(join(f.root, 'store/config.json'), JSON.stringify({ requireGate: true, checkPr: ['body-check', '{bodyFile}', '{label}'] }));
   assert.equal(await f.invoke('ship'), 1); assert.equal(f.state.pushes, 0);
   const ledger = join(f.root, '.pi/agent/pi-phase/state/ledger'); await mkdir(ledger, { recursive: true });
