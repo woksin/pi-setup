@@ -23,6 +23,8 @@ class CleanupDiagnosticsTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.dict(os.environ, PI_PHASE_WORKTREE_LOCK="0"))
+        # Disabled worktree locking still resolves the git root; keep that probe out of observer counts.
+        self.stack.enter_context(patch.object(pi_phase, "worktree_root", return_value=os.getcwd()))
         self.output = io.StringIO()
         self.stack.enter_context(redirect_stdout(self.output))
         # main's pre-existing final exception print is not a diagnostic write.
@@ -218,7 +220,7 @@ class CleanupDiagnosticsTests(unittest.TestCase):
         with self.assertRaises(PermissionError) as error:
             pi_phase.stop_group(PID)
         self.assertIs(error.exception, self.denied)
-        self.assertEqual([entry.kwargs["timeout"] for entry in self.ps.call_args_list], [2, 5, 10, 1])
+        self.assertEqual([entry.kwargs["timeout"] for entry in self.ps.call_args_list], [1, 2, 5, 10])
 
     def test_sigkill_denial_preserves_original_error(self):
         self.killpg.side_effect = [None, self.denied]

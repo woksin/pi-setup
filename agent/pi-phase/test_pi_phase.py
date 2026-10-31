@@ -19,6 +19,8 @@ from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import pi_phase
 
 HERE = Path(__file__).resolve().parent
+# Synthetic cleanup snapshot: keeps liveness probes countable apart from the one bounded snapshot.
+NO_MEMBERS = ([], "completeness=complete matched=0 omitted=0 malformed=0", "absent_at_snapshot")
 AI_WORK = HERE.parent.parent / ".ai-work"
 ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from pi_phase import main; sys.exit(main(sys.argv[4:], state=sys.argv[2], configuration=sys.argv[3]))"
 
@@ -84,8 +86,10 @@ class PhaseTests(unittest.TestCase):
                                 ("test_fingerprint", "synthetic")):
                 stack.enter_context(patch.object(pi_phase, name, return_value=value))
             stack.enter_context(patch.object(pi_phase, "cleanup_snapshot"))
+            stack.enter_context(patch.object(pi_phase, "cleanup_snapshot_observation", return_value=NO_MEMBERS))
             alive = stack.enter_context(patch.object(pi_phase, "group_alive", return_value=True))
             stack.enter_context(patch.object(pi_phase.subprocess, "Popen", return_value=producer))
+            stack.enter_context(patch.object(pi_phase, "worktree_root", side_effect=os.path.realpath))  # no git probe under mocked subprocess
             stack.enter_context(patch.object(pi_phase.os, "write", return_value=1))
             waitid = stack.enter_context(patch.object(pi_phase.os, "waitid"))
             if isinstance(observation, Exception):
@@ -159,6 +163,7 @@ class PhaseTests(unittest.TestCase):
             stack.enter_context(patch.object(pi_phase, "run", side_effect=capture_run))
             release = stack.enter_context(patch.object(pi_phase, "release", side_effect=fail_release))
             stack.enter_context(patch.object(pi_phase.subprocess, "Popen", return_value=producer))
+            stack.enter_context(patch.object(pi_phase, "worktree_root", side_effect=os.path.realpath))  # no git probe under mocked subprocess
             stack.enter_context(patch.object(pi_phase.os, "write", return_value=1))
             stack.enter_context(patch.object(pi_phase.os, "waitid",
                                              return_value=SimpleNamespace(si_code=os.CLD_EXITED, si_status=0)))
@@ -201,6 +206,7 @@ class PhaseTests(unittest.TestCase):
         cases = (("12 99 S\n", True), ("12 99 Z\n", False), ("", False))
         with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")), \
                 patch.object(pi_phase, "cleanup_snapshot"), \
+                patch.object(pi_phase, "cleanup_snapshot_observation", return_value=NO_MEMBERS), \
                 patch.object(pi_phase.time, "sleep"):
             for listing, live in cases:
                 with self.subTest(listing=listing), patch.object(pi_phase.subprocess, "run",
@@ -258,6 +264,7 @@ class PhaseTests(unittest.TestCase):
                     subprocess.TimeoutExpired("ps", 2), SimpleNamespace(stdout="12 99 Z\n"),
                     SimpleNamespace(stdout="12 99 Z+\n")]) as probe, \
                 patch.object(pi_phase, "cleanup_snapshot"), \
+                patch.object(pi_phase, "cleanup_snapshot_observation", return_value=NO_MEMBERS), \
                 patch.object(pi_phase.time, "sleep"):
             pi_phase.stop_group(99)
         self.assertEqual([entry.kwargs["timeout"] for entry in probe.call_args_list], [2, 5, 2])
@@ -268,6 +275,7 @@ class PhaseTests(unittest.TestCase):
         with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")) as kill, \
                 patch.object(pi_phase.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 2)) as probe, \
                 patch.object(pi_phase, "cleanup_snapshot"), \
+                patch.object(pi_phase, "cleanup_snapshot_observation", return_value=NO_MEMBERS), \
                 patch.object(pi_phase.time, "sleep"), redirect_stdout(output):
             with self.assertRaises(PermissionError):
                 pi_phase.stop_group(99)
@@ -280,6 +288,7 @@ class PhaseTests(unittest.TestCase):
         with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")) as kill, \
                 patch.object(pi_phase.subprocess, "run", return_value=SimpleNamespace(stdout="12 99 S\n")) as probe, \
                 patch.object(pi_phase, "cleanup_snapshot"), \
+                patch.object(pi_phase, "cleanup_snapshot_observation", return_value=NO_MEMBERS), \
                 patch.object(pi_phase.time, "sleep"):
             with self.assertRaises(PermissionError):
                 pi_phase.stop_group(99)
@@ -313,7 +322,9 @@ class PhaseTests(unittest.TestCase):
                     stack.enter_context(patch.object(pi_phase, "work_identity", return_value=identity))
                     stack.enter_context(patch.object(pi_phase, "test_fingerprint", return_value="synthetic"))
                     stack.enter_context(patch.object(pi_phase.subprocess, "Popen", return_value=producer))
+                    stack.enter_context(patch.object(pi_phase, "worktree_root", side_effect=os.path.realpath))  # no git probe under mocked subprocess
                     stack.enter_context(patch.object(pi_phase, "cleanup_snapshot"))
+                    stack.enter_context(patch.object(pi_phase, "cleanup_snapshot_observation", return_value=NO_MEMBERS))
                     probe = stack.enter_context(patch.object(pi_phase.subprocess, "run", side_effect=listings))
                     stack.enter_context(patch.object(pi_phase.os, "write", return_value=1))
                     stack.enter_context(patch.object(pi_phase.os, "waitid", return_value=SimpleNamespace(
@@ -790,11 +801,12 @@ class PhaseTests(unittest.TestCase):
             command = [sys.executable, "-c",
                        "import pathlib,sys,time;pathlib.Path(sys.argv[1]).touch();time.sleep(3)",
                        str(marker)]
-            job = self.run_phase(label=f"high-{i}", command=command, extra=("--priority", "high"))
+            job = self.run_phase(label=f"high-{i}", command=command,
+                                 extra=("--priority", "high", "--no-worktree-lock"))
             running.append(job)
             self.wait_for(marker.exists)
         grant = (self.state / "priority-grant.json").read_bytes()
-        code, output = self.done(self.run_phase(extra=("--priority", "high")))
+        code, output = self.done(self.run_phase(extra=("--priority", "high", "--no-worktree-lock")))
         self.assertEqual(code, 0, output)
         self.assertIn("high-priority cap (3) reached; queued as normal", output)
         self.assertEqual((self.state / "priority-grant.json").read_bytes(), grant)
@@ -853,11 +865,12 @@ class PhaseTests(unittest.TestCase):
 
     def test_ledger_queue_timeout_cancelled_and_rejected(self):
         self.config.write_text('{"heavy_slots": 1}')
-        owner = self.run_phase(command=[sys.executable, "-c", "import time;time.sleep(5)"])
+        owner = self.run_phase(command=[sys.executable, "-c", "import time;time.sleep(5)"],
+                               extra=("--no-worktree-lock",))
         self.wait_for(lambda: (self.state / "heavy-0.json").exists())
-        queued = self.run_phase(queue=".15")
+        queued = self.run_phase(queue=".15", extra=("--no-worktree-lock",))
         self.assertEqual(self.done(queued)[0], 75)
-        cancelled = self.run_phase()
+        cancelled = self.run_phase(extra=("--no-worktree-lock",))
         self.wait_for(lambda: bool(list((self.state / "waiters").glob("*.json"))))
         cancelled.send_signal(signal.SIGTERM)
         self.assertEqual(self.done(cancelled)[0], 143)
@@ -1696,6 +1709,7 @@ class PhaseTests(unittest.TestCase):
                         patch.object(pi_phase, "claim", return_value=permit) as claim, \
                         patch.object(pi_phase, "release") as release, \
                         patch.object(pi_phase.subprocess, "Popen") as producer, \
+                        patch.object(pi_phase, "worktree_root", side_effect=os.path.realpath), \
                         patch.object(pi_phase, "note") as note:
                     self.assertEqual(pi_phase.run(args, self.state, self.config), 75)
                 self.assert_queue_timeout_guidance("\n".join(c.args[0] for c in note.call_args_list), "2")
@@ -1713,10 +1727,13 @@ class PhaseTests(unittest.TestCase):
         args = SimpleNamespace(label="queue", timeout=1, queue_timeout=900, approved_long_timeout=True,
             kind="build", priority="normal", repo=None, pr=None, commit=None,
             command=[sys.executable, "-c", "pass"], vstest_hang_minutes=None, vstest_confirmed=False)
-        # Queue starts at zero, then ticks past 600 twice and finally times out.
-        with patch.object(pi_phase.time, "monotonic", side_effect=[0, 601, 601, 601, 601, 602, 602, 602, 901]), \
-                patch.object(pi_phase.time, "sleep"), patch.object(pi_phase, "claim", return_value=None), \
-                patch.object(pi_phase, "note") as note:
+        # Exercise the slot queue, independent of worktree admission and clock read count.
+        clock = [0]
+        ticks = iter([601, 602, 901])
+        with patch.object(pi_phase.WorktreeAdmission, "acquire", return_value=None), \
+                patch.object(pi_phase.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(pi_phase.time, "sleep", side_effect=lambda _: clock.__setitem__(0, next(ticks))), \
+                patch.object(pi_phase, "claim", return_value=None), patch.object(pi_phase, "note") as note:
             self.assertEqual(pi_phase.run(args, self.state, self.config), 75)
         hints = [call.args[0] for call in note.call_args_list if call.args[0].startswith("long queue")]
         self.assertEqual(hints, ["long queue (601s): run dev-doctor to look for contention"])
@@ -2533,9 +2550,11 @@ class PhaseTests(unittest.TestCase):
 
     def test_fast_starts_while_real_heavy_process_holds_only_slot(self):
         self.config.write_text('{"heavy_slots":1}')
-        active = self.run_phase(timeout="4", command=self.marker_job("heavy", 1.5))
+        active = self.run_phase(timeout="4", command=self.marker_job("heavy", 1.5),
+                                extra=("--no-worktree-lock",))
         self.wait_for(lambda: (self.state / "heavy-0.json").exists())
-        code, out = self.done(self.run_phase(extra=("--expect-fast",), command=self.marker_job("fast", .1)))
+        code, out = self.done(self.run_phase(extra=("--expect-fast", "--no-worktree-lock"),
+                                             command=self.marker_job("fast", .1)))
         self.assertEqual(code, 0, out)
         self.assertIsNone(active.poll())
         self.assertEqual(self.done(active)[0], 0)
@@ -2781,7 +2800,8 @@ class PhaseTests(unittest.TestCase):
         try:
             jobs = []
             for label in ("first", "second", "third"):
-                jobs.append(self.run_phase(label=label, queue="8", command=self.marker_job(label, .1)))
+                jobs.append(self.run_phase(label=label, queue="8", command=self.marker_job(label, .1),
+                                           extra=("--no-worktree-lock",)))
                 self.wait_for(lambda: len(list((self.state / "waiters").glob("*.json"))) == len(jobs))
         finally:
             os.close(blocker)
@@ -2924,7 +2944,8 @@ class PhaseTests(unittest.TestCase):
         self.assertIn(f"pi-phase: log={log.resolve()} exit=125 lines=0\n", out)
 
     def test_two_slots_across_processes_and_queue_vs_run_timer(self):
-        jobs = [self.run_phase(label=name, timeout="1.8", queue="5", command=self.marker_job(name))
+        jobs = [self.run_phase(label=name, timeout="1.8", queue="5", command=self.marker_job(name),
+                               extra=("--no-worktree-lock",))
                 for name in ("a", "b", "c")]
         for job in jobs:
             code, out = self.done(job)
@@ -2936,7 +2957,7 @@ class PhaseTests(unittest.TestCase):
         self.assertLess(max(concurrency), 3, intervals)
 
     def test_integration_exclusivity_and_no_deadlock(self):
-        jobs = [self.run_phase(kind=kind, label=name, command=self.marker_job(name, .45))
+        jobs = [self.run_phase(kind=kind, label=name, queue="30", command=self.marker_job(name, .45))
                 for name, kind in (("i1", "integration"), ("i2", "integration"),
                                    ("h", "build"))]
         for job in jobs:
@@ -3063,6 +3084,209 @@ class PhaseTests(unittest.TestCase):
         pid = int(pidfile.read_text())
         info = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
         self.assertTrue(info.returncode != 0 or info.stdout.strip().startswith("Z"), info.stdout)
+
+    def test_lock_descriptors_are_not_inherited(self):
+        script = ("import os,pathlib,sys,json; "
+                  "inodes={(p.stat().st_dev,p.stat().st_ino) for p in pathlib.Path(sys.argv[1]).rglob('*') if p.is_file()}; "
+                  "leaked=[]\n"
+                  "for fd in range(3,4096):\n"
+                  " try:\n"
+                  "  s=os.fstat(fd)\n"
+                  "  if (s.st_dev,s.st_ino) in inodes: leaked.append(fd)\n"
+                  " except OSError: pass\n"
+                  "print('lock_fds='+json.dumps(leaked)); sys.exit(bool(leaked))")
+        code, output = self.done(self.run_phase(command=[sys.executable, "-c", script, str(self.state)]))
+        self.assertEqual(code, 0, output)
+        self.assertIn("lock_fds=[]", output)
+        fd = pi_phase.lock_file(self.root / "non-inheritable.lock")
+        try:
+            self.assertFalse(os.get_inheritable(fd))
+        finally:
+            os.close(fd)
+
+    @patch.dict(os.environ, PI_PHASE_WORKTREE_LOCK="1")
+    def test_shell_orphan_is_drained_and_worktree_lock_released(self):
+        marker = self.root / "sleeper-pid"
+        script = 'sleep 300 >/dev/null 2>&1 & echo $! > "$1"; echo started'
+        started = time.monotonic()
+        code, output = self.done(self.run_phase(command=["bash", "-c", script, "_", str(marker)]))
+        self.assertEqual(code, 0, output)
+        self.assertLess(time.monotonic() - started, 6)
+        pid = int(marker.read_text())
+        info = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+        self.assertTrue(info.returncode != 0 or info.stdout.strip().startswith("Z"), info.stdout)
+        locks = list((self.state / "worktrees").glob("*.lock")) + list(self.state.glob("heavy-*.lock"))
+        self.assertTrue(locks)
+        for path in locks:
+            fd = pi_phase.lock_file(path)
+            self.assertIsNotNone(fd, str(path))
+            os.close(fd)
+        self.assertEqual(self.done(self.run_phase(queue=".5"))[0], 0)
+        self.assertNotIn("worktree-lock", self.done(self.start("status"))[1])
+
+    @patch.dict(os.environ, PI_PHASE_WORKTREE_LOCK="1")
+    def test_nested_phase_shares_outer_worktree_and_slot(self):
+        self.config.write_text('{"heavy_slots":1,"integration_slots":1}')
+        nested = self.cli("run", "--kind", "test", "--label", "nested", "--rerun", "--policy", "queued",
+                          "--queue-timeout", ".5", "--timeout", "3", "--", sys.executable, "-c", "print('nested-ok')")
+        script = "import subprocess,sys,json; sys.exit(subprocess.run(json.loads(sys.argv[1])).returncode)"
+        code, output = self.done(self.run_phase(timeout="7", command=[sys.executable, "-c", script, json.dumps(nested)]))
+        self.assertEqual(code, 0, output)
+        self.assertIn("nested admission under parent phase", output)
+        self.assertIn("nested-ok", output)
+        self.assertEqual(len(list(self.state.glob("heavy-*.lock"))), 1)
+        self.assertNotIn("worktree-lock", self.done(self.start("status"))[1])
+
+    @patch.dict(os.environ, PI_PHASE_WORKTREE_LOCK="1")
+    def test_unrelated_process_cannot_forge_nested_holder(self):
+        marker = self.root / "holder-env"
+        script = ("import os,json,pathlib,sys,time; "
+                  "pathlib.Path(sys.argv[1]).write_text(json.dumps({k:v for k,v in os.environ.items() "
+                  "if k.startswith('PI_PHASE_HOLDER')})); time.sleep(5)")
+        outer = self.run_phase(timeout="7", command=[sys.executable, "-c", script, str(marker)])
+        self.wait_for(marker.exists)
+        with patch.dict(os.environ, json.loads(marker.read_text())):
+            code, output = self.done(self.run_phase(label="forged", queue=".25"))
+        self.assertEqual(code, 75, output)
+        self.assertNotIn("nested admission", output)
+        self.assertIn("worktree lock", output)
+        outer.send_signal(signal.SIGTERM)
+        self.assertEqual(self.done(outer)[0], 143)
+
+    def test_dotnet_server_environment_defaults_and_overrides(self):
+        script = ("import os,json; print('servers='+json.dumps([os.getenv('DOTNET_CLI_USE_MSBUILD_SERVER'),"
+                  "os.getenv('MSBUILDDISABLENODEREUSE')]))")
+        for kind in ("build", "test", "integration"):
+            for values in ({}, {"DOTNET_CLI_USE_MSBUILD_SERVER":"caller", "MSBUILDDISABLENODEREUSE":"0"}):
+                with self.subTest(kind=kind, values=values), patch.dict(os.environ):
+                    for name in ("DOTNET_CLI_USE_MSBUILD_SERVER", "MSBUILDDISABLENODEREUSE"):
+                        os.environ.pop(name, None)
+                    os.environ.update(values)
+                    code, output = self.done(self.run_phase(kind=kind, command=[sys.executable, "-c", script]))
+                self.assertEqual(code, 0, output)
+                expected = [values.get("DOTNET_CLI_USE_MSBUILD_SERVER", "0"), values.get("MSBUILDDISABLENODEREUSE", "1")]
+                self.assertIn("servers=" + json.dumps(expected), output)
+
+    def test_permission_denied_group_signal_drains_only_verified_members(self):
+        rows = [(42, 1, 42, os.getuid(), "Z"), (43, 1, 42, os.getuid(), "S"),
+                (44, 1, 99, os.getuid(), "S"), (45, 1, 42, os.getuid(), "S")]
+        observation = (rows, "completeness=complete", "present")
+        with patch.object(pi_phase, "cleanup_snapshot_observation", return_value=observation), \
+                patch.object(pi_phase, "group_liveness", return_value=True), \
+                patch.object(pi_phase.os, "killpg", side_effect=PermissionError), \
+                patch.object(pi_phase.os, "getpgid", side_effect=lambda pid: 99 if pid == 45 else 42), \
+                patch.object(pi_phase.os, "kill") as kill, patch.object(pi_phase.time, "sleep"), \
+                patch.object(pi_phase, "note"):
+            self.assertEqual(pi_phase.stop_group(42), [43])
+        self.assertEqual([call.args for call in kill.call_args_list], [(43, signal.SIGTERM), (43, signal.SIGKILL)])
+
+    def test_group_drain_avoids_repeat_zombie_scan_and_bounds_denied_probe(self):
+        observation = ([(42, 1, 42, os.getuid(), "Z")],
+                       "completeness=complete matched=1 omitted=0 malformed=0", "present")
+        with patch.object(pi_phase, "cleanup_snapshot_observation", return_value=observation) as observe, \
+                patch.object(pi_phase, "group_liveness", return_value=False) as probe, \
+                patch.object(pi_phase.os, "killpg", side_effect=PermissionError), \
+                patch.object(pi_phase.time, "sleep") as sleep, patch.object(pi_phase, "note"):
+            self.assertEqual(pi_phase.stop_group(42), [])
+        # No eligible member: the full verification schedule, never the 0.5 s fallback probe.
+        self.assertEqual(probe.call_args_list, [call(42, (2, 5, 10))] * 2)
+        observe.assert_called_once_with(42, member_limit=None)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.6, 0.2])
+
+    def stop_with_denied_group(self, rows, *, liveness=True, status="completeness=complete", kill_side_effect=None):
+        observation = (rows, status, "present")
+        patches = (patch.object(pi_phase, "cleanup_snapshot_observation", return_value=observation),
+                   patch.object(pi_phase, "group_liveness", return_value=liveness),
+                   patch.object(pi_phase.os, "killpg", side_effect=PermissionError),
+                   patch.object(pi_phase.os, "getpgid", return_value=42),
+                   patch.object(pi_phase.os, "kill", side_effect=kill_side_effect),
+                   patch.object(pi_phase.time, "sleep"), patch.object(pi_phase, "note"))
+        with ExitStack() as stack:
+            observe, probe, _, _, kill, _, _ = [stack.enter_context(item) for item in patches]
+            try:
+                result = pi_phase.stop_group(42)
+            except PermissionError as exc:
+                result = exc
+        return result, observe, probe, kill
+
+    def test_group_signal_success_takes_no_snapshot(self):
+        with patch.object(pi_phase, "cleanup_snapshot_observation") as observe, \
+                patch.object(pi_phase.os, "killpg"), patch.object(pi_phase.time, "sleep"):
+            self.assertEqual(pi_phase.stop_group(42), [])
+        observe.assert_not_called()
+
+    def test_denied_signal_snapshots_once_and_fallback_probe_is_short(self):
+        rows = [(43, 1, 42, os.getuid(), "S")]
+        result, observe, probe, kill = self.stop_with_denied_group(rows)
+        self.assertEqual(result, [43])
+        observe.assert_called_once_with(42, member_limit=None)
+        self.assertEqual(probe.call_args_list, [call(42, (0.5,))] * 2)
+        self.assertEqual(kill.call_count, 2)
+
+    def test_foreign_zombie_and_leader_rows_use_full_probe_and_fail_closed(self):
+        rows = [(42, 1, 42, os.getuid(), "S"), (43, 1, 42, os.getuid() + 1, "S"), (44, 1, 42, os.getuid(), "Z")]
+        for liveness in (True, None):
+            with self.subTest(liveness=liveness):
+                result, _, probe, kill = self.stop_with_denied_group(rows, liveness=liveness)
+                self.assertIsInstance(result, PermissionError)
+                self.assertEqual(probe.call_args_list, [call(42, (2, 5, 10))])
+                kill.assert_not_called()
+
+    def test_failed_snapshot_without_rows_fails_closed_on_live_or_unknown(self):
+        for liveness in (True, None):
+            with self.subTest(liveness=liveness):
+                result, _, probe, _ = self.stop_with_denied_group([], liveness=liveness, status="completeness=unknown")
+                self.assertIsInstance(result, PermissionError)
+                self.assertEqual(probe.call_args_list, [call(42, (2, 5, 10))])
+
+    def test_failed_individual_signal_preserves_original_denial(self):
+        rows = [(43, 1, 42, os.getuid(), "S")]
+        result, _, probe, _ = self.stop_with_denied_group(rows, kill_side_effect=PermissionError)
+        self.assertIsInstance(result, PermissionError)
+        self.assertEqual(probe.call_args_list, [call(42, (0.5,)), call(42, (2, 5, 10))])
+
+    def test_changed_pgid_member_is_not_signalled(self):
+        rows = [(43, 1, 42, os.getuid(), "S")]
+        with patch.object(pi_phase.os, "getpgid", return_value=7), patch.object(pi_phase.os, "kill") as kill:
+            self.assertEqual(pi_phase.signal_group_members(42, signal.SIGTERM, rows), [])
+        kill.assert_not_called()
+
+    def test_more_than_diagnostic_limit_members_are_all_signalled(self):
+        rows = [(pid, 1, 42, os.getuid(), "S") for pid in range(100, 140)]
+        result, _, _, _ = self.stop_with_denied_group(rows, status="completeness=incomplete")
+        self.assertEqual(result, list(range(100, 140)))
+
+    def test_nested_registration_requires_every_slot_to_stay_owned(self):
+        state = self.state
+        state.mkdir(parents=True, exist_ok=True)
+        holder = dict(token="a" * 32, slots=["heavy-0.lock", "integration-0.lock"])
+        pi_phase.save(state / "heavy-0.json", dict(token=holder["token"]))
+        pi_phase.save(state / "integration-0.json", dict(token="b" * 32))  # Parent released and re-leased.
+        self.assertFalse(pi_phase.nested_group(state, holder, 123))
+        self.assertNotIn("nestedGroups", pi_phase.metadata(state / "heavy-0.json"))
+        pi_phase.save(state / "integration-0.json", dict(token=holder["token"]))
+        self.assertTrue(pi_phase.nested_group(state, holder, 123))
+        self.assertEqual(pi_phase.metadata(state / "heavy-0.json")["nestedGroups"], [123])
+        self.assertTrue(pi_phase.nested_group(state, None, 123))
+
+    def test_cleanup_can_observe_more_members_than_diagnostic_limit(self):
+        listing = "\n".join(f"{pid} 1 42 {os.getuid()} S" for pid in range(100, 140))
+        self.assertEqual(len(pi_phase.cleanup_snapshot_rows(listing, 42)[0]), 32)
+        self.assertEqual(len(pi_phase.cleanup_snapshot_rows(listing, 42, member_limit=None)[0]), 40)
+
+    def test_status_reports_dead_producer_as_draining(self):
+        self.state.mkdir()
+        fd = pi_phase.lock_file(self.state / "heavy-0.lock")
+        try:
+            pi_phase.save(self.state / "heavy-0.json", dict(pid=42, pgid=42, token="draining", kind="test"))
+            with patch.object(pi_phase, "process_snapshot", return_value={43:(1,42,"S")}), \
+                    patch.object(pi_phase, "worktree_status"), patch.object(pi_phase, "note") as note:
+                pi_phase.status(self.state, self.config)
+            lines = "\n".join(call.args[0] for call in note.call_args_list)
+            self.assertIn("draining pids=43", lines)
+            self.assertNotIn(" running", lines)
+        finally:
+            os.close(fd)
 
     def test_parent_exit_cleans_term_resistant_child(self):
         marker = self.root / "descendant-pid"

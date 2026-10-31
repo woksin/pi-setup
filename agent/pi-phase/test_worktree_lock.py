@@ -1,4 +1,4 @@
-"""Real subprocess coverage for worktree admission and descriptor-backed nesting."""
+"""Real subprocess coverage for worktree admission and authenticated nesting."""
 import fcntl
 import json
 import os
@@ -153,6 +153,12 @@ class WorktreeLockTests(Harness):
         self.assertEqual(code, 143, output)
         self.assertEqual(self.waiting(), [])
 
+    def test_sequential_success_does_not_log_stale_recovery(self):
+        for label in ("A", "B"):
+            code, output = self.done(self.phase(label, command=self.job(label, .01)))
+            self.assertEqual(code, 0, output)
+            self.assertNotIn("recovered stale worktree lock", output)
+
     def test_stale_holder_recovered(self):
         dead = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
         dead.wait(timeout=3)
@@ -198,41 +204,39 @@ class WorktreeLockTests(Harness):
         self.assertEqual(self.waiting(), [])
         self.assertFalse((self.root / "B.started").exists())
 
-    def test_normal_completion_does_not_unlock_escaped_descriptor_holder(self):
-        script = ("import os,json,subprocess,sys,time,pathlib; "
-                  "fd=json.loads(os.environ['PI_PHASE_WORKTREE_HELD'])['fd']; "
-                  "subprocess.Popen(sys.argv[2:],pass_fds=(fd,),start_new_session=True,"
+    def test_escaped_producer_cannot_retain_lock_descriptor(self):
+        script = ("import os,subprocess,sys,time,pathlib; "
+                  "assert 'PI_PHASE_WORKTREE_HELD' not in os.environ; "
+                  "subprocess.Popen(sys.argv[2:],start_new_session=True,"
                   "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
                   "p=pathlib.Path(sys.argv[1]); "
                   "exec('while not p.exists(): time.sleep(.01)')")
-        command = [sys.executable, "-c", script, str(self.root / "escaped.started"), *self.job("escaped")]
+        command = [sys.executable, "-c", script, str(self.root / "escaped.started"), *self.job("escaped", 3)]
         a = self.phase("A", command=command)
         self.started("escaped")
         self.assertEqual(self.done(a)[0], 0)
-        code, output = self.done(self.phase("B"))
+        code, output = self.done(self.phase("B", command=self.job("B", .01)))
         self.assertEqual(code, 0, output)
-        escaped, bi = self.intervals("escaped", "B")
-        self.assertLessEqual(escaped[1], bi[0])
+        self.assertFalse((self.root / 'escaped.json').exists())
 
-    def test_escaped_holder_can_nest_after_outer_completion_while_contender_waits(self):
+    def test_escaped_process_uses_independent_admission_after_outer_completion(self):
         escaped_pid = self.root / "escaped.pid"
         self.addCleanup(self.stop_recorded_group, escaped_pid)
         nested = self.cli("run", "--kind", "test", "--label", "inner", "--policy", "direct",
-                          "--timeout", "3", "--queue-timeout", "1", "--", *self.job("inner", .01))
+                          "--timeout", "3", "--queue-timeout", "20", "--", *self.job("inner", .01))
         escaped = """import json,os,pathlib,subprocess,sys,time
 root=pathlib.Path(sys.argv[1]); start=time.time()
 (root/'escaped.started').touch()
 while not (root/'go').exists():
-    assert time.time()-start < 5
+    assert time.time()-start < 30
     time.sleep(.01)
-fd=json.loads(os.environ['PI_PHASE_WORKTREE_HELD'])['fd']
-result=subprocess.run(sys.argv[2:],pass_fds=(fd,),capture_output=True,text=True,timeout=5)
+result=subprocess.run(sys.argv[2:],capture_output=True,text=True,timeout=30)
 (root/'result.json').write_text(json.dumps([result.returncode,result.stdout+result.stderr]))
 (root/'escaped.json').write_text(json.dumps([start,time.time()]))
 """
         launch = """import json,os,pathlib,subprocess,sys,time
-root=pathlib.Path(sys.argv[1]); fd=json.loads(os.environ['PI_PHASE_WORKTREE_HELD'])['fd']
-p=subprocess.Popen(sys.argv[2:],pass_fds=(fd,),start_new_session=True,
+root=pathlib.Path(sys.argv[1])
+p=subprocess.Popen(sys.argv[2:],start_new_session=True,
                    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 (root/'escaped.pid').write_text(str(p.pid))
 while not (root/'escaped.started').exists(): time.sleep(.01)
@@ -243,16 +247,16 @@ while not (root/'escaped.started').exists(): time.sleep(.01)
         self.started("escaped")
         self.assertEqual(self.done(a)[0], 0)
         b = self.phase("B")
-        self.wait_for(lambda: bool(self.waiting()))
-        self.assertFalse((self.root / "B.started").exists())
+        self.started("B")
         (self.root / "go").touch()
         code, output = self.done(b)
         self.assertEqual(code, 0, output)
+        self.wait_for(lambda: (self.root / "result.json").exists(), seconds=30)  # Escaped inner admits after B.
         nested_code, nested_output = json.loads((self.root / "result.json").read_text())
         self.assertEqual(nested_code, 0, nested_output)
-        self.assertIn("worktree lock inherited from parent phase outer", nested_output)
-        escaped_interval, bi = self.intervals("escaped", "B")
-        self.assertLessEqual(escaped_interval[1], bi[0])
+        self.assertNotIn("nested admission", nested_output)
+        inner_interval, bi = self.intervals("inner", "B")
+        self.assertLessEqual(bi[1], inner_interval[0])
 
     def stop_recorded_group(self, path):
         if path.exists():
@@ -261,19 +265,18 @@ while not (root/'escaped.started').exists(): time.sleep(.01)
                 os.killpg(pgid, signal.SIGKILL)
             self.wait_for(lambda: pi_phase.group_alive({"pgid": pgid}) is False, seconds=3)
 
-    def test_killed_nested_supervisor_guards_descriptor_closing_producer(self):
+    def test_killed_nested_supervisor_guards_producer_without_descriptors(self):
         producer_pid = self.root / "orphan.pid"
         inner_pid = self.root / "inner.pid"
         self.addCleanup(self.stop_recorded_group, producer_pid)
         producer = ("import os,json,pathlib,sys,time; "
-                    "os.close(json.loads(os.environ['PI_PHASE_WORKTREE_HELD'])['fd']); "
+                    "assert 'PI_PHASE_WORKTREE_HELD' not in os.environ; "
                     "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(6)")
         inner = self.cli("run", "--kind", "test", "--label", "inner", "--policy", "direct",
                          "--timeout", "8", "--queue-timeout", "1", "--", sys.executable,
                          "-c", producer, str(producer_pid))
         outer = ("import os,json,pathlib,subprocess,sys; "
-                 "fd=json.loads(os.environ['PI_PHASE_WORKTREE_HELD'])['fd']; "
-                 "p=subprocess.Popen(sys.argv[2:],pass_fds=(fd,),stdout=subprocess.DEVNULL,"
+                 "p=subprocess.Popen(sys.argv[2:],stdout=subprocess.DEVNULL,"
                  "stderr=subprocess.DEVNULL); pathlib.Path(sys.argv[1]).write_text(str(p.pid)); p.wait()")
         a = self.phase("outer", command=[sys.executable, "-c", outer, str(inner_pid), *inner])
         self.wait_for(producer_pid.exists)
@@ -340,26 +343,26 @@ while not (root/'escaped.started').exists(): time.sleep(.01)
         self.assertEqual(self.done(a)[0], 0)
         self.assertEqual(self.done(b)[0], 0)
 
-    def test_nested_inherits_and_forwards_descriptor(self):
+    def test_nested_authenticates_without_forwarding_descriptors(self):
         inner = self.cli("run", "--kind", "test", "--label", "inner", "--policy", "direct",
                          "--timeout", "3", "--queue-timeout", "1", "--", *self.job("inner", .01))
         middle = self.cli("run", "--kind", "test", "--label", "middle", "--policy", "direct",
                           "--timeout", "5", "--queue-timeout", "1", "--", *inner)
         code, output = self.done(self.phase("outer", command=middle))
         self.assertEqual(code, 0, output)
-        self.assertEqual(output.count("worktree lock inherited"), 2)
+        self.assertEqual(output.count("nested admission under parent phase"), 2)
         self.assertNotIn("waiting for worktree lock", output)
 
     def descriptor_hints(self, path, fd):
         data = self.holder()
-        return {pi_phase.WORKTREE_HELD_ENV: json.dumps(dict(fd=fd, root=os.path.realpath(self.repo),
+        return {"PI_PHASE_WORKTREE_HELD": json.dumps(dict(fd=fd, root=os.path.realpath(self.repo),
                 state=os.path.realpath(self.state), token=data["token"]))}
 
     def assert_independent_waits(self, hints, pass_fds=()):
         b = self.phase("B", env=hints, pass_fds=pass_fds, extra=("--queue-timeout", "1"))
         code, output = self.done(b)
         self.assertEqual(code, 75, output)
-        self.assertNotIn("worktree lock inherited", output)
+        self.assertNotIn("nested admission", output)
         self.assertFalse((self.root / "B.started").exists())
 
     def test_copied_environment_without_descriptor_cannot_inherit(self):
@@ -378,12 +381,9 @@ while not (root/'escaped.started').exists(): time.sleep(.01)
         self.addCleanup(os.close, separate)
         self.assert_independent_waits(self.descriptor_hints(path, separate), (separate,))
 
-    def test_inherited_close_does_not_unlock_parent(self):
+    def test_even_copied_descriptor_does_not_authorize_nesting_or_unlock_parent(self):
         path, fd = self.hold(pgid=os.getpgrp())
-        b = self.phase("B", env=self.descriptor_hints(path, fd), pass_fds=(fd,), command=self.job("B", .01))
-        code, output = self.done(b)
-        self.assertEqual(code, 0, output)
-        self.assertIn("worktree lock inherited", output)
+        self.assert_independent_waits(self.descriptor_hints(path, fd), (fd,))
         self.assertTrue(pi_phase.readonly_busy(path))
         self.assertEqual(self.holder()["token"], "external")
         self.assertEqual(self.holder()["pgid"], os.getpgrp())

@@ -1,7 +1,7 @@
 """Per-user host-wide, cooperative phase leases. POSIX flock and process groups required.
 
-Only the child's own process group is signalled. The producer inherits the lease FD;
-metadata guards against a dead supervisor whose descendant closed inherited FDs.
+Only the child's own process group is signalled. Lock FDs stay in the supervisor;
+metadata guards against orphaned producers and authenticated nested phases.
 """
 import argparse
 from collections import deque, namedtuple
@@ -626,7 +626,7 @@ def wait_eta(state, configuration, kind, request=None):
                 if resource not in free:
                     continue
                 data = metadata(path.with_suffix(".json"))
-                if not (readonly_busy(path) or data.get("unreadable") or live is None or data.get("pgid") in live):
+                if not (readonly_busy(path) or data.get("unreadable") or live is None or lease_groups(data) & live):
                     continue
                 free[resource] -= 1
                 running.add(data.get("token", path.stem))
@@ -1226,7 +1226,7 @@ def lease_running(path, prior, live):
         return True
     try:
         entry = metadata(path.with_suffix(".json"))
-        return entry != prior.get(path) or entry.get("unreadable") or entry.get("pgid") in live
+        return entry != prior.get(path) or entry.get("unreadable") or bool(lease_groups(entry) & live)
     finally:
         unlock(fd)
 
@@ -1516,7 +1516,7 @@ def begin_test_attribution(state, token):
     prior = {p: metadata(p.with_suffix(".json")) for p in paths}
     competitors = [entry for entry in prior.values() if entry.get("token") != token
                    and entry.get("kind") not in ("build", "ci")]
-    live = live_groups(0.5) if any(entry.get("pgid") for entry in competitors) else set()
+    live = live_groups(0.5) if any(lease_groups(entry) for entry in competitors) else set()
     solo = live is not None
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
@@ -1531,7 +1531,7 @@ def begin_test_attribution(state, token):
             if fd is not None:
                 unlock(fd)
             if (busy or entry.get("unreadable") or entry != prior.get(path, {})
-                    or live is None or entry.get("pgid") in live):
+                    or live is None or lease_groups(entry) & live):
                 solo = False
         save(state / "test-generation.json", {"token": token})
     return token if solo else None
@@ -1848,7 +1848,8 @@ def cold_worktree(cwd):
 
 
 def lock_file(path):
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600)
+    os.set_inheritable(fd, False)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -1863,7 +1864,10 @@ def unlock(fd):
 
 
 WORKTREE_ENV = "PI_PHASE_WORKTREE_LOCK"
-WORKTREE_HELD_ENV = "PI_PHASE_WORKTREE_HELD"
+HOLDER_ENV = "PI_PHASE_HOLDER"
+HOLDER_ROOT_ENV = "PI_PHASE_HOLDER_ROOT"
+HOLDER_SLOTS_ENV = "PI_PHASE_HOLDER_SLOTS"
+HOLDER_STATE_ENV = "PI_PHASE_HOLDER_STATE"
 
 
 def worktree_root(cwd):
@@ -1901,10 +1905,6 @@ class WorktreeLease:
         self.path, self.fd, self.info, self.inherited = path, fd, info, inherited
         self.group_path = path.with_suffix(".groups") / f"{uuid.uuid4().hex}.json"
 
-    def environment(self, state):
-        return {WORKTREE_HELD_ENV: json.dumps(dict(fd=self.fd, state=os.path.realpath(state),
-                                                  root=self.info["root"], token=self.info["token"]))}
-
     def publish(self, pgid):
         self.group_path.parent.mkdir(mode=0o700, exist_ok=True)
         # Each invocation has its own record: nested publishers cannot overwrite peers.
@@ -1917,6 +1917,7 @@ class WorktreeLease:
         if not self.inherited:
             # The caller verified this producer group empty: its numeric id can be reused.
             self.info.pop("pgid", None)
+            self.info["retired"] = True
             save(self.path.with_suffix(".json"), self.info)
         self.group_path.unlink(missing_ok=True)
 
@@ -1925,39 +1926,100 @@ class WorktreeLease:
             if safe:
                 self.retire_group()
         finally:
-            # Descendants can still own the description and need the holder identity.
-            # Leave holder metadata for the next successful independent claimant.
-            os.close(self.fd)
+            # Nested leases have a group guard but never a lock descriptor.
+            if self.fd is not None:
+                os.close(self.fd)
 
 
-def worktree_hint(state, root):
-    hint = json.loads(os.environ.get(WORKTREE_HELD_ENV, "null"))
-    if not isinstance(hint, dict):
-        return None
-    identity = (hint.get("state"), hint.get("root"))
-    return hint if identity == (os.path.realpath(state), root) else None
+def process_snapshot():
+    listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="],
+                             capture_output=True, text=True, timeout=2, check=True).stdout
+    return {int(p[0]): (int(p[1]), int(p[2]), p[3])
+            for line in listing.splitlines() if len(p := line.split()) == 4}
 
 
-def inherited_worktree(state, path, root):
-    """Hints are not authority: only the already-locked open-file description qualifies."""
+def holder_ancestry(info):
+    """A token alone is not authority: require a live holder and producer ancestry."""
     try:
-        hint = worktree_hint(state, root)
-        if hint is None:
-            return None
-        fd = hint["fd"]
-        actual, expected = os.fstat(fd), path.stat()
-        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
-            return None
-        info = metadata(path.with_suffix(".json"))
-        if (info.get("token"), info.get("root")) != (hint.get("token"), root):
-            return None
-        if not readonly_busy(path):
-            return None
-        # A separate open of the same inode fails here. Never LOCK_UN a shared description.
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return WorktreeLease(path, os.dup(fd), info, inherited=True)
-    except (OSError, ValueError, KeyError, TypeError):
+        rows = process_snapshot()
+        producer, holder = info["pid"], info["holderPid"]
+        if any(pid not in rows or rows[pid][2].startswith("Z") for pid in (producer, holder)):
+            return False
+        if rows[producer][1] != info["pgid"] or rows[producer][0] != holder:
+            return False
+        current, seen = os.getpid(), set()
+        if rows.get(current, (None, None, ""))[1] == info["pgid"]:
+            return True
+        while current in rows and current not in seen:
+            if current == producer:
+                return True
+            seen.add(current)
+            current = rows[current][0]
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        pass
+    return False
+
+
+def nested_holder(state, root):
+    """Validate live slot ownership under the coordinator; never inherit lock FDs."""
+    token = os.environ.get(HOLDER_ENV, "")
+    if (not re.fullmatch(r"[a-f0-9]{32}", token)
+            or os.environ.get(HOLDER_STATE_ENV) != os.path.realpath(state)
+            or os.environ.get(HOLDER_ROOT_ENV) != root):
         return None
+    try:
+        slots = json.loads(os.environ.get(HOLDER_SLOTS_ENV, "null"))
+        if (not isinstance(slots, list) or not slots or len(slots) > 3
+                or any(not isinstance(name, str) or not re.fullmatch(
+                    r"(?:heavy|integration|fast)-[0-9]+\.lock|direct-[a-f0-9]{32}\.lock", name) for name in slots)):
+            return None
+        with open(state / "coordinator.lock", "a+b") as coordinator:
+            fcntl.flock(coordinator, fcntl.LOCK_EX)
+            records = [metadata((state / name).with_suffix(".json")) for name in slots]
+            info = records[0]
+            if (any(record != info for record in records) or info.get("token") != token
+                    or info.get("root") != root or not all(readonly_busy(state / name) for name in slots)):
+                return None
+        if holder_ancestry(info):
+            return dict(info, slots=slots)
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def holder_environment(state, root, held, token, environment, holder=None):
+    environment = dict(os.environ if environment is None else environment)
+    for name in (HOLDER_ENV, HOLDER_ROOT_ENV, HOLDER_SLOTS_ENV, HOLDER_STATE_ENV, "PI_PHASE_WORKTREE_HELD"):
+        environment.pop(name, None)
+    if holder or held:
+        environment.update({HOLDER_ENV: holder["token"] if holder else token,
+                            HOLDER_ROOT_ENV: root, HOLDER_STATE_ENV: os.path.realpath(state),
+                            HOLDER_SLOTS_ENV: json.dumps(holder["slots"] if holder else [p.name for p, _ in held])})
+    return environment
+
+
+def nested_group(state, holder, pgid, safe=None):
+    """Preserve slot orphan guards even if the outer supervisor exits first."""
+    if not holder:
+        return True
+    with open(state / "coordinator.lock", "a+b") as coordinator:
+        fcntl.flock(coordinator, fcntl.LOCK_EX)
+        if safe is None and any(metadata((state / name).with_suffix(".json")).get("token") != holder["token"]
+                                for name in holder["slots"]):
+            return False  # Registration succeeds only if every slot is still owned.
+        for name in holder["slots"]:
+            path = (state / name).with_suffix(".json")
+            info = metadata(path)
+            if info.get("token") != holder["token"]:
+                continue
+            groups = set(info.get("nestedGroups", []))
+            if safe is None:
+                groups.add(pgid)
+            elif safe:
+                groups.discard(pgid)
+            info["nestedGroups"] = sorted(groups)
+            save(path, info)
+    return True
 
 
 def worktree_waiters(state, readonly=False):
@@ -1989,6 +2051,7 @@ class WorktreeAdmission:
         self.state, self.args, self.token = state, args, token
         self.root = None
         self.lease = None
+        self.holder = None
         self.result = "error"
 
     def register(self):
@@ -2027,9 +2090,10 @@ class WorktreeAdmission:
                 os.close(fd)
 
     def publish_holder(self, fd, previous):
-        for group in worktree_group_paths(self.path):
+        residual = list(worktree_group_paths(self.path))
+        for group in residual:
             group.unlink(missing_ok=True)
-        if previous:
+        if previous and (residual or not previous.get("retired")):
             note(f"recovered stale worktree lock (was {previous.get('label', '?')} pid {previous.get('pid', '?')})")
         info = dict(token=self.token, pid=os.getpid(), label=self.args.label, kind=self.args.kind,
                     root=self.root, policy=self.args.policy, acquired=time.time())
@@ -2063,6 +2127,9 @@ class WorktreeAdmission:
 
     def acquire(self, deadline, cancelled, ledger):
         if os.environ.get(WORKTREE_ENV) == "0":
+            self.root = worktree_root(os.getcwd())
+            if self.args.kind != "ci":
+                self.holder = nested_holder(self.state, self.root)
             self.result = "disabled"
             return None
         started = time.monotonic()
@@ -2077,14 +2144,19 @@ class WorktreeAdmission:
                 ledger.queued = time.monotonic()
 
     def admit(self, deadline, cancelled):
-        if self.args.kind == "ci" or self.opt_out:
+        if self.args.kind == "ci":
             return "skipped", None
         self.root = worktree_root(os.getcwd())
+        self.holder = nested_holder(self.state, self.root)
+        if self.opt_out:
+            return "skipped", None
         self.path, self.info_path, self.key = worktree_paths(self.state, self.root)
-        self.lease = inherited_worktree(self.state, self.path, self.root)
-        if self.lease:
-            note(f"worktree lock inherited from parent phase {self.lease.info.get('label', '?')}")
-            return "inherited", self.lease
+        info = metadata(self.info_path)
+        if (self.holder and info.get("token") == self.holder["token"] and readonly_busy(self.path)):
+            self.lease = WorktreeLease(self.path, None, info, inherited=True)
+            note(f"nested admission under parent phase {self.holder.get('label', '?')}")
+            return "nested", self.lease
+        self.holder = None
         return self.wait(deadline, cancelled)
 
     def exit_code(self, value, cancelled, ledger):
@@ -2098,14 +2170,6 @@ class WorktreeAdmission:
             return 75
         note("cancelled while waiting for worktree lock")
         return 128 + cancelled()
-
-    def environment(self, environment):
-        if self.lease:
-            return dict(os.environ if environment is None else environment, **self.lease.environment(self.state))
-        return environment
-
-    def descriptors(self):
-        return [self.lease.fd] if self.lease else []
 
     def publish(self, pgid):
         if self.lease:
@@ -2171,17 +2235,22 @@ def live_groups(timeout):
         return None  # Unknown: never admit an orphaned slot on a failed probe.
 
 
+def lease_groups(info):
+    return {pgid for pgid in [info.get("pgid"), *info.get("nestedGroups", [])]
+            if type(pgid) is int and pgid > 1}
+
+
 def group_alive(info, timeouts=(2,)):
-    pgid = info.get("pgid")
-    if type(pgid) is not int or pgid <= 1:
-        return False
-    try:
-        os.killpg(pgid, 0)
-        return live_group_members(pgid, timeouts)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return live_group_members(pgid, timeouts)
+    for pgid in lease_groups(info):
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass
+        if live_group_members(pgid, timeouts):
+            return True
+    return False
 
 
 def metadata(path):
@@ -2282,14 +2351,8 @@ def high_count(state):
         if data.get("priority") != "high":
             continue
         busy = readonly_busy(path)
-        if not busy and data.get("pgid"):
-            try:
-                os.killpg(data["pgid"], 0)
-                busy = True
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                busy = True
+        if not busy and lease_groups(data):
+            busy = group_alive(data)
         if busy:
             tokens.add(data.get("token", path.name))
     return len(tokens)
@@ -2558,8 +2621,7 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
         if cancelled() or time.monotonic() >= deadline:
             return None
         prior[path] = metadata(path.with_suffix(".json"))
-    needs_probe = any(type(entry.get("pgid")) is int and entry["pgid"] > 1
-                      for entry in prior.values())
+    needs_probe = any(lease_groups(entry) for entry in prior.values())
     live = live_groups(min(0.5, deadline - time.monotonic())) if needs_probe else set()
     if live is None or cancelled() or time.monotonic() >= deadline:
         return None
@@ -2578,7 +2640,7 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             # A new owner may have changed metadata since our snapshot.
             # Never trust a stale negative process-list result for that owner.
             entry = metadata(path.with_suffix(".json"))
-            if entry != prior[path] or entry.get("unreadable") or entry.get("pgid") in live:
+            if entry != prior[path] or entry.get("unreadable") or lease_groups(entry) & live:
                 unlock(fd)
                 continue
             available[path] = fd
@@ -2627,10 +2689,13 @@ def release(state, held, token, safe):
             for path, _ in held:
                 entry = metadata(path.with_suffix(".json"))
                 if entry.get("token") == token:
-                    remove_lease(path)
+                    if entry.get("nestedGroups"):
+                        entry.pop("pgid", None)
+                        save(path.with_suffix(".json"), entry)
+                    else:
+                        remove_lease(path)
         for _, fd in held:
-            # Never explicitly unlock a shared open-file description if the
-            # producer may still hold its inherited FD after supervisor failure.
+            # Supervisor-only references: orphan group metadata guards crashes.
             os.close(fd)
 
 
@@ -2836,12 +2901,16 @@ def status(state, configuration=CONFIG):
         grant = priority_grant(state)
         high = high_count(state)
     # No slow ps probe or terminal write while holding the shared coordinator.
-    live = live_groups(2) if any(not busy and data.get("pgid") for _, data, busy in owners) else set()
+    live = live_groups(2) if any(not busy and lease_groups(data) for _, data, busy in owners) else set()
+    try:
+        processes = process_snapshot() if owners else {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        processes = None
     seen = set()
     fast_running = 0
     used = dict(heavy=0, integration=0)
     for path, data, busy in owners:
-        orphan = (data.get("unreadable") or live is None or data.get("pgid") in live) if not busy else False
+        orphan = (data.get("unreadable") or live is None or bool(lease_groups(data) & live)) if not busy else False
         if not busy and not orphan:
             continue
         for pool in used:
@@ -2852,9 +2921,17 @@ def status(state, configuration=CONFIG):
         seen.add(token)
         fast_running += path.name.startswith("fast-")
         age = max(0, int(time.time() - data.get("started", time.time())))
+        phase_state = "orphan-group" if orphan else "running"
+        if processes is not None and type(data.get("pid")) is int:
+            producer = processes.get(data["pid"])
+            if producer is None or producer[2].startswith("Z"):
+                lingering = sorted(pid for pid, (_, pgid, state) in processes.items()
+                                   if pgid in lease_groups(data) and not state.startswith("Z"))
+                phase_state = f"draining pids={','.join(map(str, lingering)) or 'none'}" + (
+                    " orphan-group" if orphan else "")
         note(f"{data.get('kind', 'unknown')} {data.get('label', 'unknown')} "
              f"pid={data.get('pid', '?')} cwd={data.get('cwd', '?')} "
-             f"elapsed={age}s {'orphan-group' if orphan else 'running'}"
+             f"elapsed={age}s {phase_state}"
              f"{' fast' if data.get('fast') or path.name.startswith('fast-') else ''}"
              f" policy={data.get('policy', 'queued')} source={data.get('source', 'default')}")
     if not seen:
@@ -2952,7 +3029,7 @@ def cleanup_snapshot_row(line):
     return (*identities, parts[4])
 
 
-def cleanup_snapshot_rows(listing, pgid):
+def cleanup_snapshot_rows(listing, pgid, member_limit=32):
     """Accept only bounded numeric identities and ps state tokens, never raw text."""
     if len(listing) > 262144 or len(listing.encode("utf-8")) > 262144:
         return [], 0, 0, "oversized"
@@ -2960,17 +3037,17 @@ def cleanup_snapshot_rows(listing, pgid):
     malformed = parsed.count(None)
     rows = [row for row in parsed if row is not None and row[2] == pgid]
     status = "incomplete" if malformed or len(rows) > 32 else "complete"
-    return rows[:32], len(rows), malformed, status
+    return rows[:member_limit], len(rows), malformed, status
 
 
-def cleanup_snapshot_observation(pgid):
-    """One read-only, non-atomic observation; never used for safety decisions."""
+def cleanup_snapshot_observation(pgid, member_limit=32):
+    """One bounded non-atomic observation; not proof of exit or signal authority."""
     try:
         result = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,uid=,stat="],
                                 capture_output=True, text=True, timeout=1, check=False)
         if result.returncode != 0:
             return [], f"completeness=unknown failure=nonzero returncode={int(result.returncode)}", "unknown"
-        rows, matched, malformed, status = cleanup_snapshot_rows(result.stdout, pgid)
+        rows, matched, malformed, status = cleanup_snapshot_rows(result.stdout, pgid, member_limit)
         presence = "present" if any(row[0] == pgid for row in rows) else "absent_at_snapshot"
         if status != "complete" and presence != "present":
             presence = "unknown"
@@ -2983,38 +3060,77 @@ def cleanup_snapshot_observation(pgid):
         return [], f"completeness=unknown failure=oserror errno={number}", "unknown"
 
 
-def cleanup_snapshot(pgid, sig, leader_observation=None):
+def cleanup_snapshot(pgid, sig, leader_observation=None, snapshot=None):
     """Best effort, at most 32 rows / 8 KiB emitted; failures never escape."""
     try:
-        rows, status, presence = cleanup_snapshot_observation(pgid)
+        rows, status, presence = snapshot if snapshot is not None else cleanup_snapshot_observation(pgid)
         source, observed_exit = leader_observation or ("unknown", None)
         if source not in ("waitid_wnowait", "ps_zombie"):
             source = "unknown"
         exit_value = observed_exit if type(observed_exit) is int else "unknown"
         failure_note(f"cleanup_snapshot pgid={pgid} signal={sig.name} observer=ps non_atomic=1 "
                      f"{status} leader_presence={presence} leader_observation={source} producer_exit={exit_value}")
-        for pid, ppid, group, uid, state in rows:
+        for pid, ppid, group, uid, state in rows[:32]:
             failure_note(f"cleanup_snapshot pid={pid} ppid={ppid} pgid={group} uid={uid} state={state}")
     except Exception:
         failure_note("cleanup_snapshot completeness=unknown failure=observer_error")
 
 
+def eligible_member(pgid, row):
+    """Same-user, non-zombie, non-leader member observed in this group."""
+    pid, _, group, uid, state = row
+    return pid != pgid and group == pgid and uid == os.getuid() and not state.startswith("Z")
+
+
+def signal_group_members(pgid, sig, rows):
+    """macOS may deny killpg when the reserved leader is a reparented zombie.
+
+    Fall back only to observed, same-user live members, rechecking PGID immediately
+    before each signal. Never signal the leader or anything outside this group.
+    """
+    signalled = []
+    for row in rows:
+        pid = row[0]
+        if not eligible_member(pgid, row):
+            continue
+        try:
+            if os.getpgid(pid) != pgid:
+                continue
+            os.kill(pid, sig)
+            signalled.append(pid)
+        except OSError:
+            continue
+    return signalled
+
+
 def stop_group(pgid, leader_observation=None):
-    snapshot_taken = False
+    snapshot = None  # At most one bounded observation per invocation, taken on the first EPERM.
+    signalled = set()
     for sig, delay in ((signal.SIGTERM, 0.6), (signal.SIGKILL, 0.2)):
         try:
             os.killpg(pgid, sig)
         except ProcessLookupError:
             pass
         except PermissionError:
-            live = group_liveness(pgid, CLEANUP_PROBE_TIMEOUTS)
-            if not snapshot_taken:
-                snapshot_taken = True
-                cleanup_snapshot(pgid, sig, leader_observation)
-            if live is not False:
-                failure_note(f"killpg signal={sig.name} pgid={pgid} liveness={'live' if live else 'unknown'}")
-                raise
+            if snapshot is None:
+                snapshot = cleanup_snapshot_observation(pgid, member_limit=None)
+                cleanup_snapshot(pgid, sig, leader_observation, snapshot)
+            rows = snapshot[0]
+            targets = []
+            if any(eligible_member(pgid, row) for row in rows):
+                # Opportunistic only: a failed fallback preserves the original denial.
+                if group_liveness(pgid, (0.5,)) is not False:
+                    targets = signal_group_members(pgid, sig, rows)
+            if targets:
+                signalled.update(targets)
+                failure_note(f"cleanup pgid={pgid} signal={sig.name} pids={','.join(map(str, targets))}")
+            else:
+                live = group_liveness(pgid, CLEANUP_PROBE_TIMEOUTS)
+                if live is not False:
+                    failure_note(f"killpg signal={sig.name} pgid={pgid} liveness={'live' if live else 'unknown'}")
+                    raise
         time.sleep(delay)
+    return sorted(signalled)
 
 
 def failure_note(message):
@@ -3239,7 +3355,10 @@ def run(args, state, configuration, output=None):
                 and container_test_known(state, fingerprint, identity)):
             admission_args.kind = "integration"
             note("recorded container test: also claiming an integration permit (container_test_detection)")
-        while True:
+        heavy, integration = settings
+        if worktree.holder:
+            held = []
+        while worktree.holder is None:
             if cancelled[0]:
                 note("cancelled while queued")
                 if ledger:
@@ -3329,21 +3448,30 @@ def run(args, state, configuration, output=None):
             note(f"nice {options['phase_nice']} (phase_nice)")
         if options["cold_worktree_hint"] and args.kind in ("build", "test") and cold_worktree(os.getcwd()):
             note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
-        child_env = worktree.environment(child_env)
+        if args.kind in ("build", "test", "integration"):
+            child_env = dict(os.environ if child_env is None else child_env)
+            child_env.setdefault("DOTNET_CLI_USE_MSBUILD_SERVER", "0")
+            child_env.setdefault("MSBUILDDISABLENODEREUSE", "1")
+        child_env = holder_environment(state, worktree.root or worktree_root(phase_cwd), held, token,
+                                       child_env, worktree.holder) if args.kind != "ci" else child_env
         read_gate, write_gate = os.pipe()
         try:
             launcher = [sys.executable, str(Path(__file__).resolve()), "_launch", str(read_gate), "--", *command]
             output_options = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
             operation = "Popen"
-            proc = subprocess.Popen(launcher, pass_fds=[read_gate, *(fd for _, fd in held), *worktree.descriptors()],
+            proc = subprocess.Popen(launcher, pass_fds=[read_gate], close_fds=True,
                                     start_new_session=True, env=child_env, **output_options)
             os.close(read_gate)
             read_gate = -1
             operation = "publish"
-            publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, cwd=os.getcwd(),
+            publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, holderPid=os.getpid(),
+                               root=worktree.root, cwd=os.getcwd(),
                                label=args.label, kind=args.kind, priority=admission_args.priority, started=time.time(),
                                fast=admission_args.fast, policy=admission_args.policy, source=admission_args.source))
             worktree.publish(proc.pid)
+            if not nested_group(state, worktree.holder, proc.pid):
+                note("parent phase released its slots during nested registration; command not started")
+                return 125
             if cancelled[0]:
                 note("cancelled before execution; command not started")
                 if ledger:
@@ -3404,7 +3532,7 @@ def run(args, state, configuration, output=None):
         # Keep the group leader unreaped through both signals so its PGID cannot
         # be reused by an unrelated process, even when it exited first.
         operation = "stop_group"
-        stop_group(proc.pid, leader_observation)
+        cleanup_pids = stop_group(proc.pid, leader_observation)
         try:
             operation = "wait"
             proc.wait(timeout=2)
@@ -3422,7 +3550,8 @@ def run(args, state, configuration, output=None):
             return_code = 125
         if return_code == 125:
             producer_outcome(proc, producer_exit)
-        note(f"finished kind={args.kind} label={args.label} exit={return_code}")
+        note(f"finished kind={args.kind} label={args.label} exit={return_code}"
+             + (f" cleanup_pids={','.join(map(str, cleanup_pids))}" if cleanup_pids else ""))
         if args.kind in ("test", "integration"):
             warn_large_dumps(phase_cwd)
         return return_code
@@ -3449,6 +3578,9 @@ def run(args, state, configuration, output=None):
             alive = cleanup_step(errors, "group_alive", proc,
                                  lambda: group_alive({"pgid": proc.pid}, timeouts=CLEANUP_PROBE_TIMEOUTS))
             safe = alive is False
+        if proc is not None:
+            cleanup_step(errors, "nested_release", proc,
+                         lambda: nested_group(state, worktree.holder, proc.pid, safe))
         if held:
             cleanup_step(errors, "release", proc, lambda: release(state, held, token, safe or proc is None))
         cleanup_step(errors, "worktree_release", proc, lambda: worktree.close(safe or proc is None))
