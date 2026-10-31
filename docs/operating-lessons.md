@@ -114,3 +114,23 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Cause:** package copies in `bin` folders are hard links to one shared inode (up to 279 links). On macOS, `lsof` names an open inode by whichever link is in the vnode cache, so `lsof +D <dir>` lists processes that opened the same file through their own `bin` path. Each process's cwd and `lsof -p PID` showed it was using only its own output.
 - **Rule:** before treating a path as held, check the holder's own view (`lsof -p PID`) or the file's link count (`stat -f %l`). A file with more than one link whose holder opened it through another name is not held through this path, and deleting this link cannot affect that holder. Do not file "foreign assembly load" bugs on `lsof +D` evidence alone.
 - **Enforced:** practice (cleanup safety checks); candidate for the ai-work-lifecycle and pi-cleanup holder check to ignore open files whose link count is above 1 when the holder's own path is elsewhere.
+
+## 2026-10-31
+
+### Install setup changes from the reviewed commit, not the working tree
+- **Symptom:** a live install of pi-phase copied uncommitted work in progress from a worktree and ran it for a few minutes before it was reinstalled from the commit.
+- **Cause:** copying files from the worktree path picks up whatever is being edited at that moment.
+- **Rule:** install with `git show <sha>:agent/<path>` into a temp file, then move it into place; record the installed checksums; back up the previous live files first.
+- **Enforced:** practice (install protocol in the #81 plan).
+
+### Subagents cannot run long gates
+- **Symptom:** implementer subagents could not finish whole-suite gates under load.
+- **Cause:** subagents have no `job_start`, and their foreground bash calls are capped at 600 s.
+- **Rule:** when a gate may exceed about 10 minutes, the parent session runs it with `job_start`; the subagent runs targeted checks and reports.
+- **Enforced:** rule (brief template) / practice.
+
+### Timing-based tests flake under host load
+- **Symptom:** pi-phase tests such as the RSS-cap, cross-process slot and lock-descriptor tests failed in full runs at a load average of about 100 on 12 cores, and passed when run alone.
+- **Cause:** tight wall-clock assertions.
+- **Rule:** rerun a timing failure alone once before attributing it; report it as load-flaky with the load average; do not loosen the gate silently.
+- **Enforced:** practice; candidate for scaling test timeouts by load.
