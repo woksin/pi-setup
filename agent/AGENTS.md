@@ -208,7 +208,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 ## Local cross-repository verification
 
-- When a lower-layer Cratis fix needs proof in a consumer, use `cratis-engineering-local-cross-repo-verification` before waiting for release chains.
+- **Default for any change whose behaviour spans repositories (2026-10-28):** prove it end to end through local packages first, e.g. Stage.Axon → Stage → CLI, Chronicle → Stage → CLI, Screenplay → Stage → target. Pack each changed producer at its exact SHA as a `-local` prerelease into a task-local feed, restore the consumers from it, and run the consumer specs plus the real end-to-end flow (render → build → specs → run). Do this before the producer releases and before delivery or merge. Never wait for a release chain to test, and never treat a single-repo pass as end-to-end proof. Use `cratis-engineering-local-cross-repo-verification`.
 - Set `CRATIS_LOCAL_RUN=~/.pi/agent/bin/cratis-local-run` after installing the proposed adapter; the helper sends each heavy step through pi-phase.
 - Wrap separate consumer builds/tests and image commands too: `cratis-local-run <kind> <label> -- <cmd...>`.
 - Use kind `integration` for Docker builds and container specs; use `build` or `test` for other steps.
