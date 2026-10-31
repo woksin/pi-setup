@@ -908,7 +908,7 @@ def config(path, *, notes=None):
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
                     host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
-                    failure_categories=True,
+                    failure_categories=True, hang_timeout=dict(mode="off"),
                     fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
                     queue_order=dict(QUEUE_ORDER_DEFAULTS), policy=[])
     try:
@@ -948,6 +948,9 @@ def config(path, *, notes=None):
             continue
         elif key == "cpu_budget":
             values[key] = cpu_budget_config(value, warn)
+            continue
+        elif key == "hang_timeout":
+            values[key] = hang_timeout_config(value, warn)
             continue
         elif key == "container_test_detection":
             valid = value in ("off", "hint", "promote")
@@ -2075,6 +2078,87 @@ def hang_dump_defaults(command, diagnose_hang=False):
         if any(flag in options for flag in flags) and dump_type not in options:
             defaults[dump_type] = value
     return defaults
+
+
+HANG_TIMEOUT_DEFAULTS = dict(seconds=150, kinds=["test"], paths=[])
+HANG_TIMEOUT_MARGIN_S = 30
+
+
+def hang_timeout_config(value, warn=None):
+    """{"mode": "off"|"on", "seconds", "kinds", "paths"}; anything invalid means off."""
+    warn = warn or note
+    off = dict(mode="off")
+    if not isinstance(value, dict):
+        warn(f"invalid hang_timeout; using default {off!r}")
+        return off
+    for key in value.keys() - HANG_TIMEOUT_DEFAULTS.keys() - {"mode"}:
+        warn(f"unknown hang_timeout key {key}; ignored")
+    settings = {key: value.get(key, default) for key, default in HANG_TIMEOUT_DEFAULTS.items()}
+    valid = (type(settings["seconds"]) is int and 1 <= settings["seconds"] <= 3600
+             and isinstance(settings["kinds"], list) and set(settings["kinds"]) <= {"build", "test"}
+             and isinstance(settings["paths"], list) and all(type(item) is str for item in settings["paths"]))
+    if value.get("mode", "off") not in ("off", "on") or not valid:
+        warn(f"invalid hang_timeout; using default {off!r}")
+        return off
+    return off if value.get("mode", "off") == "off" else dict(settings, mode="on")
+
+
+def test_runner_is_mtp(cwd):
+    """True (or unknown) when the nearest global.json up to the git top selects Microsoft.Testing.Platform."""
+    directory = Path(os.path.realpath(cwd))
+    for candidate in (directory, *directory.parents):
+        file = candidate / "global.json"
+        if file.is_file():
+            try:
+                data = json.loads(file.read_text())
+                runner = data.get("test", {}).get("runner")
+            except (OSError, ValueError, AttributeError):
+                return True  # Unreadable runner choice: do not risk an unsupported option.
+            return runner == "Microsoft.Testing.Platform"
+        if (candidate / ".git").exists():
+            break
+    return False
+
+
+def hang_timeout_skip_reason(command, args, settings, cwd):
+    """None when the hang timeout applies, else why not (empty string for silent skips)."""
+    if settings["mode"] != "on" or args.kind not in settings["kinds"] or args.kind in ("integration", "ci"):
+        return ""
+    if (getattr(args, "no_hang_timeout", False) or args.diagnose_hang
+            or args.vstest_hang_minutes is not None):
+        return ""
+    inner = unwrap_command(command, stop_at_shell=True)
+    if not inner or Path(inner[0]).name != "dotnet" or inner[1:2] != ["test"]:
+        return ""  # Shell strings and scripts (Tier 1 gates) keep CI's timeouts.
+    if any(re.match(r"--(blame|hangdump|testing-platform)", argument) for argument in inner):
+        return ""
+    real = os.path.realpath(cwd)
+    inherited = main_worktree(real) if settings["paths"] else None
+    candidates = (real, inherited) if inherited is not None else (real,)
+    if settings["paths"] and not any(fnmatch.fnmatchcase(path, os.path.expanduser(pattern))
+                                     for path in candidates for pattern in settings["paths"]):
+        return ""
+    if settings["seconds"] > args.timeout - HANG_TIMEOUT_MARGIN_S:
+        return ""
+    if test_runner_is_mtp(real):
+        return "hang timeout skipped: global.json selects Microsoft.Testing.Platform"
+    return None
+
+
+def apply_hang_timeout(command, args, settings, cwd):
+    """Append --blame-hang-timeout (no dump) to a direct VSTest dotnet test at the dump-injection boundary."""
+    reason = hang_timeout_skip_reason(command, args, settings, cwd)
+    if reason is not None:
+        if reason:
+            note(reason)
+        return command
+    seconds = settings["seconds"]
+    injected = ["--blame-hang-timeout", f"{seconds}s", "--blame-hang-dump-type", "none"]
+    if getattr(args, "ledger", None) is not None:
+        args.ledger.record["hangTimeoutS"] = seconds
+    note(f"hang timeout {seconds}s injected (hang_timeout; pass --no-hang-timeout to opt out)")
+    boundary = dump_option_end(command)
+    return [*command[:boundary], *injected, *command[boundary:]]
 
 
 def prepare_dump_command(command, diagnose_hang=False):
@@ -3775,6 +3859,7 @@ def run(args, state, configuration, output=None):
         config_notes = set()
         settings = config(configuration, notes=config_notes)
         options = settings.options
+        command = apply_hang_timeout(command, admission_args, options["hang_timeout"], phase_cwd)
         identity = work_identity(os.getcwd(), original_command, args.kind)
         prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity)
         if ledger:
@@ -4137,6 +4222,7 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--pr", help="ci watcher PR identity")
     runner.add_argument("--commit", help="ci watcher commit identity")
     runner.add_argument("--vstest-hang-minutes", type=int, help="opt-in VSTest-only hang diagnostics without dumps")
+    runner.add_argument("--no-hang-timeout", action="store_true", help="skip the configured hang_timeout injection")
     runner.add_argument("--vstest-confirmed", action="store_true", help="attest project uses VSTest, not MTP")
     runner.add_argument("--diagnose-hang", action="store_true", help="declare active hang diagnosis; suppress mini-dump warnings only")
     runner.add_argument("--log", help="write producer stdout/stderr to FILE instead of streaming", metavar="FILE")

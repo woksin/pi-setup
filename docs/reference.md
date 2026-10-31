@@ -24,6 +24,10 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 | `cratis-local-run` | Wrapper that sends each step of a cross-repository check through `pi-phase`. | `cratis-local-run --help` | [source](../agent/bin/cratis-local-run) |
 | `pi-setup-tests` | Runs the `lib/*.test.ts` tests of an agent directory. | `pi-setup-tests --help` | [source](../agent/bin/pi-setup-tests) |
 
+### pi-phase options added by #81 (all off by default)
+
+- `hang_timeout` config key and `pi-phase run --no-hang-timeout`: fail-fast `--blame-hang-timeout` for direct VSTest `dotnet test` iteration runs. Details in the [pi-phase README](../agent/pi-phase/README.md).
+
 ## Pull requests and trains
 
 Train shipping reads `.pi/trains/config.json`. Configure `gateComponents` by exact repository name to require every component for the current train HEAD:

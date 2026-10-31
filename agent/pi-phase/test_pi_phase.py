@@ -1311,7 +1311,7 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(settings, (2, 1))
         self.assertEqual(settings.options, dict(policy=[], msbuild_max_cpu=0, container_test_detection="hint",
                                                 cold_worktree_hint=True, memory_admission=False, phase_nice=0,
-                                                rss_cap_mb=12288, skip_passed_integration=False, max_high=3, failure_categories=True,
+                                                rss_cap_mb=12288, skip_passed_integration=False, max_high=3, failure_categories=True, hang_timeout=dict(mode="off"),
                          host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
                                                 fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
     queue_order=dict(mode="shortest-first", aging_s=600, default_expected_s=180, low_promote_after_s=900)))
@@ -1341,7 +1341,7 @@ class PhaseTests(unittest.TestCase):
         self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
         self.assertEqual(pi_phase.config(self.config).options,
                          dict(policy=[], msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0,
-                              rss_cap_mb=12288, skip_passed_integration=False, max_high=3, failure_categories=True,
+                              rss_cap_mb=12288, skip_passed_integration=False, max_high=3, failure_categories=True, hang_timeout=dict(mode="off"),
                          host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
                               fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
     queue_order=dict(mode="shortest-first", aging_s=600, default_expected_s=180, low_promote_after_s=900)))
