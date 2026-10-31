@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import signal
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -461,6 +462,8 @@ class PhaseLedger:
                            exit=None, outcome="rejected", head=None, dirty=None, verified=False, envHash=env_hash(),
                            argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest(),
                            fingerprint=test_fingerprint(cwd, command) if cwd is not None else None)
+        self.args, self.command = args, command
+        self.records = []
         self.queued = time.monotonic()
         self.started = None
         self.enqueued = False
@@ -479,6 +482,18 @@ class PhaseLedger:
             self.snapshot_ready = all(value is not None for value in result)
         except Exception:
             pass  # Timeout/non-Git cwd retains the post-registration best-effort snapshot.
+        self.compute_gate_key()
+
+    def compute_gate_key(self):
+        if self.snapshot_ready and self.record["kind"] != "ci":
+            try:
+                key = gate_key(self.record["cwd"], self.command, self.record["kind"], self.record["head"],
+                               self.record["dirty"], self.record["stack"], self.record["envHash"],
+                               getattr(self.args, "profile", None) or "full")
+            except Exception:
+                key = None  # Optional metadata; a failure only disables deduplication.
+            if key:
+                self.record["gateKey"] = key
 
     def passed_state(self, state):
         if not self.snapshot_ready or self.record["dirty"] is None:
@@ -487,10 +502,20 @@ class PhaseLedger:
             records, _ = read_ledger(state, days=14)
         except (OSError, ValueError):
             return None, None  # Unreadable history must not prevent execution.
+        self.records = records
         matches = [r for r in reversed(records) if self.matches_state(r)]
         passed = next((r for r in matches if r["outcome"] == "passed" and r.get("label") == self.record["label"]), None)
         failed = next((r for r in matches if repeat_failure(r)), None)
         return passed, failed
+
+    def cross_worktree_passed(self):
+        """A verified passed build/test record of the same gateKey from any worktree (never integration or ci)."""
+        key = self.record.get("gateKey")
+        if not key or self.record["kind"] not in ("build", "test"):
+            return None
+        return next((r for r in reversed(self.records)
+                     if r.get("gateKey") == key and r.get("verified") is True and r.get("outcome") == "passed"
+                     and r.get("kind") == self.record["kind"]), None)
 
     def matches_state(self, record):
         keys = ("cwd", "kind", "argvHash", "head", "dirty", "stack", "envHash")
@@ -909,6 +934,7 @@ def config(path, *, notes=None):
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
                     host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
                     failure_categories=True, hang_timeout=dict(mode="off"), reap_build_servers=dict(mode="off"),
+                    skip_cross_worktree=False,
                     fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
                     queue_order=dict(QUEUE_ORDER_DEFAULTS), policy=[])
     try:
@@ -1808,8 +1834,8 @@ def digest(*parts):
     return hashlib.sha1("\0".join(parts).encode()).hexdigest()
 
 
-def repository_location(cwd):
-    """(common git dir without .git, path of cwd relative to the checkout), one bounded git call."""
+def repository_layout(cwd):
+    """(common git dir without .git, path of cwd relative to the checkout, real checkout top, top as git printed it)."""
     try:
         real = os.path.realpath(cwd)
     except OSError:
@@ -1822,9 +1848,76 @@ def repository_location(cwd):
         common, top = os.path.realpath(lines[0]), os.path.realpath(lines[1])
         if Path(common).name == ".git":
             common = str(Path(common).parent)
-        return common, os.path.relpath(real, top)
+        return common, os.path.relpath(real, top), top, lines[1]
     except (OSError, IndexError, subprocess.SubprocessError):
-        return real, ""
+        return real, "", None, None
+
+
+def repository_location(cwd):
+    """(common git dir without .git, path of cwd relative to the checkout), one bounded git call."""
+    common, rel, _, _ = repository_layout(cwd)
+    return common, rel
+
+
+GATE_OPERAND_LIMIT = 1_000_000
+
+
+def gate_argv_hash(command, cwd, top, given_top):
+    """Argv with the worktree top replaced by <root>, plus the content of every operand file inside the top."""
+    roots = sorted({item for item in (top, given_top) if item}, key=len, reverse=True)
+    parts, contents = [], []
+    for argument in command:
+        shown = argument
+        for root in roots:
+            shown = shown.replace(root, "<root>")
+        parts.append(shown)
+        try:
+            path = Path(argument) if os.path.isabs(argument) else Path(cwd) / argument
+            real = os.path.realpath(path)
+            if (os.path.commonpath([real, top]) == top and os.path.isfile(real)
+                    and os.path.getsize(real) <= GATE_OPERAND_LIMIT):
+                contents.append(f"{os.path.relpath(real, top)}:{hashlib.sha256(Path(real).read_bytes()).hexdigest()}")
+        except (OSError, ValueError):
+            continue
+    return digest(*parts, "--", *contents)
+
+
+def gate_toolchain_hash(command, cwd, top):
+    """global.json bytes up to the checkout top, installed SDK names and the resolved tool executable."""
+    parts = []
+    directory = Path(os.path.realpath(cwd))
+    for candidate in (directory, *directory.parents):
+        file = candidate / "global.json"
+        if file.is_file():
+            try:
+                parts.append(hashlib.sha256(file.read_bytes()).hexdigest())
+            except OSError:
+                parts.append("unreadable")
+            break
+        if str(candidate) == top:
+            break
+    dotnet = shutil.which("dotnet")
+    if dotnet:
+        sdk = Path(os.path.realpath(dotnet)).parent / "sdk"
+        try:
+            parts.append(",".join(sorted(item.name for item in sdk.iterdir())))
+        except OSError:
+            parts.append("no-sdk-list")
+    argv = unwrap_command(command) or command
+    tool = shutil.which(argv[0]) if argv else None
+    parts.append(os.path.realpath(tool) if tool else "")
+    return digest(*parts)
+
+
+def gate_key(cwd, command, kind, head, dirty, stack, env, profile):
+    """Worktree-independent identity of one gate run; None when it cannot be computed safely."""
+    if head is None or dirty is None:
+        return None
+    common, rel, top, given_top = repository_layout(cwd)
+    if top is None:
+        return None
+    return digest("gate-v1", digest(common), rel or ".", kind, head, dirty, stack or "", env,
+                  gate_argv_hash(command, cwd, top, given_top), gate_toolchain_hash(command, cwd, top), profile)
 
 
 def strip_target(argument):
@@ -3921,6 +4014,18 @@ def run(args, state, configuration, output=None):
                     note(f"skipped: this exact state already passed at {passed['ts']} "
                          f"(kind={args.kind} label={args.label} head={passed['head'][:7]} "
                          f"run={passed['runS']:g}s); pass --rerun to run again")
+                    ledger.outcome("skipped")
+                    return 0
+            if (options["skip_cross_worktree"] and not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1"
+                    and args.kind in ("build", "test")):
+                if ledger.record["dirty"] is None and ledger.record["head"] is not None:
+                    note("tree state too large to hash; not deduplicating")
+                other = ledger.cross_worktree_passed()
+                if other:
+                    note(f"skipped: an identical gate already passed in {other.get('cwd')} at {other['ts']} "
+                         f"(kind={args.kind} head={other['head'][:7]} run={other['runS']:g}s); "
+                         "pass --rerun to run again")
+                    ledger.record["dedupedFrom"] = other["ts"]
                     ledger.outcome("skipped")
                     return 0
         queued = time.monotonic()

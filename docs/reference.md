@@ -27,6 +27,7 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 ### pi-phase options added by #81 (all off by default)
 
 - `hang_timeout` config key and `pi-phase run --no-hang-timeout`: fail-fast `--blame-hang-timeout` for direct VSTest `dotnet test` iteration runs. Details in the [pi-phase README](../agent/pi-phase/README.md).
+- `skip_cross_worktree` config key (default `false`): skip a build/test whose identical gate already passed in another worktree of the repository; never integration, `--rerun` forces a run.
 - `reap_build_servers` config key (default `{"mode": "off"}`): enables `reap-build-servers`. With `PI_PHASE_SHARED_COMPILATION=1` each phase gets its own `SharedCompilationId` and stops only that server when it ends.
 
 ## Pull requests and trains
