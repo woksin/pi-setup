@@ -26,6 +26,22 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 
 ## Pull requests and trains
 
+Train shipping reads `.pi/trains/config.json`. Configure `gateComponents` by exact repository name to require every component for the current train HEAD:
+
+```json
+{
+  "requireGate": true,
+  "gateComponents": {
+    "Cratis/Chronicle": [
+      { "id": "release", "kind": "build", "label": "tier1 release" },
+      { "id": "specs", "kind": "test", "label": "tier1 spec" }
+    ]
+  }
+}
+```
+
+Each component needs a unique nonempty `id`, `kind` (`build` or `test`) and a case-insensitive regex `label`. Only passed, verified, clean records for the exact HEAD count. Integration is never Tier 1. Missing components block shipping when `requireGate` is true; otherwise they warn. Without a repository component list, shipping warns and retains the legacy any-build/test evidence check. Ledger records need no new fields. Gate estimates prefer the median of at least three measured clean passing chains, otherwise the sum of per-kind build/test p90s; integration is excluded.
+
 | Tool | Purpose | Help | Source |
 |---|---|---|---|
 | `pi-train` | Manages a release train: fold several PRs into one branch, check status and ship it. See [Release trains](../README.md#release-trains). | `pi-train --help` | [source](../agent/bin/pi-train) |
