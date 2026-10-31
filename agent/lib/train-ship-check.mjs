@@ -3,13 +3,21 @@ import { join } from 'node:path';
 import { TrainError } from './train-gh.mjs';
 import { trainHome } from './train-manifest.mjs';
 
-export async function shipConfig(ctx) {
-  try {
-    const config = JSON.parse(await readFile(join(trainHome(ctx.env), 'config.json'), 'utf8'));
-    validateComponents(config);
-    return config;
-  }
+// Built-in Tier 1 component sets, derived from each repository's CI; the user's config.json wins per repository.
+const DEFAULTS = new URL('./train-gate-defaults.json', import.meta.url);
+
+async function readJson(file) {
+  try { return JSON.parse(await readFile(file, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+}
+
+export async function shipConfig(ctx) {
+  const defaults = await readJson(DEFAULTS);
+  const config = await readJson(join(trainHome(ctx.env), 'config.json'));
+  validateComponents(defaults);
+  validateComponents(config);
+  if (defaults.gateComponents) config.gateComponents = { ...defaults.gateComponents, ...config.gateComponents };
+  return config;
 }
 
 function validateComponent(component) {
@@ -77,16 +85,23 @@ function componentEvidence(ctx, manifest, config, records) {
   return matches.map(({ component, record }) => `${component.id}: ${describeEvidence(record)}`).join('\n');
 }
 
-export async function gateEvidence(ctx, manifest, config) {
+function unconfiguredEvidence(ctx, manifest, config, evidence, options) {
+  if (!options.allowUnconfiguredGate) {
+    throw new TrainError(`no gateComponents configured for ${manifest.repo}; add a Tier 1 component set to the train config or pass --allow-unconfigured-gate`);
+  }
+  ctx.err(`warning: --allow-unconfigured-gate: no gateComponents for ${manifest.repo}; accepting any verified clean build/test`);
+  if (evidence.length) return evidence.map(describeEvidence).join('\n');
+  return missingEvidence(ctx, config, `no verified Tier 1 for ${manifest.head.slice(0, 7)}`);
+}
+
+export async function gateEvidence(ctx, manifest, config, options = {}) {
   validateComponents(config);
   const directory = join(ctx.env.HOME, '.pi', 'agent', 'pi-phase', 'state', 'ledger');
   const records = await ledgerEntries(directory);
   const evidence = records.filter(record => validGateRecord(record, manifest));
   const components = config.gateComponents?.[manifest.repo];
   if (components) return componentEvidence(ctx, manifest, config, evidence);
-  ctx.err(`warning: no gateComponents for ${manifest.repo}; any verified clean build/test accepted`);
-  if (evidence.length) return evidence.map(describeEvidence).join('\n');
-  return missingEvidence(ctx, config, `no verified Tier 1 for ${manifest.head.slice(0, 7)}`);
+  return unconfiguredEvidence(ctx, manifest, config, evidence, options);
 }
 
 function pending(item) {

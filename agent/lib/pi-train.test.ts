@@ -804,12 +804,22 @@ test('adopt attaches an unchecked-out branch without recreating it; dry run crea
   assert.equal(f.calls.some(call => call.args.includes('branch') && call.args.includes(TRAIN)), false);
 });
 
-async function readyToShip(t: any) {
+async function readyToShip(t: any, closed = false) {
   const f = await setup(t);
   f.state.pr.labels = [{ name: 'patch' }, { name: 'minor' }];
   assert.equal(await f.invoke('fold', '7'), 0, f.errors.join('\n'));
+  // Ship tests exercise the legacy any-build/test evidence; the fail-closed default has its own test.
+  if (!closed) { const invoke = f.invoke; f.invoke = (...args: string[]) => invoke(...(args[0] === 'ship' ? [...args, '--allow-unconfigured-gate'] : args)); }
   return f;
 }
+
+test('ship fails closed without a Tier 1 component set, and the override is logged', async t => {
+  const f = await readyToShip(t, true);
+  assert.equal(await f.invoke('ship'), 1); assert.match(f.errors.join('\n'), /no gateComponents configured for acme\/widget.*--allow-unconfigured-gate/);
+  assert.equal(f.state.pushes, 0);
+  assert.equal(await f.invoke('ship', '--allow-unconfigured-gate'), 0, f.errors.join('\n'));
+  assert.match(f.errors.join('\n'), /--allow-unconfigured-gate: no gateComponents for acme\/widget/);
+});
 
 test('ship creates a PR, aggregates notes, warns without gate evidence, links items and is idempotent', async t => {
   const f = await readyToShip(t);

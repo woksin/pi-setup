@@ -1,0 +1,8 @@
+{
+  "gateComponents": {
+    "Cratis/Chronicle": [
+      { "id": "release", "kind": "build", "label": "tier ?1(?!.*spec).*(release|build)" },
+      { "id": "specs", "kind": "test", "label": "tier ?1.*spec" }
+    ]
+  }
+}

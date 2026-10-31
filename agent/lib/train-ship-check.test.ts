@@ -20,10 +20,34 @@ async function fixture(t: any, records: any[] = []) {
   return { root, warnings, ctx: { env: { HOME: root, PI_TRAIN_DIR: join(root, 'trains') }, err: (line: string) => warnings.push(line) } };
 }
 
-test('legacy evidence is unchanged with one explicit missing-config warning', async t => {
+test('a repository without a component set fails closed, naming the override', async t => {
   const f = await fixture(t, [record]);
-  assert.match(await gateEvidence(f.ctx, manifest, {}), /build: TIER1 release/);
-  assert.deepEqual(f.warnings, ['warning: no gateComponents for Test/Repo; any verified clean build/test accepted']);
+  await assert.rejects(gateEvidence(f.ctx, manifest, {}), { message: /no gateComponents configured for Test\/Repo.*--allow-unconfigured-gate/ });
+  await assert.rejects(gateEvidence(f.ctx, manifest, { requireGate: false }, { allowUnconfiguredGate: false }), TrainError);
+  assert.deepEqual(f.warnings, []);
+});
+
+test('--allow-unconfigured-gate accepts legacy evidence with a logged warning', async t => {
+  const f = await fixture(t, [record]);
+  assert.match(await gateEvidence(f.ctx, manifest, {}, { allowUnconfiguredGate: true }), /build: TIER1 release/);
+  assert.deepEqual(f.warnings, ['warning: --allow-unconfigured-gate: no gateComponents for Test/Repo; accepting any verified clean build/test']);
+  const none = await fixture(t, []);
+  await assert.rejects(gateEvidence(none.ctx, manifest, { requireGate: true }, { allowUnconfiguredGate: true }), /no verified Tier 1/);
+});
+
+test('shipConfig supplies the built-in Chronicle component set and lets the user config override it', async t => {
+  const f = await fixture(t);
+  const chronicle = { repo: 'Cratis/Chronicle', head: manifest.head };
+  const config = await shipConfig(f.ctx);
+  assert.deepEqual(config.gateComponents['Cratis/Chronicle'].map((c: any) => c.id), ['release', 'specs']);
+  const ledger = [{ ...record, label: '12 tier1 release build' }, { ...record, kind: 'test', label: '12 tier1 specs' }];
+  const g = await fixture(t, ledger);
+  assert.match(await gateEvidence(g.ctx, chronicle, config), /release: build: 12 tier1 release build/);
+  const wrong = await fixture(t, [{ ...record, label: 'tier1 specs build' }]);
+  await assert.rejects(gateEvidence(wrong.ctx, chronicle, { ...config, requireGate: true }), /missing release, specs/);
+  await mkdir(f.ctx.env.PI_TRAIN_DIR);
+  await writeFile(join(f.ctx.env.PI_TRAIN_DIR, 'config.json'), JSON.stringify({ gateComponents: { 'Cratis/Chronicle': [{ id: 'only', kind: 'build', label: 'x' }] } }));
+  assert.deepEqual((await shipConfig(f.ctx)).gateComponents['Cratis/Chronicle'].map((c: any) => c.id), ['only']);
 });
 
 test('every configured component is listed, matched case-insensitively by kind and regex', async t => {
