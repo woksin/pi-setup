@@ -39,14 +39,15 @@ Ordered, small steps, each naming the file(s) and the change, and the specs/test
 
 ## Verify with
 - Configuration to verify: <e.g. Release, warnings as errors; must match CI>.
-- Iterate with: `<narrow affected-project command>`.
+- Iterate with: `<narrow affected-project command>`. For a .NET `dotnet build`/`dotnet test` argv, run it as `pi-phase run --profile iterate ...` (analyzers and code style off). Iterate runs are never delivery or gate evidence.
+- Before delivery: one full-profile build of the touched projects in the configuration above (analyzers on), then the Done gate.
 - Finish with the Done gate once. Use `pi-phase run ... --log <repo>/.ai-work/<task>/<phase>.log` instead of redirects, pipes or `; echo $?`. A `pi-phase run` goes alone in its tool turn, never batched with edits or quick checks (a parallel batch records results only when all calls finish).
 
 ## Stop and report (do not work around) when
 - The gate fails for a reason outside your files, or a pre-existing test fails.
 - The spec is ambiguous or the fix needs a design decision.
 - You would need to touch files outside "Files you own".
-- Two attempts at the same code or test failure did not change the result.
+- Two attempts at the same code or test failure did not change the result. Never rerun a failed phase on an unchanged tree: read the failing log first, then change code, inputs or the diagnosis (a named flaky or infrastructure cause) before the rerun.
 - `pi-phase` exit 75 (queue timeout) is not a failed attempt. Never loop short requeues (each retry goes to the back). Continue code work, then retry the phase once in the background (`job_start`) with `--queue-timeout 3600 --approved-long-timeout` (up to 7200 for integration; a deep `pi-phase status` queue is the runtime basis) and `--priority low` unless a merge waits on it. If that also times out, report "gate not run: queue saturated", not "failed". A duplicate CI watcher also returns 75: reuse the existing watch, do not retry it.
 
 ## Report back (≤ 1.5k characters; details go in a file)
