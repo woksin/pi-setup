@@ -848,7 +848,8 @@ class PhaseTests(unittest.TestCase):
                                       "head", "dirty", "argvHash", "stack", "envHash", "profile", "verified", "fingerprint", "fast", "policy", "source",
                                   "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis",
                                   "waitV", "waitBreakdown", "waitScans", "waitSamples",
-                                  "host", "peakRssMb", "peakProcRssMb"})
+                                  "host", "peakRssMb", "peakProcRssMb",
+                                  "obsV", "configHash", "configSummary", "hangTimeout", "workersSource"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
