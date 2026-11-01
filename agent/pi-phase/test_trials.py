@@ -91,6 +91,70 @@ class ChildCpuTests(RunBase):
         self.assertNotIn("childCpuS", self.records()[0])
 
 
+class TrialReportTests(RunBase):
+    def report(self, *flags):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = pi_phase.main(["report", *flags], state=self.state, configuration=self.config)
+        return code, output.getvalue()
+
+    def test_empty_trial_is_read_only_and_legacy_ignored(self):
+        code, output = self.report("--trial", "ab", "--json")
+        self.assertEqual((code, json.loads(output)), (0, dict(trial="ab", windows=[], arms={})))
+        self.assertFalse(self.state.exists())
+        pi_phase.append_ledger(self.state, dict(v=1, ts=pi_phase.utc_stamp(), kind="test", startedAt=None,
+                                               waitS=0, runS=0, outcome="queue-timeout"))
+        self.assertEqual(json.loads(self.report("--trial", "ab", "--json")[1])["windows"], [])
+
+    def test_windows_backlog_pooling_latency_and_resources(self):
+        from trial_report import trial_summary
+        def record(queued, started, ended, **fields):
+            base = dict(trial=dict(name="ab", arm="a", started="2026-01-01T00:00:00Z"),
+                        ts=ended, queuedAt=queued, startedAt=started, endedAt=ended, kind="test",
+                        policy="queued", waitS=1800, runS=600, outcome="passed", repoKey="r",
+                        host=dict(swapGrowth=3, swapMb=10, load1=4), peakRssMb=100, childCpuS=60,
+                        hangTimeout="applied", hangKill=True)
+            return dict(base, **fields)
+        a = record("2026-01-01T00:15:00Z", "2026-01-01T00:45:00Z", "2026-01-01T00:50:00Z")
+        b = record("2026-01-01T00:20:00Z", "2026-01-01T00:40:00Z", "2026-01-01T00:42:00Z", outcome="timeout", runS=1200)
+        settling = record("2025-12-31T23:59:00Z", "2026-01-01T00:10:00Z", "2026-01-01T00:12:00Z", policy="direct", waitS=0)
+        spill = record("2026-01-01T00:30:00Z", "2026-01-01T01:00:00Z", "2026-01-01T01:10:00Z", retryOf=b["ts"])
+        next_window = record("2026-01-01T01:15:00Z", "2026-01-01T01:45:00Z", "2026-01-01T02:00:00Z",
+                             trial=dict(name="ab", arm="b", started="2026-01-01T01:00:00Z"))
+        result = trial_summary([a, b, settling, spill, next_window], "ab", 900)
+        first = result["windows"][0]
+        self.assertEqual((first["spanH"], first["records"], first["started"], first["completed"]), (1, 4, 4, 3))
+        self.assertEqual((first["carryOver"], first["settling"], first["spill"]), (1, 1, 1))
+        self.assertEqual(first["backlogH"], 0.75)
+        self.assertAlmostEqual(first["completedPerBacklogH"], 1 / 0.75)
+        self.assertEqual(first["waitRunS"]["all"], dict(p50=2400, p95=3000))
+        self.assertEqual(first["timeouts"], 1)
+        self.assertAlmostEqual(first["timeoutH"], 1 / 3)
+        self.assertAlmostEqual(first["retryAfterTimeoutH"], 1 / 6)
+        self.assertEqual((first["swapGrowth"], first["swapMbMax"], first["load1"], first["peakRssMb"]), (3, 10, 4, 100))
+        self.assertEqual(first["hang"], dict(applied=4, hangKill=4))
+        self.assertEqual((result["arms"]["a"]["windows"], result["arms"]["a"]["validWindows"]), (1, 0))
+        pooled = trial_summary([a, dict(a, trial=dict(a["trial"], started="2026-01-01T01:00:00Z"),
+                                      endedAt="2026-01-01T02:00:00Z")], "ab", 0)
+        self.assertEqual(pooled["arms"]["a"]["windows"], 2)
+        self.assertEqual(pooled["arms"]["a"]["records"], 2)
+
+    def test_plain_shadow_accuracy_and_confusion(self):
+        from trial_report import shadow_summary
+        records = [dict(outcome="passed", runS=10, fast=False,
+                        fastShadow=dict(predS=5, basis="exact-warm", would=True, limS=20)),
+                   dict(outcome="passed", runS=30, fast=True,
+                        fastShadow=dict(predS=30, basis="exact-cold", would=False, limS=20)),
+                   dict(outcome="failed", runS=10, fastShadow=dict(predS=5))]
+        result = shadow_summary(records)
+        self.assertEqual(result["n"], 2)
+        self.assertEqual(result["mdapePct"], dict(warm=50, cold=0, any=None))
+        self.assertEqual(result["would"], dict(tp=1, fp=0, fn=0, tn=1))
+        self.assertEqual(result["current"], dict(tp=0, fp=1, fn=1, tn=0))
+        self.assertIn("fastShadow", json.loads(self.report("--json")[1]))
+        self.assertIn("hangKill", json.loads(self.report("--json")[1]))
+
+
 class TrialConfigTests(RunBase):
     def test_valid_absent_hash_summary_and_overlay(self):
         original = pi_phase.config(self.config)

@@ -927,12 +927,19 @@ def report_summary(records, days, skipped):
                   cpuBudgetMeanWorkers={kind: round(total / count, 2) for kind, (total, count) in sorted(mean.items())},
                   msbuildCalls=calls, observe=observe, admitObserve=admit, wouldHoldAtAdmit=hold,
                   reaper=dict(phasesWithDue=due), retries=retries)
+    from trial_report import shadow_summary
+    result.update(fastShadow=shadow_summary(records), hangKill=sum(r.get("hangKill") is True for r in records))
     return result
 
 
-def report(state, days, as_json):
+def report(state, days, as_json, trial=None, settle=900):
     """Read-only: never creates state."""
     records, skipped = read_ledger(state, days)
+    if trial is not None:
+        from trial_report import trial_summary, trial_text
+        result = trial_summary(records, trial, settle)
+        print(json.dumps(result, sort_keys=True) if as_json else trial_text(result))
+        return 0
     result = report_summary(records, days, skipped)
     if as_json:
         print(json.dumps(result, sort_keys=True))
@@ -952,6 +959,8 @@ def report(state, days, as_json):
               f" admit={result['admitObserve'][kind]} wouldHoldAtAdmit={result['wouldHoldAtAdmit'][kind]}")
     print(f"reaper phasesWithDue={result['reaper']['phasesWithDue']}")
     print("retries " + " ".join(f"{k}={v}" for k, v in result["retries"].items()))
+    print("fastShadow " + json.dumps(result["fastShadow"], sort_keys=True))
+    print(f"hangKill={result['hangKill']}")
     return 0
 
 
@@ -4777,6 +4786,8 @@ def main(argv=None, *, state=None, configuration=None):
     reporting = commands.add_parser("report", help="summarize trial observability fields from the ledger")
     reporting.add_argument("--days", type=int, default=7)
     reporting.add_argument("--json", action="store_true")
+    reporting.add_argument("--trial")
+    reporting.add_argument("--settle", type=int, default=900)
     summary = commands.add_parser("stats", help="summarize phase history by UTC day and kind")
     summary.add_argument("--days", type=int, default=7)
     summary.add_argument("--kind", choices=KINDS)
@@ -4858,7 +4869,9 @@ def main(argv=None, *, state=None, configuration=None):
         if args.action == "report":
             if args.days < 1:
                 parser.error("--days must be positive")
-            return report(state, args.days, args.json)
+            if args.settle < 0:
+                parser.error("--settle must be nonnegative")
+            return report(state, args.days, args.json, args.trial, args.settle)
         if args.action == "wait":
             return wait_eta(state, configuration, args.kind, args)
         if args.action == "status":
