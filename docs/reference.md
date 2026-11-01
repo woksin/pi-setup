@@ -40,7 +40,7 @@ Re-validate the rules when a repo's csproj conventions change (new generator, ne
 
 ### CI feedback
 
-Run `ci-feedback Cratis/cli --days 7 --limit 40` for readable tables, or add `--json` for individual job timings and full metrics. Requires authenticated `gh`; uses Node stdlib only. `--signal-pattern 'compile|unit'` overrides the case-insensitive build/spec/test job-name heuristic (only executed completed jobs count).
+Run `ci-feedback Cratis/cli --days 7 --limit 40` for readable tables, or add `--json` for individual job timings and full metrics. Requires authenticated `gh`; uses Node stdlib only. `--workflow dotnet-build.yml` (repeatable; file name or numeric id) restricts the sample to those workflows via the per-workflow runs endpoint; `--limit` then applies per workflow, results are merged and deduplicated by run id, and the JSON report's `workflowFilter` field lists the filter (`null` when absent). Transient GitHub errors (HTTP 5xx, 429, secondary rate limit) are retried up to 3 attempts in total with 2s/5s backoff. `--signal-pattern 'compile|unit'` overrides the case-insensitive build/spec/test job-name heuristic (only executed completed jobs count).
 
 For a before/after trial: `ci-feedback Cratis/cli --since 2026-10-01 --until 2026-11-01 --compare 2026-10-15`. Deltas are after minus before; each side's job-minutes/week is normalized by its own length. PR runs for the same SHA stay together on the side of their first observed creation; non-PR runs split by creation date. Percentiles use nearest rank and ignore unavailable timings; empty samples and unmatched comparison groups show `-`/JSON `null`, not zero.
 

@@ -15,7 +15,8 @@ Options:
   --days N                 Look back N days (default 30)
   --since ISO              Window start instead of --days
   --until ISO              Window end (default now)
-  --limit N                Maximum workflow runs, 1-1000 (default 300)
+  --limit N                Maximum workflow runs, 1-1000 (default 300; per workflow with --workflow)
+  --workflow FILE          Only this workflow (file name like dotnet-build.yml, or numeric id); repeatable
   --signal-pattern REGEX   Build/spec job-name heuristic (default build|spec|test, case-insensitive)
   --compare ISO            Split at this date; report after-minus-before deltas
   --json                   Emit the full report, including per-job queue times
@@ -25,12 +26,14 @@ Examples:
   ci-feedback Cratis/cli --days 7 --limit 40
   ci-feedback Cratis/cli --since 2026-10-01 --until 2026-11-01 --compare 2026-10-15 --json
   ci-feedback Cratis/cli --signal-pattern 'compile|unit'
+  ci-feedback Cratis/Chronicle --days 3 --workflow dotnet-build.yml --limit 40
 
 Times are minutes. Push time is approximated by the first observed run created_at
 for each PR head SHA. Only Actions jobs in the bounded sample are known; absent
 checks/routing reasons are unknown. All-green uses the latest attempt of every
 observed run. Job-minutes include all fetched attempts, not billing multipliers.
 Completed-run jobs are cached in ~/.cache/ci-feedback/ by repository/run/attempt.
+Transient GitHub errors (HTTP 5xx, 429, secondary rate limit) are retried up to 3 attempts in total.
 
 Exit codes:
   0 report or help printed
@@ -51,6 +54,13 @@ function argumentValue(args, index, flag) {
   return value;
 }
 
+function workflowFile(value) {
+  if (value.includes('/') || value.includes('\\') || value.includes('..') || !value.trim()) {
+    throw new Error('--workflow requires a workflow file name (e.g. dotnet-build.yml) or numeric id');
+  }
+  return value;
+}
+
 function readArguments(args, options) {
   const values = new Map([
     ['--days', 'days'], ['--limit', 'limit'], ['--since', 'since'],
@@ -60,6 +70,12 @@ function readArguments(args, options) {
     const arg = args[i];
     if (arg === '--json') {
       options.json = true;
+      continue;
+    }
+    if (arg === '--workflow') {
+      const file = workflowFile(argumentValue(args, ++i, arg));
+      options.workflows ??= [];
+      if (!options.workflows.includes(file)) options.workflows.push(file);
       continue;
     }
     if (values.has(arg)) {
@@ -110,15 +126,48 @@ export function parseOptions(args, now = new Date()) {
   return options;
 }
 
-function ghApi(endpoint) {
-  try {
-    return JSON.parse(execFileSync('gh', ['api', '--method', 'GET', endpoint], {
-      encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-    }));
-  } catch (error) {
-    throw new Error(`gh api failed: ${error.stderr?.toString().trim() || error.message}`);
-  }
+const MAX_ATTEMPTS = 3;
+const BACKOFF_MS = [2000, 5000];
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
+
+function isTransient(message) {
+  return /\bHTTP 5\d\d\b|\bHTTP 429\b|secondary rate limit|abuse/i.test(message);
+}
+
+function ghExec(endpoint) {
+  return execFileSync('gh', ['api', '--method', 'GET', endpoint], {
+    encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+export function createApi({ exec = ghExec, sleep = sleepSync } = {}) {
+  return endpoint => {
+    for (let attempt = 1; ; attempt++) {
+      let output;
+      try {
+        output = exec(endpoint);
+      } catch (error) {
+        const message = error.stderr?.toString().trim() || error.message;
+        if (!isTransient(message) || attempt >= MAX_ATTEMPTS) {
+          const attempts = attempt > 1 ? `, gave up after ${attempt} attempts` : '';
+          throw new Error(`gh api failed: ${message} (endpoint ${endpoint}${attempts})`);
+        }
+        sleep(BACKOFF_MS[attempt - 1]);
+        continue;
+      }
+      try {
+        return JSON.parse(output);
+      } catch (error) {
+        throw new Error(`gh api failed: ${error.message} (endpoint ${endpoint})`);
+      }
+    }
+  };
+}
+
+const ghApi = createApi();
 
 function diskCache(repo) {
   const directory = join(homedir(), '.cache', 'ci-feedback', ...repo.toLowerCase().split('/'));
@@ -167,20 +216,34 @@ function jobsForAttempt(run, attempt, { repo, api, cache }) {
   return jobs;
 }
 
-function fetchRuns(options, api) {
+function fetchRunPages(options, api, path) {
   const runs = [];
   // Keep page size fixed: changing it on the last page would repeat/omit runs.
   const size = Math.min(100, options.limit);
   let total = 0;
   for (let page = 1; runs.length < options.limit; page++) {
     const query = new URLSearchParams({ created: `${options.since}..${options.until}`, per_page: String(size), page: String(page) });
-    const response = api(`repos/${options.repo}/actions/runs?${query}`);
+    const response = api(`repos/${options.repo}/actions/${path}?${query}`);
     requireFields(response, ['workflow_runs', 'total_count'], 'workflow runs response');
     total = response.total_count;
     runs.push(...response.workflow_runs.slice(0, options.limit - runs.length));
     if (response.workflow_runs.length < size || runs.length >= total) break;
   }
   return { runs, total };
+}
+
+function fetchRuns(options, api) {
+  if (!options.workflows?.length) return fetchRunPages(options, api, 'runs');
+  const byId = new Map();
+  let total = 0;
+  for (const file of options.workflows) {
+    const result = fetchRunPages(options, api, `workflows/${encodeURIComponent(file)}/runs`);
+    total += result.total;
+    for (const run of result.runs) if (!byId.has(run.id)) byId.set(run.id, run);
+  }
+  const runs = [...byId.values()];
+  if (options.workflows.length > 1) runs.sort((a, b) => (b.created_at > a.created_at) - (b.created_at < a.created_at));
+  return { runs, total: Math.max(total, runs.length) };
 }
 
 function runRecords(run, reader) {
@@ -389,6 +452,7 @@ export function analyze(data, options) {
   const records = data.records.filter(({ run }) => run.created_at >= options.since && run.created_at < options.until)
     .map(record => ({ ...record, jobs: record.jobs.map(job => normalizeJob(job, record.run, record.attempt)) }));
   const report = { repository: options.repo, signalPattern: options.signalPattern,
+    workflowFilter: options.workflows ?? null,
     sample: { fetchedRuns: data.fetchedRuns, totalRuns: data.totalRuns, truncated: data.truncated },
     ...summarize(records, options) };
   if (options.compare) {

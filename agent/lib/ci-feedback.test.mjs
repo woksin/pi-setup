@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { analyze, collectData, HELP, normalizeJob, parseOptions, percentile, renderReport } from './ci-feedback.mjs';
+import { analyze, collectData, createApi, HELP, normalizeJob, parseOptions, percentile, renderReport } from './ci-feedback.mjs';
 
 const START = '2026-10-01T00:00:00.000Z';
 const END = '2026-10-15T00:00:00.000Z';
@@ -266,4 +266,78 @@ test('reader refuses incomplete job pagination instead of treating a partial lis
   const api = endpoint => endpoint.includes('/jobs?') ? { total_count: 1, jobs: [] }
     : { total_count: 1, workflow_runs: [run()] };
   assert.throws(() => collectData(options(), { api, cache: memoryCache() }), /Incomplete jobs response/);
+});
+
+test('workflow filter pages the per-workflow endpoint, encodes the file, limits per workflow and dedupes by id', () => {
+  const calls = [];
+  const api = endpoint => {
+    calls.push(endpoint);
+    if (endpoint.includes('/jobs?')) return { total_count: 1, jobs: [job()] };
+    const shared = run(2, { created_at: stamp(30) });
+    return endpoint.includes('a%20b.yml')
+      ? { total_count: 5, workflow_runs: [shared, run(1, { created_at: stamp(10) }), run(9)] }
+      : { total_count: 2, workflow_runs: [run(3, { created_at: stamp(40) }), shared] };
+  };
+  const parsed = parseOptions(['example/repo', '--workflow', 'a b.yml', '--workflow', 'other.yml', '--limit', '2'], new Date(END));
+  assert.deepEqual(parsed.workflows, ['a b.yml', 'other.yml']);
+  const data = collectData({ ...options({ limit: 2 }), workflows: parsed.workflows }, { api, cache: memoryCache() });
+  const listing = calls.filter(endpoint => !endpoint.includes('/jobs?'));
+  assert.match(listing[0], /^repos\/example\/repo\/actions\/workflows\/a%20b\.yml\/runs\?created=.*per_page=2&page=1$/);
+  assert.match(listing[1], /workflows\/other\.yml\/runs\?/);
+  assert.equal(listing.length, 2);
+  assert.deepEqual(data.records.map(r => r.run.id), [3, 2, 1]);
+  const none = analyze(data, options());
+  assert.equal(none.workflowFilter, null);
+  assert.deepEqual(analyze(data, { ...options(), workflows: ['a b.yml'] }).workflowFilter, ['a b.yml']);
+});
+
+test('invalid workflow files are rejected as usage errors', () => {
+  for (const value of ['', ' ', 'a/b.yml', '..', 'x..y.yml', '.github/workflows/a.yml']) {
+    assert.throws(() => parseOptions(['example/repo', '--workflow', value]), undefined, value);
+  }
+  assert.throws(() => parseOptions(['example/repo', '--workflow']), /Missing value/);
+});
+
+const failure = stderr => Object.assign(new Error('Command failed'), { stderr: Buffer.from(stderr) });
+
+test('api retries a transient 502 and then succeeds', () => {
+  const sleeps = [];
+  let calls = 0;
+  const api = createApi({ sleep: ms => sleeps.push(ms), exec: () => {
+    if (++calls === 1) throw failure('gh: Bad Gateway (HTTP 502)');
+    return '{"ok":true}';
+  } });
+  assert.deepEqual(api('repos/x/y'), { ok: true });
+  assert.equal(calls, 2);
+  assert.deepEqual(sleeps, [2000]);
+});
+
+test('api gives up after three attempts naming the endpoint', () => {
+  const sleeps = [];
+  let calls = 0;
+  const api = createApi({ sleep: ms => sleeps.push(ms), exec: () => { calls++; throw failure('HTTP 503: unavailable'); } });
+  assert.throws(() => api('repos/x/y/actions/runs'), /repos\/x\/y\/actions\/runs.*3 attempts/);
+  assert.equal(calls, 3);
+  assert.deepEqual(sleeps, [2000, 5000]);
+});
+
+test('api retries secondary rate limits but not 404 or invalid JSON', () => {
+  let calls = 0;
+  const limited = createApi({ sleep: () => {}, exec: () => { if (++calls < 2) throw failure('You have exceeded a secondary rate limit'); return '[]'; } });
+  assert.deepEqual(limited('e'), []);
+  calls = 0;
+  const missing = createApi({ sleep: () => assert.fail('slept'), exec: () => { calls++; throw failure('Not Found (HTTP 404)'); } });
+  assert.throws(() => missing('repos/x/y'), /HTTP 404.*endpoint repos\/x\/y\)/);
+  assert.equal(calls, 1);
+  const garbage = createApi({ sleep: () => assert.fail('slept'), exec: () => 'not json' });
+  assert.throws(() => garbage('repos/x/z'), /gh api failed.*endpoint repos\/x\/z\)/);
+});
+
+test('api retries every HTTP 5xx status', () => {
+  for (const status of [501, 505, 599]) {
+    let calls = 0;
+    const api = createApi({ sleep: () => {}, exec: () => { if (++calls < 2) throw failure(`gh: Error (HTTP ${status})`); return '{}'; } });
+    assert.deepEqual(api('e'), {});
+    assert.equal(calls, 2, `HTTP ${status}`);
+  }
 });
