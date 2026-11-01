@@ -205,13 +205,19 @@ class WorktreeLockTests(Harness):
         self.assertFalse((self.root / "B.started").exists())
 
     def test_escaped_producer_cannot_retain_lock_descriptor(self):
+        # The escaped job outlives A and B by a wide margin, so B finishing first proves the lock
+        # was released, even when the host is loaded. Its group is killed afterwards.
+        escaped_pid = self.root / "escaped.pid"
+        self.addCleanup(self.stop_recorded_group, escaped_pid)
         script = ("import os,subprocess,sys,time,pathlib; "
                   "assert 'PI_PHASE_WORKTREE_HELD' not in os.environ; "
-                  "subprocess.Popen(sys.argv[2:],start_new_session=True,"
+                  "q=subprocess.Popen(sys.argv[3:],start_new_session=True,"
                   "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+                  "pathlib.Path(sys.argv[2]).write_text(str(q.pid)); "
                   "p=pathlib.Path(sys.argv[1]); "
                   "exec('while not p.exists(): time.sleep(.01)')")
-        command = [sys.executable, "-c", script, str(self.root / "escaped.started"), *self.job("escaped", 3)]
+        command = [sys.executable, "-c", script, str(self.root / "escaped.started"), str(escaped_pid),
+                   *self.job("escaped", 30)]
         a = self.phase("A", command=command)
         self.started("escaped")
         self.assertEqual(self.done(a)[0], 0)
