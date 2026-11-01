@@ -77,6 +77,20 @@ class WarmthShadowTests(RunBase):
         self.assertEqual(record["fastShadow"]["v"], 1)
 
 
+class ChildCpuTests(RunBase):
+    def test_started_phase_records_child_cpu_seconds(self):
+        command = [pi_phase.sys.executable, "-c", "import time; end=time.process_time()+0.3\nwhile time.process_time()<end: pass"]
+        self.assertEqual(self.run_phase(command)[0], 0)
+        value = self.records()[0]["childCpuS"]
+        self.assertIsInstance(value, float)
+        self.assertGreaterEqual(value, 0.1)
+        self.assertEqual(value, round(value, 1))
+
+    def test_rejected_phase_has_no_child_cpu(self):
+        self.assertNotEqual(self.run_phase(["true"], "--timeout", "0")[0], 0)
+        self.assertNotIn("childCpuS", self.records()[0])
+
+
 class TrialConfigTests(RunBase):
     def test_valid_absent_hash_summary_and_overlay(self):
         original = pi_phase.config(self.config)

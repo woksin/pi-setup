@@ -25,6 +25,7 @@ import tempfile
 import threading
 import random
 import re
+import resource
 import time
 import uuid
 
@@ -4571,6 +4572,7 @@ def run(args, state, configuration, output=None):
             launcher = [sys.executable, str(Path(__file__).resolve()), "_launch", str(read_gate), "--", *command]
             output_options = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
             operation = "Popen"
+            child_cpu_before = resource.getrusage(resource.RUSAGE_CHILDREN)
             proc = subprocess.Popen(launcher, pass_fds=[read_gate], close_fds=True,
                                     start_new_session=True, env=child_env, **output_options)
             os.close(read_gate)
@@ -4647,6 +4649,10 @@ def run(args, state, configuration, output=None):
         try:
             operation = "wait"
             proc.wait(timeout=2)
+            child_cpu_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+            if ledger:
+                ledger.record["childCpuS"] = round(child_cpu_after.ru_utime + child_cpu_after.ru_stime
+                                                   - child_cpu_before.ru_utime - child_cpu_before.ru_stime, 1)
             if return_code == 125:
                 return_code = proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
                 if ledger and proc.returncode < 0:
