@@ -1484,6 +1484,27 @@ def fast_decision(state, args, settings, fingerprint, *, history=None, identity=
     return False, None
 
 
+def fast_shadow(history, identity, fingerprint, kind, warm, settings):
+    """Observe passed-only, warmth-aware predictions without influencing admission."""
+    if not settings or kind not in ("build", "test"):
+        return None
+    runs = history.scoped(fingerprint, identity)[-HISTORY_WINDOW:]
+    tier = "exact" if history.exact_runs(fingerprint) else (
+        "work" if identity is not None and history.work.get(identity.work_key) else "family")
+    passed = [r for r in runs if r.get("outcome") == "passed"]
+    matching = [r for r in passed if warm is not None and r.get("warm") is warm]
+    samples = matching if len(matching) >= 2 else passed
+    basis = tier + ("-warm" if warm else "-cold") if len(matching) >= 2 else tier + "-any"
+    times = [r["runS"] for r in samples]
+    p90 = percentile(times, 90)
+    limit = settings["max_expected_s"]
+    would = (kind in settings["kinds"] and len(samples) >= 2 and p90 <= limit
+             and not history.family_overran(identity) and runs[-1].get("outcome") != "timeout")
+    rounded = lambda value: round(value, 1) if value is not None else None
+    return dict(v=1, basis=basis, n=len(samples), predS=rounded(percentile(times, 50)),
+                p90S=rounded(p90), fails=len(runs) - len(passed), would=bool(would), limS=round(limit, 1))
+
+
 def fast_phase(state, args, settings, fingerprint, *, history=None, identity=None):
     return fast_decision(state, args, settings, fingerprint, history=history, identity=identity)[0]
 
@@ -2753,35 +2774,42 @@ def warn_large_dumps(cwd):
         pass  # Best effort, including unavailable threads or a closed output stream.
 
 
-def cold_worktree(cwd):
-    """At most 1000 entries, three levels, no symlink traversal or git subprocess."""
-    cwd = Path(cwd).resolve()
-    for top in (cwd, *cwd.parents):
-        if (top / ".git").is_file():
-            break
-        if (top / ".git").is_dir():
-            return False
-    else:
-        return False
-    pending = [(top, 0)]
-    budget = 1000
+def obj_warmth(cwd):
+    """True/False for obj presence; None if a bounded depth-three scan is inconclusive."""
     try:
+        cwd = Path(cwd).resolve()
+        top = next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), None)
+        if top is None:
+            return None
+        pending = [(top, 0)]
+        budget = 1000
         while pending:
             directory, depth = pending.pop()
             with os.scandir(directory) as entries:
                 for entry in entries:
                     budget -= 1
                     if budget < 0:
-                        return False  # Inconclusive, not necessarily cold.
+                        return None
                     if entry.name in ("node_modules", ".git") or not entry.is_dir(follow_symlinks=False):
                         continue
                     if entry.name == "obj":
-                        return False
+                        return True
                     if depth < 2:
                         pending.append((Path(entry.path), depth + 1))
     except OSError:
-        return False
-    return True
+        return None
+    return False
+
+
+def linked_worktree(cwd):
+    """Recognize a linked worktree without a git subprocess."""
+    cwd = Path(cwd).resolve()
+    return next(((p / ".git").is_file() for p in (cwd, *cwd.parents) if (p / ".git").exists()), False)
+
+
+def cold_worktree(cwd):
+    """Only a conclusively cold linked worktree warrants a hint."""
+    return linked_worktree(cwd) and obj_warmth(cwd) is False
 
 
 def lock_file(path):
@@ -4230,7 +4258,7 @@ def report_log(path, tail, return_code):
     note(f"log={path} exit={return_code} lines={lines}")
 
 
-def prepare_policy(state, args, options, fingerprint, history=None, identity=None):
+def prepare_policy(state, args, options, fingerprint, history=None, identity=None, warm=None):
     args.policy, args.source = select_policy(state, args, options, fingerprint, history=history, identity=identity)
     args.fast = args.policy == "fast"
     note(f"policy={args.policy} source={args.source}")
@@ -4250,6 +4278,12 @@ def prepare_policy(state, args, options, fingerprint, history=None, identity=Non
                                       repoKey=identity.repo_key)
         if history is not None:
             args.ledger.record.update(expectedS=round(args.expected, 1), expectedBasis=args.basis)
+            try:
+                shadow = fast_shadow(history, identity, fingerprint, args.kind, warm, options["fast_lane"])
+                if shadow is not None:
+                    args.ledger.record["fastShadow"] = shadow
+            except Exception:
+                pass  # Shadow telemetry must never affect admission.
 
 
 def phase_candidates(state, args, context):
@@ -4375,7 +4409,10 @@ def run(args, state, configuration, output=None):
             if workers is not None:
                 ledger.record["workers"] = workers
         identity = work_identity(os.getcwd(), original_command, args.kind)
-        prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity)
+        warm = obj_warmth(os.getcwd()) if args.kind in ("build", "test") else None
+        if ledger and warm is not None:
+            ledger.record["warm"] = warm
+        prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity, warm=warm)
         if ledger:
             ledger.failure_categories = options["failure_categories"]
             ledger.prepare_snapshot()
@@ -4517,7 +4554,7 @@ def run(args, state, configuration, output=None):
         if options["phase_nice"] and args.kind in ("build", "test", "integration"):
             child_env = dict(os.environ if child_env is None else child_env, **{NICE_ENV: str(options["phase_nice"])})
             note(f"nice {options['phase_nice']} (phase_nice)")
-        if options["cold_worktree_hint"] and args.kind in ("build", "test") and cold_worktree(os.getcwd()):
+        if options["cold_worktree_hint"] and warm is False and linked_worktree(os.getcwd()):
             note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
         if args.kind in ("build", "test", "integration"):
             child_env = dict(os.environ if child_env is None else child_env)
