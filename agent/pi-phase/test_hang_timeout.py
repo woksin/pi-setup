@@ -38,7 +38,7 @@ class HangTimeoutTests(unittest.TestCase):
 
     def test_defaults_are_off(self):
         self.assertEqual(pi_phase.config(self.root / "none.json").options["hang_timeout"], dict(mode="off"))
-        self.assertEqual(self.settings, dict(mode="on", seconds=150, kinds=["test"], paths=[]))
+        self.assertEqual(self.settings, dict(mode="on", seconds=150, kinds=["test"], paths=[], labels=[]))
 
     def test_injected_for_direct_vstest_with_and_without_runsettings(self):
         injected = ["--blame-hang-timeout", "150s", "--blame-hang-dump-type", "none"]
@@ -126,6 +126,45 @@ class HangTimeoutTests(unittest.TestCase):
                   for line in path.read_text().splitlines()][-1]
         self.assertEqual(record["hangTimeoutS"], 60)
         self.assertEqual(record["argvHash"], hashlib.sha256(os.fsencode("\0".join([str(stub), "test"]))).hexdigest())
+
+    def test_observe_and_label_scope(self):
+        settings = pi_phase.hang_timeout_config(dict(mode="observe", labels=["Gate *"]), self.fail)
+        ledger = SimpleNamespace(record={})
+        command = ["dotnet", "test"]
+        result, output = self.apply(command, settings, label="Gate specs", ledger=ledger)
+        self.assertEqual((result, output, ledger.record), (command, "", dict(hangTimeout="eligible")))
+        self.assertEqual(pi_phase.hang_timeout_decision(command, self.args(label="gate specs"), settings, self.root)[0], "label")
+        warnings = []
+        self.assertEqual(pi_phase.hang_timeout_config(dict(mode="observe", labels="bad"), warnings.append), dict(mode="off"))
+        self.assertEqual(len(warnings), 1)
+
+    def test_scope_is_checked_after_eligibility(self):
+        settings = dict(self.settings, paths=["/outside/*"], labels=["Gate *"])
+        cases = [(["dotnet", "test"], dict(kind="integration"), "kind"),
+                 (["dotnet", "test"], dict(no_hang_timeout=True), "opt-out"),
+                 (["npm", "test"], {}, "not-direct-test"),
+                 (["dotnet", "test", "--blame"], {}, "blame-args"),
+                 (["dotnet", "test"], dict(timeout=70), "margin"),
+                 (["dotnet", "test"], {}, "path")]
+        for command, fields, expected in cases:
+            self.assertEqual(pi_phase.hang_timeout_decision(command, self.args(**fields), settings, self.root)[0], expected)
+        (self.root / "global.json").write_text(json.dumps({"test": {"runner": "Microsoft.Testing.Platform"}}))
+        self.assertEqual(self.apply(["dotnet", "test"], settings), (["dotnet", "test"], ""))
+
+    def test_hang_diagnostic_is_additive_and_kill_requires_applied_failure(self):
+        log = FIXTURES / "blame-hang.log"
+        text = log.read_bytes()
+        category = pi_phase.classify_failure(text, 1, "failed", False)["category"]
+        diagnostic = pi_phase.failure_diagnostic(log, 1, "failed", False)
+        self.assertEqual(diagnostic["category"], category)
+        self.assertEqual(diagnostic["hang"], pi_phase.failure_match("x", text, pi_phase.re.search(rb"inactivity time of .*? elapsed|hang diagnostics", text, pi_phase.re.I))["offset"])
+        for applied, outcome, code, killed in [(True, "failed", 1, True), (True, "passed", 0, False), (False, "failed", 1, False)]:
+            ledger = pi_phase.PhaseLedger.__new__(pi_phase.PhaseLedger)
+            ledger.failure_categories = True
+            ledger.record = dict(outcome=outcome, hangTimeout="applied" if applied else "eligible")
+            ledger.record_failure(log, code, False)
+            self.assertEqual(ledger.record.get("hangKill", False), killed)
+        self.assertNotIn("hang", pi_phase.failure_diagnostic(log, 124, "timeout", False))
 
     def test_classifier_maps_blame_text_to_hang(self):
         text = (FIXTURES / "blame-hang.log").read_bytes()

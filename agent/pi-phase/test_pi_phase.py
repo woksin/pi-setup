@@ -849,7 +849,8 @@ class PhaseTests(unittest.TestCase):
                                   "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis",
                                   "waitV", "waitBreakdown", "waitScans", "waitSamples",
                                   "host", "peakRssMb", "peakProcRssMb",
-                                  "obsV", "configHash", "configSummary", "hangTimeout", "workersSource"})
+                                  "obsV", "configHash", "configSummary", "hangTimeout", "workersSource",
+                                  "warm", "fastShadow", "childCpuS"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
@@ -1310,7 +1311,7 @@ class PhaseTests(unittest.TestCase):
     def test_performance_config_defaults_and_auto(self):
         settings = pi_phase.config(self.config)
         self.assertEqual(settings, (2, 1))
-        self.assertEqual(settings.options, dict(policy=[], msbuild_max_cpu=0, container_test_detection="hint",
+        self.assertEqual(settings.options, dict(trial=None, policy=[], msbuild_max_cpu=0, container_test_detection="hint",
                                                 cold_worktree_hint=True, memory_admission=False, phase_nice=0,
                                                 rss_cap_mb=12288, skip_passed_integration=False, max_high=3, failure_categories=True, hang_timeout=dict(mode="off"), reap_build_servers=dict(mode="off"), skip_cross_worktree=False,
                          host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
@@ -1341,7 +1342,7 @@ class PhaseTests(unittest.TestCase):
                 note.assert_called_once()
         self.configure(msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False)
         self.assertEqual(pi_phase.config(self.config).options,
-                         dict(policy=[], msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0,
+                         dict(trial=None, policy=[], msbuild_max_cpu="auto", container_test_detection="promote", cold_worktree_hint=False, memory_admission=False, phase_nice=0,
                               rss_cap_mb=12288, skip_passed_integration=False, max_high=3, failure_categories=True, hang_timeout=dict(mode="off"), reap_build_servers=dict(mode="off"), skip_cross_worktree=False,
                          host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
                               fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),

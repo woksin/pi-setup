@@ -25,6 +25,7 @@ import tempfile
 import threading
 import random
 import re
+import resource
 import time
 import uuid
 
@@ -463,6 +464,10 @@ def failure_diagnostic(log, code, outcome, expect_red):
     result = classify_failure(tail, code, outcome, expect_red)
     if "offset" in result:
         result["offset"] += start
+    if outcome != "timeout":
+        hang = re.search(rb"inactivity time of .*? elapsed|hang diagnostics", tail, re.I)
+        if hang:
+            result["hang"] = start + tail.rfind(b"\n", 0, hang.start()) + 1
     result["log"] = str(log)[:240]
     return result
 
@@ -568,6 +573,8 @@ class PhaseLedger:
             return
         try:
             self.record["failure"] = failure_diagnostic(log, code, self.record["outcome"], expect_red)
+            if self.record.get("hangTimeout") == "applied" and "hang" in self.record["failure"]:
+                self.record["hangKill"] = True
         except Exception:
             pass  # Diagnostics must never change a phase's result.
 
@@ -920,12 +927,19 @@ def report_summary(records, days, skipped):
                   cpuBudgetMeanWorkers={kind: round(total / count, 2) for kind, (total, count) in sorted(mean.items())},
                   msbuildCalls=calls, observe=observe, admitObserve=admit, wouldHoldAtAdmit=hold,
                   reaper=dict(phasesWithDue=due), retries=retries)
+    from trial_report import shadow_summary
+    result.update(fastShadow=shadow_summary(records), hangKill=sum(r.get("hangKill") is True for r in records))
     return result
 
 
-def report(state, days, as_json):
+def report(state, days, as_json, trial=None, settle=900):
     """Read-only: never creates state."""
     records, skipped = read_ledger(state, days)
+    if trial is not None:
+        from trial_report import trial_summary, trial_text
+        result = trial_summary(records, trial, settle)
+        print(json.dumps(result, sort_keys=True) if as_json else trial_text(result))
+        return 0
     result = report_summary(records, days, skipped)
     if as_json:
         print(json.dumps(result, sort_keys=True))
@@ -945,6 +959,8 @@ def report(state, days, as_json):
               f" admit={result['admitObserve'][kind]} wouldHoldAtAdmit={result['wouldHoldAtAdmit'][kind]}")
     print(f"reaper phasesWithDue={result['reaper']['phasesWithDue']}")
     print("retries " + " ".join(f"{k}={v}" for k, v in result["retries"].items()))
+    print("fastShadow " + json.dumps(result["fastShadow"], sort_keys=True))
+    print(f"hangKill={result['hangKill']}")
     return 0
 
 
@@ -1105,6 +1121,29 @@ def local_config(path, data, warn):
     return merge_config(data, local)
 
 
+def trial_config(value, warn):
+    """Validate a bounded trial marker, preserving only an explicit UTC window start."""
+    if value is None:
+        return None
+    try:
+        if not isinstance(value, dict) or set(value) != {"name", "arm", "started"}:
+            raise ValueError("expected name, arm and started")
+        for key, limit in (("name", 64), ("arm", 32)):
+            if not isinstance(value[key], str) or not re.fullmatch(rf"[A-Za-z0-9._-]{{1,{limit}}}", value[key]):
+                raise ValueError(f"invalid {key}")
+        if not isinstance(value["started"], str):
+            raise ValueError("started must be a string")
+        # Python < 3.11 rejects a trailing Z in fromisoformat.
+        started = datetime.fromisoformat(value["started"].replace("Z", "+00:00"))
+        if started.tzinfo is None or started.utcoffset() is None:
+            raise ValueError("started requires a timezone")
+        return dict(name=value["name"], arm=value["arm"],
+                    started=started.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
+    except (ValueError, TypeError):
+        warn("invalid trial; using default None")
+        return None
+
+
 def config(path, *, notes=None):
     def warn(message):
         if notes is None or message not in notes:
@@ -1117,7 +1156,7 @@ def config(path, *, notes=None):
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
                     host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
                     failure_categories=True, hang_timeout=dict(mode="off"), reap_build_servers=dict(mode="off"),
-                    skip_cross_worktree=False,
+                    skip_cross_worktree=False, trial=None,
                     fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
                     queue_order=dict(QUEUE_ORDER_DEFAULTS), policy=[])
     try:
@@ -1143,6 +1182,9 @@ def config(path, *, notes=None):
             valid = type(value) is int and value >= 0  # 0 = off
         elif key == "phase_nice":
             valid = type(value) is int and 0 <= value <= 19
+        elif key == "trial":
+            values[key] = trial_config(value, warn)
+            continue
         elif key == "fast_lane":
             values[key] = fast_lane_config(value, warn)
             continue
@@ -1192,6 +1234,8 @@ def config_fields(settings):
                    cpuBudget=mode("cpu_budget"), hangTimeout=mode("hang_timeout"),
                    reapBuildServers=mode("reap_build_servers"), skipCrossWorktree=options["skip_cross_worktree"],
                    queueOrder=(options.get("queue_order") or {}).get("mode"))
+    if options.get("trial"):
+        summary["trial"] = options["trial"]["name"] + "/" + options["trial"]["arm"]
     return digest, summary
 
 
@@ -1451,6 +1495,27 @@ def fast_decision(state, args, settings, fingerprint, *, history=None, identity=
         if shape_fast(history, identity, args, settings):
             return True, "shape"
     return False, None
+
+
+def fast_shadow(history, identity, fingerprint, kind, warm, settings):
+    """Observe passed-only, warmth-aware predictions without influencing admission."""
+    if not settings or kind not in ("build", "test"):
+        return None
+    runs = history.scoped(fingerprint, identity)[-HISTORY_WINDOW:]
+    tier = "exact" if history.exact_runs(fingerprint) else (
+        "work" if identity is not None and history.work.get(identity.work_key) else "family")
+    passed = [r for r in runs if r.get("outcome") == "passed"]
+    matching = [r for r in passed if warm is not None and r.get("warm") is warm]
+    samples = matching if len(matching) >= 2 else passed
+    basis = tier + ("-warm" if warm else "-cold") if len(matching) >= 2 else tier + "-any"
+    times = [r["runS"] for r in samples]
+    p90 = percentile(times, 90)
+    limit = settings["max_expected_s"]
+    would = (kind in settings["kinds"] and len(samples) >= 2 and p90 <= limit
+             and not history.family_overran(identity) and runs[-1].get("outcome") != "timeout")
+    rounded = lambda value: round(value, 1) if value is not None else None
+    return dict(v=1, basis=basis, n=len(samples), predS=rounded(percentile(times, 50)),
+                p90S=rounded(p90), fails=len(runs) - len(passed), would=bool(would), limS=round(limit, 1))
 
 
 def fast_phase(state, args, settings, fingerprint, *, history=None, identity=None):
@@ -1978,7 +2043,7 @@ def explicit_cap(argument):
 
 
 def phase_workers(command, kind, cap, cwd, cpus):
-    """(workers|None, source|None): a pure estimate of the MSBuild node count, mirroring dotnet-shim.sh.
+    """(workers|None, source|None): estimate MSBuild nodes; explicit paths bypass dotnet-shim.sh.
 
     Commands we cannot see into (shells, scripts, non-dotnet, dotnet run/test of assemblies or MTP) keep their pool price."""
     if kind == "ci":
@@ -1996,7 +2061,7 @@ def phase_workers(command, kind, cap, cwd, cpus):
     if explicit:
         return explicit[-1] or cpus, "explicit"
     if type(cap) is int and cap >= 1:
-        return cap, "shim"
+        return (cap, "shim") if os.sep not in inner[0] else (cpus, "bypass")
     return cpus, "sdk-default"
 
 
@@ -2465,12 +2530,12 @@ def hang_dump_defaults(command, diagnose_hang=False):
     return defaults
 
 
-HANG_TIMEOUT_DEFAULTS = dict(seconds=150, kinds=["test"], paths=[])
+HANG_TIMEOUT_DEFAULTS = dict(seconds=150, kinds=["test"], paths=[], labels=[])
 HANG_TIMEOUT_MARGIN_S = 30
 
 
 def hang_timeout_config(value, warn=None):
-    """{"mode": "off"|"on", "seconds", "kinds", "paths"}; anything invalid means off."""
+    """{"mode": "off"|"observe"|"on", "seconds", "kinds", "paths", "labels"}; invalid means off."""
     warn = warn or note
     off = dict(mode="off")
     if not isinstance(value, dict):
@@ -2481,11 +2546,12 @@ def hang_timeout_config(value, warn=None):
     settings = {key: value.get(key, default) for key, default in HANG_TIMEOUT_DEFAULTS.items()}
     valid = (type(settings["seconds"]) is int and 1 <= settings["seconds"] <= 3600
              and isinstance(settings["kinds"], list) and set(settings["kinds"]) <= {"build", "test"}
-             and isinstance(settings["paths"], list) and all(type(item) is str for item in settings["paths"]))
-    if value.get("mode", "off") not in ("off", "on") or not valid:
+             and isinstance(settings["paths"], list) and all(type(item) is str for item in settings["paths"])
+             and isinstance(settings["labels"], list) and all(type(item) is str for item in settings["labels"]))
+    if value.get("mode", "off") not in ("off", "observe", "on") or not valid:
         warn(f"invalid hang_timeout; using default {off!r}")
         return off
-    return off if value.get("mode", "off") == "off" else dict(settings, mode="on")
+    return off if value.get("mode", "off") == "off" else dict(settings, mode=value["mode"])
 
 
 def test_runner_is_mtp(cwd):
@@ -2507,7 +2573,7 @@ def test_runner_is_mtp(cwd):
 
 def hang_timeout_decision(command, args, settings, cwd):
     """(code, message): code 'applied' when the hang timeout applies, else why not; message is printed (may be empty)."""
-    if settings["mode"] != "on":
+    if settings["mode"] == "off":
         return "off", ""
     if args.kind not in settings["kinds"] or args.kind in ("integration", "ci"):
         return "kind", ""
@@ -2519,17 +2585,23 @@ def hang_timeout_decision(command, args, settings, cwd):
         return "not-direct-test", ""  # Shell strings and scripts (Tier 1 gates) keep CI's timeouts.
     if any(re.match(r"--(blame|hangdump|testing-platform)", argument) for argument in inner):
         return "blame-args", ""
+    if settings["seconds"] > args.timeout - HANG_TIMEOUT_MARGIN_S:
+        return "margin", ""
     real = os.path.realpath(cwd)
     inherited = main_worktree(real) if settings["paths"] else None
     candidates = (real, inherited) if inherited is not None else (real,)
-    if settings["paths"] and not any(fnmatch.fnmatchcase(path, os.path.expanduser(pattern))
-                                     for path in candidates for pattern in settings["paths"]):
-        return "path", ""
-    if settings["seconds"] > args.timeout - HANG_TIMEOUT_MARGIN_S:
-        return "margin", ""
+    path_matches = not settings["paths"] or any(fnmatch.fnmatchcase(path, os.path.expanduser(pattern))
+                                               for path in candidates for pattern in settings["paths"])
+    label_matches = not settings.get("labels") or any(fnmatch.fnmatchcase(getattr(args, "label", ""), pattern)
+                                                       for pattern in settings["labels"])
     if test_runner_is_mtp(real):
-        return "mtp", "hang timeout skipped: global.json selects Microsoft.Testing.Platform"
-    return "applied", None
+        message = "hang timeout skipped: global.json selects Microsoft.Testing.Platform"
+        return "mtp", message if path_matches and label_matches else ""
+    if not path_matches:
+        return "path", ""
+    if not label_matches:
+        return "label", ""
+    return ("eligible", "") if settings["mode"] == "observe" else ("applied", None)
 
 
 def hang_timeout_skip_reason(command, args, settings, cwd):
@@ -2715,35 +2787,42 @@ def warn_large_dumps(cwd):
         pass  # Best effort, including unavailable threads or a closed output stream.
 
 
-def cold_worktree(cwd):
-    """At most 1000 entries, three levels, no symlink traversal or git subprocess."""
-    cwd = Path(cwd).resolve()
-    for top in (cwd, *cwd.parents):
-        if (top / ".git").is_file():
-            break
-        if (top / ".git").is_dir():
-            return False
-    else:
-        return False
-    pending = [(top, 0)]
-    budget = 1000
+def obj_warmth(cwd):
+    """True/False for obj presence; None if a bounded depth-three scan is inconclusive."""
     try:
+        cwd = Path(cwd).resolve()
+        top = next((p for p in (cwd, *cwd.parents) if (p / ".git").exists()), None)
+        if top is None:
+            return None
+        pending = [(top, 0)]
+        budget = 1000
         while pending:
             directory, depth = pending.pop()
             with os.scandir(directory) as entries:
                 for entry in entries:
                     budget -= 1
                     if budget < 0:
-                        return False  # Inconclusive, not necessarily cold.
+                        return None
                     if entry.name in ("node_modules", ".git") or not entry.is_dir(follow_symlinks=False):
                         continue
                     if entry.name == "obj":
-                        return False
+                        return True
                     if depth < 2:
                         pending.append((Path(entry.path), depth + 1))
     except OSError:
-        return False
-    return True
+        return None
+    return False
+
+
+def linked_worktree(cwd):
+    """Recognize a linked worktree without a git subprocess."""
+    cwd = Path(cwd).resolve()
+    return next(((p / ".git").is_file() for p in (cwd, *cwd.parents) if (p / ".git").exists()), False)
+
+
+def cold_worktree(cwd):
+    """Only a conclusively cold linked worktree warrants a hint."""
+    return linked_worktree(cwd) and obj_warmth(cwd) is False
 
 
 def lock_file(path):
@@ -4192,7 +4271,7 @@ def report_log(path, tail, return_code):
     note(f"log={path} exit={return_code} lines={lines}")
 
 
-def prepare_policy(state, args, options, fingerprint, history=None, identity=None):
+def prepare_policy(state, args, options, fingerprint, history=None, identity=None, warm=None):
     args.policy, args.source = select_policy(state, args, options, fingerprint, history=history, identity=identity)
     args.fast = args.policy == "fast"
     note(f"policy={args.policy} source={args.source}")
@@ -4212,6 +4291,12 @@ def prepare_policy(state, args, options, fingerprint, history=None, identity=Non
                                       repoKey=identity.repo_key)
         if history is not None:
             args.ledger.record.update(expectedS=round(args.expected, 1), expectedBasis=args.basis)
+            try:
+                shadow = fast_shadow(history, identity, fingerprint, args.kind, warm, options["fast_lane"])
+                if shadow is not None:
+                    args.ledger.record["fastShadow"] = shadow
+            except Exception:
+                pass  # Shadow telemetry must never affect admission.
 
 
 def phase_candidates(state, args, context):
@@ -4326,6 +4411,8 @@ def run(args, state, configuration, output=None):
             ledger.state = state
             digest, summary = config_fields(settings)
             ledger.record.update(configHash=digest, configSummary=summary)
+            if options.get("trial"):
+                ledger.record["trial"] = dict(options["trial"])
         command = apply_profile(command, getattr(args, "profile", "full"), args.kind, ledger)
         command = apply_hang_timeout(command, admission_args, options["hang_timeout"], phase_cwd)
         workers, workers_source = phase_workers(
@@ -4335,7 +4422,10 @@ def run(args, state, configuration, output=None):
             if workers is not None:
                 ledger.record["workers"] = workers
         identity = work_identity(os.getcwd(), original_command, args.kind)
-        prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity)
+        warm = obj_warmth(os.getcwd()) if args.kind in ("build", "test") else None
+        if ledger and warm is not None:
+            ledger.record["warm"] = warm
+        prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity, warm=warm)
         if ledger:
             ledger.failure_categories = options["failure_categories"]
             ledger.prepare_snapshot()
@@ -4477,7 +4567,7 @@ def run(args, state, configuration, output=None):
         if options["phase_nice"] and args.kind in ("build", "test", "integration"):
             child_env = dict(os.environ if child_env is None else child_env, **{NICE_ENV: str(options["phase_nice"])})
             note(f"nice {options['phase_nice']} (phase_nice)")
-        if options["cold_worktree_hint"] and args.kind in ("build", "test") and cold_worktree(os.getcwd()):
+        if options["cold_worktree_hint"] and warm is False and linked_worktree(os.getcwd()):
             note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
         if args.kind in ("build", "test", "integration"):
             child_env = dict(os.environ if child_env is None else child_env)
@@ -4494,6 +4584,7 @@ def run(args, state, configuration, output=None):
             launcher = [sys.executable, str(Path(__file__).resolve()), "_launch", str(read_gate), "--", *command]
             output_options = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
             operation = "Popen"
+            child_cpu_before = resource.getrusage(resource.RUSAGE_CHILDREN)
             proc = subprocess.Popen(launcher, pass_fds=[read_gate], close_fds=True,
                                     start_new_session=True, env=child_env, **output_options)
             os.close(read_gate)
@@ -4570,6 +4661,10 @@ def run(args, state, configuration, output=None):
         try:
             operation = "wait"
             proc.wait(timeout=2)
+            child_cpu_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+            if ledger:
+                ledger.record["childCpuS"] = round(child_cpu_after.ru_utime + child_cpu_after.ru_stime
+                                                   - child_cpu_before.ru_utime - child_cpu_before.ru_stime, 1)
             if return_code == 125:
                 return_code = proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
                 if ledger and proc.returncode < 0:
@@ -4694,6 +4789,8 @@ def main(argv=None, *, state=None, configuration=None):
     reporting = commands.add_parser("report", help="summarize trial observability fields from the ledger")
     reporting.add_argument("--days", type=int, default=7)
     reporting.add_argument("--json", action="store_true")
+    reporting.add_argument("--trial")
+    reporting.add_argument("--settle", type=int, default=900)
     summary = commands.add_parser("stats", help="summarize phase history by UTC day and kind")
     summary.add_argument("--days", type=int, default=7)
     summary.add_argument("--kind", choices=KINDS)
@@ -4775,7 +4872,9 @@ def main(argv=None, *, state=None, configuration=None):
         if args.action == "report":
             if args.days < 1:
                 parser.error("--days must be positive")
-            return report(state, args.days, args.json)
+            if args.settle < 0:
+                parser.error("--settle must be nonnegative")
+            return report(state, args.days, args.json, args.trial, args.settle)
         if args.action == "wait":
             return wait_eta(state, configuration, args.kind, args)
         if args.action == "status":

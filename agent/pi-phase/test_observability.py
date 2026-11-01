@@ -34,7 +34,8 @@ class LedgerSizeTests(unittest.TestCase):
         args = pi_phase.argparse.Namespace(kind="test", label="L" * 120, priority="normal", command=["x"],
                                            retry_reason="r" * 120)
         ledger = pi_phase.PhaseLedger(args)
-        digest, summary = pi_phase.config_fields(settings_for())
+        trial = dict(name="n" * 64, arm="a" * 32, started="2026-11-03T08:00:00.123456Z")
+        digest, summary = pi_phase.config_fields(settings_for(trial=trial))
         ledger.record.update(cwd="/" + "d" * 3999, session="s" * 4000, lane="l" * 400, configHash=digest,
                              configSummary=summary, profileApplied=True,
                              profileProps=list(pi_phase.ITERATE_PROPERTIES), hangTimeout="not-direct-test",
@@ -42,7 +43,12 @@ class LedgerSizeTests(unittest.TestCase):
                              waitObserve=dict(host=dict(s=99999.999, n=99999), cpu=dict(s=99999.999, n=99999)),
                              admitObserve=["cpu", "host"], reaper=dict(mode="enforce", due=99, ageS=99999),
                              retryOf="2026-01-01T00:00:00.000000+00:00", outcome="passed", startedAt="2026-01-01T00:00:00Z",
-                             ts=pi_phase.utc_stamp(), head="h" * 40, dirty="d" * 64)
+                             ts=pi_phase.utc_stamp(), head="h" * 40, dirty="d" * 64,
+                             trial=trial, warm=True, hangKill=True, childCpuS=999999.9,
+                             fastShadow=dict(v=1, basis="family-warm", n=20, predS=99999.9, p90S=99999.9,
+                                             fails=20, would=False, limS=99999.9),
+                             failure=dict(category="hang", log="/" + "l" * 239, offset=9999999,
+                                          excerpt="e" * 160, hang=9999999))
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             pi_phase.append_ledger(state, ledger.record)
@@ -54,6 +60,8 @@ class LedgerSizeTests(unittest.TestCase):
         self.assertEqual((len(records), skipped), (1, 0))
         self.assertEqual(records[0]["obsV"], 1)
         self.assertEqual(records[0]["configHash"], digest)
+        for key in ("trial", "warm", "hangKill", "childCpuS", "fastShadow", "failure"):
+            self.assertEqual(records[0][key], ledger.record[key])
 
     def test_non_string_values_never_break_truncation(self):
         tmp = tempfile.TemporaryDirectory()
@@ -102,6 +110,12 @@ class PhaseWorkersTests(unittest.TestCase):
             self.assertEqual(self.workers(command, "test"), (None, "pool"), command)
         self.assertEqual(self.workers(["dotnet", "build"], "ci"), (None, None))
         self.assertEqual(self.workers(["env", "A=1", "nice", "dotnet", "build"]), (3, "shim"))
+
+    def test_explicit_paths_bypass_the_shim(self):
+        for executable in ("/usr/local/share/dotnet/dotnet", "./dotnet"):
+            self.assertEqual(self.workers([executable, "build"]), (CPUS, "bypass"))
+            self.assertEqual(self.workers([executable, "build", "-m:5"]), (5, "explicit"))
+            self.assertEqual(self.workers([executable, "build"], cap=0), (CPUS, "sdk-default"))
 
     def test_mtp_global_json_keeps_the_pool_price(self):
         tmp = tempfile.TemporaryDirectory()
@@ -393,6 +407,10 @@ class RunRecordTests(RunBase):
         stub.chmod(0o700)
         self.run_phase([str(stub), "build"])
         (record,) = self.records()
+        self.assertEqual((record["workers"], record["workersSource"]), (os.cpu_count() or 1, "bypass"))
+        with patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"]):
+            self.assertEqual(self.run_phase(["dotnet", "build"])[0], 0)
+        record = self.records()[-1]
         self.assertEqual((record["workers"], record["workersSource"]), (2, "shim"))
 
 
