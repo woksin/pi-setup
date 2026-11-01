@@ -3505,7 +3505,7 @@ class DotnetShimTests(unittest.TestCase):
                 self.assertEqual(self.invoke("build", arg), ["build", "-m:3", "-p:UseSharedCompilation=false", arg])
 
     def test_escape_hatch_leaves_cpu_cap_and_run_is_untouched(self):
-        self.assertEqual(self.invoke("build", "a.csproj", escape=True), ["build", "-m:3", "a.csproj"])
+        self.assertEqual(self.invoke("build", "a.csproj", escape=True), ["build", "-m:3", "-nodeReuse:false", "a.csproj"])
         self.assertEqual(self.invoke("run", "--project", "a.csproj"), ["run", "--project", "a.csproj"])
         self.assertEqual(self.invoke("--info"), ["--info"])
 
