@@ -279,12 +279,12 @@ class PhaseTests(unittest.TestCase):
                 patch.object(pi_phase.time, "sleep"), redirect_stdout(output):
             with self.assertRaises(PermissionError):
                 pi_phase.stop_group(99)
-        self.assertEqual([entry.kwargs["timeout"] for entry in probe.call_args_list], [2, 5, 10])
+        self.assertEqual([entry.kwargs["timeout"] for entry in probe.call_args_list], [2, 5, 10] + [2] * 5)
         kill.assert_called_once_with(99, signal.SIGTERM)
         self.assertIn("liveness=unknown", output.getvalue())
         self.assertIn("probe_attempts_failed=3", output.getvalue())
 
-    def test_eperm_live_probe_does_not_retry(self):
+    def test_eperm_live_probe_only_reobserves_within_bound(self):
         with patch.object(pi_phase.os, "killpg", side_effect=PermissionError(1, "denied")) as kill, \
                 patch.object(pi_phase.subprocess, "run", return_value=SimpleNamespace(stdout="12 99 S\n")) as probe, \
                 patch.object(pi_phase, "cleanup_snapshot"), \
@@ -292,7 +292,7 @@ class PhaseTests(unittest.TestCase):
                 patch.object(pi_phase.time, "sleep"):
             with self.assertRaises(PermissionError):
                 pi_phase.stop_group(99)
-        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(probe.call_count, 1 + pi_phase.CLEANUP_REOBSERVE_ATTEMPTS)
         kill.assert_called_once_with(99, signal.SIGTERM)
 
     @unittest.skipUnless(hasattr(os, "waitid"), "os.waitid unavailable (macOS Python < 3.13)")
@@ -3213,6 +3213,49 @@ class PhaseTests(unittest.TestCase):
                 result = exc
         return result, observe, probe, kill
 
+    def denied_group_with_observations(self, observations, probes):
+        with patch.object(pi_phase, "cleanup_snapshot_observation", side_effect=observations) as observe, \
+                patch.object(pi_phase, "cleanup_snapshot"), \
+                patch.object(pi_phase, "group_liveness", side_effect=probes) as probe, \
+                patch.object(pi_phase.os, "killpg", side_effect=PermissionError), \
+                patch.object(pi_phase.os, "getpgid", return_value=42), \
+                patch.object(pi_phase.os, "kill") as kill, patch.object(pi_phase.time, "sleep"), \
+                patch.object(pi_phase, "note"):
+            try:
+                result = pi_phase.stop_group(42)
+            except PermissionError as exc:
+                result = exc
+        return result, observe, probe, kill
+
+    def test_incomplete_first_snapshot_then_live_member_exiting_succeeds(self):
+        mine = os.getuid()
+        malformed = ([], "completeness=incomplete matched=0 omitted=0 malformed=1", "unknown")
+        seen = ([(42, 1, 42, mine, "Z"), (43, 1, 42, mine, "S"), (44, 1, 42, mine + 1, "S")],
+                "completeness=complete", "present")
+        zombie_only = ([(42, 1, 42, mine, "Z")], "completeness=complete", "present")
+        # SIGTERM: probe live, resnapshot shows member, signal it, probe empty. SIGKILL: already empty.
+        result, observe, probe, kill = self.denied_group_with_observations(
+            [malformed, malformed, seen, zombie_only], [True, True, False, False])
+        self.assertEqual(result, [43])
+        self.assertEqual([c.args for c in kill.call_args_list], [(43, signal.SIGTERM)])
+
+    def test_live_member_persisting_through_reobservation_fails_closed(self):
+        mine = os.getuid()
+        seen = ([(42, 1, 42, mine, "Z"), (43, 1, 42, mine, "S")], "completeness=complete", "present")
+        malformed_first = ([], "completeness=incomplete matched=0 omitted=0 malformed=1", "unknown")
+        result, observe, probe, kill = self.denied_group_with_observations(
+            [malformed_first] + [seen] * 20, [True] * 20)
+        self.assertIsInstance(result, PermissionError)
+        self.assertEqual(observe.call_count, 1 + pi_phase.CLEANUP_REOBSERVE_ATTEMPTS)
+        self.assertEqual(kill.call_count, pi_phase.CLEANUP_REOBSERVE_ATTEMPTS)  # SIGTERM stage only
+
+    def test_unknown_probe_through_reobservation_fails_closed(self):
+        unknown = ([], "completeness=unknown failure=timeout", "unknown")
+        result, observe, probe, kill = self.denied_group_with_observations([unknown] * 20, [None] * 20)
+        self.assertIsInstance(result, PermissionError)
+        kill.assert_not_called()
+        self.assertEqual(probe.call_count, 1 + pi_phase.CLEANUP_REOBSERVE_ATTEMPTS)
+
     def test_group_signal_success_takes_no_snapshot(self):
         with patch.object(pi_phase, "cleanup_snapshot_observation") as observe, \
                 patch.object(pi_phase.os, "killpg"), patch.object(pi_phase.time, "sleep"):
@@ -3233,7 +3276,7 @@ class PhaseTests(unittest.TestCase):
             with self.subTest(liveness=liveness):
                 result, _, probe, kill = self.stop_with_denied_group(rows, liveness=liveness)
                 self.assertIsInstance(result, PermissionError)
-                self.assertEqual(probe.call_args_list, [call(42, (2, 5, 10))])
+                self.assertEqual(probe.call_args_list, [call(42, (2, 5, 10))] + [call(42, (2,))] * 5)
                 kill.assert_not_called()
 
     def test_failed_snapshot_without_rows_fails_closed_on_live_or_unknown(self):
@@ -3241,13 +3284,13 @@ class PhaseTests(unittest.TestCase):
             with self.subTest(liveness=liveness):
                 result, _, probe, _ = self.stop_with_denied_group([], liveness=liveness, status="completeness=unknown")
                 self.assertIsInstance(result, PermissionError)
-                self.assertEqual(probe.call_args_list, [call(42, (2, 5, 10))])
+                self.assertEqual(probe.call_args_list, [call(42, (2, 5, 10))] + [call(42, (2,))] * 5)
 
     def test_failed_individual_signal_preserves_original_denial(self):
         rows = [(43, 1, 42, os.getuid(), "S")]
         result, _, probe, _ = self.stop_with_denied_group(rows, kill_side_effect=PermissionError)
         self.assertIsInstance(result, PermissionError)
-        self.assertEqual(probe.call_args_list, [call(42, (0.5,)), call(42, (2, 5, 10))])
+        self.assertEqual(probe.call_args_list, [call(42, (0.5,)), call(42, (2, 5, 10))] + [call(42, (2,))] * 5)
 
     def test_changed_pgid_member_is_not_signalled(self):
         rows = [(43, 1, 42, os.getuid(), "S")]

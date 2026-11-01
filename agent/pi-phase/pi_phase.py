@@ -3800,8 +3800,31 @@ def signal_group_members(pgid, sig, rows):
     return signalled
 
 
+CLEANUP_REOBSERVE_ATTEMPTS = 5
+CLEANUP_REOBSERVE_DELAY = 0.5
+
+
+def reobserve_denied_group(pgid, sig, signalled):
+    """Bounded (~2.5 s) fresh observations after a denied killpg; True only on a successful empty probe.
+
+    A single snapshot can be incomplete or stale, so re-observe, signal only eligible members
+    (PGID rechecked just before each signal) and accept nothing but a successful no-live-members probe.
+    """
+    for _ in range(CLEANUP_REOBSERVE_ATTEMPTS):
+        time.sleep(CLEANUP_REOBSERVE_DELAY)
+        rows = cleanup_snapshot_observation(pgid, member_limit=None)[0]
+        targets = signal_group_members(pgid, sig, rows)
+        if targets:
+            signalled.update(targets)
+            failure_note(f"cleanup pgid={pgid} signal={sig.name} pids={','.join(map(str, targets))}")
+        if group_liveness(pgid, (2,)) is False:
+            return True
+    failure_note(f"cleanup pgid={pgid} signal={sig.name} reobserve_attempts={CLEANUP_REOBSERVE_ATTEMPTS} unresolved=1")
+    return False
+
+
 def stop_group(pgid, leader_observation=None):
-    snapshot = None  # At most one bounded observation per invocation, taken on the first EPERM.
+    snapshot = None  # One diagnostic snapshot per invocation; denied-group re-observation takes fresh ones.
     signalled = set()
     for sig, delay in ((signal.SIGTERM, 0.6), (signal.SIGKILL, 0.2)):
         try:
@@ -3823,7 +3846,7 @@ def stop_group(pgid, leader_observation=None):
                 failure_note(f"cleanup pgid={pgid} signal={sig.name} pids={','.join(map(str, targets))}")
             else:
                 live = group_liveness(pgid, CLEANUP_PROBE_TIMEOUTS)
-                if live is not False:
+                if live is not False and not reobserve_denied_group(pgid, sig, signalled):
                     failure_note(f"killpg signal={sig.name} pgid={pgid} liveness={'live' if live else 'unknown'}")
                     raise
         time.sleep(delay)
