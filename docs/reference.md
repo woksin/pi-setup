@@ -20,7 +20,7 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 
 | Tool | Purpose | Help | Source |
 |---|---|---|---|
-| `pi-phase` | Runs one build, test or integration command through a shared queue with time limits and logs. Subcommands include `run`, `status` and `stats`. See the [pi-phase README](../agent/pi-phase/README.md). | `pi-phase --help` | [source](../agent/bin/pi-phase) |
+| `pi-phase` | Runs one build, test or integration command through a shared queue with time limits and logs. Subcommands include `run`, `status`, `stats` and `report`. See the [pi-phase README](../agent/pi-phase/README.md). | `pi-phase --help` | [source](../agent/bin/pi-phase) |
 | `cratis-local-run` | Wrapper that sends each step of a cross-repository check through `pi-phase`. | `cratis-local-run --help` | [source](../agent/bin/cratis-local-run) |
 | `pi-setup-tests` | Runs the `lib/*.test.ts` tests of an agent directory. | `pi-setup-tests --help` | [source](../agent/bin/pi-setup-tests) |
 
