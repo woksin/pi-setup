@@ -18,6 +18,9 @@ SECRET = "ARGV_ENV_STDERR_SENTINEL"
 COLUMNS = "pid=,ppid=,pgid=,uid=,stat="
 
 
+REOBSERVE = pi_phase.CLEANUP_REOBSERVE_ATTEMPTS
+
+
 class CleanupDiagnosticsTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
@@ -104,7 +107,9 @@ class CleanupDiagnosticsTests(unittest.TestCase):
         self.assertFalse(release.call_args.args[-1])
         self.assertTrue(list(state.glob("direct-*.json")))
         self.assertEqual(self.handlers.call_count, 4)
-        self.assertLessEqual(self.ps.call_count, 2)
+        # Per denied stop_group: one diagnostic snapshot, then only bounded re-observations.
+        self.assertLessEqual(self.ps.call_count, 2 * (1 + REOBSERVE))
+        self.assertLessEqual(self.output.getvalue().count("cleanup_snapshot pgid="), 2)
         self.assertNotIn(SECRET, self.output.getvalue())
         return self.output.getvalue()
 
@@ -116,7 +121,8 @@ class CleanupDiagnosticsTests(unittest.TestCase):
         self.assertIn("leader_observation=waitid_wnowait producer_exit=0", output)
         self.assertIn(f"pid={PID} ppid=1 pgid={PID} uid=501 state=S", output)
         self.assertIn("wrapper exit=125", output)
-        self.assertEqual(self.ps.call_count, 2)
+        self.assertEqual(self.ps.call_count, 2 * (1 + REOBSERVE))
+        self.assertEqual(self.output.getvalue().count("cleanup_snapshot pgid="), 2)
         self.waitid.assert_called_once_with(os.P_PID, PID, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         self.assertEqual(self.killpg.call_args_list, [call(PID, signal.SIGTERM)] * 2)
 
@@ -129,7 +135,7 @@ class CleanupDiagnosticsTests(unittest.TestCase):
     def test_waitid_failure_never_claims_exit(self):
         output = self.supervise(observation=OSError(5, SECRET))
         self.assertIn("leader_observation=unknown producer_exit=unknown", output)
-        self.assertEqual(self.ps.call_count, 1)
+        self.assertEqual(self.ps.call_count, 1 + REOBSERVE)
 
     def test_timeout_never_claims_exit(self):
         output = self.supervise(observation="timeout")
@@ -220,7 +226,7 @@ class CleanupDiagnosticsTests(unittest.TestCase):
         with self.assertRaises(PermissionError) as error:
             pi_phase.stop_group(PID)
         self.assertIs(error.exception, self.denied)
-        self.assertEqual([entry.kwargs["timeout"] for entry in self.ps.call_args_list], [1, 2, 5, 10])
+        self.assertEqual([entry.kwargs["timeout"] for entry in self.ps.call_args_list], [1, 2, 5, 10] + [1, 2] * REOBSERVE)
 
     def test_sigkill_denial_preserves_original_error(self):
         self.killpg.side_effect = [None, self.denied]
@@ -228,7 +234,8 @@ class CleanupDiagnosticsTests(unittest.TestCase):
             pi_phase.stop_group(PID)
         self.assertIs(error.exception, self.denied)
         self.assertIn("signal=SIGKILL", self.output.getvalue())
-        self.assertEqual(self.ps.call_count, 1)
+        self.assertEqual(self.ps.call_count, 1 + REOBSERVE)  # One diagnostic snapshot, then re-observations.
+        self.assertEqual(self.output.getvalue().count("cleanup_snapshot pgid="), 1)
 
     def test_observer_failure_does_not_replace_denial_or_skip_finalization(self):
         self.ps.side_effect = PermissionError(1, SECRET)
