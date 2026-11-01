@@ -28,9 +28,9 @@ msbuild=yes
 shared=yes
 reuse=yes
 property_next=no
+# Shared compilation only: MSBuild node reuse stays off, because reused nodes outlive the phase.
 if [ "${PI_PHASE_SHARED_COMPILATION:-}" = 1 ]; then
     shared=no
-    reuse=no
 fi
 for arg do
     index=$((index + 1))

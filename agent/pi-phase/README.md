@@ -140,7 +140,7 @@ Preserve your actual phase arguments, command and cwd; the command and label abo
 
 ## .NET worker lifetime and orchestration guard
 
-For MSBuild-backed `build`, `test`, `publish`, `pack`, `msbuild`, and `restore`, the dotnet shim also injects `-p:UseSharedCompilation=false` and `-nodeReuse:false`. These defaults prevent shared compiler/MSBuild nodes from outliving a phase. Explicit caller properties/node-reuse flags win; `PI_PHASE_SHARED_COMPILATION=1` opts out of both lifetime defaults without removing the CPU cap. `dotnet run`, metadata commands, assembly-based tests and Microsoft.Testing.Platform tests are unchanged.
+For MSBuild-backed `build`, `test`, `publish`, `pack`, `msbuild`, and `restore`, the dotnet shim also injects `-p:UseSharedCompilation=false` and `-nodeReuse:false`. These defaults prevent shared compiler/MSBuild nodes from outliving a phase. Explicit caller properties/node-reuse flags win; `PI_PHASE_SHARED_COMPILATION=1` opts out of the shared-compilation default only (node reuse stays off) without removing the CPU cap. `dotnet run`, metadata commands, assembly-based tests and Microsoft.Testing.Platform tests are unchanged.
 
 In orchestrated sessions only, the `dotnet` guard rejects definite unwrapped `dotnet build|test|publish|pack|msbuild|run` commands and suggests a complete `pi-phase run` replacement (test kind for `test`, build otherwise, with bounded queue/execution timers). Phase-wrapped commands, metadata/tooling/format commands, quoted mentions and uncertain shell syntax remain allowed. `/guards off dotnet` disables the guard through the normal guard registry; ordinary non-orchestrated sessions are unaffected.
 
