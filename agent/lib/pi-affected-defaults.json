@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "repos": {
+    "Cratis/Stage": {
+      "note": "Host Exec-publishes SpecRunner and BodyWorker after build (no ProjectReference); pi-setup#94.",
+      "edges": {
+        "Source/SpecRunner/SpecRunner.csproj": ["Source/Host/Host.csproj", "Source/Conformance.Specs/Conformance.Specs.csproj"],
+        "Source/BodyWorker/BodyWorker.csproj": ["Source/Host/Host.csproj", "Source/Conformance.Specs/Conformance.Specs.csproj"]
+      }
+    }
+  }
+}

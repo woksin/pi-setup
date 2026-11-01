@@ -39,7 +39,7 @@ Ordered, small steps, each naming the file(s) and the change, and the specs/test
 
 ## Verify with
 - Configuration to verify: <e.g. Release, warnings as errors; must match CI>.
-- Iterate with: `<narrow affected-project command>`. For a .NET `dotnet build`/`dotnet test` argv, run it as `pi-phase run --profile iterate ...` (analyzers and code style off). Iterate runs are never delivery or gate evidence.
+- Iterate with: `<narrow affected-project command>`. For a .NET `dotnet build`/`dotnet test` argv, run it as `pi-phase run --profile iterate ...` (analyzers and code style off). Iterate runs are never delivery or gate evidence. For .NET, run `~/.pi/agent/bin/pi-affected` first and iterate on its `target:`.
 - Before delivery: one full-profile build of the touched projects in the configuration above (analyzers on), then the Done gate.
 - Finish with the Done gate once. Use `pi-phase run ... --log <repo>/.ai-work/<task>/<phase>.log` instead of redirects, pipes or `; echo $?`. A `pi-phase run` goes alone in its tool turn, never batched with edits or quick checks (a parallel batch records results only when all calls finish).
 

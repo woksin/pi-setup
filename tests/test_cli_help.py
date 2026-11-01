@@ -24,6 +24,7 @@ TOOLS = {
     "inbox-watch": ("agent/bin/inbox-watch", []),
     "lane-status": ("agent/bin/lane-status", ["set", "clear", "get"]),
     "pi-account": ("agent/bin/pi-account", ["save", "use", "next", "list"]),
+    "pi-affected": ("agent/bin/pi-affected", ["install"]),
     "pi-cleanup": ("agent/bin/pi-cleanup", []),
     "pi-phase": ("agent/bin/pi-phase", ["status", "run", "withdraw", "report"]),
     "pi-profile": ("agent/bin/pi-profile", ["list", "use", "save"]),
