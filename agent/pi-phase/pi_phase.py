@@ -1978,7 +1978,7 @@ def explicit_cap(argument):
 
 
 def phase_workers(command, kind, cap, cwd, cpus):
-    """(workers|None, source|None): a pure estimate of the MSBuild node count, mirroring dotnet-shim.sh.
+    """(workers|None, source|None): estimate MSBuild nodes; explicit paths bypass dotnet-shim.sh.
 
     Commands we cannot see into (shells, scripts, non-dotnet, dotnet run/test of assemblies or MTP) keep their pool price."""
     if kind == "ci":
@@ -1996,7 +1996,7 @@ def phase_workers(command, kind, cap, cwd, cpus):
     if explicit:
         return explicit[-1] or cpus, "explicit"
     if type(cap) is int and cap >= 1:
-        return cap, "shim"
+        return (cap, "shim") if os.sep not in inner[0] else (cpus, "bypass")
     return cpus, "sdk-default"
 
 

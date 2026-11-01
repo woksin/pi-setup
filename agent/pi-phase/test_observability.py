@@ -103,6 +103,12 @@ class PhaseWorkersTests(unittest.TestCase):
         self.assertEqual(self.workers(["dotnet", "build"], "ci"), (None, None))
         self.assertEqual(self.workers(["env", "A=1", "nice", "dotnet", "build"]), (3, "shim"))
 
+    def test_explicit_paths_bypass_the_shim(self):
+        for executable in ("/usr/local/share/dotnet/dotnet", "./dotnet"):
+            self.assertEqual(self.workers([executable, "build"]), (CPUS, "bypass"))
+            self.assertEqual(self.workers([executable, "build", "-m:5"]), (5, "explicit"))
+            self.assertEqual(self.workers([executable, "build"], cap=0), (CPUS, "sdk-default"))
+
     def test_mtp_global_json_keeps_the_pool_price(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -393,6 +399,10 @@ class RunRecordTests(RunBase):
         stub.chmod(0o700)
         self.run_phase([str(stub), "build"])
         (record,) = self.records()
+        self.assertEqual((record["workers"], record["workersSource"]), (os.cpu_count() or 1, "bypass"))
+        with patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"]):
+            self.assertEqual(self.run_phase(["dotnet", "build"])[0], 0)
+        record = self.records()[-1]
         self.assertEqual((record["workers"], record["workersSource"]), (2, "shim"))
 
 
