@@ -2,6 +2,10 @@
 
 `provider-fallback.json` controls equivalents/chains and provider limits. Provider limit marks live in `.provider-limits.json` beside the agent config. Automatic expiry restores the remembered original model unless `restoreWhenExpired` is false.
 
+## Provider pins
+
+`providerPins` (in `provider-fallback.json`) and the machine-local `provider-pins.json` beside it (not published; override path with `PI_PROVIDER_PINS`) map a session id, or a prefix of at least 8 characters, to a provider: `{ "<session id>": "openai-codex" }`. A pinned session never switches, pre-empts or restores to another provider. Same-provider chain entries still apply; with none it stays put on a limit and `resumeAfterLimit` continues it when the limit clears. Subagents inherit the pin: persisted ones and forks through their session header's `parentSession`, in-memory ones from the root session of their process (the UI session, or the first session of a headless process). Pin root sessions; a pin on an intermediate subagent reaches only its persisted descendants. Pins are read on every check; a running session picks up code changes after `/reload`. Agent types pinned to a Claude model still run on Claude in a pinned session (the pin only governs fallback), so a session that must stay on GPT uses GPT-pinned agent types.
+
 ## Limit marks, manual choice and the status widget
 
 - **Scopes.** A mark is keyed `"<provider>"` (account-wide: blocks every model of the provider) or `"<provider>/<model>"` (blocks that model only). A rate limit (`429`, `rate_limit_error`) marks the model that hit it, because provider rate limits are per model class. Text matching the defaults `usage limit`, `quota` or `billing|credit balance|extra usage|upgrade your plan`, or the optional per-provider `accountWidePatterns` (`{"anthropic": ["weekly cap"]}`, case-insensitive regexes; code defaults apply when the key is absent), marks the whole account. "Unavailable" (outage) marks stay provider-wide and short.
