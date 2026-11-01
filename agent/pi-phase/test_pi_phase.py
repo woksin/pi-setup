@@ -1735,10 +1735,10 @@ class PhaseTests(unittest.TestCase):
         # Exercise the slot queue, independent of worktree admission and clock read count.
         clock = [0]
         ticks = iter([601, 602, 901])
+        # subprocess.wait polls with short time.sleep calls (<= 0.05 s) when a probe is slow under
+        # load; only the queue's own waits advance the fake clock.
         with patch.object(pi_phase.WorktreeAdmission, "acquire", return_value=None), \
                 patch.object(pi_phase.time, "monotonic", side_effect=lambda: clock[0]), \
-                # subprocess.wait polls with short time.sleep calls (<= 0.05 s) when a probe is slow under
-                # load; only the queue's own waits advance the fake clock.
                 patch.object(pi_phase.time, "sleep",
                              side_effect=lambda delay: clock.__setitem__(0, next(ticks)) if delay >= 0.1 else None), \
                 patch.object(pi_phase, "claim", return_value=None), patch.object(pi_phase, "note") as note:
