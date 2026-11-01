@@ -848,7 +848,8 @@ class PhaseTests(unittest.TestCase):
                                       "head", "dirty", "argvHash", "stack", "envHash", "profile", "verified", "fingerprint", "fast", "policy", "source",
                                   "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis",
                                   "waitV", "waitBreakdown", "waitScans", "waitSamples",
-                                  "host", "peakRssMb", "peakProcRssMb"})
+                                  "host", "peakRssMb", "peakProcRssMb",
+                                  "obsV", "configHash", "configSummary", "hangTimeout", "workersSource"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
@@ -1734,9 +1735,12 @@ class PhaseTests(unittest.TestCase):
         # Exercise the slot queue, independent of worktree admission and clock read count.
         clock = [0]
         ticks = iter([601, 602, 901])
+        # subprocess.wait polls with short time.sleep calls (<= 0.05 s) when a probe is slow under
+        # load; only the queue's own waits advance the fake clock.
         with patch.object(pi_phase.WorktreeAdmission, "acquire", return_value=None), \
                 patch.object(pi_phase.time, "monotonic", side_effect=lambda: clock[0]), \
-                patch.object(pi_phase.time, "sleep", side_effect=lambda _: clock.__setitem__(0, next(ticks))), \
+                patch.object(pi_phase.time, "sleep",
+                             side_effect=lambda delay: clock.__setitem__(0, next(ticks)) if delay >= 0.1 else None), \
                 patch.object(pi_phase, "claim", return_value=None), patch.object(pi_phase, "note") as note:
             self.assertEqual(pi_phase.run(args, self.state, self.config), 75)
         hints = [call.args[0] for call in note.call_args_list if call.args[0].startswith("long queue")]

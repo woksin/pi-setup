@@ -252,9 +252,17 @@ def append_ledger(state, record):
         # Environment values and even rejected labels can be arbitrarily large. Bound only
         # descriptive strings, retaining hashes, times and measurements in their entirety.
         while len(payload) >= 4096:
-            key = max(("session", "lane", "cwd", "label", "priority"),
-                      key=lambda k: len(json.dumps(record[k])))
-            record[key] = record[key][:len(record[key]) // 2]
+            strings = [k for k in ("session", "lane", "cwd", "label", "priority", "retryReason")
+                       if isinstance(record.get(k), str) and len(record[k]) > 1]
+            if strings:
+                key = max(strings, key=lambda k: len(json.dumps(record[k])))
+                record[key] = record[key][:len(record[key]) // 2]
+            elif "configSummary" in record:
+                del record["configSummary"]
+            elif "msbuildCalls" in record:
+                del record["msbuildCalls"]
+            else:
+                break  # Nothing left to bound; write as is rather than loop forever.
             payload = (json.dumps(record, separators=(",", ":")) + "\n").encode()
         fd = os.open(directory / (record["ts"][:10] + ".jsonl"),
                      os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -299,6 +307,7 @@ class WaitTelemetry:
         self.mem_free_min = None
         self.busy = {}
         self.would, self.would_seconds = None, {}
+        self.observed, self.observe_seconds, self.observe_scans = (), {}, {}
 
     def record(self, scan):
         try:
@@ -308,9 +317,13 @@ class WaitTelemetry:
             now = self.clock()
             self.seconds[self.current] = self.seconds.get(self.current, 0.0) + now - self.at
             self.credit_would_hold(now - self.at)
+            self.credit_observe(now - self.at)
             self.current, self.at = reason, now
             self.scans[reason] = self.scans.get(reason, 0) + 1
             self.would = would_hold_kind(scan)
+            self.observed = tuple(kind for kind in ("host", "cpu") if kind in (scan.get("observe") or {}))
+            for kind in self.observed:
+                self.observe_scans[kind] = self.observe_scans.get(kind, 0) + 1
             self.sample_load()
             self.sample_memory(scan.get("memFree"))
             self.sample_pools(scan.get("busy", {}))
@@ -320,6 +333,10 @@ class WaitTelemetry:
     def credit_would_hold(self, seconds):
         if self.would:
             self.would_seconds[self.would] = self.would_seconds.get(self.would, 0.0) + seconds
+
+    def credit_observe(self, seconds):
+        for kind in self.observed:
+            self.observe_seconds[kind] = self.observe_seconds.get(kind, 0.0) + seconds
 
     def sample_load(self):
         try:
@@ -350,6 +367,7 @@ class WaitTelemetry:
             if not self.closed:
                 self.seconds[self.current] = self.seconds.get(self.current, 0.0) + max(0, end - self.at)
                 self.credit_would_hold(max(0, end - self.at))
+                self.credit_observe(max(0, end - self.at))
                 self.closed = True
         except Exception:
             pass
@@ -366,6 +384,9 @@ class WaitTelemetry:
                           waitScans=dict(self.scans), waitSamples=samples)
             if self.would_seconds:  # Observe-mode holds only; absent when no observed pressure/budget hold.
                 fields["waitWouldHold"] = {key: round(value, 3) for key, value in self.would_seconds.items()}
+            if self.observe_scans:  # Independent host/cpu verdicts in any mode (#92); absent when none was seen.
+                fields["waitObserve"] = {kind: dict(s=round(self.observe_seconds.get(kind, 0.0), 3), n=count)
+                                         for kind, count in self.observe_scans.items()}
             return fields
         except Exception:
             return {}
@@ -453,7 +474,7 @@ class PhaseLedger:
             cwd = os.path.realpath(os.getcwd())
         except OSError:
             cwd = None
-        self.record = dict(v=1, ts=None, session=os.environ.get("PI_SESSION_ID") or None,
+        self.record = dict(v=1, obsV=1, ts=None, session=os.environ.get("PI_SESSION_ID") or None,
                            lane=os.environ.get("PI_ORCH_ID") or os.environ.get("PI_LANE_ID") or None,
                            cwd=cwd, kind=args.kind, label=args.label, priority=args.priority,
                            policy="queued", source="default",
@@ -463,7 +484,11 @@ class PhaseLedger:
                            profile=getattr(args, "profile", None) or "full",
                            argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest(),
                            fingerprint=test_fingerprint(cwd, command) if cwd is not None else None)
+        retry_reason = getattr(args, "retry_reason", None)
+        if retry_reason:
+            self.record["retryReason"] = retry_reason
         self.args, self.command = args, command
+        self.state = None
         self.records = []
         self.queued = time.monotonic()
         self.started = None
@@ -508,6 +533,19 @@ class PhaseLedger:
         passed = next((r for r in matches if r["outcome"] == "passed" and r.get("label") == self.record["label"]), None)
         failed = next((r for r in matches if repeat_failure(r)), None)
         return passed, failed
+
+    def retry_of(self):
+        """Timestamp of the latest failed/timeout run of the same label and tree state (profile included)."""
+        if self.record["dirty"] is None:
+            return None
+        keys = ("label", "cwd", "kind", "head", "dirty")
+        for record in reversed(self.records):
+            if (record.get("outcome") in ("failed", "timeout", "passed")
+                    and all(record.get(k) == self.record[k] for k in keys)
+                    and (record.get("profile") or "full") == self.record["profile"]):
+                # Only the latest same-state result counts: a pass in between ends the retry chain.
+                return record["ts"] if record["outcome"] != "passed" and isinstance(record.get("ts"), str) else None
+        return None
 
     def cross_worktree_passed(self):
         """A verified passed build/test record of the same gateKey from any worktree (never integration or ci)."""
@@ -554,6 +592,20 @@ class PhaseLedger:
         kind = would_hold_kind(scan)
         if kind:
             self.record["wouldHoldAtAdmit"] = kind
+        observed = sorted(kind for kind in (scan.get("observe") or {}) if kind in ("host", "cpu"))
+        if observed:
+            self.record["admitObserve"] = observed
+
+    def reaper_context(self):
+        """Cache read only (written by reap-build-servers); never probes processes."""
+        try:
+            data = json.loads((self.state / "reaper-last.json").read_text())
+            if (isinstance(data, dict) and isinstance(data.get("mode"), str) and len(data["mode"]) <= 20
+                    and type(data.get("due")) is int and number(data.get("at"))):
+                self.record["reaper"] = dict(mode=data["mode"], due=data["due"],
+                                             ageS=int(max(0, time.time() - data["at"])))
+        except (OSError, ValueError, TypeError, AttributeError, OverflowError):
+            pass  # Missing or corrupt cache sets nothing.
 
     def snapshot(self):
         try:
@@ -572,6 +624,8 @@ class PhaseLedger:
         if self.host_pressure is not None:
             self.record.setdefault("host", {}).update(self.host_pressure.cached_fields())  # cache only, never probes
         self.record["waitS"] = max(0, self.started - self.queued)
+        if self.state is not None:
+            self.reaper_context()
         if self.wait:
             self.wait.close(self.started)
 
@@ -624,7 +678,8 @@ def rejected_ledger(argv):
         return None
     options, command = [], []
     valued = {"--kind", "--label", "--priority", "--timeout", "--queue-timeout", "--repo", "--pr",
-              "--commit", "--log", "--tail", "--vstest-hang-minutes", "--stack", "--policy", "--profile"}
+              "--commit", "--log", "--tail", "--vstest-hang-minutes", "--stack", "--policy", "--profile",
+              "--retry-reason"}
     index = 1
     while index < len(argv):
         arg = argv[index]
@@ -650,7 +705,11 @@ def rejected_ledger(argv):
     if kind not in KINDS:
         return None
     stack = value("--stack", "")
-    return PhaseLedger(argparse.Namespace(kind=kind, label=value("--label", ""),
+    try:
+        retry_reason = safe_label(value("--retry-reason") or "")
+    except ValueError:
+        retry_reason = None
+    return PhaseLedger(argparse.Namespace(kind=kind, label=value("--label", ""), retry_reason=retry_reason,
                                          priority=value("--priority", "normal"), command=command,
                                          stack=stack if re.fullmatch(r"[a-z0-9-]{1,20}", stack) else None))
 
@@ -766,6 +825,126 @@ def stats(state, days, kind, as_json, stack=None):
                   *("-" if v is None else f"{v:g}" for v in (*row["waitS"].values(), *row["runS"].values())),
                   row["queueTimeouts"], row["failures"], row["skipped"], row["withdrawn"])
         print(f"skipped {skipped} malformed ledger lines")
+    return 0
+
+
+MSBUILD_CALLS_READ_BYTES = 64 * 1024
+
+
+def parse_msbuild_calls(text):
+    """{capped, explicit, maxNodes} from the shim's `calls` lines, or None without any call."""
+    capped = explicit = nodes = 0
+    for line in text.splitlines():
+        kind, _, rest = line.partition(" ")
+        if kind == "capped" and rest.strip().isdigit():
+            capped += 1
+            nodes = max(nodes, int(rest))
+        elif kind == "explicit":
+            explicit += 1
+            nodes = max(nodes, explicit_cap(rest.strip())[1] or (os.cpu_count() or 1))
+    return dict(capped=capped, explicit=explicit, maxNodes=nodes) if capped or explicit else None
+
+
+def record_msbuild_calls(ledger, directory):
+    """What the shim really saw; never affects the phase result."""
+    try:
+        with open(Path(directory) / "calls", "rb") as stream:
+            calls = parse_msbuild_calls(stream.read(MSBUILD_CALLS_READ_BYTES).decode("utf-8", "replace"))
+        if calls:
+            ledger.record["msbuildCalls"] = calls
+    except Exception:
+        pass
+
+
+def bump(counter, key, amount=1):
+    counter[key] = counter.get(key, 0) + amount
+
+
+def report_summary(records, days, skipped):
+    """Counters over registered and legacy records alike; every new field is optional."""
+    result = dict(days=days, skipped=skipped, records=len(records), obsRecords=0,
+                  started=sum(r["startedAt"] is not None for r in records))
+    configs, unknown = {}, 0
+    profile = dict(iterate=0, iterateApplied=0, full=0)
+    hang, sources, mean = {}, {}, {}
+    calls = dict(phases=0, capped=0, explicit=0, maxNodes=0)
+    observe = dict(host=dict(phases=0, waitS=0.0), cpu=dict(phases=0, waitS=0.0))
+    admit, hold = dict(host=0, cpu=0), dict(host=0, cpu=0)
+    retries = dict(retryOf=0, withReason=0, reasonOnly=0)
+    due = 0
+    for r in records:
+        result["obsRecords"] += "obsV" in r
+        if type(r.get("configHash")) is str:
+            entry = configs.setdefault(r["configHash"], dict(hash=r["configHash"], count=0, summary=None))
+            entry["count"] += 1
+            entry["summary"] = r.get("configSummary")
+        else:
+            unknown += 1
+        if r["kind"] in ("build", "test", "integration"):
+            if (r.get("profile") or "full") == "iterate":
+                profile["iterate"] += 1
+                profile["iterateApplied"] += r.get("profileApplied") is True
+            else:
+                profile["full"] += 1
+        if r["kind"] == "test" and isinstance(r.get("hangTimeout"), str):
+            bump(hang, r["hangTimeout"])
+        if isinstance(r.get("workersSource"), str):
+            bump(sources, r["workersSource"])
+        if type(r.get("workers")) is int:
+            total = mean.setdefault(r["kind"], [0, 0])
+            total[0] += r["workers"]
+            total[1] += 1
+        if isinstance(r.get("msbuildCalls"), dict):
+            call = r["msbuildCalls"]
+            calls["phases"] += 1
+            for key in ("capped", "explicit"):
+                calls[key] += call.get(key) if type(call.get(key)) is int else 0
+            if type(call.get("maxNodes")) is int:
+                calls["maxNodes"] = max(calls["maxNodes"], call["maxNodes"])
+        wait = r.get("waitObserve") if isinstance(r.get("waitObserve"), dict) else {}
+        for kind in ("host", "cpu"):
+            item = wait.get(kind)
+            if isinstance(item, dict):
+                observe[kind]["phases"] += 1
+                observe[kind]["waitS"] += item.get("s") if number(item.get("s")) else 0
+            admit[kind] += isinstance(r.get("admitObserve"), list) and kind in r["admitObserve"]
+            hold[kind] += r.get("wouldHoldAtAdmit") == kind
+        due += isinstance(r.get("reaper"), dict) and (r["reaper"].get("due") or 0) > 0
+        retries["retryOf"] += "retryOf" in r
+        retries["withReason"] += "retryOf" in r and "retryReason" in r
+        retries["reasonOnly"] += "retryOf" not in r and "retryReason" in r
+    for item in observe.values():
+        item["waitS"] = round(item["waitS"], 3)
+    result.update(configs=sorted(configs.values(), key=lambda c: -c["count"]), unknownConfig=unknown,
+                  profile=profile, hangTimeout=hang, workers=sources,
+                  cpuBudgetMeanWorkers={kind: round(total / count, 2) for kind, (total, count) in sorted(mean.items())},
+                  msbuildCalls=calls, observe=observe, admitObserve=admit, wouldHoldAtAdmit=hold,
+                  reaper=dict(phasesWithDue=due), retries=retries)
+    return result
+
+
+def report(state, days, as_json):
+    """Read-only: never creates state."""
+    records, skipped = read_ledger(state, days)
+    result = report_summary(records, days, skipped)
+    if as_json:
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    print(f"pi-phase: report last {days}d ({skipped} malformed records skipped)")
+    print(f"records={result['records']} started={result['started']} withObservability={result['obsRecords']}"
+          f" unknownConfig={result['unknownConfig']}")
+    for config in result["configs"]:
+        print(f"config {config['hash'][:12]} count={config['count']} {json.dumps(config['summary'], sort_keys=True)}")
+    print("profile " + " ".join(f"{k}={v}" for k, v in result["profile"].items()))
+    print("hangTimeout " + (" ".join(f"{k}={v}" for k, v in sorted(result["hangTimeout"].items())) or "-"))
+    print("workers " + (" ".join(f"{k}={v}" for k, v in sorted(result["workers"].items())) or "-")
+          + " meanByKind " + (" ".join(f"{k}={v:g}" for k, v in result["cpuBudgetMeanWorkers"].items()) or "-"))
+    print("msbuildCalls " + " ".join(f"{k}={v}" for k, v in result["msbuildCalls"].items()))
+    for kind in ("host", "cpu"):
+        print(f"observe.{kind} phases={result['observe'][kind]['phases']} waitS={result['observe'][kind]['waitS']:g}"
+              f" admit={result['admitObserve'][kind]} wouldHoldAtAdmit={result['wouldHoldAtAdmit'][kind]}")
+    print(f"reaper phasesWithDue={result['reaper']['phasesWithDue']}")
+    print("retries " + " ".join(f"{k}={v}" for k, v in result["retries"].items()))
     return 0
 
 
@@ -996,6 +1175,24 @@ def config(path, *, notes=None):
     heavy = values.pop("heavy_slots")
     integration = values.pop("integration_slots")
     return PhaseConfig(heavy, integration, values)
+
+
+def config_fields(settings):
+    """(hash, summary) of the validated, merged options; the digest covers everything including policy rules."""
+    heavy, integration = settings
+    options = settings.options
+    digest = hashlib.sha256(json.dumps(dict(heavy_slots=heavy, integration_slots=integration, **options),
+                                       sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    mode = lambda key: (options.get(key) or {}).get("mode")
+    fast = options["fast_lane"] or {}
+    summary = dict(heavySlots=heavy, integrationSlots=integration,
+                   fastSlots=fast.get("slots"), fastMaxS=fast.get("max_expected_s"),
+                   msbuildMaxCpu=options["msbuild_max_cpu"], phaseNice=options["phase_nice"],
+                   memoryAdmission=bool(options["memory_admission"]), hostPressure=mode("host_pressure"),
+                   cpuBudget=mode("cpu_budget"), hangTimeout=mode("hang_timeout"),
+                   reapBuildServers=mode("reap_build_servers"), skipCrossWorktree=options["skip_cross_worktree"],
+                   queueOrder=(options.get("queue_order") or {}).get("mode"))
+    return digest, summary
 
 
 QUEUE_ORDER_DEFAULTS = dict(mode="shortest-first", aging_s=600, default_expected_s=180, low_promote_after_s=900)
@@ -1599,7 +1796,8 @@ def cpu_budget_config(value, warn=None):
 
 class CpuBudget:
     """Units per live lease by pool prefix; the unit total and the load average gate every policy except ci."""
-    def __init__(self, settings, msbuild_max_cpu, cpus=None, loadavg=None):
+    def __init__(self, settings, msbuild_max_cpu, cpus=None, loadavg=None, workers=None):
+        self.workers = workers if type(workers) is int and workers >= 1 else None
         self.mode, self.loadavg = settings["mode"], loadavg or (lambda: os.getloadavg())
         self.cpus = cpus or os.cpu_count() or 1
         units = settings["max_units"]
@@ -1608,8 +1806,15 @@ class CpuBudget:
         self.costs = {pool: msbuild if cost == "msbuild" else cost for pool, cost in settings["costs"].items()}
         self.max_load = settings["max_load_per_core"]
 
-    def cost(self, path):
-        return self.costs.get(path.name.split("-", 1)[0], 0)
+    def cost(self, path, entry=None):
+        """Worker-aware for heavy/fast/direct when the count is known (candidate: self.workers; running lease: its
+        metadata `workers`); otherwise the pool price. Integration and unknown prefixes keep their pool price."""
+        pool = path.name.split("-", 1)[0]
+        if pool in ("heavy", "fast", "direct"):
+            workers = self.workers if entry is None else entry.get("workers")
+            if type(workers) is int and workers >= 1:
+                return workers
+        return self.costs.get(pool, 0)
 
     def load_per_core(self):
         try:
@@ -1619,7 +1824,7 @@ class CpuBudget:
 
     def running_units(self, state, available, prior, live):
         """Caller holds the coordinator."""
-        return sum(self.cost(path) for path in state.glob("*.lock")
+        return sum(self.cost(path, prior.get(path) or {}) for path in state.glob("*.lock")
                    if path.name.startswith(tuple(pool + "-" for pool in CPU_POOLS)) and path not in available
                    and lease_running(path, prior, live))
 
@@ -1757,6 +1962,42 @@ def phase_memory(options, kind, ledger):
 
 def msbuild_cap(value, heavy):
     return max(2, (os.cpu_count() or 1) // heavy) if value == "auto" else value
+
+
+WORKER_SUBCOMMANDS = ("build", "test", "publish", "pack", "msbuild", "restore")
+EXPLICIT_CAP = re.compile(r"^(?:[-/]m(?::(\d*))?|(?:-|/|--)maxcpucount(?:[:=](\d*))?\S*)$", re.I)
+
+
+def explicit_cap(argument):
+    """(matched, count|None) for a shim-recognized explicit MSBuild node-count argument."""
+    match = EXPLICIT_CAP.match(argument)
+    if not match:
+        return False, None
+    count = match.group(1) or match.group(2)
+    return True, int(count) if count and int(count) >= 1 else None
+
+
+def phase_workers(command, kind, cap, cwd, cpus):
+    """(workers|None, source|None): a pure estimate of the MSBuild node count, mirroring dotnet-shim.sh.
+
+    Commands we cannot see into (shells, scripts, non-dotnet, dotnet run/test of assemblies or MTP) keep their pool price."""
+    if kind == "ci":
+        return None, None
+    inner = unwrap_command(command, stop_at_shell=True)
+    if not inner or Path(inner[0]).name != "dotnet":
+        return None, "pool"
+    subcommand = next((a for a in inner[1:] if not a.startswith("-")), None)
+    if subcommand not in WORKER_SUBCOMMANDS:
+        return None, "pool"
+    if subcommand == "test" and (any(a.lower().endswith((".dll", ".exe")) for a in inner[1:])
+                                 or test_runner_is_mtp(cwd)):
+        return None, "pool"
+    explicit = [count for matched, count in map(explicit_cap, inner[1:]) if matched]
+    if explicit:
+        return explicit[-1] or cpus, "explicit"
+    if type(cap) is int and cap >= 1:
+        return cap, "shim"
+    return cpus, "sdk-default"
 
 
 COMPILER_ID_PREFIX = "pi-phase-"
@@ -2264,42 +2505,53 @@ def test_runner_is_mtp(cwd):
     return False
 
 
-def hang_timeout_skip_reason(command, args, settings, cwd):
-    """None when the hang timeout applies, else why not (empty string for silent skips)."""
-    if settings["mode"] != "on" or args.kind not in settings["kinds"] or args.kind in ("integration", "ci"):
-        return ""
+def hang_timeout_decision(command, args, settings, cwd):
+    """(code, message): code 'applied' when the hang timeout applies, else why not; message is printed (may be empty)."""
+    if settings["mode"] != "on":
+        return "off", ""
+    if args.kind not in settings["kinds"] or args.kind in ("integration", "ci"):
+        return "kind", ""
     if (getattr(args, "no_hang_timeout", False) or args.diagnose_hang
             or args.vstest_hang_minutes is not None):
-        return ""
+        return "opt-out", ""
     inner = unwrap_command(command, stop_at_shell=True)
     if not inner or Path(inner[0]).name != "dotnet" or inner[1:2] != ["test"]:
-        return ""  # Shell strings and scripts (Tier 1 gates) keep CI's timeouts.
+        return "not-direct-test", ""  # Shell strings and scripts (Tier 1 gates) keep CI's timeouts.
     if any(re.match(r"--(blame|hangdump|testing-platform)", argument) for argument in inner):
-        return ""
+        return "blame-args", ""
     real = os.path.realpath(cwd)
     inherited = main_worktree(real) if settings["paths"] else None
     candidates = (real, inherited) if inherited is not None else (real,)
     if settings["paths"] and not any(fnmatch.fnmatchcase(path, os.path.expanduser(pattern))
                                      for path in candidates for pattern in settings["paths"]):
-        return ""
+        return "path", ""
     if settings["seconds"] > args.timeout - HANG_TIMEOUT_MARGIN_S:
-        return ""
+        return "margin", ""
     if test_runner_is_mtp(real):
-        return "hang timeout skipped: global.json selects Microsoft.Testing.Platform"
-    return None
+        return "mtp", "hang timeout skipped: global.json selects Microsoft.Testing.Platform"
+    return "applied", None
+
+
+def hang_timeout_skip_reason(command, args, settings, cwd):
+    """None when the hang timeout applies, else why not (empty string for silent skips)."""
+    code, message = hang_timeout_decision(command, args, settings, cwd)
+    return None if code == "applied" else message
 
 
 def apply_hang_timeout(command, args, settings, cwd):
     """Append --blame-hang-timeout (no dump) to a direct VSTest dotnet test at the dump-injection boundary."""
-    reason = hang_timeout_skip_reason(command, args, settings, cwd)
-    if reason is not None:
+    code, reason = hang_timeout_decision(command, args, settings, cwd)
+    ledger = getattr(args, "ledger", None)
+    if ledger is not None and args.kind != "ci":
+        ledger.record["hangTimeout"] = code
+    if code != "applied":
         if reason:
             note(reason)
         return command
     seconds = settings["seconds"]
     injected = ["--blame-hang-timeout", f"{seconds}s", "--blame-hang-dump-type", "none"]
-    if getattr(args, "ledger", None) is not None:
-        args.ledger.record["hangTimeoutS"] = seconds
+    if ledger is not None:
+        ledger.record["hangTimeoutS"] = seconds
     note(f"hang timeout {seconds}s injected (hang_timeout; pass --no-hang-timeout to opt out)")
     boundary = dump_option_end(command)
     return [*command[:boundary], *injected, *command[boundary:]]
@@ -2309,7 +2561,7 @@ PROFILES = ("iterate", "full")
 ITERATE_PROPERTIES = ("RunAnalyzers=false", "EnforceCodeStyleInBuild=false")
 
 
-def apply_profile(command, profile, kind):
+def apply_profile(command, profile, kind, ledger=None):
     """The opt-in iterate profile: no analyzers or style enforcement for a direct `dotnet build|test` argv.
 
     Shell strings, scripts and other tools are left alone (and a note says so); a property the caller already
@@ -2319,9 +2571,13 @@ def apply_profile(command, profile, kind):
     inner = unwrap_command(command, stop_at_shell=True)
     if not inner or Path(inner[0]).name != "dotnet" or inner[1:2] not in (["build"], ["test"]):
         note("profile iterate: no dotnet build/test argv to adjust; running unchanged")
+        if ledger is not None:
+            ledger.record.update(profileApplied=False, profileProps=[])
         return command
     added = [f"-p:{item}" for item in ITERATE_PROPERTIES
              if not any(re.match(rf"^[-/]p(roperty)?[:=]{item.split('=')[0]}=", argument, re.I) for argument in inner)]
+    if ledger is not None:
+        ledger.record.update(profileApplied=True, profileProps=[a[3:] for a in added])
     note("profile iterate: " + (" ".join(added) or "caller already sets the properties")
          + " (analyzers/style off; not ship evidence)")
     boundary = dump_option_end(command)
@@ -3272,6 +3528,17 @@ def record_admission(scan, paths, available, admission):
         scan["memFree"] = admission.sample[0]
 
 
+def observe_verdict(scan, kind, why):
+    """Record what a check said, in any mode; scan['wouldHold'] keeps its first-reason meaning."""
+    if scan is not None and why:
+        scan.setdefault("observe", {})[kind] = why
+
+
+def cpu_verdict(cpu, state, available, prior, live, candidate, load):
+    """Caller holds the coordinator."""
+    return cpu.reason(cpu.running_units(state, available, prior, live), candidate, load)
+
+
 def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None,
           integration_ceiling=None, *, scan=None, pressure=None, cpu=None):
     """One bounded admission scan; kernel locks and metadata identity are checked atomically.
@@ -3281,6 +3548,7 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
     gated = any(path.name.startswith(("heavy-", "fast-", "direct-")) for path in paths)
     reason = admission.reason(deadline) if admission and gated else None
     host = pressure.reason(deadline) if pressure and gated else None
+    host_seen = host  # raw verdict, kept for observation whatever the enforce juggling below does
     holder = admission
     if host and pressure.mode == "enforce" and not reason:
         reason, holder = host, pressure
@@ -3323,10 +3591,13 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             available[path] = fd
         record_admission(scan, paths, available, admission)
         if (reason or host) and phases_running(state, available, prior, live):
+            observe_verdict(scan, "host", host_seen)
             if reason:
                 memory_held = True
                 if scan is not None:
                     scan["reason"] = "memory"
+                    if cpu and candidates:
+                        observe_verdict(scan, "cpu", cpu_verdict(cpu, state, available, prior, live, candidates[0], load))
                 return None
             if scan is not None:
                 scan["wouldHold"] = f"host:{host}"  # observe mode: report, never hold
@@ -3339,13 +3610,14 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
             candidate = next((c for c in candidates if all(p in eligible for p in c)), [])
             if scan is not None and not candidate:
                 scan["reason"] = "slots"
-        if candidate and cpu and phases_running(state, available, prior, live):
-            budget = cpu.reason(cpu.running_units(state, available, prior, live), candidate, load)
-            if budget and cpu.mode == "enforce":
+        if (candidate or candidates) and cpu and phases_running(state, available, prior, live):
+            budget = cpu_verdict(cpu, state, available, prior, live, candidate or candidates[0], load)
+            observe_verdict(scan, "cpu", budget)  # independent of the host verdict and of what the scan decides
+            if candidate and budget and cpu.mode == "enforce":
                 if scan is not None:
                     scan["reason"] = "cpu"
                 candidate = []
-            elif budget and scan is not None and "wouldHold" not in scan:
+            elif candidate and budget and scan is not None and "wouldHold" not in scan:
                 scan["wouldHold"] = budget
         if candidate and not cancelled() and time.monotonic() < deadline:
             for path in candidate:
@@ -4050,14 +4322,27 @@ def run(args, state, configuration, output=None):
         config_notes = set()
         settings = config(configuration, notes=config_notes)
         options = settings.options
-        command = apply_profile(command, getattr(args, "profile", "full"), args.kind)
+        if ledger:
+            ledger.state = state
+            digest, summary = config_fields(settings)
+            ledger.record.update(configHash=digest, configSummary=summary)
+        command = apply_profile(command, getattr(args, "profile", "full"), args.kind, ledger)
         command = apply_hang_timeout(command, admission_args, options["hang_timeout"], phase_cwd)
+        workers, workers_source = phase_workers(
+            command, args.kind, msbuild_cap(options["msbuild_max_cpu"], settings[0]), phase_cwd, os.cpu_count() or 1)
+        if ledger and workers_source:
+            ledger.record["workersSource"] = workers_source
+            if workers is not None:
+                ledger.record["workers"] = workers
         identity = work_identity(os.getcwd(), original_command, args.kind)
         prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity)
         if ledger:
             ledger.failure_categories = options["failure_categories"]
             ledger.prepare_snapshot()
             passed, failed = ledger.passed_state(state)
+            retry = ledger.retry_of()
+            if retry:
+                ledger.record["retryOf"] = retry
             warn_repeat_failure(failed)
             if (not args.rerun and os.environ.get("PI_PHASE_NO_SKIP") != "1" and args.kind != "ci"
                     and (args.kind != "integration" or options["skip_passed_integration"])):
@@ -4090,7 +4375,7 @@ def run(args, state, configuration, output=None):
         burst = IntegrationBurst(admission, burst_settings) if burst_settings else None
         pressure = (HostPressure(options["host_pressure"], state)
                     if options["host_pressure"]["mode"] != "off" else None)
-        cpu = (CpuBudget(options["cpu_budget"], options["msbuild_max_cpu"])
+        cpu = (CpuBudget(options["cpu_budget"], options["msbuild_max_cpu"], workers=workers)
                if options["cpu_budget"]["mode"] != "off" else None)
         if ledger:
             ledger.host_pressure = pressure
@@ -4217,7 +4502,8 @@ def run(args, state, configuration, output=None):
             publish(held, dict(token=token, pid=proc.pid, pgid=proc.pid, holderPid=os.getpid(),
                                root=worktree.root, cwd=os.getcwd(),
                                label=args.label, kind=args.kind, priority=admission_args.priority, started=time.time(),
-                               fast=admission_args.fast, policy=admission_args.policy, source=admission_args.source))
+                               fast=admission_args.fast, policy=admission_args.policy, source=admission_args.source,
+                               **({"workers": workers} if workers is not None else {})))
             worktree.publish(proc.pid)
             if not nested_group(state, worktree.holder, proc.pid):
                 note("parent phase released its slots during nested registration; command not started")
@@ -4336,6 +4622,8 @@ def run(args, state, configuration, output=None):
             # After the phase's own process group is gone; probes run here, outside the coordinator lock.
             cleanup_step(errors, "compiler_server_cleanup", proc, lambda: stop_phase_compiler_server(compiler_id))
         if shim_dir is not None:
+            if ledger:
+                record_msbuild_calls(ledger, shim_dir.name)
             cleanup_step(errors, "shim_cleanup", proc, shim_dir.cleanup)
         cleanup_step(errors, "restore_sigint", proc, lambda: signal.signal(signal.SIGINT, old_int))
         cleanup_step(errors, "restore_sigterm", proc, lambda: signal.signal(signal.SIGTERM, old_term))
@@ -4380,6 +4668,7 @@ def add_worktree_arguments(runner):
 HELP_EPILOG = """Examples:
   pi-phase status                                      # read-only: leases and queue
   pi-phase run --kind test --label unit -- npm test    # state-changing: runs the command as a bounded phase
+  pi-phase report --days 7                             # read-only: trial observability summary from the ledger
 Exit codes:
   run: the command's own exit code, or 75 queue timeout, 76 RSS cap, 77 withdrawn, 124 timeout, 125 wrapper failure
   other commands: 0 ok, 1 no match, 2 usage error, 3 refused (see README.md)
@@ -4402,6 +4691,9 @@ def main(argv=None, *, state=None, configuration=None):
     withdrawing.add_argument("--all", action="store_true")
     withdrawing.add_argument("--force", action="store_true")
     withdrawing.add_argument("--reason", type=withdrawal_reason)
+    reporting = commands.add_parser("report", help="summarize trial observability fields from the ledger")
+    reporting.add_argument("--days", type=int, default=7)
+    reporting.add_argument("--json", action="store_true")
     summary = commands.add_parser("stats", help="summarize phase history by UTC day and kind")
     summary.add_argument("--days", type=int, default=7)
     summary.add_argument("--kind", choices=KINDS)
@@ -4429,6 +4721,7 @@ def main(argv=None, *, state=None, configuration=None):
     runner.add_argument("--profile", choices=PROFILES, default="full",
                         help="iterate: no analyzers/style enforcement for dotnet build/test (never ship evidence); default full")
     runner.add_argument("--rerun", action="store_true", help="run even if this exact state already passed")
+    runner.add_argument("--retry-reason", type=withdrawal_reason, help="why this run repeats an earlier one (ledger only)")
     runner.add_argument("--expect-red", action="store_true", help="tag an intentional TDD failure; exit code is unchanged")
     add_worktree_arguments(runner)
     runner.add_argument("--repo", help="ci watcher repo identity")
@@ -4479,6 +4772,10 @@ def main(argv=None, *, state=None, configuration=None):
             if args.days < 1:
                 parser.error("--days must be positive")
             return summary_stats(state, args)
+        if args.action == "report":
+            if args.days < 1:
+                parser.error("--days must be positive")
+            return report(state, args.days, args.json)
         if args.action == "wait":
             return wait_eta(state, configuration, args.kind, args)
         if args.action == "status":

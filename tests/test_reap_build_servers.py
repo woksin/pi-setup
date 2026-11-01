@@ -135,6 +135,30 @@ class ReapBuildServersTests(unittest.TestCase):
         self.assertEqual(h.pass_(1000), "")
         self.assertIn("100", json.loads((Path(h.dir.name) / "reaper.json").read_text()))
 
+    def last(self, h):
+        return json.loads((Path(h.dir.name) / "reaper-last.json").read_text())
+
+    def test_reaper_last_records_each_pass_for_attribution(self):
+        h = Harness(self, row(), dict(SETTINGS, mode="observe"))
+        h.pass_(1000)
+        h.pass_(1300)
+        self.assertEqual(self.last(h), dict(v=1, at=int(START + 1300), mode="observe", candidates=1, due=0, acted=0))
+        h.pass_(1700)
+        self.assertEqual(self.last(h), dict(v=1, at=int(START + 1700), mode="observe", candidates=1, due=1, acted=0))
+        h = Harness(self, row())
+        for at in (1000, 1300, 1700):
+            h.pass_(at)
+        self.assertEqual(self.last(h)["acted"], 1)
+        self.assertEqual((self.last(h)["mode"], self.last(h)["due"]), ("enforce", 1))
+        h = Harness(self, row(), dict(mode="off"))
+        h.pass_(1000)
+        self.assertFalse((Path(h.dir.name) / "reaper-last.json").exists())
+
+    def test_reaper_last_write_failure_still_exits_zero(self):
+        h = Harness(self, row(), dict(SETTINGS, mode="observe"))
+        (Path(h.dir.name) / "reaper-last.json").mkdir()  # os.replace onto a directory fails
+        self.assertEqual(h.pass_(1000), "")
+
     def test_one_ps_listing_per_pass_and_exit_zero(self):
         h = Harness(self, row())
         h.pass_(1000)

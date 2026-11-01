@@ -15,6 +15,7 @@ REFERENCE = ROOT / "docs" / "reference.md"
 
 # name -> (path relative to the repo, subcommand words the help must mention)
 TOOLS = {
+    "ci-feedback": ("agent/bin/ci-feedback", []),
     "cratis-local-run": ("agent/bin/cratis-local-run", []),
     "dev-doctor": ("agent/bin/dev-doctor", []),
     "disk-growth": ("agent/bin/disk-growth", []),
@@ -24,7 +25,7 @@ TOOLS = {
     "lane-status": ("agent/bin/lane-status", ["set", "clear", "get"]),
     "pi-account": ("agent/bin/pi-account", ["save", "use", "next", "list"]),
     "pi-cleanup": ("agent/bin/pi-cleanup", []),
-    "pi-phase": ("agent/bin/pi-phase", ["status", "run", "withdraw"]),
+    "pi-phase": ("agent/bin/pi-phase", ["status", "run", "withdraw", "report"]),
     "pi-profile": ("agent/bin/pi-profile", ["list", "use", "save"]),
     "pi-publish": ("agent/bin/pi-publish", ["check"]),
     "pi-retain": ("agent/bin/pi-retain", ["add", "release", "list", "status"]),
