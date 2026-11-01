@@ -463,6 +463,10 @@ def failure_diagnostic(log, code, outcome, expect_red):
     result = classify_failure(tail, code, outcome, expect_red)
     if "offset" in result:
         result["offset"] += start
+    if outcome != "timeout":
+        hang = re.search(rb"inactivity time of .*? elapsed|hang diagnostics", tail, re.I)
+        if hang:
+            result["hang"] = start + tail.rfind(b"\n", 0, hang.start()) + 1
     result["log"] = str(log)[:240]
     return result
 
@@ -568,6 +572,8 @@ class PhaseLedger:
             return
         try:
             self.record["failure"] = failure_diagnostic(log, code, self.record["outcome"], expect_red)
+            if self.record.get("hangTimeout") == "applied" and "hang" in self.record["failure"]:
+                self.record["hangKill"] = True
         except Exception:
             pass  # Diagnostics must never change a phase's result.
 
@@ -2490,12 +2496,12 @@ def hang_dump_defaults(command, diagnose_hang=False):
     return defaults
 
 
-HANG_TIMEOUT_DEFAULTS = dict(seconds=150, kinds=["test"], paths=[])
+HANG_TIMEOUT_DEFAULTS = dict(seconds=150, kinds=["test"], paths=[], labels=[])
 HANG_TIMEOUT_MARGIN_S = 30
 
 
 def hang_timeout_config(value, warn=None):
-    """{"mode": "off"|"on", "seconds", "kinds", "paths"}; anything invalid means off."""
+    """{"mode": "off"|"observe"|"on", "seconds", "kinds", "paths", "labels"}; invalid means off."""
     warn = warn or note
     off = dict(mode="off")
     if not isinstance(value, dict):
@@ -2506,11 +2512,12 @@ def hang_timeout_config(value, warn=None):
     settings = {key: value.get(key, default) for key, default in HANG_TIMEOUT_DEFAULTS.items()}
     valid = (type(settings["seconds"]) is int and 1 <= settings["seconds"] <= 3600
              and isinstance(settings["kinds"], list) and set(settings["kinds"]) <= {"build", "test"}
-             and isinstance(settings["paths"], list) and all(type(item) is str for item in settings["paths"]))
-    if value.get("mode", "off") not in ("off", "on") or not valid:
+             and isinstance(settings["paths"], list) and all(type(item) is str for item in settings["paths"])
+             and isinstance(settings["labels"], list) and all(type(item) is str for item in settings["labels"]))
+    if value.get("mode", "off") not in ("off", "observe", "on") or not valid:
         warn(f"invalid hang_timeout; using default {off!r}")
         return off
-    return off if value.get("mode", "off") == "off" else dict(settings, mode="on")
+    return off if value.get("mode", "off") == "off" else dict(settings, mode=value["mode"])
 
 
 def test_runner_is_mtp(cwd):
@@ -2532,7 +2539,7 @@ def test_runner_is_mtp(cwd):
 
 def hang_timeout_decision(command, args, settings, cwd):
     """(code, message): code 'applied' when the hang timeout applies, else why not; message is printed (may be empty)."""
-    if settings["mode"] != "on":
+    if settings["mode"] == "off":
         return "off", ""
     if args.kind not in settings["kinds"] or args.kind in ("integration", "ci"):
         return "kind", ""
@@ -2544,17 +2551,23 @@ def hang_timeout_decision(command, args, settings, cwd):
         return "not-direct-test", ""  # Shell strings and scripts (Tier 1 gates) keep CI's timeouts.
     if any(re.match(r"--(blame|hangdump|testing-platform)", argument) for argument in inner):
         return "blame-args", ""
+    if settings["seconds"] > args.timeout - HANG_TIMEOUT_MARGIN_S:
+        return "margin", ""
     real = os.path.realpath(cwd)
     inherited = main_worktree(real) if settings["paths"] else None
     candidates = (real, inherited) if inherited is not None else (real,)
-    if settings["paths"] and not any(fnmatch.fnmatchcase(path, os.path.expanduser(pattern))
-                                     for path in candidates for pattern in settings["paths"]):
-        return "path", ""
-    if settings["seconds"] > args.timeout - HANG_TIMEOUT_MARGIN_S:
-        return "margin", ""
+    path_matches = not settings["paths"] or any(fnmatch.fnmatchcase(path, os.path.expanduser(pattern))
+                                               for path in candidates for pattern in settings["paths"])
+    label_matches = not settings.get("labels") or any(fnmatch.fnmatchcase(getattr(args, "label", ""), pattern)
+                                                       for pattern in settings["labels"])
     if test_runner_is_mtp(real):
-        return "mtp", "hang timeout skipped: global.json selects Microsoft.Testing.Platform"
-    return "applied", None
+        message = "hang timeout skipped: global.json selects Microsoft.Testing.Platform"
+        return "mtp", message if path_matches and label_matches else ""
+    if not path_matches:
+        return "path", ""
+    if not label_matches:
+        return "label", ""
+    return ("eligible", "") if settings["mode"] == "observe" else ("applied", None)
 
 
 def hang_timeout_skip_reason(command, args, settings, cwd):
