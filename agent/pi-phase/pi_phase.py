@@ -1105,6 +1105,26 @@ def local_config(path, data, warn):
     return merge_config(data, local)
 
 
+def trial_config(value, warn):
+    """Validate a bounded trial marker, preserving only an explicit UTC window start."""
+    if value is None:
+        return None
+    try:
+        if not isinstance(value, dict) or set(value) != {"name", "arm", "started"}:
+            raise ValueError("expected name, arm and started")
+        for key, limit in (("name", 64), ("arm", 32)):
+            if not isinstance(value[key], str) or not re.fullmatch(rf"[A-Za-z0-9._-]{{1,{limit}}}", value[key]):
+                raise ValueError(f"invalid {key}")
+        started = datetime.fromisoformat(value["started"])
+        if started.tzinfo is None or started.utcoffset() is None:
+            raise ValueError("started requires a timezone")
+        return dict(name=value["name"], arm=value["arm"],
+                    started=started.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
+    except (ValueError, TypeError):
+        warn("invalid trial; using default None")
+        return None
+
+
 def config(path, *, notes=None):
     def warn(message):
         if notes is None or message not in notes:
@@ -1117,7 +1137,7 @@ def config(path, *, notes=None):
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
                     host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
                     failure_categories=True, hang_timeout=dict(mode="off"), reap_build_servers=dict(mode="off"),
-                    skip_cross_worktree=False,
+                    skip_cross_worktree=False, trial=None,
                     fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
                     queue_order=dict(QUEUE_ORDER_DEFAULTS), policy=[])
     try:
@@ -1143,6 +1163,9 @@ def config(path, *, notes=None):
             valid = type(value) is int and value >= 0  # 0 = off
         elif key == "phase_nice":
             valid = type(value) is int and 0 <= value <= 19
+        elif key == "trial":
+            values[key] = trial_config(value, warn)
+            continue
         elif key == "fast_lane":
             values[key] = fast_lane_config(value, warn)
             continue
@@ -1192,6 +1215,8 @@ def config_fields(settings):
                    cpuBudget=mode("cpu_budget"), hangTimeout=mode("hang_timeout"),
                    reapBuildServers=mode("reap_build_servers"), skipCrossWorktree=options["skip_cross_worktree"],
                    queueOrder=(options.get("queue_order") or {}).get("mode"))
+    if options.get("trial"):
+        summary["trial"] = options["trial"]["name"] + "/" + options["trial"]["arm"]
     return digest, summary
 
 
@@ -4326,6 +4351,8 @@ def run(args, state, configuration, output=None):
             ledger.state = state
             digest, summary = config_fields(settings)
             ledger.record.update(configHash=digest, configSummary=summary)
+            if options.get("trial"):
+                ledger.record["trial"] = dict(options["trial"])
         command = apply_profile(command, getattr(args, "profile", "full"), args.kind, ledger)
         command = apply_hang_timeout(command, admission_args, options["hang_timeout"], phase_cwd)
         workers, workers_source = phase_workers(
