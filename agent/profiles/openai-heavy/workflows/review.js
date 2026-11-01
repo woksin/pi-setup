@@ -161,10 +161,16 @@ const record = (res, opts, name) => {
   const expected = AGENT_MODELS[opts.agentType]
   const models = runtimeModels(p)
   const available = runtimeAvailable(p, models)
-  const ok = available && models.every(model => model === expected)
-  if (!available) runtimeProblems.push(`${name} (${opts.label}): no runtime model record`)
-  else if (!ok) runtimeProblems.push(`${name} (${opts.label}) ran on ${models.join(', ')}, not ${expected} (${classification(p)})`)
-  runtimeRuns.push({ ...runtimeDetails(p), label: opts.label, agentType: opts.agentType, expected, effective: models, ok })
+  // Transitional (pi-setup#87): a parent session started before model-provenance was installed stamps no record at all.
+  // An absent record is reported, not blocking; a present record that is unavailable, malformed or mismatched still blocks.
+  const absent = p === undefined || p === null
+  const ok = absent || (available && models.every(model => model === expected))
+  if (absent) runtimeRuns.push({ label: opts.label, agentType: opts.agentType, expected, effective: [], ok, provenance: 'unavailable (pre-update session)' })
+  else {
+    if (!available) runtimeProblems.push(`${name} (${opts.label}): no runtime model record`)
+    else if (!ok) runtimeProblems.push(`${name} (${opts.label}) ran on ${models.join(', ')}, not ${expected} (${classification(p)})`)
+    runtimeRuns.push({ ...runtimeDetails(p), label: opts.label, agentType: opts.agentType, expected, effective: models, ok })
+  }
 }
 const reviewAgent = async (prompt, opts, name) => {
   const res = await agent(prompt, opts)
