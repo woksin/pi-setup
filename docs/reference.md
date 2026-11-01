@@ -23,6 +23,17 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 | `pi-phase` | Runs one build, test or integration command through a shared queue with time limits and logs. Subcommands include `run`, `status`, `stats` and `report`. See the [pi-phase README](../agent/pi-phase/README.md). | `pi-phase --help` | [source](../agent/bin/pi-phase) |
 | `cratis-local-run` | Wrapper that sends each step of a cross-repository check through `pi-phase`. | `cratis-local-run --help` | [source](../agent/bin/cratis-local-run) |
 | `pi-setup-tests` | Runs the `lib/*.test.ts` tests of an agent directory. | `pi-setup-tests --help` | [source](../agent/bin/pi-setup-tests) |
+| `ci-feedback` | Read-only GitHub Actions feedback times per PR head SHA, workflow/job p50/p90, queues and job-minutes/week by event. Writes only a local jobs cache. | `ci-feedback --help` | [source](../agent/bin/ci-feedback) |
+
+### CI feedback
+
+Run `ci-feedback Cratis/cli --days 7 --limit 40` for readable tables, or add `--json` for individual job timings and full metrics. Requires authenticated `gh`; uses Node stdlib only. `--signal-pattern 'compile|unit'` overrides the case-insensitive build/spec/test job-name heuristic (only executed completed jobs count).
+
+For a before/after trial: `ci-feedback Cratis/cli --since 2026-10-01 --until 2026-11-01 --compare 2026-10-15`. Deltas are after minus before; each side's job-minutes/week is normalized by its own length. PR runs for the same SHA stay together on the side of their first observed creation; non-PR runs split by creation date. Percentiles use nearest rank and ignore unavailable timings; empty samples and unmatched comparison groups show `-`/JSON `null`, not zero.
+
+Push time is approximated by the earliest observed Actions run creation for a PR SHA, not the actual push timestamp. First failure includes timed-out and action-required jobs; signal is the first completed matching executed job; all-green requires every observed run's latest attempt and jobs to be completed successful or skipped. All attempts contribute execution job-minutes (no billing multipliers); queue time is job start minus the original run's creation, including rerun delay. Pending job duration is unknown, not extrapolated. Workflow duration is creation to last observed latest-attempt job completion for completed runs; job duration is start to completion. JSON `jobDetails` includes per-execution queue times across all events.
+
+Skipped jobs are counted separately from cancelled, failed, pending and other conclusions, but their routing reason cannot be inferred. Runs with empty job lists are flagged; workflows that never triggered, third-party checks and required-check coverage are unknown. All-green means only the observed Actions jobs, not proof that all required checks ran. The default limit is 300 runs (maximum 1000, matching GitHub's filtered-run cap); a truncated sample is labelled and weekly rates are sampled lower bounds. Runs are selected by creation in the half-open window, not by completion. Jobs are paginated for every attempt and cached only when the parent run is completed, under `~/.cache/ci-feedback/OWNER/REPO/RUN-ATTEMPT.json`; active runs are always fetched live. Cache entries can be removed to refresh completed results.
 
 ### pi-phase options added by #81 (all off by default)
 

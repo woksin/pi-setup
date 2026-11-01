@@ -15,6 +15,7 @@ REFERENCE = ROOT / "docs" / "reference.md"
 
 # name -> (path relative to the repo, subcommand words the help must mention)
 TOOLS = {
+    "ci-feedback": ("agent/bin/ci-feedback", []),
     "cratis-local-run": ("agent/bin/cratis-local-run", []),
     "dev-doctor": ("agent/bin/dev-doctor", []),
     "disk-growth": ("agent/bin/disk-growth", []),
