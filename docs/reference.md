@@ -24,6 +24,19 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 | `cratis-local-run` | Wrapper that sends each step of a cross-repository check through `pi-phase`. | `cratis-local-run --help` | [source](../agent/bin/cratis-local-run) |
 | `pi-setup-tests` | Runs the `lib/*.test.ts` tests of an agent directory. | `pi-setup-tests --help` | [source](../agent/bin/pi-setup-tests) |
 | `ci-feedback` | Read-only GitHub Actions feedback times per PR head SHA, workflow/job p50/p90, queues and job-minutes/week by event. Writes only a local jobs cache. | `ci-feedback --help` | [source](../agent/bin/ci-feedback) |
+| `pi-affected` | Picks the .NET projects to iterate on (pinned dotnet-affected plus fallback rules) and writes a solution filter. Iteration only, never a gate. | `pi-affected --help` | [source](../agent/bin/pi-affected) |
+
+### Affected-project selection
+
+Run `pi-affected --json` in the worktree and feed its `target` to iteration `dotnet build`/`dotnet test`; selection is never gate or delivery evidence.
+1. Build inputs (SDK, packages, props/targets, solution, analyzer config, CI/build scripts or `fullOnPaths`) force the whole solution before evaluation.
+2. A non-C# change outside all selected project directories forces the whole solution, except docs and `ignorePaths`.
+3. An empty selection is none only for docs/ignored changes; otherwise use the whole solution.
+4. Add transitive hidden edges, skipping absent solution projects with a note.
+5. Tool/install/parse errors fall back to the whole solution.
+Config: shipped `agent/lib/pi-affected-defaults.json`, overridden per repo by `~/.pi/agent/pi-affected.json` (`PI_AFFECTED_CONFIG`); schema `{ "schema": 1, "repos": { "owner/repo": { "note": "...", "edges": { "A.csproj": ["B.csproj"] }, "fullOnPaths": [], "ignorePaths": [] } } }`.
+Pinned dotnet-affected 7.0.1 installs lazily into `~/.cache/pi-affected/dotnet-affected-7.0.1` (`PI_AFFECTED_CACHE`), or explicitly with `pi-affected install`; `PI_AFFECTED_TOOL` selects an existing executable.
+Re-validate the rules when a repo's csproj conventions change (new generator, new cross-project Include). Tier 1 and delivery gates always build the whole solution.
 
 ### CI feedback
 
