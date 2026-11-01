@@ -14,9 +14,10 @@ def percentile(values, percent):
 
 def timestamp(value):
     try:
-        parsed = datetime.fromisoformat(value)
+        # Python < 3.11 rejects a trailing Z in fromisoformat.
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return parsed.timestamp() if parsed.tzinfo is not None else None
-    except (ValueError, TypeError, OverflowError):
+    except (ValueError, TypeError, AttributeError, OverflowError):
         return None
 
 

@@ -1131,7 +1131,10 @@ def trial_config(value, warn):
         for key, limit in (("name", 64), ("arm", 32)):
             if not isinstance(value[key], str) or not re.fullmatch(rf"[A-Za-z0-9._-]{{1,{limit}}}", value[key]):
                 raise ValueError(f"invalid {key}")
-        started = datetime.fromisoformat(value["started"])
+        if not isinstance(value["started"], str):
+            raise ValueError("started must be a string")
+        # Python < 3.11 rejects a trailing Z in fromisoformat.
+        started = datetime.fromisoformat(value["started"].replace("Z", "+00:00"))
         if started.tzinfo is None or started.utcoffset() is None:
             raise ValueError("started requires a timezone")
         return dict(name=value["name"], arm=value["arm"],
