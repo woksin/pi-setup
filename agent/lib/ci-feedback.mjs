@@ -73,7 +73,9 @@ function readArguments(args, options) {
       continue;
     }
     if (arg === '--workflow') {
-      (options.workflows ??= []).push(workflowFile(argumentValue(args, ++i, arg)));
+      const file = workflowFile(argumentValue(args, ++i, arg));
+      options.workflows ??= [];
+      if (!options.workflows.includes(file)) options.workflows.push(file);
       continue;
     }
     if (values.has(arg)) {
@@ -132,7 +134,7 @@ function sleepSync(ms) {
 }
 
 function isTransient(message) {
-  return /\bHTTP 5(?:00|02|03|04)\b|\bHTTP 429\b|secondary rate limit|abuse/i.test(message);
+  return /\bHTTP 5\d\d\b|\bHTTP 429\b|secondary rate limit|abuse/i.test(message);
 }
 
 function ghExec(endpoint) {
@@ -150,8 +152,8 @@ export function createApi({ exec = ghExec, sleep = sleepSync } = {}) {
       } catch (error) {
         const message = error.stderr?.toString().trim() || error.message;
         if (!isTransient(message) || attempt >= MAX_ATTEMPTS) {
-          const suffix = isTransient(message) ? ` (endpoint ${endpoint}, gave up after ${attempt} attempts)` : '';
-          throw new Error(`gh api failed: ${message}${suffix}`);
+          const attempts = attempt > 1 ? `, gave up after ${attempt} attempts` : '';
+          throw new Error(`gh api failed: ${message} (endpoint ${endpoint}${attempts})`);
         }
         sleep(BACKOFF_MS[attempt - 1]);
         continue;
@@ -159,7 +161,7 @@ export function createApi({ exec = ghExec, sleep = sleepSync } = {}) {
       try {
         return JSON.parse(output);
       } catch (error) {
-        throw new Error(`gh api failed: ${error.message}`);
+        throw new Error(`gh api failed: ${error.message} (endpoint ${endpoint})`);
       }
     }
   };

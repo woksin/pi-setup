@@ -327,8 +327,17 @@ test('api retries secondary rate limits but not 404 or invalid JSON', () => {
   assert.deepEqual(limited('e'), []);
   calls = 0;
   const missing = createApi({ sleep: () => assert.fail('slept'), exec: () => { calls++; throw failure('Not Found (HTTP 404)'); } });
-  assert.throws(() => missing('repos/x/y'), /HTTP 404/);
+  assert.throws(() => missing('repos/x/y'), /HTTP 404.*endpoint repos\/x\/y\)/);
   assert.equal(calls, 1);
   const garbage = createApi({ sleep: () => assert.fail('slept'), exec: () => 'not json' });
-  assert.throws(() => garbage('e'), /gh api failed/);
+  assert.throws(() => garbage('repos/x/z'), /gh api failed.*endpoint repos\/x\/z\)/);
+});
+
+test('api retries every HTTP 5xx status', () => {
+  for (const status of [501, 505, 599]) {
+    let calls = 0;
+    const api = createApi({ sleep: () => {}, exec: () => { if (++calls < 2) throw failure(`gh: Error (HTTP ${status})`); return '{}'; } });
+    assert.deepEqual(api('e'), {});
+    assert.equal(calls, 2, `HTTP ${status}`);
+  }
 });
