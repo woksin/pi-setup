@@ -24,13 +24,19 @@
  * new subagents and sessions do not each fail once. When the mark expires, a session that
  * this extension moved is switched back to its original model before the next prompt.
  *
+ * Provider pins: `providerPins` maps a session id (or a prefix of at least 8 characters) to the provider that
+ * session must stay on. The pin also covers subagents it spawns (their session header names the spawner in
+ * `parentSession`). A pinned session never switches, pre-empts or restores to another provider; with no
+ * allowed fallback it stalls on the limit and `resumeAfterLimit` continues it once the limit clears.
+ * Machine-local pins go in `provider-pins.json` beside the config (override: PI_PROVIDER_PINS).
+ *
  * Config: ~/.pi/agent/provider-fallback.json (override: PI_PROVIDER_FALLBACK_CONFIG).
  * State:  ~/.pi/agent/.provider-limits.json   (override: PI_PROVIDER_FALLBACK_STATE).
  * Subagents load it only when their agent file lists `provider-fallback` in `extensions:`.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { mkdirSync, readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { ORIGINAL_ENTRY, publishFallbackState, restoreManualPin, restoreOriginal, type OriginalEntryData } from "../lib/provider-fallback-state.ts";
 import { codeFingerprint, fallbackStatusLines } from "../lib/provider-fallback-status.ts";
@@ -67,6 +73,75 @@ interface FallbackConfig {
 	unavailableMinutes?: number;
 	/** provider id -> extra regex sources (case-insensitive) marking a limit error as account-wide (all models) instead of per model. */
 	accountWidePatterns?: Record<string, string[]>;
+	/** Session id (or prefix of at least 8 characters) -> provider that session and its subagents must stay on. */
+	providerPins?: Record<string, string>;
+}
+
+const MAX_LINEAGE_DEPTH = 8;
+
+function readSessionHeader(file: string): { id?: string; parentSession?: string } | undefined {
+	try {
+		const fd = openSync(file, "r");
+		try {
+			const buffer = Buffer.alloc(8192);
+			const read = readSync(fd, buffer, 0, buffer.length, 0);
+			return JSON.parse(buffer.toString("utf8", 0, read).split("\n")[0]);
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return undefined;
+	}
+}
+
+type LineageSource = { getSessionId?: () => string | undefined; getHeader?: () => { id?: string; parentSession?: string } | null } | undefined;
+
+/** This session's id followed by its spawners' ids (subagents and forks record `parentSession`), nearest first. */
+export function sessionLineage(manager: LineageSource, readHeader = readSessionHeader): string[] {
+	const ids: string[] = [];
+	let header: { id?: string; parentSession?: string } | null | undefined;
+	try {
+		header = manager?.getHeader?.();
+		const id = manager?.getSessionId?.() ?? header?.id;
+		if (typeof id === "string" && id) ids.push(id);
+	} catch {
+		return ids;
+	}
+	let parent = header?.parentSession;
+	for (let depth = 0; parent && depth < MAX_LINEAGE_DEPTH; depth++) {
+		const next = readHeader(parent);
+		const id = typeof next?.id === "string" ? next.id : /_([0-9a-f-]{36})\.jsonl$/i.exec(parent)?.[1];
+		if (!id || ids.includes(id)) break;
+		ids.push(id);
+		parent = typeof next?.parentSession === "string" ? next.parentSession : undefined;
+	}
+	return ids;
+}
+
+const MAIN_LINEAGE = Symbol.for("pi.provider-fallback.main-lineage");
+
+/**
+ * The process root's lineage, shared process-wide: subagents run in the root session's process, and in-memory
+ * subagent sessions (the default for nested agents) carry no `parentSession`, so they inherit pins through this.
+ * Pins are meant for root sessions; a pin on an intermediate subagent reaches only its persisted descendants.
+ */
+export function setProcessMainLineage(ids: string[]): void {
+	(globalThis as Record<symbol, unknown>)[MAIN_LINEAGE] = ids;
+}
+
+function processMainLineage(): string[] {
+	const ids = (globalThis as Record<symbol, unknown>)[MAIN_LINEAGE];
+	return Array.isArray(ids) ? ids : [];
+}
+
+/** The provider the nearest pinned session in `lineage` must stay on, if any. */
+export function pinnedProvider(config: FallbackConfig, lineage: string[]): string | undefined {
+	const pins = Object.entries(config.providerPins ?? {}).filter(([key, provider]) => key.length >= 8 && typeof provider === "string" && provider);
+	for (const id of lineage) {
+		const pin = pins.find(([key]) => id.startsWith(key));
+		if (pin) return pin[1];
+	}
+	return undefined;
 }
 
 type StalledLimit = { provider: string; ref: string; since: number; ctx: ExtensionContext };
@@ -91,10 +166,16 @@ function readJson<T>(path: string): T | undefined {
 	}
 }
 
+/** Machine-local pins (session ids stay out of the published config): { "<session id or prefix>": "<provider>" }. */
+function pinsPath(): string {
+	return process.env.PI_PROVIDER_PINS || join(dirname(configPath()), "provider-pins.json");
+}
+
 function loadConfig(): FallbackConfig | undefined {
 	const config = readJson<FallbackConfig>(configPath());
 	if (!config || config.enabled === false) return undefined;
-	return config;
+	const local = readJson<Record<string, string>>(pinsPath());
+	return local && typeof local === "object" ? { ...config, providerPins: { ...config.providerPins, ...local } } : config;
 }
 
 const classify: Classify = (provider, text) => limitScope(loadConfig() ?? {}, provider, text);
@@ -174,9 +255,11 @@ export function selectFallback(
 	current: string,
 	origin: string | undefined,
 	isLimited: (ref: string) => boolean,
+	pin?: string,
 ): { target?: string; blocked: string[]; chain: boolean } {
 	const chain = (origin && config.chains?.[origin]) || config.chains?.[current];
-	const candidates = chain?.length ? chain.filter((ref) => ref !== current) : [equivalentOf(config, current)].filter((ref): ref is string => !!ref);
+	const configured = chain?.length ? chain.filter((ref) => ref !== current) : [equivalentOf(config, current)].filter((ref): ref is string => !!ref);
+	const candidates = pin ? configured.filter((ref) => splitRef(ref).provider === pin) : configured;
 	const blocked: string[] = [];
 	for (const ref of candidates) {
 		if (!isLimited(ref)) return { target: ref, blocked, chain: !!chain?.length };
@@ -365,6 +448,10 @@ export default function (pi: ExtensionAPI) {
 	let switchChain: Promise<unknown> = Promise.resolve();
 	/** Model the user picked manually (pinned: never pre-empted away), and a counter bumped on every manual pick. */
 	let manualRef: string | undefined;
+	/** This session and its spawners, nearest first (for `providerPins`); set at session_start. */
+	let lineage: string[] = [];
+	/** Own lineage first; a subagent also inherits the pin of the main session hosting it. */
+	const pinFor = (config: FallbackConfig) => pinnedProvider(config, isMain ? lineage : [...lineage, ...processMainLineage()]);
 	let selectionGen = 0;
 	const SUPERSEDED = "superseded by your manual model selection";
 	/** Start time and selection generation of the request in flight (set at turn_start, consumed at turn_end). */
@@ -595,6 +682,12 @@ export default function (pi: ExtensionAPI) {
 			forgetOriginal(ctx);
 		}
 		if (!originalRef || originalRef === current) return false;
+		const pin = pinFor(config);
+		if (pin && splitRef(originalRef).provider !== pin) {
+			// A pinned session never goes back to another provider, even one it started on.
+			forgetOriginal(ctx);
+			return false;
+		}
 		if (!restoreEnabled(config, requested)) {
 			restoreNote = "restoreWhenExpired is disabled";
 			publishState();
@@ -628,8 +721,8 @@ export default function (pi: ExtensionAPI) {
 		const currentProvider = splitRef(current).provider;
 		const until = limitedUntil(current);
 		if (until === undefined) return;
-		const { target } = selectFallback(config, current, originalRef, isLimited);
-		if (!target) return; // no equivalent, or every candidate limited: nothing to gain
+		const { target } = selectFallback(config, current, originalRef, isLimited, pinFor(config));
+		if (!target) return; // no equivalent, every candidate limited, or pinned: nothing to gain
 		const veto = contextVeto(ctx, config, target);
 		if (veto) {
 			notify(ctx, `provider-fallback: ${currentProvider} is limited (${formatUntil(until)} left); ${veto}.`, "warning");
@@ -716,6 +809,9 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			sessionId = undefined;
 		}
+		lineage = sessionLineage(ctx.sessionManager as LineageSource);
+		// The process root seeds it: the UI session, or the first session of a headless (-p/RPC) process.
+		if (isMain || !processMainLineage().length) setProcessMainLineage(lineage);
 		if (isMain) loadPersisted(ctx);
 		publishState();
 		await preempt(ctx);
@@ -813,8 +909,12 @@ export default function (pi: ExtensionAPI) {
 			return fallbackNote(text, from, event.entries);
 		};
 
-		const selection = selectFallback(config, from, originalRef, isLimited);
+		const pin = pinFor(config);
+		const selection = selectFallback(config, from, originalRef, isLimited, pin);
 		const target = selection.target;
+		if (!target && !selection.blocked.length && pin) {
+			return note(`provider-fallback: ${from} ${what} (${formatUntil(until)}); this session is pinned to ${pin} (providerPins), so it waits for the limit to clear instead of switching provider.`, "warning");
+		}
 		if (!target && !selection.blocked.length) return note(`provider-fallback: ${from} ${what} and has no configured equivalent.`, "error");
 		if (!target && selection.chain) {
 			const list = selection.blocked.map((ref) => `${ref} (${formatUntil(limitedUntil(ref) ?? now)})`).join(", ");
