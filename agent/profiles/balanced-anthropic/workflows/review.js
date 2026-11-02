@@ -219,7 +219,7 @@ const compactRuntimeRuns = (res, oversized) => {
 // End runtime recording.
 
 // Cache identities include the pinned routing, not just caller-supplied diff identity.
-const cacheKey = 'review-v2-security:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
+const cacheKey = 'review-v3-coverage:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
   mode: deep ? 'deep' : 'full', author, context: input.context ?? '', routing: AGENT_MODELS, runtimeStamp: RUNTIME_STAMP,
   deepReason: input.deepReason ?? null, deepJustification: input.deepJustification ?? null }))
 // The security lens runs on the provider that did NOT write the work (same rule as `other` below).
@@ -290,9 +290,22 @@ const FINDINGS = {
         required: ['severity', 'blocking', 'location', 'problem', 'fix', 'verified'],
       },
     },
+    coverage: {
+      type: 'string',
+      enum: ['complete', 'partial', 'none'],
+      description: 'complete only if you reviewed the whole requested change for your lens; partial or none if you ' +
+        'could not (no access, tool failure, scope unclear, declined); explain in coverageNote.',
+    },
+    coverageNote: { type: 'string' },
   },
-  required: ['summary', 'findings'],
+  required: ['summary', 'findings', 'coverage'],
 }
+
+// A reviewer slot that did not fully review is never a pass, even with an empty findings list.
+const coverageProblem = (name, res) =>
+  res.coverage === 'complete'
+    ? null
+    : `${name} did not complete its review (coverage: ${res.coverage ?? 'missing'}${res.coverageNote ? `; ${clip(res.coverageNote, 200)}` : ''})`
 
 const VERDICTS = {
   type: 'object',
@@ -356,7 +369,8 @@ const reviewPrompt =
   `Review ${target}.${context}${scope}${priorText}\n\n` +
   'Look for correctness problems, regressions, behaviour changed outside the requested scope, ' +
   'missing or broken tests and security issues. Read the actual code; do not guess. ' +
-  'Report only real problems — an empty findings list is a valid answer.' + RUBRIC
+  'Report only real problems — an empty findings list is a valid answer. ' +
+  'Set coverage honestly: complete only if you reviewed the whole requested change.' + RUBRIC
 
 const securityPrompt =
   `Security review of ${target}.${context}${scope}${priorText}\n\n` +
@@ -389,7 +403,8 @@ const securityPrompt =
   'Deployment context: in Cratis repositories, assume the Cratis platform deployment (services behind Cratis AuthProxy, ' +
   'which strips client identity and tenant headers and injects verified ones). Rate a hole that AuthProxy fully ' +
   'neutralises as minor and say so; holes AuthProxy passes through (other headers, bodies, responses, authenticated ' +
-  'callers) keep their full severity. An empty findings list is a valid answer.'
+  'callers) keep their full severity. An empty findings list is a valid answer. ' +
+  'Set coverage honestly: complete only if you reviewed the whole requested change for the security lens.'
 
 const isBlocking = f => f.blocking === true && (f.severity === 'critical' || f.severity === 'major')
 const clip = (t, n) => (typeof t === 'string' && t.length > n ? t.slice(0, n) + '…' : t)
@@ -450,6 +465,10 @@ if (quick) {
   const all = res.findings.concat(sec.findings.map(f => ({ ...f, foundBy: `${r.name} (security)` })))
   const blocking = all.filter(isBlocking)
   const incomplete = [...runtimeProblems]
+  for (const [slotName, slot] of [[r.name, res], [`${r.name} (security)`, sec]]) {
+    const cp = coverageProblem(slotName, slot)
+    if (cp) incomplete.push(cp)
+  }
   const passedQ = blocking.length === 0 && incomplete.length === 0
   return fit({
     mode: 'quick', round, passed: passedQ, complete: incomplete.length === 0, incomplete,
@@ -481,7 +500,7 @@ const results = await pipeline(
     if (!res) return { lane, side, failed: true }
     // Only blocking claims are adversarially verified; everything else is advisory and never gates.
     const toCheck = res.findings.map((f, i) => ({ f, i })).filter(x => isBlocking(x.f))
-    if (toCheck.length === 0) return { lane, side, summary: res.summary, findings: res.findings, verdicts: [] }
+    if (toCheck.length === 0) return { lane, side, summary: res.summary, findings: res.findings, coverage: res.coverage, coverageNote: res.coverageNote, verdicts: [] }
     const verifier = other(side)
     const checkerAgent = verifierFor(side)
     const list = toCheck
@@ -499,7 +518,7 @@ const results = await pipeline(
       { agentType: checkerAgent.agentType, schema: VERDICTS, label: `verify:${lane.key}-by-${verifier}`, phase: 'Verify' },
       checkerAgent.name,
     )
-    return { lane, side, summary: res.summary, findings: res.findings, verdicts: v ? v.verdicts : null }
+    return { lane, side, summary: res.summary, findings: res.findings, coverage: res.coverage, coverageNote: res.coverageNote, verdicts: v ? v.verdicts : null }
   },
 )
 
@@ -523,6 +542,8 @@ for (const r of results.filter(Boolean)) {
     incomplete.push(`${by} review failed`)
     continue
   }
+  const cp = coverageProblem(by, r)
+  if (cp) incomplete.push(cp)
   if (r.findings.some(isBlocking) && !r.verdicts) incomplete.push(`verification of ${by}'s findings failed`)
   summaries.push({ by, summary: clip(r.summary, 400) })
   const checker = verifierFor(r.side).name
