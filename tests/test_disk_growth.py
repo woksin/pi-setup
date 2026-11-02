@@ -2,16 +2,19 @@
 from datetime import datetime, timezone
 import importlib.machinery
 import importlib.util
+import io
+import itertools
 import json
 import os
 from pathlib import Path
 import plistlib
 import runpy
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 loader = importlib.machinery.SourceFileLoader('disk_growth', str(ROOT / 'agent/bin/disk-growth'))
@@ -102,7 +105,8 @@ class DiskGrowthTests(unittest.TestCase):
             self.assertRegex(files[0].name, r'^ALL-disk-growth-\d{4}\.md$')
             self.assertEqual(files[0].read_text(), text)
 
-    def test_run_state_log_dry_run_and_timeout_notice(self):
+    @patch.object(dg, 'attribution_lines', return_value=['Likely writers (mocked):'])
+    def test_run_state_log_dry_run_and_timeout_notice(self, attribution):
         empty = lambda **kwargs: ([], {'walked': 0, 'total': 0, 'partial': False})
         for now, free, status in [(1000, 30, 'seed'), (1060, 24, 'fire'), (1120, 23, 'suppressed')]:
             self.assertEqual(dg.run(now=now, free_bytes=free * G, env=self.env,
@@ -122,6 +126,229 @@ class DiskGrowthTests(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 3)
         notice = self.messages / f"ALL-disk-growth-{dg.clock(1240, '%H%M')}.md"
         self.assertIn('probe timed out/partial', notice.read_text())
+        self.assertIn('Likely writers (mocked):', notice.read_text())
+
+    def test_phase_attribution_orders_window_first_and_preserves_spaced_labels(self):
+        output = ('pi-phase: build older build pid=1 cwd=/tmp/old elapsed=600s running policy=queued source=flag\n'
+                  f'pi-phase: test recent tests pid=2 cwd={self.home}/repo space elapsed=120s running fast\n'
+                  'pi-phase: build boundary pid=3 cwd=/tmp/boundary elapsed=180s running\n'
+                  'pi-phase: queued kind=test label=waiting waited=1s\n'
+                  'pi-phase: build orphan pid=4 cwd=/tmp/orphan elapsed=1s orphan-group\n')
+        with patch.object(dg.subprocess, 'run', return_value=Mock(returncode=0, stdout='', stderr=output)) as run:
+            lines = dg.phase_lines(dg.AttributionCommands(), 180, str(self.home))
+        self.assertEqual(lines, ['- test recent tests cwd=~/repo space elapsed=120s',
+                                 '- build boundary cwd=/tmp/boundary elapsed=180s',
+                                 '- build older build cwd=/tmp/old elapsed=600s'])
+        self.assertEqual(run.call_args.args[0], [str(ROOT / 'agent/bin/pi-phase'), 'status'])
+        self.assertLessEqual(run.call_args.kwargs['timeout'], 10)
+
+    def test_real_phase_status_installed_lookup_tokens_and_ten_entry_limit(self):
+        installed = self.agent / 'bin/pi-phase'
+        installed.parent.mkdir()
+        installed.touch()
+        output = ('pi-phase: test <label> pid=108 cwd=/path elapsed=133s running policy=direct source=flag\n'
+                  'pi-phase: test bc-mcp-green pid=6162 cwd=/Volumes/sourcecode/repos/cratis/.worktrees/screenplay-mcp elapsed=439s running policy=queued source=default\n'
+                  'pi-phase: test cli-hard Cli.Specs pid=90277 cwd=/Volumes/sourcecode/repos/cratis/.worktrees/cli elapsed=39s running policy=queued source=default\n'
+                  'pi-phase: test ux-p0b-app pid=81014 cwd=/Volumes/sourcecode/repos/Mesta/.worktrees/ux-main elapsed=190s running policy=queued source=default\n'
+                  'pi-phase: queued priority=normal kind=test label=pi-setup-tests waited=353s rank=3 expected=143s basis=exact order=short policy=queued source=default id=86645c7f06de\n')
+        output += '\n'.join(f'pi-phase: build old {age} cwd=/tmp/repo space elapsed={age}s pid={age} running policy=direct source=flag'
+                            for age in range(600, 620))
+        with patch.object(dg.subprocess, 'run', return_value=Mock(returncode=0, stdout=output, stderr='')) as run:
+            lines = dg.phase_lines(dg.AttributionCommands(), 180, str(self.home))
+        self.assertEqual(run.call_args.args[0], [str(installed), 'status'])
+        self.assertEqual(len(lines), 10)
+        self.assertIn('cli-hard Cli.Specs', lines[0])
+        self.assertEqual(lines[1], '- test <label> cwd=/path elapsed=133s')
+        self.assertIn('ux-p0b-app', lines[2])
+        self.assertIn('bc-mcp-green', lines[3])
+        self.assertEqual(lines[-1], '- build old 605 cwd=/tmp/repo space elapsed=605s')
+        self.assertNotIn('queued', '\n'.join(lines))
+
+    def test_process_attribution_window_truncation_and_ten_cwd_limit(self):
+        args = f'node {self.home}/npm-cli.js install ' + 'x' * 200
+        output = ' PID ELAPSED COMM ARGS\n' + '\n'.join(
+            f'{pid} 03:00 /usr/bin/node {args}' for pid in range(1, 13))
+        output += ('\n13 03:01 dotnet dotnet build\n14 1-00:00:00 cp cp a b\n'
+                   '15 00:10 node node server.js\n16 01:00:00 cargo cargo build\n')
+        def run(command, **kwargs):
+            stdout = output if command[0] == 'ps' else f'p{command[3]}\nn{self.home}/repo\n'
+            return Mock(returncode=0, stdout=stdout, stderr='')
+        with patch.object(dg.subprocess, 'run', side_effect=run) as call:
+            commands = dg.AttributionCommands()
+            processes = dg.recent_processes(commands, 120)
+            lines = dg.process_lines(processes, commands, str(self.home))
+        self.assertEqual([process[1] for process in processes], list(range(1, 11)))
+        self.assertEqual(call.call_args_list[0].args[0], ['ps', '-axo', 'pid,etime,comm,args'])
+        lookups = [item.args[0] for item in call.call_args_list[1:]]
+        self.assertEqual(lookups, [['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'] for pid in range(1, 11)])
+        self.assertIn('node ~/npm-cli.js install', lines[0])
+        self.assertNotIn(str(self.home), '\n'.join(lines))
+        self.assertEqual(len(lines[0].split('elapsed=03:00 ', 1)[1].split(' cwd=')[0]), 120)
+        self.assertIn('... cwd=~/repo', lines[0])
+        self.assertEqual(len(lines), 10)
+        self.assertIn('cwd=~/repo', lines[-1])
+        self.assertEqual(dg.elapsed_seconds('2-01:02:03'), 176523)
+
+    def test_heavy_processes_exclude_chrome_helpers_and_sort_shortest_first(self):
+        chrome = ('/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/'
+                  'Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper'
+                  ' --disable-features=dotnet --disable-gpu --node npm go cargo')
+        output = ('PID ELAPSED COMM ARGS\n'
+                  f'10 00:00 /Applications/Go {chrome}\n'
+                  '11 00:01 chrome-helper chrome-helper --disable-features=dotnet --node npm go cargo\n'
+                  '12 00:20 /usr/local/shar /usr/local/share/dotnet/dotnet test Arc.Core.Specs\n'
+                  '13 00:10 /usr/local/shar /usr/local/share/dotnet/dotnet build\n')
+        output += '\n'.join(f'{pid} 00:{pid} dotnet dotnet test' for pid in range(30, 42))
+        with patch.object(dg.subprocess, 'run', return_value=Mock(returncode=0, stdout=output, stderr='')):
+            processes = dg.recent_processes(dg.AttributionCommands(), 120)
+        self.assertEqual([row[1] for row in processes], [13, 12, *range(30, 38)])
+        self.assertEqual(len(processes), 10)
+        self.assertIn('dotnet test Arc.Core.Specs', processes[1][3])
+        self.assertFalse(dg.writer_command('/Applications/Example.app/Contents/MacOS/node', 'node npm-cli.js'))
+        self.assertFalse(dg.writer_command('node', 'node --disable-feature=npm server.js'))
+        self.assertFalse(dg.writer_command('not-python', 'not-python -m pip install x'))
+        self.assertTrue(dg.writer_command('/usr/local/shar', '/usr/local/share/dotnet/dotnet test'))
+
+    def test_redacts_url_userinfo_before_process_argument_truncation(self):
+        commands = Mock()
+        commands.run.return_value = f'p123\nn{self.home}/repo\n'
+        for userinfo in ['reader:' + 'private-value' * 30, 'private-value' * 30]:
+            args = f'git clone https://{userinfo}@example.com/repo'
+            with self.subTest(userinfo=userinfo):
+                lines = dg.process_lines([(0, 123, '00:00', args)], commands, str(self.home))
+                self.assertEqual(lines, ['- pid=123 elapsed=00:00 git clone https://***@example.com/repo cwd=~/repo'])
+        self.assertEqual(dg.short_text('git+ssh://reader:private-value@example.com/repo', str(self.home)),
+                         'git+ssh://***@example.com/repo')
+
+    def test_redacts_sensitive_flag_values_and_preserves_environment_names(self):
+        flags = ['-k', '--api-key', '-p', '--password', '--token', '--build-arg', '--secret', '-e', '--env']
+        values = ['private-value', '"private value"', "'private value'", '"private value']
+        for flag, separator, value in itertools.product(flags, [' ', '='], values):
+            with self.subTest(flag=flag, separator=separator, value=value):
+                self.assertEqual(dg.short_text(f'dotnet test {flag}{separator}{value}', str(self.home)),
+                                 f'dotnet test {flag}{separator}***')
+        values = ['NAME=private-value', '"NAME=private value"', 'NAME="private value"']
+        for flag, separator, value in itertools.product(['--build-arg', '-e', '--env'], [' ', '='], values):
+            with self.subTest(flag=flag, separator=separator, value=value):
+                self.assertEqual(dg.short_text(f'docker build {flag}{separator}{value}', str(self.home)),
+                                 f'docker build {flag}{separator}NAME=***')
+        self.assertEqual(dg.short_text("dotnet test --label can't --token private-value", str(self.home)),
+                         "dotnet test --label can't --token ***")
+        self.assertEqual(dg.short_text('dotnet test "--token" "private value"', str(self.home)),
+                         'dotnet test --token ***')
+
+    def test_redacts_sensitive_assignments_including_nested_options(self):
+        keys = ['TOKEN', 'client_secret', 'PASS', 'Password', 'PWD', 'api_key', 'Auth', 'CREDENTIAL']
+        values = ['private-value', '"private value"', 'private" value"']
+        for key, prefix, value in itertools.product(keys, ['', '--x='], values):
+            with self.subTest(key=key, prefix=prefix, value=value):
+                result = dg.short_text(f'dotnet test {prefix}{key}={value}', str(self.home))
+                self.assertIn(f'{prefix}{key}=***', result)
+                self.assertNotIn('private', result)
+                self.assertNotIn('value', result)
+        self.assertEqual(dg.short_text('dotnet test MODE=release --x=COUNT=3', str(self.home)),
+                         'dotnet test MODE=release --x=COUNT=3')
+
+    def test_redacts_npm_registry_auth_token(self):
+        self.assertEqual(dg.short_text('npm config set //registry.example/:_authToken=private-value', str(self.home)),
+                         'npm config set //registry.example/:_authToken=***')
+
+    def test_redacts_authorization_and_api_key_headers(self):
+        home = str(self.home)
+        self.assertEqual(dg.short_text('curl -H "Authorization: Bearer abc123" https://x', home),
+                         'curl -H "Authorization: Bearer ***" https://x')
+        self.assertEqual(dg.short_text("curl --header 'authorization: basic dXNlcjpw' x", home),
+                         "curl --header 'authorization: basic ***' x")
+        self.assertEqual(dg.short_text('curl -H "X-Api-Key: k123" x', home),
+                         'curl -H "X-Api-Key: ***" x')
+
+    def test_redacts_long_flags_case_insensitively(self):
+        self.assertEqual(dg.short_text('tool --PASSWORD hunter2 --Token t', str(self.home)),
+                         'tool --PASSWORD *** --Token ***')
+
+    def test_short_text_only_abbreviates_home_path_prefix(self):
+        home = str(self.home)
+        self.assertEqual(dg.short_text(f'{home} {home}/repo {home}-backup/repo', home, 1000),
+                         f'~ ~/repo {home}-backup/repo')
+
+    def test_attribution_section_handles_unexpected_errors_without_leaking_arguments(self):
+        collect = Mock(side_effect=RuntimeError('unexpected --token private-value'))
+        self.assertEqual(dg.attribution_section('Processes', collect, str(self.home)),
+                         ['Processes:', '- unavailable: unexpected --token ***'])
+
+    def test_writer_patterns(self):
+        positives = [('dotnet', 'dotnet build'), ('MSBuild', 'MSBuild x'), ('VBCSCompiler', 'VBCSCompiler'),
+                     ('node', '/bin/node /lib/yarn/bin/yarn.js'), ('node', 'node /lib/pnpm.cjs install'),
+                     ('node', 'node /lib/npm-cli.js ci'), ('python3', 'python3 -m pip install x'),
+                     ('python', 'python /bin/pip install x')]
+        positives += [(name, f'{name} x') for name in ('yarn', 'npm', 'pnpm', 'cargo', 'go', 'tar', 'cp', 'rsync', 'ditto')]
+        positives += [('docker', f'docker {cmd} x') for cmd in ('build', 'buildx', 'compose', 'pull')]
+        positives += [('git', f'git {cmd} x') for cmd in ('clone', 'worktree', 'fetch')]
+        for command, args in positives:
+            with self.subTest(args=args):
+                self.assertTrue(dg.writer_command('/bin/' + command, args))
+        for command, args in [('node', 'node server.js'), ('docker', 'docker ps'), ('git', 'git status'),
+                              ('python3', 'python3 script.py'), ('sleep', 'sleep 100')]:
+            with self.subTest(args=args):
+                self.assertFalse(dg.writer_command(command, args))
+
+    def test_docker_attribution_uses_uptime_and_existing_allocation_only(self):
+        output = ('a\trecent\tUp 2 minutes (healthy)\nb\told\tUp 3 minutes\n'
+                  'c\tjust-started\tUp Less than a second\nd\tminute\tUp About a minute\n'
+                  'e\trestarting\tRestarting (1) 2 seconds ago\n')
+        _, info = self.evaluate([(880, 30), (1000, 24)])
+        info['current']['watch'] = {'/docker/Docker.raw': 7 * G}
+        def run(command, **kwargs):
+            outputs = {'status': 'pi-phase: no active phases\n',
+                       'ps': 'PID ELAPSED COMM ARGS\n', 'docker': output}
+            return Mock(returncode=0, stdout=outputs.get(command[0], outputs.get(command[-1], '')), stderr='')
+        with patch.object(dg.subprocess, 'run', side_effect=run) as call:
+            lines = dg.attribution_lines(info, self.cfg)
+        text = '\n'.join(lines)
+        self.assertIn('a recent Up 2 minutes (healthy)', text)
+        self.assertIn('c just-started', text)
+        self.assertIn('d minute', text)
+        self.assertNotIn('b old', text)
+        self.assertNotIn('e restarting', text)
+        self.assertIn('Docker.raw allocated now: 7.0 GiB', text)
+        docker_calls = [item.args[0] for item in call.call_args_list if item.args[0][0] == 'docker']
+        self.assertEqual(docker_calls, [['docker', 'ps', '--format', '{{.ID}}\t{{.Names}}\t{{.Status}}']])
+
+    def test_attribution_failures_are_one_line_and_do_not_break_dry_run(self):
+        _, info = self.evaluate([(880, 30), (1000, 24)])
+        for failure in [FileNotFoundError('missing tool'), subprocess.TimeoutExpired('tool', 1),
+                        Mock(returncode=1, stdout='', stderr='permission denied\nmore detail')]:
+            with self.subTest(failure=failure), patch.object(dg.subprocess, 'run') as run:
+                if isinstance(failure, Exception):
+                    run.side_effect = failure
+                else:
+                    run.return_value = failure
+                output = io.StringIO()
+                with patch.object(sys, 'stdout', output):
+                    dg.alert(1000, info, self.cfg, lambda text: self.fail('notified during dry run'),
+                             lambda **kw: ([], {'walked': 0, 'total': 0, 'partial': False}), True)
+                text = output.getvalue()
+                self.assertIn('Likely writers (walk-free attribution', text)
+                self.assertEqual(text.count('unavailable:'), 3)
+                self.assertNotIn('\nmore detail', text)
+                self.assertIn('Next notice after', text)
+
+    def test_attribution_shared_deadline_and_cwd_failures(self):
+        with patch.object(dg.time, 'monotonic', side_effect=[0, 13, 14]), \
+                patch.object(dg.subprocess, 'run', return_value=Mock(returncode=0, stdout='', stderr='')) as run:
+            commands = dg.AttributionCommands()
+            commands.run(['ps'], 2)
+            with self.assertRaisesRegex(OSError, 'budget exhausted'):
+                commands.run(['docker'], 2)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs['timeout'], 1)
+        with patch.object(dg.subprocess, 'run', side_effect=subprocess.TimeoutExpired('lsof', 1)):
+            lines = dg.process_lines([(0, 123, '00:00', 'dotnet build')], dg.AttributionCommands(), str(self.home))
+        self.assertEqual(lines, ['- pid=123 elapsed=00:00 dotnet build cwd=unavailable: timed out'])
+        with patch.object(dg.subprocess, 'run', return_value=Mock(returncode=0, stdout='malformed', stderr='')):
+            lines = dg.attribution_lines({'baseline': {'ts': 0}, 'current': {'ts': 120}}, self.cfg)
+        self.assertIn('- unavailable: no readable running phases in status', lines)
+        self.assertIn('- unavailable: unreadable docker ps output', lines)
 
     def test_isolated_probe_returns_partial_json_before_parent_deadline(self):
         worker = self.home / 'worker.py'

@@ -14,8 +14,10 @@ import argparse
 import json
 import math
 import os
+import re
 from pathlib import Path
 import runpy
+import shlex
 import shutil
 import signal
 import subprocess
@@ -140,7 +142,230 @@ def display_path(path, home):
     return '~' + path[len(home):] if path == home or path.startswith(home + os.sep) else path
 
 
-def format_notice(now, info, writers, coverage, cfg):
+class AttributionCommands:
+    """Walk-free commands share a deadline, including per-process cwd lookups."""
+
+    def __init__(self):
+        self.deadline = time.monotonic() + 14
+
+    def run(self, command, timeout):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise OSError('attribution budget exhausted')
+        result = subprocess.run(command, capture_output=True, text=True, errors='replace',
+                                timeout=min(timeout, remaining))
+        if result.returncode:
+            raise OSError(result.stderr.strip() or f'exit {result.returncode}')
+        return result.stdout + (result.stderr if command[-1] == 'status' else '')
+
+
+def redact_assignment(token):
+    token = re.sub(r'([A-Za-z][A-Za-z0-9+.-]*://)[^/\s]+@', r'\1***@', token)
+    for match in re.finditer(r'([A-Za-z_][\w.:-]*)=', token):
+        if re.search(r'token|secret|pass(word)?|pwd|key|auth|credential', match[1], re.I):
+            closing = re.search(r'''['"]+$''', token)
+            return token[:match.end()] + '***' + (closing[0] if closing else '')
+    return token
+
+
+def redact_flag_value(flag, value):
+    if flag.lower() in {'--build-arg', '-e', '--env'}:
+        name = re.match(r'([A-Za-z_][\w.-]*)=', value.lstrip("'\""))
+        if name:
+            return name[0] + '***'
+    return '***'
+
+
+def redact_text(text):
+    # Keep quoted values together, including an unterminated quote through EOF.
+    value = r'''(?:[^\s'"]|"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$))+'''
+    text = re.sub(r'''(?i)(authorization:\s*(?:bearer|basic|token)\s+)[^\s'"]+''', r'\1***', text)
+    text = re.sub(r'''(?i)((?:x-api-key|api-key|private-token|x-auth-token):\s*)[^\s'"]+''', r'\1***', text)
+    flags = (r'''(?<!\S)['"]?(?P<flag>-k|-p|-e|(?i:--api-key|--password|--token|--build-arg|--secret|--env))'''
+             r'''['"]?(?P<separator>=|\s+)(?P<value>''' + value + ')')
+    text = re.sub(flags, lambda match: match['flag'] + match['separator']
+                  + redact_flag_value(match['flag'], match['value']), text)
+    return ' '.join(redact_assignment(token) for token in re.findall(value, text))
+
+
+def short_text(text, home, limit=120):
+    text = redact_text(text)
+    text = re.sub(re.escape(home) + r'(?=/|\s|$)', '~', text)
+    text = ' '.join(text.split())
+    return text if len(text) <= limit else text[:limit - 3] + '...'
+
+
+def unavailable(error, home):
+    if isinstance(error, subprocess.TimeoutExpired):
+        reason = 'timed out'
+    else:
+        reason = str(error)
+    return 'unavailable: ' + short_text(reason, home)
+
+
+def parse_phase(line):
+    head = re.match(r'^pi-phase:\s+(\S+)\s+(.+?)\s+(?=(?:pid|cwd|elapsed)=)', line)
+    if not head or head[1] == 'queued':
+        return None
+    tail = line[head.end():]
+    if not re.search(r'(?:^|\s)running(?:\s|$)', tail):
+        return None
+    fields = dict(re.findall(r'(?:^|\s)(pid|cwd|elapsed)=(.*?)'
+                             r'(?=\s+\w+=|\s+(?:running|fast|orphan-group|draining)\b|$)', tail))
+    if not fields.get('pid', '').isdigit() or not re.fullmatch(r'\d+s', fields.get('elapsed', '')):
+        return None
+    if not fields.get('cwd'):
+        return None
+    return head[1], head[2], fields['cwd'], int(fields['elapsed'][:-1])
+
+
+def phase_lines(commands, window, home):
+    executable = Path(home) / '.pi/agent/bin/pi-phase'
+    if not executable.is_file():
+        executable = Path(__file__).resolve().with_name('pi-phase')
+    output = commands.run([str(executable), 'status'], 10)
+    phases = []
+    for line in output.splitlines():
+        phase = parse_phase(line)
+        if phase:
+            kind, label, cwd, age = phase
+            phases.append((age > window, age,
+                           f'- {kind} {label} cwd={display_path(cwd, home)} elapsed={age}s'))
+    if not phases and 'pi-phase: no active phases' not in output:
+        raise ValueError('no readable running phases in status')
+    return [line for _, _, line in sorted(phases)[:10]] or ['- none']
+
+
+def elapsed_seconds(value):
+    days, separator, clock_value = value.partition('-')
+    parts = (clock_value if separator else days).split(':')
+    if len(parts) not in (2, 3):
+        raise ValueError('invalid elapsed time')
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return seconds + (int(days) * 86400 if separator else 0)
+
+
+def writer_executable(name, args):
+    if name in {'dotnet', 'msbuild', 'vbcscompiler', 'yarn', 'npm', 'pnpm', 'cargo',
+                'go', 'tar', 'cp', 'rsync', 'ditto'}:
+        return True
+    subcommands = {'docker': {'build', 'buildx', 'compose', 'pull'},
+                   'git': {'clone', 'worktree', 'fetch'}}
+    if name in subcommands:
+        return bool(subcommands[name].intersection(args))
+    if name == 'node':
+        return any(re.fullmatch(r'(?:yarn|npm|pnpm)(?:-cli)?(?:\.(?:js|cjs|mjs))?', Path(arg).name)
+                   for arg in args if not arg.startswith('-'))
+    if re.fullmatch(r'python(?:\d+(?:\.\d+)*)?', name):
+        return (args[:2] == ['-m', 'pip']
+                or bool(args and re.fullmatch(r'pip(?:\d+(?:\.\d+)*)?', Path(args[0]).name)))
+    return False
+
+
+def writer_command(command, args):
+    # macOS truncates comm; argv[0] supplies the full executable in that case.
+    # In particular, /Applications/Go is a truncated Google Chrome path, not go.
+    if re.search(r'/Applications/.*?\.app(?:/|\s|$)', command + ' ' + args):
+        return False
+    try:
+        argv = shlex.split(args)
+    except ValueError:
+        return False
+    names = {Path(command).name.lower()}
+    if argv:
+        names.add(Path(argv[0]).name.lower())
+    return any(writer_executable(name, argv[1:]) for name in names)
+
+
+def recent_processes(commands, window):
+    output = commands.run(['ps', '-axo', 'pid,etime,comm,args'], 2)
+    processes = []
+    for line in output.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) != 4 or not parts[0].isdigit():
+            continue
+        pid, elapsed, command, args = parts
+        age = elapsed_seconds(elapsed)
+        if age <= window + 60 and writer_command(command, args):
+            processes.append((age, int(pid), elapsed, args))
+    return sorted(processes)[:10]
+
+
+def process_lines(processes, commands, home):
+    lines = []
+    for _, pid, elapsed, args in processes[:10]:
+        try:
+            output = commands.run(['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'], 1)
+            paths = [line[1:] for line in output.splitlines() if line.startswith('n/')]
+            if not paths:
+                raise ValueError('cwd not reported')
+            cwd = display_path(paths[0], home)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            cwd = unavailable(error, home)
+        lines.append(f'- pid={pid} elapsed={elapsed} {short_text(args, home)} cwd={cwd}')
+    return lines or ['- none']
+
+
+def container_age(status):
+    # ps exposes uptime (Status), not StartedAt; RunningFor is creation age.
+    if status.startswith('Up Less than a second'):
+        return 0
+    match = re.match(r'Up (?:About )?(\d+|an?) (second|minute|hour|day|week|month|year)s?\b', status)
+    if not match:
+        return None
+    count, unit = match.groups()
+    scales = {'second': 1, 'minute': 60, 'hour': 3600, 'day': 86400,
+              'week': 604800, 'month': 2592000, 'year': 31536000}
+    return (int(count) if count.isdigit() else 1) * scales[unit]
+
+
+def container_lines(commands, window, home):
+    output = commands.run(['docker', 'ps', '--format', '{{.ID}}\t{{.Names}}\t{{.Status}}'], 2)
+    lines = []
+    for line in output.splitlines():
+        parts = line.split('\t', 2)
+        if len(parts) != 3:
+            raise ValueError('unreadable docker ps output')
+        if not parts[2].startswith('Up '):
+            continue
+        age = container_age(parts[2])
+        if age is None:
+            raise ValueError('unreadable container uptime')
+        if age <= window:
+            lines.append('- ' + short_text(line, home))
+    return lines or ['- none']
+
+
+def attribution_section(heading, collect, home):
+    try:
+        lines = collect()
+    except Exception as error:
+        lines = ['- ' + unavailable(error, home)]
+    return [heading + ':', *lines]
+
+
+def attribution_lines(info, cfg):
+    commands = AttributionCommands()
+    window = info['current']['ts'] - info['baseline']['ts']
+    home = cfg['home']
+    phases = attribution_section('Running pi-phase phases (started within drop window first)',
+                                 lambda: phase_lines(commands, window, home), home)
+    # Query Docker before spending the remaining budget on per-process cwd.
+    containers = attribution_section('Docker containers started within drop window (approximate uptime)',
+                                     lambda: container_lines(commands, window, home), home)
+    processes = attribution_section('Recently started heavy processes (drop window +60s)',
+                                    lambda: process_lines(recent_processes(commands, window), commands, home), home)
+    lines = ['Likely writers (walk-free attribution; not proof of disk growth):',
+             *phases, *processes, *containers]
+    for path, size in info['current'].get('watch', {}).items():
+        if Path(path).name == 'Docker.raw':
+            lines.append(f'Docker.raw allocated now: {size / GIB:.1f} GiB')
+    return lines
+
+
+def format_notice(now, info, writers, coverage, cfg, attribution=()):
     baseline, current = info['baseline'], info['current']
     elapsed = (current['ts'] - baseline['ts']) / 60
     scope = f"{'partial' if coverage['partial'] else 'complete'}: walked {coverage['walked']} of {coverage['total']} units"
@@ -161,6 +386,7 @@ def format_notice(now, info, writers, coverage, cfg):
         lines.append(line)
     if not shown:
         lines.append('No recently modified files were found in the probed roots; try docker system df and df -h ~.')
+    lines += list(attribution)
     lines += ['Act: stop an unexpected writer; delete leftover .dmp files; ~/.pi/agent/bin/dev-doctor --only disk.',
               f"Next notice after {cfg['debounce_seconds'] / 60:g} min unless free space drops another {cfg['rearm_gib']:g} GiB."]
     return '\n'.join(lines) + '\n'
@@ -249,7 +475,7 @@ def alert(now, info, cfg, notifier, probe, dry_run):
         runpy.run_path(Path(__file__).resolve().with_name('disk_growth_probe.py'))
         writers, coverage = isolated_probe(cfg, since)
     writers += watch_writers(info)
-    text = format_notice(now, info, writers, coverage, cfg)
+    text = format_notice(now, info, writers, coverage, cfg, attribution_lines(info, cfg))
     if dry_run:
         print(text, end='')
     else:
