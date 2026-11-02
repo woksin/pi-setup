@@ -341,3 +341,8 @@ test('api retries every HTTP 5xx status', () => {
     assert.equal(calls, 2, `HTTP ${status}`);
   }
 });
+
+test('repeated --workflow files are deduplicated in parsed options', () => {
+  assert.deepEqual(parseOptions(['example/repo', '--workflow', 'a.yml', '--workflow', 'a.yml'], new Date(END)).workflows, ['a.yml']);
+  assert.deepEqual(parseOptions(['example/repo', '--workflow', 'a.yml', '--workflow', 'b.yml', '--workflow', 'a.yml'], new Date(END)).workflows, ['a.yml', 'b.yml']);
+});

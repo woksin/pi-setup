@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -141,12 +141,11 @@ export function install(env = process.env) {
   const options = { cwd: cache, env: toolEnvironment(env), encoding: 'utf8', timeout: 300000, maxBuffer: 64 * 1024 * 1024 };
   if (!installed()) {
     const temporary = `${toolDir}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
-    execFileSync('dotnet', ['tool', 'install', TOOL.id, '--version', TOOL.version, '--tool-path', temporary], options);
-    try { renameSync(temporary, toolDir); }
-    catch (error) {
-      if (!installed()) throw error;
-      rmSync(temporary, { recursive: true });
-    }
+    try {
+      execFileSync('dotnet', ['tool', 'install', TOOL.id, '--version', TOOL.version, '--tool-path', temporary], options);
+      try { renameSync(temporary, toolDir); }
+      catch (error) { if (!installed()) throw error; }
+    } finally { rmSync(temporary, { recursive: true, force: true }); }
   }
   const version = execFileSync(executable, ['--version'], options);
   if (!version.includes(TOOL.version)) throw new Error(`expected ${TOOL.id} ${TOOL.version}, got ${version.trim()}`);
@@ -261,14 +260,21 @@ function outputPath(root, solution, requested, git) {
   const directory = ignored ? join(root, '.ai-work', 'affected') : join(tmpdir(), 'pi-affected', createHash('sha1').update(root).digest('hex').slice(0, 12));
   return join(directory, `${basename(solution, extname(solution))}.affected.slnf`);
 }
-function writeSelection(report, out, entries) {
+function generatedFilter(out) {
+  try {
+    if (!lstatSync(out).isFile()) return false;
+    return Array.isArray(JSON.parse(readFileSync(out, 'utf8'))?.solution?.projects);
+  } catch { return false; }
+}
+function writeSelection(report, out, entries, projectKey) {
   if (report.mode !== 'selected') {
-    try { unlinkSync(out); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (generatedFilter(out)) unlinkSync(out);
     return;
   }
+  if (existsSync(out) && !generatedFilter(out)) throw new Error(`refusing to overwrite ${out}: not a generated solution filter`);
   mkdirSync(dirname(out), { recursive: true });
   const temporary = `${out}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
-  const selectedEntries = entries.filter(entry => report.projects.includes(normalized(entry)));
+  const selectedEntries = entries.filter(entry => report.projects.includes(projectKey(entry)));
   writeFileSync(temporary, renderSlnf(report.solution, out, selectedEntries));
   renameSync(temporary, out);
 }
@@ -293,7 +299,8 @@ async function evaluate(options, deps, env) {
   const git = deps.git ?? gitAt(root);
   const solution = findSolution(root, options.solution);
   const entries = solutionProjects(readFileSync(solution, 'utf8'), extname(solution));
-  const projects = entries.map(normalized);
+  const projectKey = entry => slash(relative(root, resolve(dirname(solution), slash(entry))));
+  const projects = entries.map(projectKey);
   const base = baseRef(git, options.from);
   const out = outputPath(root, solution, options.out, git);
   const changed = changedFiles(git, base.sha, slash(relative(root, out)));
@@ -301,7 +308,7 @@ async function evaluate(options, deps, env) {
   const config = loadConfig(DEFAULTS, env.PI_AFFECTED_CONFIG || join(homedir(), '.pi', 'agent', 'pi-affected.json'), repo);
   const decision = await decide({ root, solution, sha: base.sha, projects, changed, config, timeout: options.timeout }, { ...deps, env });
   const report = { schema: 1, mode: decision.mode, iterationOnly: true, repo, root, solution, base, target: decision.mode === 'selected' ? out : decision.mode === 'full' ? solution : null, projects: decision.projects, added: decision.added, reasons: decision.reasons, notes: decision.notes, changed: { count: changed.length, docs: changed.filter(path => docs(path, config)).length, sample: changed.slice(0, 20) }, tool: decision.tool };
-  writeSelection(report, out, entries);
+  writeSelection(report, out, entries, projectKey);
   return { report, total: projects.length };
 }
 export async function main(args, deps = {}) {
