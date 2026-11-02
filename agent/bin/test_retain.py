@@ -321,5 +321,51 @@ class RetainTests(unittest.TestCase):
         self.assertEqual(items[0]['action'], 'run')
 
 
+class PlanRmiPinTests(unittest.TestCase):
+    OLD = '2020-01-01T00:00:00Z'
+
+    def plan(self, images, pins_text):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__('shutil').rmtree(tmp, ignore_errors=True))
+        if pins_text is not None:
+            (tmp / 'pinned.txt').write_text(pins_text)
+        inspect = ''.join(f"{i}|{self.OLD}|{json.dumps(t)}|100|{json.dumps(d)}\n" for i, t, d in images)
+
+        def run(cmd, timeout=None):
+            if cmd[:3] == ['docker', 'image', 'ls']:
+                return 0, ''.join(i + '\n' for i, _, _ in images), ''
+            if cmd[:2] == ['docker', 'ps']:
+                return 0, '', ''
+            if cmd[:3] == ['docker', 'image', 'inspect']:
+                return 0, inspect, ''
+            raise AssertionError(cmd)
+        with patch.dict(os.environ, DOCKER_GUARDIAN_STATE=str(tmp)), patch.object(cleanup, 'run', side_effect=run):
+            return cleanup.plan_rmi(30)
+
+    def test_pinned_tag_kept(self):
+        cands, kept, err = self.plan([('sha256:a', ['mongo:8.2'], []), ('sha256:b', ['old:1'], [])],
+                                     '# c\n\nmongo:*\n')
+        self.assertIsNone(err)
+        self.assertEqual([c['id'] for c in cands], ['sha256:b'])
+        self.assertEqual([(k['id'], k['reason']) for k in kept], [('sha256:a', 'pinned: mongo:*')])
+
+    def test_digest_suffixed_tag_kept(self):
+        cands, kept, _ = self.plan([('sha256:a', ['testcontainers/ryuk:0.11@sha256:' + 'f' * 64], [])],
+                                   'testcontainers/ryuk:*\n')
+        self.assertEqual(cands, [])
+        self.assertEqual(kept[0]['reason'], 'pinned: testcontainers/ryuk:*')
+
+    def test_none_tag_with_pinned_repo_digest_kept(self):
+        cands, kept, _ = self.plan([('sha256:a', [], ['mongo@sha256:' + 'e' * 64])], 'mongo@*\n')
+        self.assertEqual(cands, [])
+        self.assertEqual(len(kept), 1)
+
+    def test_missing_pin_file_means_no_pins(self):
+        cands, kept, err = self.plan([('sha256:a', ['mongo:8.2'], [])], None)
+        self.assertIsNone(err)
+        self.assertEqual([c['id'] for c in cands], ['sha256:a'])
+        self.assertEqual(kept, [])
+
+
 if __name__ == '__main__':
     unittest.main()
