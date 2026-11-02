@@ -961,8 +961,8 @@ def docker_pins() -> list:
     try:
         with open(os.path.join(state, "pinned.txt")) as f:
             return [ln.strip() for ln in f.read().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
-    except OSError:
-        return []  # missing/unreadable file = no pins
+    except FileNotFoundError:
+        return []  # missing file = no pins; any other read error propagates (fail closed)
 
 
 def pinned_by(pins: list, iid: str, tags: list, digests: list):
@@ -976,6 +976,10 @@ def pinned_by(pins: list, iid: str, tags: list, digests: list):
 
 def plan_rmi(age_days: float):
     """(candidates, kept-notes, error). Images used by no container (by image ID and by name)."""
+    try:
+        pins = docker_pins()
+    except (OSError, UnicodeDecodeError) as e:
+        return [], [], f"cannot read docker pin file: {e}"
     rc, out, err = run(["docker", "image", "ls", "-a", "--no-trunc", "-q"], timeout=60)
     if rc != 0:
         return [], [], "docker image ls failed"
@@ -994,7 +998,6 @@ def plan_rmi(age_days: float):
             used_ids.add(iid)
             used_names.add(name)
     cands, kept = [], []
-    pins = docker_pins()
     cutoff = time.time() - age_days * 86400
     for i in range(0, len(img_ids), 100):
         chunk = img_ids[i:i + 100]

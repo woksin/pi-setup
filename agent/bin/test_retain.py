@@ -350,10 +350,10 @@ class PlanRmiPinTests(unittest.TestCase):
         self.assertEqual([(k['id'], k['reason']) for k in kept], [('sha256:a', 'pinned: mongo:*')])
 
     def test_digest_suffixed_tag_kept(self):
-        cands, kept, _ = self.plan([('sha256:a', ['testcontainers/ryuk:0.11@sha256:' + 'f' * 64], [])],
-                                   'testcontainers/ryuk:*\n')
+        cands, kept, _ = self.plan([('sha256:a', ['testcontainers/ryuk:0.14.0@sha256:' + 'f' * 64], [])],
+                                   'testcontainers/ryuk:0.14.0\n')
         self.assertEqual(cands, [])
-        self.assertEqual(kept[0]['reason'], 'pinned: testcontainers/ryuk:*')
+        self.assertEqual(kept[0]['reason'], 'pinned: testcontainers/ryuk:0.14.0')
 
     def test_none_tag_with_pinned_repo_digest_kept(self):
         cands, kept, _ = self.plan([('sha256:a', [], ['mongo@sha256:' + 'e' * 64])], 'mongo@*\n')
@@ -366,6 +366,25 @@ class PlanRmiPinTests(unittest.TestCase):
         self.assertEqual([c['id'] for c in cands], ['sha256:a'])
         self.assertEqual(kept, [])
 
+
+    def test_unreadable_pin_file_fails_closed(self):
+        with patch.object(cleanup, 'run', side_effect=AssertionError('no docker calls expected')), \
+             patch('builtins.open', side_effect=PermissionError('denied')):
+            cands, kept, err = cleanup.plan_rmi(30)
+        self.assertEqual((cands, kept), ([], []))
+        self.assertIn('cannot read docker pin file', err)
+
+    def test_apply_recompute_refuses_when_pin_file_unreadable(self):
+        ctx = Mock()
+        ctx.args.image_age_days = 30
+        d = {'prunes': [], 'rmi': [], 'rmi_kept': [], 'error': None}
+        calls = []
+        with patch.object(cleanup, 'run', side_effect=lambda cmd, **k: calls.append(cmd) or (0, '', '')), \
+             patch('builtins.open', side_effect=PermissionError('denied')):
+            cleanup.apply_docker(ctx, d)
+        self.assertEqual(d['rmi'], [])
+        self.assertIn('cannot read docker pin file', d['error'])
+        self.assertFalse([c for c in calls if c[:2] == ['docker', 'rmi']])
 
 if __name__ == '__main__':
     unittest.main()
