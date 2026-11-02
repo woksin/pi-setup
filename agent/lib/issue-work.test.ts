@@ -412,7 +412,7 @@ test("list caps the repo limit at 1000 and views missing issues without authorsh
 	await list(d);
 	assert.equal(calls.length, 5);
 	assert.equal(calls[0].args[calls[0].args.indexOf("--limit") + 1], "1000");
-	assert.deepEqual(calls.slice(1).map((c) => [c.cmd, c.args]), [5500, 5501, 5502, 5503].map((issue) =>
+	assert.deepEqual(calls.slice(1).map((c) => [c.cmd, c.args]), [5501, 5502, 5503, 5500].map((issue) =>
 		["gh", ["issue", "view", String(issue), "--repo", "o/r", "--json", "title,url,state,body,author"]]));
 	const cache = await readCache(d);
 	for (let issue = 5500; issue < 5504; issue++) {
@@ -461,6 +461,21 @@ test("missing issues beyond the fallback cap do not gain cache entries", async (
 	for (let issue = 5500; issue < 5512; issue++) {
 		if (!calls.some((c) => c.args[1] === "view" && c.args[2] === String(issue))) assert.equal(cache[`o/r#${issue}`], undefined);
 	}
+});
+
+for (const seeded of [false, true]) test(`forced refreshes prioritize deferred missing issues (existing cache=${seeded})`, async () => {
+	const d = missingListDeps();
+	await registerRefreshIssues(d, "o/r", 12, 5500);
+	if (seeded) writeFileSync(join(dir, "cache.json"), JSON.stringify(Object.fromEntries(Array.from({ length: 12 }, (_, i) => [
+		`o/r#${5500 + i}`, { fetchedAt: "2026-10-08T10:00:00Z", title: `Old ${5500 + i}` },
+	]))));
+	await list(d, { refresh: true });
+	assert.deepEqual(calls.slice(1).map((c) => Number(c.args[2])), Array.from({ length: 10 }, (_, i) => 5500 + i));
+	calls = [];
+	await list(d, { refresh: true });
+	assert.equal(calls.length, 11, "one list and ten views, even when every entry is forced stale");
+	assert.deepEqual(calls.slice(1, 3).map((c) => Number(c.args[2])), [5510, 5511], "deferred issues precede those fetched last time");
+	assert.ok(Object.values(await readCache(d)).every((info) => info.fetchedAt === now));
 });
 
 // ---------- activity checks ----------

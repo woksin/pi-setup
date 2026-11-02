@@ -663,7 +663,7 @@ async function fetchRefreshIssue(d: Deps, repo: string, issue: number): Promise<
 async function fetchRefreshIssues(d: Deps, repo: string, views: IssueView[]): Promise<Map<number, IssueData>> {
 	if (views.length <= 3) return new Map(await Promise.all(views.map(async (v) => [v.issue, await fetchRefreshIssue(d, repo, v.issue)] as const)));
 	const limit = Math.min(1000, Math.max(...views.map((v) => v.issue)));
-	const r = await d.run("gh", ["issue", "list", "--repo", repo, "--state", "all", "--limit", String(limit), "--json", "number,title,url,state,body,author"], { timeout: 60000 });
+	const r = await d.run("gh", ["issue", "list", "--repo", repo, "--state", "all", "--limit", String(limit), "--json", "number,title,url,state,body,author"], { timeout: 120000 });
 	return new Map(JSON.parse(r.stdout).map((data: any) => [data.number, refreshIssueData(data, repo, data.number)]));
 }
 
@@ -672,6 +672,12 @@ async function refreshIssueCache(d: Deps, v: IssueView, cache: Record<string, Gi
 		const data = await fetchRefreshIssue(d, v.repo, v.issue);
 		cache[v.key] = infoFrom({ ...data, association: cache[v.key]?.association }, now);
 	} catch (e) { cache[v.key] = { ...(cache[v.key] ?? {}), fetchedAt: now.toISOString(), error: errorText(e) }; }
+}
+
+function oldestCacheFirst(a: GitHubInfo | undefined, b: GitHubInfo | undefined): number {
+	if (!a) return b ? -1 : 0;
+	if (!b) return 1;
+	return Date.parse(a.fetchedAt) - Date.parse(b.fetchedAt);
 }
 
 async function refreshRepoCache(d: Deps, views: IssueView[], cache: Record<string, GitHubInfo>, now: Date): Promise<void> {
@@ -685,8 +691,9 @@ async function refreshRepoCache(d: Deps, views: IssueView[], cache: Record<strin
 		const data = issues.get(v.issue);
 		if (data) cache[v.key] = infoFrom({ ...data, association: cache[v.key]?.association }, now);
 	}
-	// Keep deferred entries stale so a later refresh can pick them up.
-	for (const v of views.filter((v) => !issues.has(v.issue)).slice(0, 10)) await refreshIssueCache(d, v, cache, now);
+	// Prioritize uncached and oldest entries so repeated refreshes do not starve deferred issues.
+	const missing = views.filter((v) => !issues.has(v.issue)).sort((a, b) => oldestCacheFirst(cache[a.key], cache[b.key]));
+	for (const v of missing.slice(0, 10)) await refreshIssueCache(d, v, cache, now);
 }
 
 /** Refresh cached GitHub info by repo, without authorship checks (stale or all when `force`). Errors are cached as such. */
