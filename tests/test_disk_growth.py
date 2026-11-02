@@ -141,6 +141,28 @@ class DiskGrowthTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], [str(ROOT / 'agent/bin/pi-phase'), 'status'])
         self.assertLessEqual(run.call_args.kwargs['timeout'], 10)
 
+    def test_real_phase_status_installed_lookup_tokens_and_ten_entry_limit(self):
+        installed = self.agent / 'bin/pi-phase'
+        installed.parent.mkdir()
+        installed.touch()
+        output = ('pi-phase: test <label> pid=108 cwd=/path elapsed=133s running policy=direct source=flag\n'
+                  'pi-phase: test bc-mcp-green pid=6162 cwd=/Volumes/sourcecode/repos/cratis/.worktrees/screenplay-mcp elapsed=439s running policy=queued source=default\n'
+                  'pi-phase: test cli-hard Cli.Specs pid=90277 cwd=/Volumes/sourcecode/repos/cratis/.worktrees/cli elapsed=39s running policy=queued source=default\n'
+                  'pi-phase: test ux-p0b-app pid=81014 cwd=/Volumes/sourcecode/repos/Mesta/.worktrees/ux-main elapsed=190s running policy=queued source=default\n'
+                  'pi-phase: queued priority=normal kind=test label=pi-setup-tests waited=353s rank=3 expected=143s basis=exact order=short policy=queued source=default id=86645c7f06de\n')
+        output += '\n'.join(f'pi-phase: build old {age} cwd=/tmp/repo space elapsed={age}s pid={age} running policy=direct source=flag'
+                            for age in range(600, 620))
+        with patch.object(dg.subprocess, 'run', return_value=Mock(returncode=0, stdout=output, stderr='')) as run:
+            lines = dg.phase_lines(dg.AttributionCommands(), 180, str(self.home))
+        self.assertEqual(run.call_args.args[0], [str(installed), 'status'])
+        self.assertEqual(len(lines), 10)
+        self.assertIn('cli-hard Cli.Specs', lines[0])
+        self.assertEqual(lines[1], '- test <label> cwd=/path elapsed=133s')
+        self.assertIn('ux-p0b-app', lines[2])
+        self.assertIn('bc-mcp-green', lines[3])
+        self.assertEqual(lines[-1], '- build old 605 cwd=/tmp/repo space elapsed=605s')
+        self.assertNotIn('queued', '\n'.join(lines))
+
     def test_process_attribution_window_truncation_and_ten_cwd_limit(self):
         args = f'node {self.home}/npm-cli.js install ' + 'x' * 200
         output = ' PID ELAPSED COMM ARGS\n' + '\n'.join(
@@ -154,7 +176,7 @@ class DiskGrowthTests(unittest.TestCase):
             commands = dg.AttributionCommands()
             processes = dg.recent_processes(commands, 120)
             lines = dg.process_lines(processes, commands, str(self.home))
-        self.assertEqual([process[1] for process in processes], list(range(1, 13)))
+        self.assertEqual([process[1] for process in processes], list(range(1, 11)))
         self.assertEqual(call.call_args_list[0].args[0], ['ps', '-axo', 'pid,etime,comm,args'])
         lookups = [item.args[0] for item in call.call_args_list[1:]]
         self.assertEqual(lookups, [['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'] for pid in range(1, 11)])
@@ -162,8 +184,29 @@ class DiskGrowthTests(unittest.TestCase):
         self.assertNotIn(str(self.home), '\n'.join(lines))
         self.assertEqual(len(lines[0].split('elapsed=03:00 ', 1)[1].split(' cwd=')[0]), 120)
         self.assertIn('... cwd=~/repo', lines[0])
-        self.assertIn('cwd=not queried (10 pid limit)', lines[-1])
+        self.assertEqual(len(lines), 10)
+        self.assertIn('cwd=~/repo', lines[-1])
         self.assertEqual(dg.elapsed_seconds('2-01:02:03'), 176523)
+
+    def test_heavy_processes_exclude_chrome_helpers_and_sort_shortest_first(self):
+        chrome = ('/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/'
+                  'Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper'
+                  ' --disable-features=dotnet --disable-gpu --node npm go cargo')
+        output = ('PID ELAPSED COMM ARGS\n'
+                  f'10 00:00 /Applications/Go {chrome}\n'
+                  '11 00:01 chrome-helper chrome-helper --disable-features=dotnet --node npm go cargo\n'
+                  '12 00:20 /usr/local/shar /usr/local/share/dotnet/dotnet test Arc.Core.Specs\n'
+                  '13 00:10 /usr/local/shar /usr/local/share/dotnet/dotnet build\n')
+        output += '\n'.join(f'{pid} 00:{pid} dotnet dotnet test' for pid in range(30, 42))
+        with patch.object(dg.subprocess, 'run', return_value=Mock(returncode=0, stdout=output, stderr='')):
+            processes = dg.recent_processes(dg.AttributionCommands(), 120)
+        self.assertEqual([row[1] for row in processes], [13, 12, *range(30, 38)])
+        self.assertEqual(len(processes), 10)
+        self.assertIn('dotnet test Arc.Core.Specs', processes[1][3])
+        self.assertFalse(dg.writer_command('/Applications/Example.app/Contents/MacOS/node', 'node npm-cli.js'))
+        self.assertFalse(dg.writer_command('node', 'node --disable-feature=npm server.js'))
+        self.assertFalse(dg.writer_command('not-python', 'not-python -m pip install x'))
+        self.assertTrue(dg.writer_command('/usr/local/shar', '/usr/local/share/dotnet/dotnet test'))
 
     def test_writer_patterns(self):
         positives = [('dotnet', 'dotnet build'), ('MSBuild', 'MSBuild x'), ('VBCSCompiler', 'VBCSCompiler'),
