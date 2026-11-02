@@ -1111,32 +1111,32 @@ def procs_running(names):
 
 
 def tree_usage(vd: str, stop_at=None):
-    """Walk `vd` without following symlinks. Returns (newest, bytes): newest is the max of
-    atime/mtime/ctime over the dir and every file in it; bytes is allocated size. When
-    `stop_at` is given the walk stops at the first entry newer than it (bytes is partial)."""
+    """Walk `vd` without following symlinks. Returns (newest, bytes, ok): newest is the max
+    of atime/mtime/ctime over the dir and every entry in it; bytes is allocated size; ok is
+    False if ANY stat/walk error happened (callers must then treat the dir as in use). The
+    atime of `.nupkg.metadata` is ignored (only its mtime/ctime count): pi-cleanup itself
+    reads that file, which would otherwise make every scanned version look freshly used.
+    When `stop_at` is given the walk stops at the first entry newer than it."""
+    state = {"ok": True}
+
+    def onerror(_e):
+        state["ok"] = False
+
     newest, total = 0.0, 0
-    stack = [vd]
-    while stack:
-        d = stack.pop()
-        try:
-            st = os.lstat(d)
-            newest = max(newest, st.st_atime, st.st_mtime, st.st_ctime)
+    for dp, dns, fns in os.walk(vd, onerror=onerror, followlinks=False):
+        for name in [None] + dns + fns:
+            p = dp if name is None else os.path.join(dp, name)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                state["ok"] = False
+                continue
+            at = 0.0 if name == ".nupkg.metadata" else st.st_atime
+            newest = max(newest, at, st.st_mtime, st.st_ctime)
             total += st.st_blocks * 512
             if stop_at is not None and newest >= stop_at:
-                return newest, total
-            with os.scandir(d) as it:
-                for e in it:
-                    if e.is_dir(follow_symlinks=False):
-                        stack.append(e.path)
-                        continue
-                    st = e.stat(follow_symlinks=False)
-                    newest = max(newest, st.st_atime, st.st_mtime, st.st_ctime)
-                    total += st.st_blocks * 512
-                    if stop_at is not None and newest >= stop_at:
-                        return newest, total
-        except OSError:
-            continue
-    return newest, total
+                return newest, total, state["ok"]
+    return newest, total, state["ok"]
 
 
 def nuget_version_key(v: str):
@@ -1153,19 +1153,29 @@ def nuget_version_key(v: str):
     return (tuple(nums), 0, ids)
 
 
-def nuget_newest(idp: str, versions, keep: int):
-    """The `keep` newest of `versions` (names) of package dir `idp`."""
-    keys = {v: nuget_version_key(v) for v in versions}
-    if all(k is not None for k in keys.values()):
-        order = sorted(versions, key=lambda v: keys[v], reverse=True)
-    else:  # unparsable version names: fall back to newest timestamp
-        def ts(v):
-            try:
-                st = os.lstat(os.path.join(idp, v))
-                return max(st.st_atime, st.st_mtime, st.st_ctime)
-            except OSError:
-                return 0.0
-        order = sorted(versions, key=ts, reverse=True)
+def nuget_valid_versions(idp: str, names):
+    """Names under package dir `idp` that are real version dirs: not a symlink, have a regular
+    .nupkg.metadata, and parse as a NuGet version. Anything else is ignored (never ranked,
+    never deleted)."""
+    out = []
+    for v in names:
+        if v.startswith(".") or nuget_version_key(v) is None:
+            continue
+        vd = os.path.join(idp, v)
+        try:
+            if not statmod.S_ISDIR(os.lstat(vd).st_mode):
+                continue
+            if not statmod.S_ISREG(os.lstat(os.path.join(vd, ".nupkg.metadata")).st_mode):
+                continue
+        except OSError:
+            continue
+        out.append(v)
+    return out
+
+
+def nuget_newest(versions, keep: int):
+    """The `keep` newest (NuGet semver order, at least 1) of validated `versions`."""
+    order = sorted(versions, key=nuget_version_key, reverse=True)
     return set(order[:max(1, keep)])
 
 
@@ -1192,12 +1202,13 @@ def nuget_check(vd: str, cutoff: float, root_real: str):
         meta = os.path.join(vd, ".nupkg.metadata")
         if not statmod.S_ISREG(os.lstat(meta).st_mode):
             return False, False, 0
+        # timestamps of every file are captured BEFORE the metadata content is read
+        newest, size, walk_ok = tree_usage(vd, stop_at=cutoff)
         with open(meta) as f:
             src = json.load(f).get("source") or ""
         if not isinstance(src, str) or not src.startswith(NUGET_REMOTE_PREFIXES):
             return False, True, 0
-        newest, size = tree_usage(vd, stop_at=cutoff)
-        if newest >= cutoff:
+        if not walk_ok or newest >= cutoff:  # fail closed on any scan error
             return False, False, 0
         return True, False, size
     except (OSError, ValueError, AttributeError):
@@ -1219,10 +1230,10 @@ def plan_nuget_trim(ctx: Ctx):
         try:
             if not statmod.S_ISDIR(os.lstat(idp).st_mode):
                 continue
-            vers = [v for v in os.listdir(idp) if not v.startswith(".")]
+            vers = nuget_valid_versions(idp, os.listdir(idp))
         except OSError:
             continue
-        newest = nuget_newest(idp, vers, keep)
+        newest = nuget_newest(vers, keep)
         for v in vers:
             vd = os.path.join(idp, v)
             if v in newest:
@@ -1239,9 +1250,63 @@ def plan_nuget_trim(ctx: Ctx):
     return cands, kept_local, local_bytes, cand_bytes
 
 
-def trash_remove(vd: str):
-    """Atomically rename `vd` to a sibling trash name, then delete that. Returns
-    'deleted', 'skipped' (rename failed) or 'failed: ...' (rename ok, delete failed)."""
+NUGET_TRASH_RE = re.compile(r"\.(.+)\.pi-cleanup-trash-([0-9]+)")
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # e.g. EPERM: exists
+    return True
+
+
+def find_nuget_trash(root_real: str):
+    """Leftover trash dirs of dead pi-cleanup runs: directly inside a package id dir, strict
+    name, a real directory (not a symlink) under the real root, pid not a live process."""
+    found = []
+    try:
+        ids = os.listdir(NUGET_PACKAGES)
+    except OSError:
+        return found
+    for pid in ids:
+        idp = os.path.join(NUGET_PACKAGES, pid)
+        try:
+            if not statmod.S_ISDIR(os.lstat(idp).st_mode):
+                continue
+            names = os.listdir(idp)
+        except OSError:
+            continue
+        for n in names:
+            m = NUGET_TRASH_RE.fullmatch(n)
+            if not m or pid_alive(int(m.group(2))):
+                continue
+            p = os.path.join(idp, n)
+            try:
+                if not statmod.S_ISDIR(os.lstat(p).st_mode):
+                    continue
+                if os.path.dirname(os.path.realpath(p)) != os.path.realpath(idp) or \
+                        not os.path.realpath(p).startswith(root_real + os.sep):
+                    continue
+            except OSError:
+                continue
+            found.append(p)
+    return found
+
+
+def trash_remove(vd: str, cutoff=None):
+    """Rename `vd` to a sibling trash name (atomic, so a concurrent restore sees it missing
+    and re-downloads instead of a half-deleted dir), then delete that. Immediately before the
+    rename the dir's timestamps are re-scanned and the version is skipped if anything is newer
+    than `cutoff` or the scan had errors. A tiny window between that re-scan and the rename
+    remains; it is accepted because atime older than --nuget-age-days means the version
+    has not been used for that long. Returns 'deleted', 'skipped' or 'failed: ...'."""
+    if cutoff is not None:
+        newest, _, ok = tree_usage(vd, stop_at=cutoff)
+        if not ok or newest >= cutoff:
+            return "skipped"
     trash = os.path.join(os.path.dirname(vd), f".{os.path.basename(vd)}.pi-cleanup-trash-{os.getpid()}")
     try:
         os.rename(vd, trash)
@@ -1461,9 +1526,11 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True):
             item("nuget temp", "run", cmd=["dotnet", "nuget", "locals", "temp", "--clear"])
         # the packages trim is atime-gated, so it is safe while dotnet runs
         cands, kept_local, local_bytes, cand_bytes = plan_nuget_trim(ctx)
-        item("nuget packages trim", "run" if cands else "skip", None if cands else "nothing old enough",
-             paths=cands, size=cand_bytes,
-             note=f"{kept_local} local/other-source versions never touched ({human(local_bytes)})")
+        trash = find_nuget_trash(os.path.realpath(NUGET_PACKAGES))
+        item("nuget packages trim", "run" if cands or trash else "skip", None if cands or trash else "nothing old enough",
+             paths=cands, size=cand_bytes, trash=len(trash),
+             note=f"{kept_local} local/other-source versions never touched ({human(local_bytes)})"
+                  + (f"; {len(trash)} leftover trash dirs to recover" if trash else ""))
     # c. yarn / npm
     for tool, cmd in (("yarn", ["yarn", "cache", "clean"]), ("npm", ["npm", "cache", "clean", "--force"])):
         if which(tool):
@@ -1641,6 +1708,14 @@ def apply_caches(ctx: Ctx, plan):
             cutoff = ctx.now - ctx.args.nuget_age_days * 86400
             root_real = os.path.realpath(NUGET_PACKAGES)
             ids = set()
+            res["recovered"] = 0
+            for tp in find_nuget_trash(root_real):
+                try:
+                    shutil.rmtree(tp)
+                    res["recovered"] += 1
+                except Exception as e:
+                    res["failed"] += 1
+                    res["first_error"] = res.get("first_error") or f"{tp}: {str(e)[:100]}"
             for i, vd in enumerate(it["paths"]):
                 reason = retained_reason(vd)
                 ok, _ = nuget_eligible(vd, cutoff, root_real)
@@ -1649,7 +1724,7 @@ def apply_caches(ctx: Ctx, plan):
                     if reason:
                         it.setdefault("retained", []).append({"path": vd, "reason": reason})
                     continue
-                r = trash_remove(vd)
+                r = trash_remove(vd, cutoff)
                 if r == "deleted":
                     res["deleted"] += 1
                 elif r == "skipped":
@@ -1724,7 +1799,7 @@ def render_caches(plan, apply, out):
                          + (f"  (cache {human(it['size'])})" if it.get("size") else "")])
         elif it["name"] == "nuget packages trim":
             det = f"{len(it['paths'])} versions, {human(it.get('size') or 0)}" + (f"; {it['note']}" if it.get("note") else "")
-            rows.append([it["name"], (f"deleted {r['deleted']}, failed {r['failed']}" if r else "would delete") if apply else "would delete", det])
+            rows.append([it["name"], (f"deleted {r['deleted']}, failed {r['failed']}" + (f", recovered {r['recovered']} trash dirs" if r.get('recovered') else "") if r else "would delete") if apply else "would delete", det])
         elif it["name"] == "pi session gzip":
             tot = sum(f["size"] for f in it["files"])
             det = f"{len(it['files'])} files, {human(tot)} raw" + (f"; {it['note']}" if it.get("note") else "")

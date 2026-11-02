@@ -449,13 +449,99 @@ class NugetTrimTests(unittest.TestCase):
         self.ctx.args.nuget_keep_versions = 0
         self.assertEqual(self.plan()[0], [])
 
-    def test_unparsable_versions_fall_back_to_timestamps(self):
-        a = self.version('p', 'weird', age_days=40)
-        for v, d in (('x', 20), ('y', 30), ('z', 25)):
-            self.version('p', v, age_days=d)
-        self.ctx.args.nuget_keep_versions = 2
+    def test_stray_entries_ignored_for_ranking_and_never_deleted(self):
+        vs = [self.version('p', f'1.0.{i}') for i in range(5)]
+        stray_dir = self.real / 'p' / 'not-a-version'
+        stray_dir.mkdir()
+        nometa = self.real / 'p' / '9.9.9'  # parses, but has no .nupkg.metadata
+        nometa.mkdir()
+        (self.real / 'p' / 'stray.txt').write_text('x')
+        (self.real / 'p' / 'link').symlink_to(self.real / 'p' / '1.0.0')
         cands, *_ = self.plan()
-        self.assertEqual(sorted(cands), sorted([a, str(self.link / 'p' / 'y')]))
+        self.assertEqual(sorted(cands), sorted(vs[:2]))
+        self.ctx.args.nuget_keep_versions = 0
+        self.assertEqual(len(self.plan()[0]), 4)  # never the only (newest) real version
+
+    def test_only_real_version_kept_amid_strays(self):
+        self.version('p', '1.0.0')
+        (self.real / 'p' / 'junk').mkdir()
+        self.ctx.args.nuget_keep_versions = 0
+        self.assertEqual(self.plan()[0], [])
+
+    def test_walk_or_stat_error_fails_closed(self):
+        vs = [self.version('p', f'1.0.{i}') for i in range(4)]
+        self.assertEqual(self.plan()[0], [vs[0]])
+        real_lstat = os.lstat
+        def bad(path, *a, **k):
+            if str(path).endswith('a.dll') and '1.0.0' in str(path):
+                raise PermissionError('denied')
+            return real_lstat(path, *a, **k)
+        with patch.object(cleanup.os, 'lstat', side_effect=bad):
+            self.assertEqual(self.plan()[0], [])
+        real_scandir = os.scandir
+        def bad_scandir(path):
+            if str(path).endswith('lib') and '1.0.0' in str(path):
+                raise PermissionError('denied')
+            return real_scandir(path)
+        with patch.object(cleanup.os, 'scandir', side_effect=bad_scandir):
+            self.assertEqual(self.plan()[0], [])
+
+    def test_timestamps_captured_before_metadata_is_read(self):
+        vs = [self.version('p', f'1.0.{i}') for i in range(4)]
+        events = []
+        real_usage, real_open = cleanup.tree_usage, open
+        def usage(*a, **k):
+            events.append('walk')
+            return real_usage(*a, **k)
+        def spy_open(path, *a, **k):
+            if str(path).endswith('.nupkg.metadata'):
+                events.append('read')
+            return real_open(path, *a, **k)
+        with patch.object(cleanup, 'tree_usage', side_effect=usage), \
+             patch('builtins.open', side_effect=spy_open):
+            cleanup.nuget_check(vs[0], self.ctx.now - 7 * self.DAY, os.path.realpath(str(self.link)))
+        self.assertEqual(events, ['walk', 'read'])
+
+    def test_own_metadata_atime_does_not_count_as_use(self):
+        vs = [self.version('p', f'1.0.{i}') for i in range(4)]
+        os.utime(Path(vs[0]) / '.nupkg.metadata', (self.ctx.now, self.ctx.now - 30 * self.DAY))
+        self.assertEqual(self.plan()[0], [vs[0]])
+
+    def test_old_atimes_without_clock_shift(self):
+        # real clock: only atime/mtime are backdated; ctime is "now", so nothing may be eligible
+        self.ctx.now -= 40 * self.DAY
+        vs = [self.version('p', f'1.0.{i}') for i in range(4)]
+        self.ctx.now += 40 * self.DAY
+        self.assertEqual(self.plan()[0], [vs[0]])
+        self.ctx.now = time.time()
+        self.assertEqual(self.plan()[0], [])  # ctime is fresh at the real clock
+
+    def test_recheck_before_rename_skips_newly_used(self):
+        vd = self.version('p', '1.0.0')
+        cutoff = self.ctx.now - 7 * self.DAY
+        self.assertEqual(cleanup.trash_remove(vd, time.time() - 7 * self.DAY), 'skipped')  # fresh ctime
+        self.assertTrue(os.path.isdir(vd))
+        self.assertEqual(cleanup.trash_remove(vd, cutoff), 'deleted')
+
+    def test_leftover_trash_of_dead_pid_recovered(self):
+        import subprocess
+        p = subprocess.Popen(['true']); p.wait()
+        dead = p.pid
+        self.version('p', '1.0.0')
+        (self.real / 'p' / f'.1.0.1.pi-cleanup-trash-{dead}' / 'lib').mkdir(parents=True)
+        (self.real / 'p' / f'.1.0.2.pi-cleanup-trash-{os.getpid()}').mkdir()  # live pid
+        (self.real / 'p' / f'.1.0.3.pi-cleanup-trash-{dead}x').mkdir()  # bad name
+        outside = self.tmp / 'outside'; outside.mkdir()
+        (self.real / 'p' / f'.1.0.4.pi-cleanup-trash-{dead}').symlink_to(outside)
+        found = cleanup.find_nuget_trash(os.path.realpath(str(self.link)))
+        self.assertEqual([os.path.basename(f) for f in found], [f'.1.0.1.pi-cleanup-trash-{dead}'])
+        item = dict(name='nuget packages trim', action='run', paths=[])
+        with patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
+             patch.object(cleanup, 'protect_cache_items'):
+            cleanup.apply_caches(self.ctx, dict(items=[item]))
+        self.assertEqual(item['result']['recovered'], 1)
+        self.assertTrue(outside.is_dir())
+        self.assertFalse(found[0] and os.path.exists(found[0]))
 
     def test_local_sourced_kept_and_sized(self):
         local = [self.version('p', f'1.0.{i}', source='/Users/x/local-feed') for i in range(5)]
