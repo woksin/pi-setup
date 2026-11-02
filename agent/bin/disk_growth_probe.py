@@ -1,4 +1,5 @@
 """Bounded, best-effort attribution of recently modified allocated file sizes."""
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -77,6 +78,46 @@ def active_cwds(timeout=5):
                 child.wait()
     except (OSError, subprocess.SubprocessError):
         return {}
+
+
+def ledger_cwds(since):
+    path = Path.home() / '.pi/agent/pi-phase/state/ledger' / f'{datetime.now(timezone.utc):%Y-%m-%d}.jsonl'
+    try:
+        with path.open('rb') as stream:
+            stream.seek(0, os.SEEK_END)
+            start = max(0, stream.tell() - 1048576)
+            stream.seek(start)
+            lines = stream.read(1048576).splitlines()[int(start > 0):]
+    except OSError:
+        return []
+    cwds = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+            ended = row.get('endedAt')
+            if (not ended or datetime.fromisoformat(ended.replace('Z', '+00:00')).timestamp() >= since):
+                if isinstance(row.get('cwd'), str):
+                    cwds.append(row['cwd'])
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return cwds
+
+
+def add_worktree_root(cwd, found):
+    path = Path(cwd)
+    for root in (path, *path.parents):
+        if (root / '.git').exists():
+            found.setdefault(str(root), None)
+            break
+
+
+def priority_units(active, since, budget=None):
+    found = {}
+    for cwd in [*active, *ledger_cwds(since)]:
+        if budget and not budget.available():
+            break
+        add_worktree_root(cwd, found)
+    return list(found)[:3000]
 
 
 def discover_directory(entry, depth, budget, found):
@@ -195,10 +236,16 @@ def rank_units(found, active, budget):
 
 def walk_ranked(ranked, since, budget):
     writers, walked = [], 0
-    for _, unit, procs in ranked:
+    for index, (_, unit, procs) in enumerate(ranked):
         if not budget.available():
             break
-        size, categories, complete = walk_unit(unit, since, budget.deadline, budget)
+        left = len(ranked) - index
+        now = time.monotonic()
+        share = Budget(now + (budget.deadline - now) / left, max(1, (budget.cap - budget.entries) // left))
+        share.shallow = budget.shallow
+        size, categories, complete = walk_unit(unit, since, share.deadline, share)
+        budget.entries += share.entries
+        budget.partial |= share.partial
         walked += int(complete)
         writers.append({'path': unit, 'bytes': size, 'categories': categories, 'procs': procs})
     return sorted(writers, key=lambda writer: (-writer['bytes'], writer['path'])), walked
@@ -208,10 +255,18 @@ def top_writers(roots, repos_root, since, deadline, active=None):
     budget = Budget(deadline)
     if active is None:
         active = active_cwds(max(0, min(5, deadline - time.monotonic()))) if budget.available() else {}
-    found = discover_roots(roots, repos_root, budget)
-    ranked = rank_units(found, active, budget)
+    first = priority_units(active, time.time() - 300, budget) if budget.available() else []
+    ranked = [((0, index, unit), unit, sorted({command for cwd, commands in active.items()
+               if cwd == unit or cwd.startswith(unit + os.sep) for command in commands}))
+              for index, unit in enumerate(first)]
     writers, walked = walk_ranked(ranked, since, budget)
-    return writers, {'walked': walked, 'total': len(found), 'partial': budget.partial}
+    found = [unit for unit in discover_roots(roots, repos_root, budget) if unit not in first]
+    if len(first) + len(found) > 3000:
+        budget.partial = True
+        found = found[:3000 - len(first)]
+    more, completed = walk_ranked(rank_units(found, active, budget), since, budget)
+    writers = sorted(writers + more, key=lambda writer: (-writer['bytes'], writer['path']))
+    return writers, {'walked': walked + completed, 'total': len(first) + len(found), 'partial': budget.partial}
 
 
 if __name__ == '__main__':

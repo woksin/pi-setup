@@ -143,7 +143,7 @@ def display_path(path, home):
 def format_notice(now, info, writers, coverage, cfg):
     baseline, current = info['baseline'], info['current']
     elapsed = (current['ts'] - baseline['ts']) / 60
-    scope = f"{'partial' if coverage['partial'] else 'complete'}: {coverage['walked']} of {coverage['total']} units"
+    scope = f"{'partial' if coverage['partial'] else 'complete'}: walked {coverage['walked']} of {coverage['total']} units"
     if coverage.get('timed_out'):
         scope = 'probe timed out/partial; ' + scope
     lines = [f"disk-growth ({clock(now)}): free space dropped {info['drop'] / GIB:.1f} GiB in {elapsed:g} min "
@@ -201,7 +201,7 @@ def worker_command():
 
 def isolated_probe(cfg, since):
     request = {'roots': [str(Path(p).expanduser()) for p in cfg['roots']], 'repos_root': cfg['repos_root'],
-               'since': since, 'deadline': time.monotonic() + cfg['probe_budget_seconds']}
+               'since': since, 'deadline': time.monotonic() + cfg['probe_budget_seconds'] - 3}
     partial = ([], {'walked': 0, 'total': 0, 'partial': True, 'timed_out': True})
     # A file, rather than communicate's unbounded output buffer, caps the parent read.
     with tempfile.TemporaryFile() as output:
