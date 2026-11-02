@@ -14,6 +14,7 @@ import argparse
 import json
 import math
 import os
+import re
 from pathlib import Path
 import runpy
 import shutil
@@ -140,7 +141,166 @@ def display_path(path, home):
     return '~' + path[len(home):] if path == home or path.startswith(home + os.sep) else path
 
 
-def format_notice(now, info, writers, coverage, cfg):
+class AttributionCommands:
+    """Walk-free commands share a deadline, including per-process cwd lookups."""
+
+    def __init__(self):
+        self.deadline = time.monotonic() + 14
+
+    def run(self, command, timeout):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise OSError('attribution budget exhausted')
+        result = subprocess.run(command, capture_output=True, text=True, errors='replace',
+                                timeout=min(timeout, remaining))
+        if result.returncode:
+            raise OSError(result.stderr.strip() or f'exit {result.returncode}')
+        return result.stdout + (result.stderr if command[-1] == 'status' else '')
+
+
+def short_text(text, home, limit=120):
+    text = ' '.join(text.replace(home, '~').split())
+    return text if len(text) <= limit else text[:limit - 3] + '...'
+
+
+def unavailable(error, home):
+    if isinstance(error, subprocess.TimeoutExpired):
+        reason = 'timed out'
+    else:
+        reason = str(error)
+    return 'unavailable: ' + short_text(reason, home)
+
+
+def phase_lines(commands, window, home):
+    output = commands.run([str(Path(__file__).resolve().with_name('pi-phase')), 'status'], 10)
+    pattern = re.compile(r'^pi-phase: (\S+) (.*?) pid=\S+ cwd=(.*?) elapsed=(\d+)s running(?: .*)?$')
+    phases = []
+    for line in output.splitlines():
+        match = pattern.match(line)
+        if match:
+            kind, label, cwd, elapsed = match.groups()
+            age = int(elapsed)
+            phases.append((age > window, age,
+                           f'- {kind} {label} cwd={display_path(cwd, home)} elapsed={age}s'))
+    if not phases and 'pi-phase: no active phases' not in output:
+        raise ValueError('no readable running phases in status')
+    return [line for _, _, line in sorted(phases)] or ['- none']
+
+
+def elapsed_seconds(value):
+    days, separator, clock_value = value.partition('-')
+    parts = (clock_value if separator else days).split(':')
+    if len(parts) not in (2, 3):
+        raise ValueError('invalid elapsed time')
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return seconds + (int(days) * 86400 if separator else 0)
+
+
+def writer_command(command, args):
+    name = Path(command).name.lower()
+    if name in {'dotnet', 'msbuild', 'vbcscompiler', 'yarn', 'npm', 'pnpm', 'cargo',
+                'go', 'tar', 'cp', 'rsync', 'ditto'}:
+        return True
+    patterns = {'node': r'(?:^|[/\s])(?:yarn|npm|pnpm)(?:[-.\s/]|$)',
+                'docker': r'\s(?:build|buildx|compose|pull)(?:\s|$)',
+                'git': r'\s(?:clone|worktree|fetch)(?:\s|$)'}
+    pattern = patterns.get(name)
+    if name.startswith('python'):
+        pattern = r'(?:\s-m\s+pip(?:\s|$)|[/\s]pip(?:\d[\d.]*)?(?:\s|$))'
+    return bool(pattern and re.search(pattern, args))
+
+
+def recent_processes(commands, window):
+    output = commands.run(['ps', '-axo', 'pid,etime,comm,args'], 2)
+    processes = []
+    for line in output.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) != 4 or not parts[0].isdigit():
+            continue
+        pid, elapsed, command, args = parts
+        age = elapsed_seconds(elapsed)
+        if age <= window + 60 and writer_command(command, args):
+            processes.append((age, int(pid), elapsed, args))
+    return sorted(processes)
+
+
+def process_lines(processes, commands, home):
+    lines = []
+    for index, (_, pid, elapsed, args) in enumerate(processes):
+        cwd = 'not queried (10 pid limit)'
+        if index < 10:
+            try:
+                output = commands.run(['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'], 1)
+                paths = [line[1:] for line in output.splitlines() if line.startswith('n/')]
+                if not paths:
+                    raise ValueError('cwd not reported')
+                cwd = display_path(paths[0], home)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                cwd = unavailable(error, home)
+        lines.append(f'- pid={pid} elapsed={elapsed} {short_text(args, home)} cwd={cwd}')
+    return lines or ['- none']
+
+
+def container_age(status):
+    # ps exposes uptime (Status), not StartedAt; RunningFor is creation age.
+    if status.startswith('Up Less than a second'):
+        return 0
+    match = re.match(r'Up (?:About )?(\d+|an?) (second|minute|hour|day|week|month|year)s?\b', status)
+    if not match:
+        return None
+    count, unit = match.groups()
+    scales = {'second': 1, 'minute': 60, 'hour': 3600, 'day': 86400,
+              'week': 604800, 'month': 2592000, 'year': 31536000}
+    return (int(count) if count.isdigit() else 1) * scales[unit]
+
+
+def container_lines(commands, window, home):
+    output = commands.run(['docker', 'ps', '--format', '{{.ID}}\t{{.Names}}\t{{.Status}}'], 2)
+    lines = []
+    for line in output.splitlines():
+        parts = line.split('\t', 2)
+        if len(parts) != 3:
+            raise ValueError('unreadable docker ps output')
+        if not parts[2].startswith('Up '):
+            continue
+        age = container_age(parts[2])
+        if age is None:
+            raise ValueError('unreadable container uptime')
+        if age <= window:
+            lines.append('- ' + short_text(line, home))
+    return lines or ['- none']
+
+
+def attribution_section(heading, collect, home):
+    try:
+        lines = collect()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        lines = ['- ' + unavailable(error, home)]
+    return [heading + ':', *lines]
+
+
+def attribution_lines(info, cfg):
+    commands = AttributionCommands()
+    window = info['current']['ts'] - info['baseline']['ts']
+    home = cfg['home']
+    phases = attribution_section('Running pi-phase phases (started within drop window first)',
+                                 lambda: phase_lines(commands, window, home), home)
+    # Query Docker before spending the remaining budget on per-process cwd.
+    containers = attribution_section('Docker containers started within drop window (approximate uptime)',
+                                     lambda: container_lines(commands, window, home), home)
+    processes = attribution_section('Recently started heavy processes (drop window +60s)',
+                                    lambda: process_lines(recent_processes(commands, window), commands, home), home)
+    lines = ['Likely writers (walk-free attribution; not proof of disk growth):',
+             *phases, *processes, *containers]
+    for path, size in info['current'].get('watch', {}).items():
+        if Path(path).name == 'Docker.raw':
+            lines.append(f'Docker.raw allocated now: {size / GIB:.1f} GiB')
+    return lines
+
+
+def format_notice(now, info, writers, coverage, cfg, attribution=()):
     baseline, current = info['baseline'], info['current']
     elapsed = (current['ts'] - baseline['ts']) / 60
     scope = f"{'partial' if coverage['partial'] else 'complete'}: walked {coverage['walked']} of {coverage['total']} units"
@@ -161,6 +321,7 @@ def format_notice(now, info, writers, coverage, cfg):
         lines.append(line)
     if not shown:
         lines.append('No recently modified files were found in the probed roots; try docker system df and df -h ~.')
+    lines += list(attribution)
     lines += ['Act: stop an unexpected writer; delete leftover .dmp files; ~/.pi/agent/bin/dev-doctor --only disk.',
               f"Next notice after {cfg['debounce_seconds'] / 60:g} min unless free space drops another {cfg['rearm_gib']:g} GiB."]
     return '\n'.join(lines) + '\n'
@@ -249,7 +410,7 @@ def alert(now, info, cfg, notifier, probe, dry_run):
         runpy.run_path(Path(__file__).resolve().with_name('disk_growth_probe.py'))
         writers, coverage = isolated_probe(cfg, since)
     writers += watch_writers(info)
-    text = format_notice(now, info, writers, coverage, cfg)
+    text = format_notice(now, info, writers, coverage, cfg, attribution_lines(info, cfg))
     if dry_run:
         print(text, end='')
     else:
