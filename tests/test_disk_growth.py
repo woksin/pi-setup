@@ -253,6 +253,19 @@ class DiskGrowthTests(unittest.TestCase):
         self.assertEqual(dg.short_text('npm config set //registry.example/:_authToken=private-value', str(self.home)),
                          'npm config set //registry.example/:_authToken=***')
 
+    def test_redacts_authorization_and_api_key_headers(self):
+        home = str(self.home)
+        self.assertEqual(dg.short_text('curl -H "Authorization: Bearer abc123" https://x', home),
+                         'curl -H "Authorization: Bearer ***" https://x')
+        self.assertEqual(dg.short_text("curl --header 'authorization: basic dXNlcjpw' x", home),
+                         "curl --header 'authorization: basic ***' x")
+        self.assertEqual(dg.short_text('curl -H "X-Api-Key: k123" x', home),
+                         'curl -H "X-Api-Key: ***" x')
+
+    def test_redacts_long_flags_case_insensitively(self):
+        self.assertEqual(dg.short_text('tool --PASSWORD hunter2 --Token t', str(self.home)),
+                         'tool --PASSWORD *** --Token ***')
+
     def test_short_text_only_abbreviates_home_path_prefix(self):
         home = str(self.home)
         self.assertEqual(dg.short_text(f'{home} {home}/repo {home}-backup/repo', home, 1000),

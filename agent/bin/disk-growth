@@ -169,7 +169,7 @@ def redact_assignment(token):
 
 
 def redact_flag_value(flag, value):
-    if flag in {'--build-arg', '-e', '--env'}:
+    if flag.lower() in {'--build-arg', '-e', '--env'}:
         name = re.match(r'([A-Za-z_][\w.-]*)=', value.lstrip("'\""))
         if name:
             return name[0] + '***'
@@ -179,7 +179,9 @@ def redact_flag_value(flag, value):
 def redact_text(text):
     # Keep quoted values together, including an unterminated quote through EOF.
     value = r'''(?:[^\s'"]|"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$))+'''
-    flags = (r'''(?<!\S)['"]?(?P<flag>-k|--api-key|-p|--password|--token|--build-arg|--secret|-e|--env)'''
+    text = re.sub(r'''(?i)(authorization:\s*(?:bearer|basic|token)\s+)[^\s'"]+''', r'\1***', text)
+    text = re.sub(r'''(?i)((?:x-api-key|api-key|private-token|x-auth-token):\s*)[^\s'"]+''', r'\1***', text)
+    flags = (r'''(?<!\S)['"]?(?P<flag>-k|-p|-e|(?i:--api-key|--password|--token|--build-arg|--secret|--env))'''
              r'''['"]?(?P<separator>=|\s+)(?P<value>''' + value + ')')
     text = re.sub(flags, lambda match: match['flag'] + match['separator']
                   + redact_flag_value(match['flag'], match['value']), text)
