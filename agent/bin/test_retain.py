@@ -502,10 +502,18 @@ class NugetTrimTests(unittest.TestCase):
             cleanup.nuget_check(vs[0], self.ctx.now - 7 * self.DAY, os.path.realpath(str(self.link)))
         self.assertEqual(events, ['walk', 'read'])
 
-    def test_own_metadata_atime_does_not_count_as_use(self):
+    def test_fresh_metadata_atime_makes_version_ineligible(self):
         vs = [self.version('p', f'1.0.{i}') for i in range(4)]
         os.utime(Path(vs[0]) / '.nupkg.metadata', (self.ctx.now, self.ctx.now - 30 * self.DAY))
+        self.assertEqual(self.plan()[0], [])
+
+    def test_plan_does_not_refresh_metadata_atime(self):
+        vs = [self.version('p', f'1.0.{i}') for i in range(4)]
+        meta = Path(vs[0]) / '.nupkg.metadata'
+        before = os.lstat(meta)
         self.assertEqual(self.plan()[0], [vs[0]])
+        after = os.lstat(meta)
+        self.assertEqual((after.st_atime_ns, after.st_mtime_ns), (before.st_atime_ns, before.st_mtime_ns))
 
     def test_old_atimes_without_clock_shift(self):
         # real clock: only atime/mtime are backdated; ctime is "now", so nothing may be eligible

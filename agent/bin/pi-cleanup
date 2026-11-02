@@ -1131,8 +1131,8 @@ def tree_usage(vd: str, stop_at=None):
             except OSError:
                 state["ok"] = False
                 continue
-            at = 0.0 if name == ".nupkg.metadata" else st.st_atime
-            newest = max(newest, at, st.st_mtime, st.st_ctime)
+            ct = 0.0 if name == ".nupkg.metadata" else st.st_ctime
+            newest = max(newest, st.st_atime, st.st_mtime, ct)
             total += st.st_blocks * 512
             if stop_at is not None and newest >= stop_at:
                 return newest, total, state["ok"]
@@ -1200,12 +1200,20 @@ def nuget_check(vd: str, cutoff: float, root_real: str):
         if not rp.startswith(root_real + os.sep):
             return False, False, 0
         meta = os.path.join(vd, ".nupkg.metadata")
-        if not statmod.S_ISREG(os.lstat(meta).st_mode):
+        pre = os.lstat(meta)
+        if not statmod.S_ISREG(pre.st_mode):
             return False, False, 0
         # timestamps of every file are captured BEFORE the metadata content is read
         newest, size, walk_ok = tree_usage(vd, stop_at=cutoff)
-        with open(meta) as f:
-            src = json.load(f).get("source") or ""
+        try:
+            with open(meta) as f:
+                src = json.load(f).get("source") or ""
+        finally:
+            # our own read must stay invisible to later runs (restore is best effort)
+            try:
+                os.utime(meta, ns=(pre.st_atime_ns, pre.st_mtime_ns), follow_symlinks=False)
+            except OSError:
+                pass
         if not isinstance(src, str) or not src.startswith(NUGET_REMOTE_PREFIXES):
             return False, True, 0
         if not walk_ok or newest >= cutoff:  # fail closed on any scan error
