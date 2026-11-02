@@ -86,6 +86,7 @@ import argparse
 import bisect
 import fcntl
 import gzip
+import fnmatch
 import json
 import math
 import multiprocessing
@@ -954,8 +955,31 @@ def parse_ts(s: str):
     return t
 
 
+def docker_pins() -> list:
+    """Globs from docker-guardian's pin file (same path/env override, '#' comments, blank lines ignored)."""
+    state = os.environ.get("DOCKER_GUARDIAN_STATE") or os.path.expanduser("~/.pi/agent/docker-guardian")
+    try:
+        with open(os.path.join(state, "pinned.txt")) as f:
+            return [ln.strip() for ln in f.read().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    except FileNotFoundError:
+        return []  # missing file = no pins; any other read error propagates (fail closed)
+
+
+def pinned_by(pins: list, iid: str, tags: list, digests: list):
+    """First pin glob matching the image id, a tag (any @sha256 suffix stripped) or a RepoDigest, else None."""
+    refs = [iid, *tags, *(t.split("@", 1)[0] for t in tags), *digests]
+    for pin in pins:
+        if any(fnmatch.fnmatchcase(r, pin) for r in refs):
+            return pin
+    return None
+
+
 def plan_rmi(age_days: float):
     """(candidates, kept-notes, error). Images used by no container (by image ID and by name)."""
+    try:
+        pins = docker_pins()
+    except (OSError, UnicodeDecodeError) as e:
+        return [], [], f"cannot read docker pin file: {e}"
     rc, out, err = run(["docker", "image", "ls", "-a", "--no-trunc", "-q"], timeout=60)
     if rc != 0:
         return [], [], "docker image ls failed"
@@ -978,15 +1002,19 @@ def plan_rmi(age_days: float):
     for i in range(0, len(img_ids), 100):
         chunk = img_ids[i:i + 100]
         rc, out, err = run(["docker", "image", "inspect", "-f",
-                            "{{.Id}}|{{.Created}}|{{json .RepoTags}}|{{.Size}}", *chunk], timeout=120)
+                            "{{.Id}}|{{.Created}}|{{json .RepoTags}}|{{.Size}}|{{json .RepoDigests}}", *chunk], timeout=120)
         if rc != 0 and not out:
             return [], [], "docker image inspect failed"
         for line in out.splitlines():
-            iid, created, tags, size = (line.split("|", 3) + ["", "", ""])[:4]
+            iid, created, tags, size, digests = (line.split("|", 4) + ["", "", "", ""])[:5]
             try:
                 tags = json.loads(tags) or []
             except ValueError:
                 tags = []
+            try:
+                digests = json.loads(digests) or []
+            except ValueError:
+                digests = []
             ts = parse_ts(created)
             item = {"id": iid, "tags": tags, "size": int(size) if size.isdigit() else None,
                     "age_days": None if ts is None else round((time.time() - ts) / 86400, 1)}
@@ -994,7 +1022,11 @@ def plan_rmi(age_days: float):
                 continue  # in use: not a candidate, not worth listing
             if ts is None or ts > cutoff:
                 continue
-            if len(tags) > 1:
+            pin = pinned_by(pins, iid, tags, digests)
+            if pin:
+                item["reason"] = f"pinned: {pin}"
+                kept.append(item)
+            elif len(tags) > 1:
                 item["reason"] = f"{len(tags)} tags; `docker rmi <id>` needs -f, left alone"
                 kept.append(item)
             else:
