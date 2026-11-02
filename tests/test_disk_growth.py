@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import importlib.machinery
 import importlib.util
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -207,6 +208,60 @@ class DiskGrowthTests(unittest.TestCase):
         self.assertFalse(dg.writer_command('node', 'node --disable-feature=npm server.js'))
         self.assertFalse(dg.writer_command('not-python', 'not-python -m pip install x'))
         self.assertTrue(dg.writer_command('/usr/local/shar', '/usr/local/share/dotnet/dotnet test'))
+
+    def test_redacts_url_userinfo_before_process_argument_truncation(self):
+        commands = Mock()
+        commands.run.return_value = f'p123\nn{self.home}/repo\n'
+        for userinfo in ['reader:' + 'private-value' * 30, 'private-value' * 30]:
+            args = f'git clone https://{userinfo}@example.com/repo'
+            with self.subTest(userinfo=userinfo):
+                lines = dg.process_lines([(0, 123, '00:00', args)], commands, str(self.home))
+                self.assertEqual(lines, ['- pid=123 elapsed=00:00 git clone https://***@example.com/repo cwd=~/repo'])
+        self.assertEqual(dg.short_text('git+ssh://reader:private-value@example.com/repo', str(self.home)),
+                         'git+ssh://***@example.com/repo')
+
+    def test_redacts_sensitive_flag_values_and_preserves_environment_names(self):
+        flags = ['-k', '--api-key', '-p', '--password', '--token', '--build-arg', '--secret', '-e', '--env']
+        values = ['private-value', '"private value"', "'private value'", '"private value']
+        for flag, separator, value in itertools.product(flags, [' ', '='], values):
+            with self.subTest(flag=flag, separator=separator, value=value):
+                self.assertEqual(dg.short_text(f'dotnet test {flag}{separator}{value}', str(self.home)),
+                                 f'dotnet test {flag}{separator}***')
+        values = ['NAME=private-value', '"NAME=private value"', 'NAME="private value"']
+        for flag, separator, value in itertools.product(['--build-arg', '-e', '--env'], [' ', '='], values):
+            with self.subTest(flag=flag, separator=separator, value=value):
+                self.assertEqual(dg.short_text(f'docker build {flag}{separator}{value}', str(self.home)),
+                                 f'docker build {flag}{separator}NAME=***')
+        self.assertEqual(dg.short_text("dotnet test --label can't --token private-value", str(self.home)),
+                         "dotnet test --label can't --token ***")
+        self.assertEqual(dg.short_text('dotnet test "--token" "private value"', str(self.home)),
+                         'dotnet test --token ***')
+
+    def test_redacts_sensitive_assignments_including_nested_options(self):
+        keys = ['TOKEN', 'client_secret', 'PASS', 'Password', 'PWD', 'api_key', 'Auth', 'CREDENTIAL']
+        values = ['private-value', '"private value"', 'private" value"']
+        for key, prefix, value in itertools.product(keys, ['', '--x='], values):
+            with self.subTest(key=key, prefix=prefix, value=value):
+                result = dg.short_text(f'dotnet test {prefix}{key}={value}', str(self.home))
+                self.assertIn(f'{prefix}{key}=***', result)
+                self.assertNotIn('private', result)
+                self.assertNotIn('value', result)
+        self.assertEqual(dg.short_text('dotnet test MODE=release --x=COUNT=3', str(self.home)),
+                         'dotnet test MODE=release --x=COUNT=3')
+
+    def test_redacts_npm_registry_auth_token(self):
+        self.assertEqual(dg.short_text('npm config set //registry.example/:_authToken=private-value', str(self.home)),
+                         'npm config set //registry.example/:_authToken=***')
+
+    def test_short_text_only_abbreviates_home_path_prefix(self):
+        home = str(self.home)
+        self.assertEqual(dg.short_text(f'{home} {home}/repo {home}-backup/repo', home, 1000),
+                         f'~ ~/repo {home}-backup/repo')
+
+    def test_attribution_section_handles_unexpected_errors_without_leaking_arguments(self):
+        collect = Mock(side_effect=RuntimeError('unexpected --token private-value'))
+        self.assertEqual(dg.attribution_section('Processes', collect, str(self.home)),
+                         ['Processes:', '- unavailable: unexpected --token ***'])
 
     def test_writer_patterns(self):
         positives = [('dotnet', 'dotnet build'), ('MSBuild', 'MSBuild x'), ('VBCSCompiler', 'VBCSCompiler'),

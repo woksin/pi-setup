@@ -159,8 +159,37 @@ class AttributionCommands:
         return result.stdout + (result.stderr if command[-1] == 'status' else '')
 
 
+def redact_assignment(token):
+    token = re.sub(r'([A-Za-z][A-Za-z0-9+.-]*://)[^/\s]+@', r'\1***@', token)
+    for match in re.finditer(r'([A-Za-z_][\w.:-]*)=', token):
+        if re.search(r'token|secret|pass(word)?|pwd|key|auth|credential', match[1], re.I):
+            closing = re.search(r'''['"]+$''', token)
+            return token[:match.end()] + '***' + (closing[0] if closing else '')
+    return token
+
+
+def redact_flag_value(flag, value):
+    if flag in {'--build-arg', '-e', '--env'}:
+        name = re.match(r'([A-Za-z_][\w.-]*)=', value.lstrip("'\""))
+        if name:
+            return name[0] + '***'
+    return '***'
+
+
+def redact_text(text):
+    # Keep quoted values together, including an unterminated quote through EOF.
+    value = r'''(?:[^\s'"]|"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$))+'''
+    flags = (r'''(?<!\S)['"]?(?P<flag>-k|--api-key|-p|--password|--token|--build-arg|--secret|-e|--env)'''
+             r'''['"]?(?P<separator>=|\s+)(?P<value>''' + value + ')')
+    text = re.sub(flags, lambda match: match['flag'] + match['separator']
+                  + redact_flag_value(match['flag'], match['value']), text)
+    return ' '.join(redact_assignment(token) for token in re.findall(value, text))
+
+
 def short_text(text, home, limit=120):
-    text = ' '.join(text.replace(home, '~').split())
+    text = redact_text(text)
+    text = re.sub(re.escape(home) + r'(?=/|\s|$)', '~', text)
+    text = ' '.join(text.split())
     return text if len(text) <= limit else text[:limit - 3] + '...'
 
 
@@ -264,17 +293,15 @@ def recent_processes(commands, window):
 
 def process_lines(processes, commands, home):
     lines = []
-    for index, (_, pid, elapsed, args) in enumerate(processes):
-        cwd = 'not queried (10 pid limit)'
-        if index < 10:
-            try:
-                output = commands.run(['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'], 1)
-                paths = [line[1:] for line in output.splitlines() if line.startswith('n/')]
-                if not paths:
-                    raise ValueError('cwd not reported')
-                cwd = display_path(paths[0], home)
-            except (OSError, ValueError, subprocess.SubprocessError) as error:
-                cwd = unavailable(error, home)
+    for _, pid, elapsed, args in processes[:10]:
+        try:
+            output = commands.run(['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'], 1)
+            paths = [line[1:] for line in output.splitlines() if line.startswith('n/')]
+            if not paths:
+                raise ValueError('cwd not reported')
+            cwd = display_path(paths[0], home)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            cwd = unavailable(error, home)
         lines.append(f'- pid={pid} elapsed={elapsed} {short_text(args, home)} cwd={cwd}')
     return lines or ['- none']
 
@@ -312,7 +339,7 @@ def container_lines(commands, window, home):
 def attribution_section(heading, collect, home):
     try:
         lines = collect()
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except Exception as error:
         lines = ['- ' + unavailable(error, home)]
     return [heading + ':', *lines]
 
