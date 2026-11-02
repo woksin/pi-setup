@@ -651,21 +651,70 @@ function infoFrom(data: IssueData, now: Date): GitHubInfo {
 	return { fetchedAt: now.toISOString(), title: data.title, url: data.url, ghState: data.state, statusState: statusStateOf(extractStatusBlock(data.body)), author: data.author, association: data.association };
 }
 
-/** Refresh cached GitHub info for the given issues (stale or all when `force`). Errors are cached as such. */
+function refreshIssueData(data: any, repo: string, issue: number): IssueData {
+	return { title: data.title ?? "", url: data.url ?? issueUrl(repo, issue), state: data.state ?? "", body: data.body ?? "", author: data.author?.login };
+}
+
+async function fetchRefreshIssue(d: Deps, repo: string, issue: number): Promise<IssueData> {
+	const r = await d.run("gh", ["issue", "view", String(issue), "--repo", repo, "--json", "title,url,state,body,author"], { timeout: 60000 });
+	return refreshIssueData(JSON.parse(r.stdout), repo, issue);
+}
+
+async function fetchRefreshIssues(d: Deps, repo: string, views: IssueView[]): Promise<Map<number, IssueData>> {
+	if (views.length <= 3) return new Map(await Promise.all(views.map(async (v) => [v.issue, await fetchRefreshIssue(d, repo, v.issue)] as const)));
+	const limit = Math.min(1000, Math.max(...views.map((v) => v.issue)));
+	const r = await d.run("gh", ["issue", "list", "--repo", repo, "--state", "all", "--limit", String(limit), "--json", "number,title,url,state,body,author"], { timeout: 120000 });
+	return new Map(JSON.parse(r.stdout).map((data: any) => [data.number, refreshIssueData(data, repo, data.number)]));
+}
+
+async function refreshIssueCache(d: Deps, v: IssueView, cache: Record<string, GitHubInfo>, now: Date): Promise<void> {
+	try {
+		const data = await fetchRefreshIssue(d, v.repo, v.issue);
+		cache[v.key] = infoFrom({ ...data, association: cache[v.key]?.association }, now);
+	} catch (e) { cache[v.key] = { ...(cache[v.key] ?? {}), fetchedAt: now.toISOString(), error: errorText(e) }; }
+}
+
+function oldestCacheFirst(a: GitHubInfo | undefined, b: GitHubInfo | undefined): number {
+	if (!a) return b ? -1 : 0;
+	if (!b) return 1;
+	return Date.parse(a.fetchedAt) - Date.parse(b.fetchedAt);
+}
+
+async function refreshRepoCache(d: Deps, views: IssueView[], cache: Record<string, GitHubInfo>, now: Date): Promise<void> {
+	let issues: Map<number, IssueData>;
+	try { issues = await fetchRefreshIssues(d, views[0].repo, views); }
+	catch (e) {
+		for (const v of views) cache[v.key] = { ...(cache[v.key] ?? {}), fetchedAt: now.toISOString(), error: errorText(e) };
+		return;
+	}
+	for (const v of views) {
+		const data = issues.get(v.issue);
+		if (data) cache[v.key] = infoFrom({ ...data, association: cache[v.key]?.association }, now);
+	}
+	// Prioritize uncached and oldest entries so repeated refreshes do not starve deferred issues.
+	const missing = views.filter((v) => !issues.has(v.issue)).sort((a, b) => oldestCacheFirst(cache[a.key], cache[b.key]));
+	for (const v of missing.slice(0, 10)) await refreshIssueCache(d, v, cache, now);
+}
+
+/** Refresh cached GitHub info by repo, without authorship checks (stale or all when `force`). Errors are cached as such. */
 export async function refreshCache(d: Deps, views: IssueView[], force = false, concurrency = 4): Promise<Record<string, GitHubInfo>> {
 	const now = d.now?.() ?? new Date();
 	const cache = await readCache(d);
 	const todo = views.filter((v) => force || !cache[v.key] || now.getTime() - Date.parse(cache[v.key].fetchedAt) > CACHE_TTL_MS);
 	if (!todo.length) return cache;
+	const byRepo = new Map<string, IssueView[]>();
+	for (const v of todo) {
+		const repo = v.repo.toLowerCase();
+		const group = byRepo.get(repo) ?? [];
+		group.push(v);
+		byRepo.set(repo, group);
+	}
+	const repos = [...byRepo.values()];
 	let i = 0;
 	const worker = async () => {
-		while (i < todo.length) {
-			const v = todo[i++];
-			try { cache[v.key] = infoFrom(await fetchIssue(d, v.repo, v.issue), now); }
-			catch (e) { cache[v.key] = { ...(cache[v.key] ?? {}), fetchedAt: now.toISOString(), error: errorText(e) }; }
-		}
+		while (i < repos.length) await refreshRepoCache(d, repos[i++], cache, now);
 	};
-	await Promise.all(Array.from({ length: Math.min(concurrency, todo.length) }, worker));
+	await Promise.all(Array.from({ length: Math.min(concurrency, repos.length) }, worker));
 	await writeCache(d, cache).catch(() => {});
 	return cache;
 }
