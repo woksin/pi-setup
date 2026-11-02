@@ -9,7 +9,7 @@ import { join } from "node:path";
 import {
 	activeCount, appendEvent, check, claim, computeAnomalies, detectIssueCommands, extractStatusBlock, foldRegistry, heldBy, list, liveSessions, liveSet,
 	parseRegistry, rawStatusBlock, readCache, readEvents, recordDetected, removeLease, REPO_RE, spawnIssueLock, repoFromRemote, rewriteStatusBlock, statusStateOf, update, writeLease,
-	type Deps, type RegistryEvent, type Runner, type SessionInfo,
+	type Deps, type GitHubInfo, type RegistryEvent, type Runner, type SessionInfo,
 } from "./issue-work.ts";
 import issueWorkExtension from "../extensions/issue-work.ts";
 
@@ -395,17 +395,72 @@ test("list caches a repo failure for every issue without retrying or blocking ot
 	assert.equal(calls.length, 0, "repo errors are cached for the TTL");
 });
 
-test("list caps the repo limit at 1000 and caches missing issues without per-issue retries", async () => {
-	const d = { ...deps(), run: (async (cmd, args) => {
-		calls.push({ cmd, args });
-		return { stdout: "[]", stderr: "" };
-	}) as Runner };
-	await registerRefreshIssues(d, "o/r", 5, 1200);
+function missingListDeps(returned: unknown[] = []): Deps {
+	return { ...deps(), run: async (cmd, args, opts) => {
+		if (args[1] === "list") {
+			calls.push({ cmd, args });
+			return { stdout: JSON.stringify(returned), stderr: "" };
+		}
+		return fakeRun(cmd, args, opts);
+	} };
+}
+
+test("list caps the repo limit at 1000 and views missing issues without authorship calls", async () => {
+	const d = missingListDeps([{ number: 5504, title: "Listed title", state: "CLOSED", body: "", author: { login: "listed-author" } }]);
+	await registerRefreshIssues(d, "o/r", 5, 5500);
+	writeFileSync(join(dir, "cache.json"), JSON.stringify({ "o/r#5500": { fetchedAt: "2026-10-08T10:00:00Z", association: "OWNER" } }));
 	await list(d);
-	assert.equal(calls.length, 1);
+	assert.equal(calls.length, 5);
 	assert.equal(calls[0].args[calls[0].args.indexOf("--limit") + 1], "1000");
+	assert.deepEqual(calls.slice(1).map((c) => [c.cmd, c.args]), [5500, 5501, 5502, 5503].map((issue) =>
+		["gh", ["issue", "view", String(issue), "--repo", "o/r", "--json", "title,url,state,body,author"]]));
 	const cache = await readCache(d);
-	for (let issue = 1200; issue < 1205; issue++) assert.equal(cache[`o/r#${issue}`].error, `Issue #${issue} not returned by gh issue list`);
+	for (let issue = 5500; issue < 5504; issue++) {
+		assert.equal(cache[`o/r#${issue}`].title, "Title");
+		assert.equal(cache[`o/r#${issue}`].author, "opener");
+		assert.equal(cache[`o/r#${issue}`].fetchedAt, now);
+		assert.equal(cache[`o/r#${issue}`].error, undefined);
+	}
+	assert.equal(cache["o/r#5500"].association, "OWNER");
+	assert.equal(cache["o/r#5504"].title, "Listed title");
+});
+
+test("missing-issue views are capped at ten per repo and deferred cache entries stay unchanged until the next refresh", async () => {
+	const d = missingListDeps();
+	const repos = ["o/r", "o/other"];
+	for (const repo of repos) await registerRefreshIssues(d, repo, 12, 5500);
+	const previous: Record<string, GitHubInfo> = Object.fromEntries(repos.flatMap((repo) => Array.from({ length: 12 }, (_, i) => [
+		`${repo}#${5500 + i}`, { fetchedAt: "2026-10-08T10:00:00Z", title: `Old ${5500 + i}`, association: "OWNER", author: "opener", error: "Old error" },
+	])));
+	writeFileSync(join(dir, "cache.json"), JSON.stringify(previous));
+	await list(d);
+	assert.equal(calls.length, 22, "one list plus ten views per repo");
+	const cache = await readCache(d);
+	for (const repo of ["o/r", "o/other"]) {
+		const fetched = new Set(calls.filter((c) => c.args[1] === "view" && c.args[4] === repo).map((c) => Number(c.args[2])));
+		assert.equal(fetched.size, 10);
+		for (let issue = 5500; issue < 5512; issue++) {
+			if (fetched.has(issue)) assert.equal(cache[`${repo}#${issue}`].fetchedAt, now);
+			else assert.deepEqual(cache[`${repo}#${issue}`], previous[`${repo}#${issue}`]);
+		}
+	}
+	calls = [];
+	await list(d);
+	assert.equal(calls.length, 4, "only deferred stale entries need views on the next refresh");
+	assert.ok(calls.every((c) => c.args[1] === "view"));
+	assert.ok(Object.values(await readCache(d)).every((info) => info.fetchedAt === now && info.error === undefined));
+});
+
+test("missing issues beyond the fallback cap do not gain cache entries", async () => {
+	const d = missingListDeps();
+	await registerRefreshIssues(d, "o/r", 12, 5500);
+	await list(d);
+	assert.equal(calls.length, 11);
+	const cache = await readCache(d);
+	assert.equal(Object.keys(cache).length, 10);
+	for (let issue = 5500; issue < 5512; issue++) {
+		if (!calls.some((c) => c.args[1] === "view" && c.args[2] === String(issue))) assert.equal(cache[`o/r#${issue}`], undefined);
+	}
 });
 
 // ---------- activity checks ----------

@@ -651,20 +651,27 @@ function infoFrom(data: IssueData, now: Date): GitHubInfo {
 	return { fetchedAt: now.toISOString(), title: data.title, url: data.url, ghState: data.state, statusState: statusStateOf(extractStatusBlock(data.body)), author: data.author, association: data.association };
 }
 
+function refreshIssueData(data: any, repo: string, issue: number): IssueData {
+	return { title: data.title ?? "", url: data.url ?? issueUrl(repo, issue), state: data.state ?? "", body: data.body ?? "", author: data.author?.login };
+}
+
+async function fetchRefreshIssue(d: Deps, repo: string, issue: number): Promise<IssueData> {
+	const r = await d.run("gh", ["issue", "view", String(issue), "--repo", repo, "--json", "title,url,state,body,author"], { timeout: 60000 });
+	return refreshIssueData(JSON.parse(r.stdout), repo, issue);
+}
+
 async function fetchRefreshIssues(d: Deps, repo: string, views: IssueView[]): Promise<Map<number, IssueData>> {
-	let issues;
-	if (views.length <= 3) {
-		issues = await Promise.all(views.map(async (v) => {
-			const r = await d.run("gh", ["issue", "view", String(v.issue), "--repo", repo, "--json", "title,url,state,body,author"], { timeout: 60000 });
-			return { ...JSON.parse(r.stdout), number: v.issue };
-		}));
-	} else {
-		const limit = Math.min(1000, Math.max(...views.map((v) => v.issue)));
-		const r = await d.run("gh", ["issue", "list", "--repo", repo, "--state", "all", "--limit", String(limit), "--json", "number,title,url,state,body,author"], { timeout: 60000 });
-		issues = JSON.parse(r.stdout);
-	}
-	return new Map(issues.map((data: any) => [data.number, { title: data.title ?? "", url: data.url ?? issueUrl(repo, data.number),
-		state: data.state ?? "", body: data.body ?? "", author: data.author?.login }]));
+	if (views.length <= 3) return new Map(await Promise.all(views.map(async (v) => [v.issue, await fetchRefreshIssue(d, repo, v.issue)] as const)));
+	const limit = Math.min(1000, Math.max(...views.map((v) => v.issue)));
+	const r = await d.run("gh", ["issue", "list", "--repo", repo, "--state", "all", "--limit", String(limit), "--json", "number,title,url,state,body,author"], { timeout: 60000 });
+	return new Map(JSON.parse(r.stdout).map((data: any) => [data.number, refreshIssueData(data, repo, data.number)]));
+}
+
+async function refreshIssueCache(d: Deps, v: IssueView, cache: Record<string, GitHubInfo>, now: Date): Promise<void> {
+	try {
+		const data = await fetchRefreshIssue(d, v.repo, v.issue);
+		cache[v.key] = infoFrom({ ...data, association: cache[v.key]?.association }, now);
+	} catch (e) { cache[v.key] = { ...(cache[v.key] ?? {}), fetchedAt: now.toISOString(), error: errorText(e) }; }
 }
 
 async function refreshRepoCache(d: Deps, views: IssueView[], cache: Record<string, GitHubInfo>, now: Date): Promise<void> {
@@ -676,9 +683,10 @@ async function refreshRepoCache(d: Deps, views: IssueView[], cache: Record<strin
 	}
 	for (const v of views) {
 		const data = issues.get(v.issue);
-		cache[v.key] = data ? infoFrom({ ...data, association: cache[v.key]?.association }, now)
-			: { ...(cache[v.key] ?? {}), fetchedAt: now.toISOString(), error: `Issue #${v.issue} not returned by gh issue list` };
+		if (data) cache[v.key] = infoFrom({ ...data, association: cache[v.key]?.association }, now);
 	}
+	// Keep deferred entries stale so a later refresh can pick them up.
+	for (const v of views.filter((v) => !issues.has(v.issue)).slice(0, 10)) await refreshIssueCache(d, v, cache, now);
 }
 
 /** Refresh cached GitHub info by repo, without authorship checks (stale or all when `force`). Errors are cached as such. */
