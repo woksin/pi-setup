@@ -219,7 +219,7 @@ const compactRuntimeRuns = (res, oversized) => {
 // End runtime recording.
 
 // Cache identities include the pinned routing, not just caller-supplied diff identity.
-const cacheKey = 'review-v2-security:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
+const cacheKey = 'review-v3-coverage:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
   mode: deep ? 'deep' : 'full', author, context: input.context ?? '', routing: AGENT_MODELS, runtimeStamp: RUNTIME_STAMP,
   deepReason: input.deepReason ?? null, deepJustification: input.deepJustification ?? null }))
 // The security lens runs on the provider that did NOT write the work (same rule as `other` below).
