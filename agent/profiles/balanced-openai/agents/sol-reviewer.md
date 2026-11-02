@@ -6,7 +6,7 @@ color: orange
 model: openai-codex/gpt-6.1-sol
 thinking: xhigh
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, model-provenance, cratis-rules, output-cap, observation-mask]
+extensions: [cratis-cli-guard, exact-model-guard, model-provenance, cratis-rules, output-cap, observation-mask]
 skills: false
 prompt_mode: replace
 ---
