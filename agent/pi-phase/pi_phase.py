@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state"
 CONFIG = ROOT / "config.json"
 HEARTBEAT = 5.0
+SILENCE_SAMPLE_INTERVAL = 5.0
 TICK = 0.2
 # Queued waiters re-scan less often: each scan runs `ps -A`, and dozens of waiters at TICK
 # saturated the CPU with system time (2026-10-19: 45 waiters, 47% sys).
@@ -294,6 +295,40 @@ def would_hold_kind(scan):
     """'host' or 'cpu' when an observe-mode check would have held this scan (scan['wouldHold'] = '<kind>:<why>')."""
     kind = str(scan.get("wouldHold") or "").split(":", 1)[0]
     return kind if kind in ("host", "cpu") else None
+
+
+class LogSilence:
+    """Approximate output gaps from log growth; never intercept child output."""
+
+    def __init__(self, log, start):
+        self.log = log
+        self.interval = SILENCE_SAMPLE_INTERVAL
+        self.next_sample = start + self.interval
+        self.last_growth, self.maximum, self.size = start, 0.0, 0
+        self.valid, self.result = True, None
+
+    def sample(self, now, final=False):
+        if not self.valid or (not final and now < self.next_sample):
+            return
+        self.next_sample = now + self.interval
+        try:
+            info = os.stat(self.log)
+        except OSError:
+            self.valid = False
+            return
+        if not stat.S_ISREG(info.st_mode) or info.st_size < self.size:
+            self.valid = False
+            return
+        if info.st_size != self.size:
+            self.maximum = max(self.maximum, now - self.last_growth)
+            self.last_growth, self.size = now, info.st_size
+
+    def close(self, end):
+        if self.result is None:
+            self.sample(end, final=True)
+            self.result = (dict(maxSilenceS=round(max(self.maximum, end - self.last_growth)),
+                                silenceSampleS=self.interval) if self.valid else {})
+        return self.result
 
 
 class WaitTelemetry:
@@ -4399,6 +4434,7 @@ def run(args, state, configuration, output=None):
     detector_stopped = threading.Event()
     producer_exit = [None]
     leader_observation = None
+    log_silence = None
     operation = "prepare"
     primary = None
     fingerprint = test_fingerprint(os.getcwd(), original_command)
@@ -4610,6 +4646,8 @@ def run(args, state, configuration, output=None):
             started = time.monotonic()  # No execution budget consumed waiting for a permit.
             if ledger:
                 ledger.start()
+                if output is not None:
+                    log_silence = LogSilence(args.log, started)
         finally:
             if read_gate != -1:
                 os.close(read_gate)
@@ -4632,9 +4670,13 @@ def run(args, state, configuration, output=None):
             operation = "waitid"
             if exited_unreaped(proc.pid, producer_exit):
                 leader_observation = ("waitid_wnowait" if hasattr(os, "waitid") else "ps_zombie", producer_exit[0])
+                if log_silence is not None:
+                    log_silence.close(time.monotonic())
                 break
             operation = "supervise"
             now = time.monotonic()
+            if log_silence is not None:
+                log_silence.sample(now)
             if now - started >= args.timeout:
                 note(f"phase timed out ({args.timeout:g}s); stopping owned process group")
                 fast_timeout(args, budget)
@@ -4707,6 +4749,8 @@ def run(args, state, configuration, output=None):
             alive = cleanup_step(errors, "group_alive", proc,
                                  lambda: group_alive({"pgid": proc.pid}, timeouts=CLEANUP_PROBE_TIMEOUTS))
             safe = alive is False
+        if log_silence is not None and proc.returncode is not None:
+            ledger.record.update(log_silence.close(time.monotonic()))
         if proc is not None:
             cleanup_step(errors, "nested_release", proc,
                          lambda: nested_group(state, worktree.holder, proc.pid, safe))

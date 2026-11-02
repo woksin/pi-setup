@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -69,6 +70,61 @@ class LedgerSizeTests(unittest.TestCase):
         record = dict(v=1, ts=pi_phase.utc_stamp(), session=None, lane=None, cwd="c" * 5000, label="x", priority="normal")
         pi_phase.append_ledger(Path(tmp.name), record)
         self.assertLess(len(next((Path(tmp.name) / "ledger").glob("*.jsonl")).read_bytes()), 4096)
+
+
+class LogSilenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.log = Path(self.tmp.name) / "phase.log"
+        self.log.write_bytes(b"")
+
+    def test_start_growth_and_exit_gaps_and_final_sample(self):
+        with patch.object(pi_phase, "SILENCE_SAMPLE_INTERVAL", 0.2):
+            silence = pi_phase.LogSilence(self.log, 100)
+        self.log.write_bytes(b"first")
+        silence.sample(101.2)
+        self.log.write_bytes(b"first second")
+        silence.sample(103.6)
+        self.assertEqual(silence.close(107.7), dict(maxSilenceS=4, silenceSampleS=0.2))
+        self.assertEqual(silence.close(200), dict(maxSilenceS=4, silenceSampleS=0.2))
+
+    def test_start_to_first_growth_can_be_longest(self):
+        silence = pi_phase.LogSilence(self.log, 100)
+        self.log.write_bytes(b"first")
+        self.assertEqual(silence.close(107.2), dict(maxSilenceS=7, silenceSampleS=5.0))
+
+    def test_empty_log_counts_whole_run(self):
+        silence = pi_phase.LogSilence(self.log, 100)
+        silence.sample(105)
+        self.assertEqual(silence.close(109), dict(maxSilenceS=9, silenceSampleS=5.0))
+
+    def test_samples_only_when_due_and_at_exit(self):
+        silence = pi_phase.LogSilence(self.log, 100)
+        with patch.object(pi_phase.os, "stat", wraps=os.stat) as sample:
+            silence.sample(104)
+            sample.assert_not_called()
+            silence.sample(105)
+            self.assertEqual(sample.call_count, 1)
+            silence.sample(106)
+            self.assertEqual(sample.call_count, 1)
+            silence.close(107)
+            self.assertEqual(sample.call_count, 2)
+
+    def test_failed_sample_omits_fields_even_after_recovery(self):
+        silence = pi_phase.LogSilence(self.log, 100)
+        with patch.object(pi_phase.os, "stat", side_effect=OSError("unavailable")):
+            silence.sample(105)
+        self.assertEqual(silence.close(110), {})
+
+    def test_non_regular_or_truncated_log_omits_fields(self):
+        silence = pi_phase.LogSilence(os.devnull, 100)
+        self.assertEqual(silence.close(110), {})
+        silence = pi_phase.LogSilence(self.log, 100)
+        self.log.write_bytes(b"first")
+        silence.sample(105)
+        self.log.write_bytes(b"")
+        self.assertEqual(silence.close(110), {})
 
 
 class ConfigFieldTests(unittest.TestCase):
@@ -337,6 +393,33 @@ class RunBase(unittest.TestCase):
 
 
 class RunRecordTests(RunBase):
+    def test_logged_output_gap_records_sampled_silence(self):
+        log = self.root / "phase.log"
+        gap, interval = 1.2, 0.2
+        command = [sys.executable, "-c",
+                   f"import time; print('first', flush=True); time.sleep({gap}); print('last', flush=True)"]
+        with patch.object(pi_phase, "SILENCE_SAMPLE_INTERVAL", interval):
+            self.assertEqual(self.run_phase(command, "--log", str(log), "--tail", "0")[0], 0)
+        (record,) = self.records()
+        self.assertGreaterEqual(record["maxSilenceS"], gap - interval)
+        self.assertEqual(record["silenceSampleS"], interval)
+        self.assertEqual(log.read_text(), "first\nlast\n")
+
+    def test_chatty_logged_child_records_small_silence(self):
+        command = [sys.executable, "-c",
+                   "import time; [(print(i, flush=True), time.sleep(0.05)) for i in range(24)]"]
+        with patch.object(pi_phase, "SILENCE_SAMPLE_INTERVAL", 0.2):
+            self.assertEqual(self.run_phase(command, "--log", str(self.root / "chatty.log"), "--tail", "0")[0], 0)
+        (record,) = self.records()
+        self.assertLessEqual(record["maxSilenceS"], 1)
+        self.assertEqual(record["silenceSampleS"], 0.2)
+
+    def test_inherited_stdio_omits_silence_fields(self):
+        self.assertEqual(self.run_phase(["true"])[0], 0)
+        (record,) = self.records()
+        self.assertNotIn("maxSilenceS", record)
+        self.assertNotIn("silenceSampleS", record)
+
     def test_record_carries_config_profile_workers_and_version(self):
         self.write_config(msbuild_max_cpu=2, cpu_budget=dict(mode="observe"))
         self.assertEqual(self.run_phase(["true"])[0], 0)
