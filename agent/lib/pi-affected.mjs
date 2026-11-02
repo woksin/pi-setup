@@ -266,12 +266,22 @@ function generatedFilter(out) {
     return Array.isArray(JSON.parse(readFileSync(out, 'utf8'))?.solution?.projects);
   } catch { return false; }
 }
+/** True when anything (including a dangling symlink) occupies `path`; only ENOENT means absent. */
+function entryExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
 function writeSelection(report, out, entries, projectKey) {
   if (report.mode !== 'selected') {
     if (generatedFilter(out)) unlinkSync(out);
     return;
   }
-  if (existsSync(out) && !generatedFilter(out)) throw new Error(`refusing to overwrite ${out}: not a generated solution filter`);
+  if (entryExists(out) && !generatedFilter(out)) throw new Error(`refusing to overwrite ${out}: not a generated solution filter`);
   mkdirSync(dirname(out), { recursive: true });
   const temporary = `${out}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
   const selectedEntries = entries.filter(entry => report.projects.includes(projectKey(entry)));

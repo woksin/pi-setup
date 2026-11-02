@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { applyEdges, changedFiles, decide, HELP, install, loadConfig, main, parseToolOutput, renderSlnf, solutionProjects } from './pi-affected.mjs';
@@ -240,6 +240,11 @@ test('--out never destroys a file it did not generate, and refuses directories',
   result = await runCli(['--repo', dir, '--from', 'HEAD', '--out', fakeDir], env);
   assert.equal(result.code, 1); assert.ok(existsSync(fakeDir));
   assert.deepEqual(readdirSync(fakeDir).filter(name => name.includes('.tmp-')), []);
+  const dangling = join(fakeDir, 'dangling.slnf');
+  symlinkSync(join(fakeDir, 'missing-target'), dangling);
+  result = await runCli(['--repo', dir, '--from', 'HEAD', '--out', dangling], env);
+  assert.equal(result.code, 1); assert.match(result.error, /refusing to overwrite/);
+  assert.equal(lstatSync(dangling).isSymbolicLink(), true);
   put('global.json', '{}');
   for (const target of [precious, fakeDir]) {
     result = await runCli(['--repo', dir, '--from', 'HEAD', '--out', target], env);
