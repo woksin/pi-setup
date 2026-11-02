@@ -134,3 +134,11 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Cause:** tight wall-clock assertions.
 - **Rule:** rerun a timing failure alone once before attributing it; report it as load-flaky with the load average; do not loosen the gate silently.
 - **Enforced:** practice; candidate for scaling test timeouts by load.
+
+## 2026-11-02
+
+### Pattern kills terminate other sessions' builds
+- **Symptom:** a lane's `pkill -f 'MSBuild.dll.*nodeReuse'` cleanup killed other lanes' active builds with MSB4166.
+- **Cause:** process names and command-line patterns are shared across sessions on the same machine, not scoped to the lane that started them.
+- **Rule:** find the exact PIDs you started (`ps -o pid,ppid,pgid,command` filtered to your own process group or cwd, and `lsof -p PID`) and kill only those numeric PIDs, or let pi-phase clean up its owned process group. Never clean up by name or pattern.
+- **Enforced:** `agent/extensions/kill-guard.ts` blocks name kills and process-search kill pipelines/substitutions before bash executes; `/guards off kill` is the user's switch.
