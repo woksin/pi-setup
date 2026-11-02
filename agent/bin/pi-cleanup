@@ -3,7 +3,7 @@
 
 Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-days N]
                   [--image-age-days N]
-                  [--nuget-age-days N] [--session-age-days N] [--if-free-below GIB|config]
+                  [--nuget-age-days N] [--nuget-keep-versions N] [--session-age-days N] [--if-free-below GIB|config]
                   [--roots PATH ...] [--json] [--scheduled] [--budget SECONDS]
 
   (default)          dry run: print the plan, change nothing; use existing remote refs
@@ -16,8 +16,11 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
                      --scheduled and not given, only the build step uses 0.25)
   --worktree-min-idle-days N  minimum idle age for worktree removal (default 1; may be 0).
                      Effective worktree idle threshold = max(--idle-days, this value)
-  --nuget-age-days N remote-sourced ~/.nuget/packages versions older than N days are
-                     removed by the caches step (default 14)
+  --nuget-age-days N remote-sourced ~/.nuget/packages versions whose newest file
+                     atime/mtime/ctime is older than N days are removed by the caches step
+                     (default 7); runs even while dotnet is running
+  --nuget-keep-versions N  the newest N versions of every package id are never removed
+                     (default 3; at least one version always stays)
   --session-age-days N pi session .jsonl files not modified for N days are gzipped in
                      place by the caches step (default 30)
   --if-free-below GIB|config exit 0 with "free space OK" (doing nothing) when the home volume
@@ -71,7 +74,8 @@ Steps
              go/compile/golangci-lint/gopls process); NuGet http-cache and temp, and
              ~/.nuget/packages versions whose .nupkg.metadata source is
              https://api.nuget.org/ or https://pkgs.dev.azure.com/dnceng/ and that are
-             older than --nuget-age-days (never local/file feeds; skipped when a
+             unused for --nuget-age-days and not among the newest --nuget-keep-versions
+             (never local/file feeds; http-cache/temp clearing is skipped while a
              dotnet/MSBuild/VBCSCompiler process runs); `yarn cache clean` and
              `npm cache clean --force`; gzip in place of old, unopened pi session
              .jsonl files (never deleted); `git worktree prune` in every discovered
@@ -1106,57 +1110,148 @@ def procs_running(names):
     return found
 
 
+def tree_usage(vd: str, stop_at=None):
+    """Walk `vd` without following symlinks. Returns (newest, bytes): newest is the max of
+    atime/mtime/ctime over the dir and every file in it; bytes is allocated size. When
+    `stop_at` is given the walk stops at the first entry newer than it (bytes is partial)."""
+    newest, total = 0.0, 0
+    stack = [vd]
+    while stack:
+        d = stack.pop()
+        try:
+            st = os.lstat(d)
+            newest = max(newest, st.st_atime, st.st_mtime, st.st_ctime)
+            total += st.st_blocks * 512
+            if stop_at is not None and newest >= stop_at:
+                return newest, total
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                    newest = max(newest, st.st_atime, st.st_mtime, st.st_ctime)
+                    total += st.st_blocks * 512
+                    if stop_at is not None and newest >= stop_at:
+                        return newest, total
+        except OSError:
+            continue
+    return newest, total
+
+
+def nuget_version_key(v: str):
+    """NuGet semver ordering key, or None if `v` does not parse."""
+    m = re.fullmatch(r"(\d+(?:\.\d+){0,3})(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?", v)
+    if not m:
+        return None
+    nums = [int(x) for x in m.group(1).split(".")]
+    nums += [0] * (4 - len(nums))
+    pre = m.group(2)
+    if pre is None:
+        return (tuple(nums), 1, ())
+    ids = tuple((0, int(x), "") if x.isdigit() else (1, 0, x.lower()) for x in pre.split("."))
+    return (tuple(nums), 0, ids)
+
+
+def nuget_newest(idp: str, versions, keep: int):
+    """The `keep` newest of `versions` (names) of package dir `idp`."""
+    keys = {v: nuget_version_key(v) for v in versions}
+    if all(k is not None for k in keys.values()):
+        order = sorted(versions, key=lambda v: keys[v], reverse=True)
+    else:  # unparsable version names: fall back to newest timestamp
+        def ts(v):
+            try:
+                st = os.lstat(os.path.join(idp, v))
+                return max(st.st_atime, st.st_mtime, st.st_ctime)
+            except OSError:
+                return 0.0
+        order = sorted(versions, key=ts, reverse=True)
+    return set(order[:max(1, keep)])
+
+
 def nuget_eligible(vd: str, cutoff: float, root_real: str):
-    """True if version dir `vd` is a remote-sourced, old, symlink-free package version.
+    """True if version dir `vd` is a remote-sourced, symlink-free package version whose
+    newest atime/mtime/ctime (any file inside) is older than `cutoff`.
     Returns (eligible, is_local_source)."""
+    ok, local, _ = nuget_check(vd, cutoff, root_real)
+    return ok, local
+
+
+def nuget_check(vd: str, cutoff: float, root_real: str):
+    """Like nuget_eligible, plus the bytes of the version dir when it was fully walked."""
     try:
         idp = os.path.dirname(vd)
         if os.path.dirname(idp) != NUGET_PACKAGES:
-            return False, False
+            return False, False, 0
         for q in (idp, vd):
             if not statmod.S_ISDIR(os.lstat(q).st_mode):  # lstat: symlinks are not dirs
-                return False, False
+                return False, False, 0
         rp = os.path.realpath(vd)
         if not rp.startswith(root_real + os.sep):
-            return False, False
+            return False, False, 0
         meta = os.path.join(vd, ".nupkg.metadata")
         if not statmod.S_ISREG(os.lstat(meta).st_mode):
-            return False, False
+            return False, False, 0
         with open(meta) as f:
             src = json.load(f).get("source") or ""
         if not isinstance(src, str) or not src.startswith(NUGET_REMOTE_PREFIXES):
-            return False, True
-        if os.lstat(vd).st_mtime >= cutoff or os.lstat(meta).st_mtime >= cutoff:
-            return False, False
-        return True, False
+            return False, True, 0
+        newest, size = tree_usage(vd, stop_at=cutoff)
+        if newest >= cutoff:
+            return False, False, 0
+        return True, False, size
     except (OSError, ValueError, AttributeError):
-        return False, False
+        return False, False, 0
 
 
 def plan_nuget_trim(ctx: Ctx):
+    """Returns (candidates, kept_local_count, kept_local_bytes, candidate_bytes)."""
     cutoff = ctx.now - ctx.args.nuget_age_days * 86400
-    cands, kept_local = [], 0
+    keep = getattr(ctx.args, "nuget_keep_versions", 3)
+    cands, kept_local, local_bytes, cand_bytes = [], 0, 0, 0
     try:
         root_real = os.path.realpath(NUGET_PACKAGES)
         ids = sorted(os.listdir(NUGET_PACKAGES))
     except OSError:
-        return cands, kept_local
+        return cands, kept_local, local_bytes, cand_bytes
     for pid in ids:
         idp = os.path.join(NUGET_PACKAGES, pid)
         try:
             if not statmod.S_ISDIR(os.lstat(idp).st_mode):
                 continue
-            vers = os.listdir(idp)
+            vers = [v for v in os.listdir(idp) if not v.startswith(".")]
         except OSError:
             continue
+        newest = nuget_newest(idp, vers, keep)
         for v in vers:
             vd = os.path.join(idp, v)
-            ok, local = nuget_eligible(vd, cutoff, root_real)
+            if v in newest:
+                # protected from deletion, but still classify local feeds for the summary
+                ok, local, _ = nuget_check(vd, 0.0, root_real)
+            else:
+                ok, local, size = nuget_check(vd, cutoff, root_real)
+                if ok:
+                    cands.append(vd)
+                    cand_bytes += size
             if local:
                 kept_local += 1
-            elif ok:
-                cands.append(vd)
-    return cands, kept_local
+                local_bytes += tree_usage(vd)[1]
+    return cands, kept_local, local_bytes, cand_bytes
+
+
+def trash_remove(vd: str):
+    """Atomically rename `vd` to a sibling trash name, then delete that. Returns
+    'deleted', 'skipped' (rename failed) or 'failed: ...' (rename ok, delete failed)."""
+    trash = os.path.join(os.path.dirname(vd), f".{os.path.basename(vd)}.pi-cleanup-trash-{os.getpid()}")
+    try:
+        os.rename(vd, trash)
+    except OSError:
+        return "skipped"
+    try:
+        shutil.rmtree(trash)
+    except Exception as e:
+        return f"failed: {trash}: {str(e)[:100]}"
+    return "deleted"
 
 
 def plan_session_gzip(ctx: Ctx):
@@ -1360,13 +1455,15 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True):
     else:
         busy = procs_running(["dotnet", "MSBuild", "VBCSCompiler"])
         if busy:
-            item("nuget", "skip", "running: " + ",".join(busy))
+            item("nuget cache clear", "skip", "running: " + ",".join(busy))
         else:
             item("nuget http-cache", "run", cmd=["dotnet", "nuget", "locals", "http-cache", "--clear"])
             item("nuget temp", "run", cmd=["dotnet", "nuget", "locals", "temp", "--clear"])
-            cands, kept_local = plan_nuget_trim(ctx)
-            item("nuget packages trim", "run" if cands else "skip", None if cands else "nothing old enough",
-                 paths=cands, note=f"{kept_local} local/other-source versions never touched")
+        # the packages trim is atime-gated, so it is safe while dotnet runs
+        cands, kept_local, local_bytes, cand_bytes = plan_nuget_trim(ctx)
+        item("nuget packages trim", "run" if cands else "skip", None if cands else "nothing old enough",
+             paths=cands, size=cand_bytes,
+             note=f"{kept_local} local/other-source versions never touched ({human(local_bytes)})")
     # c. yarn / npm
     for tool, cmd in (("yarn", ["yarn", "cache", "clean"]), ("npm", ["npm", "cache", "clean", "--force"])):
         if which(tool):
@@ -1519,7 +1616,7 @@ def apply_caches(ctx: Ctx, plan):
         if it["action"] != "run":
             continue
         n = it["name"]
-        if n.startswith("nuget"):
+        if n.startswith("nuget") and n != "nuget packages trim":
             busy = procs_running(NUGET_PROCS)
             if busy:
                 it.update(action="skip", reason="running: " + ",".join(busy))
@@ -1545,10 +1642,6 @@ def apply_caches(ctx: Ctx, plan):
             root_real = os.path.realpath(NUGET_PACKAGES)
             ids = set()
             for i, vd in enumerate(it["paths"]):
-                if i and i % 100 == 0 and procs_running(NUGET_PROCS):
-                    res["skipped"] += len(it["paths"]) - i
-                    res["first_error"] = "dotnet started during trim; stopped"
-                    break
                 reason = retained_reason(vd)
                 ok, _ = nuget_eligible(vd, cutoff, root_real)
                 if reason or not ok:
@@ -1556,12 +1649,14 @@ def apply_caches(ctx: Ctx, plan):
                     if reason:
                         it.setdefault("retained", []).append({"path": vd, "reason": reason})
                     continue
-                try:
-                    shutil.rmtree(vd)
+                r = trash_remove(vd)
+                if r == "deleted":
                     res["deleted"] += 1
-                except Exception as e:
+                elif r == "skipped":
+                    res["skipped"] += 1
+                else:
                     res["failed"] += 1
-                    res["first_error"] = res.get("first_error") or f"{vd}: {str(e)[:100]}"
+                    res["first_error"] = res.get("first_error") or r
                 ids.add(os.path.dirname(vd))
             for idp in ids:
                 try:
@@ -1628,7 +1723,7 @@ def render_caches(plan, apply, out):
             rows.append([it["name"], act, " ".join(it["cmd"]) + (f"  [{it['note']}]" if it.get("note") else "")
                          + (f"  (cache {human(it['size'])})" if it.get("size") else "")])
         elif it["name"] == "nuget packages trim":
-            det = f"{len(it['paths'])} versions" + (f"; {it['note']}" if it.get("note") else "")
+            det = f"{len(it['paths'])} versions, {human(it.get('size') or 0)}" + (f"; {it['note']}" if it.get("note") else "")
             rows.append([it["name"], (f"deleted {r['deleted']}, failed {r['failed']}" if r else "would delete") if apply else "would delete", det])
         elif it["name"] == "pi session gzip":
             tot = sum(f["size"] for f in it["files"])
@@ -2078,7 +2173,7 @@ def dry_suggestions(ctx, rows):
     suggestions = {"guards_off": stale_guards_off()}
     nuget = os.path.expanduser("~/.nuget/packages")
     if os.path.isdir(nuget):
-        suggestions["nuget_bytes"] = du_bytes(nuget, 3)
+        suggestions["nuget_bytes"] = du_bytes(os.path.realpath(nuget), 3)
     if ctx.docker_up:
         rc, out, _ = run(["docker", "volume", "ls", "-q", "-f", "dangling=true"], timeout=3)
         suggestions["dangling_volumes"] = out.split() if rc == 0 else None
@@ -2224,7 +2319,8 @@ def parse_args(argv):
     ap.add_argument("--only", default=",".join(STEPS_ALL), help="comma list of " + ",".join(STEPS_ALL))
     ap.add_argument("--idle-days", type=nonneg_float, default=None)
     ap.add_argument("--worktree-min-idle-days", type=nonneg_float, default=1)
-    ap.add_argument("--nuget-age-days", type=nonneg_float, default=14)
+    ap.add_argument("--nuget-age-days", type=nonneg_float, default=7)
+    ap.add_argument("--nuget-keep-versions", type=int, default=3)
     ap.add_argument("--session-age-days", type=nonneg_float, default=30)
     ap.add_argument("--if-free-below", type=free_below_arg, default=None, metavar="GIB|config")
     ap.add_argument("--image-age-days", type=nonneg_float, default=7)
@@ -2387,7 +2483,7 @@ def main(argv=None):
         # suggestion gathering that can overlap with planning
         nuget = os.path.expanduser("~/.nuget/packages")
         if os.path.isdir(nuget):
-            nuget_f = pool.submit(du_bytes, nuget, 30)
+            nuget_f = pool.submit(du_bytes, os.path.realpath(nuget), 30)
 
         wt_rows = []
         queued = set()

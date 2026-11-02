@@ -386,5 +386,135 @@ class PlanRmiPinTests(unittest.TestCase):
         self.assertIn('cannot read docker pin file', d['error'])
         self.assertFalse([c for c in calls if c[:2] == ['docker', 'rmi']])
 
+
+class NugetTrimTests(unittest.TestCase):
+    DAY = 86400
+
+    def setUp(self):
+        parent = Path(os.environ.get('PI_RETAIN_TEST_TMP', str(Path.cwd() / '.ai-work/retain-tests')))
+        parent.mkdir(parents=True, exist_ok=True)
+        self.tmp = Path(tempfile.mkdtemp(dir=parent)).resolve()
+        self.real = self.tmp / 'real-packages'
+        self.real.mkdir()
+        self.link = self.tmp / 'packages'
+        self.link.symlink_to(self.real)
+        p = patch.object(cleanup, 'NUGET_PACKAGES', str(self.link))
+        p.start()
+        self.addCleanup(p.stop)
+        self.ctx = cleanup.Ctx(cleanup.parse_args(['--only', 'caches']))
+        # ctime cannot be backdated, so move "now" 40 days ahead: every fixture's ctime is
+        # then 40 days old and atime/mtime are set relative to this shifted clock.
+        self.ctx.now += 40 * self.DAY
+
+    def version(self, pid, ver, age_days=30, source='https://api.nuget.org/v3/index.json'):
+        vd = self.real / pid / ver
+        vd.mkdir(parents=True)
+        (vd / '.nupkg.metadata').write_text(json.dumps({'source': source}))
+        (vd / 'lib').mkdir()
+        f = vd / 'lib' / 'a.dll'
+        f.write_bytes(b'x' * 10)
+        self.age(vd, age_days)
+        return str(self.link / pid / ver)
+
+    def age(self, vd, days):
+        t = self.ctx.now - days * self.DAY
+        for dp, dns, fns in os.walk(vd):
+            for n in dns + fns:
+                os.utime(os.path.join(dp, n), (t, t), follow_symlinks=False)
+            os.utime(dp, (t, t))
+
+    def plan(self):
+        return cleanup.plan_nuget_trim(self.ctx)
+
+    def test_defaults(self):
+        self.assertEqual(self.ctx.args.nuget_age_days, 7)
+        self.assertEqual(self.ctx.args.nuget_keep_versions, 3)
+
+    def test_old_atime_eligible_recent_atime_kept(self):
+        old = [self.version('p', f'1.0.{i}') for i in range(4)]
+        recent = self.version('p', '0.9.0')  # oldest by semver, but recently read
+        os.utime(Path(recent) / 'lib' / 'a.dll', (self.ctx.now, self.ctx.now - 30 * self.DAY))
+        cands, *_ = self.plan()
+        self.assertEqual(cands, [old[0]])  # 1.0.1-1.0.3 newest three; 0.9.0 used recently
+
+    def test_newest_three_kept_by_semver(self):
+        for v in ('1.2.0', '1.10.0', '1.9.0', '2.0.0-beta.2', '2.0.0-beta.10', '1.0.0'):
+            self.version('p', v)
+        cands, *_ = self.plan()
+        self.assertEqual(sorted(os.path.basename(c) for c in cands), ['1.0.0', '1.2.0', '1.9.0'])
+
+    def test_single_version_kept(self):
+        self.version('p', '1.0.0')
+        self.assertEqual(self.plan()[0], [])
+        self.ctx.args.nuget_keep_versions = 0
+        self.assertEqual(self.plan()[0], [])
+
+    def test_unparsable_versions_fall_back_to_timestamps(self):
+        a = self.version('p', 'weird', age_days=40)
+        for v, d in (('x', 20), ('y', 30), ('z', 25)):
+            self.version('p', v, age_days=d)
+        self.ctx.args.nuget_keep_versions = 2
+        cands, *_ = self.plan()
+        self.assertEqual(sorted(cands), sorted([a, str(self.link / 'p' / 'y')]))
+
+    def test_local_sourced_kept_and_sized(self):
+        local = [self.version('p', f'1.0.{i}', source='/Users/x/local-feed') for i in range(5)]
+        cands, kept, local_bytes, _ = self.plan()
+        self.assertEqual(cands, [])
+        self.assertEqual(kept, 5)
+        self.assertGreater(local_bytes, 0)
+
+    def test_rename_then_delete(self):
+        vd = self.version('p', '1.0.0')
+        renames = []
+        real_rename = os.rename
+        def spy(a, b):
+            renames.append((a, b))
+            self.assertTrue(os.path.exists(a))
+            real_rename(a, b)
+        with patch.object(cleanup.os, 'rename', side_effect=spy):
+            self.assertEqual(cleanup.trash_remove(vd), 'deleted')
+        self.assertEqual(len(renames), 1)
+        self.assertEqual(os.path.basename(renames[0][1]), f'.1.0.0.pi-cleanup-trash-{os.getpid()}')
+        self.assertEqual(os.listdir(self.real / 'p'), [])
+
+    def test_rename_failure_skips(self):
+        vd = self.version('p', '1.0.0')
+        with patch.object(cleanup.os, 'rename', side_effect=OSError('nope')), \
+             patch.object(cleanup.shutil, 'rmtree', side_effect=AssertionError('no delete')):
+            self.assertEqual(cleanup.trash_remove(vd), 'skipped')
+        self.assertTrue(os.path.isdir(vd))
+
+    def test_symlinked_root_plans_and_apply_runs_with_dotnet_running(self):
+        paths = [self.version('p', f'1.0.{i}') for i in range(5)]
+        cands, kept, _, size = self.plan()
+        self.assertEqual(sorted(cands), sorted(paths[:2]))
+        self.assertGreater(size, 0)
+        item = dict(name='nuget packages trim', action='run', paths=cands)
+        with patch.object(cleanup, 'procs_running', return_value=['dotnet']), \
+             patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
+             patch.object(cleanup, 'protect_cache_items'):
+            cleanup.apply_caches(self.ctx, dict(items=[item]))
+        self.assertEqual(item['result']['deleted'], 2)
+        self.assertEqual(sorted(os.listdir(self.real / 'p')), ['1.0.2', '1.0.3', '1.0.4'])
+
+    def test_recent_use_between_plan_and_apply_is_respected(self):
+        vd = self.version('p', '1.0.0')
+        self.version('p', '1.0.1'); self.version('p', '1.0.2'); self.version('p', '1.0.3')
+        cands, *_ = self.plan()
+        self.assertEqual(cands, [vd])
+        os.utime(Path(vd) / 'lib' / 'a.dll', (self.ctx.now, self.ctx.now))
+        item = dict(name='nuget packages trim', action='run', paths=cands)
+        with patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
+             patch.object(cleanup, 'protect_cache_items'):
+            cleanup.apply_caches(self.ctx, dict(items=[item]))
+        self.assertTrue(os.path.isdir(vd))
+        self.assertEqual(item['result']['skipped'], 1)
+
+    def test_sizing_follows_symlink(self):
+        self.version('p', '1.0.0')
+        self.assertGreater(cleanup.du_bytes(os.path.realpath(str(self.link)), 5), 0)
+
+
 if __name__ == '__main__':
     unittest.main()
