@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { applyEdges, changedFiles, decide, HELP, loadConfig, main, parseToolOutput, renderSlnf, solutionProjects } from './pi-affected.mjs';
+import { applyEdges, changedFiles, decide, HELP, install, loadConfig, main, parseToolOutput, renderSlnf, solutionProjects } from './pi-affected.mjs';
 
 const stageNames = ['BodyWorker', 'Conformance.Specs', 'Contracts', 'Host', 'Rendering.Cratis.Scaffolding', 'Rendering.Cratis', 'Rendering.Declarative', 'Rendering.Kits', 'Rendering.Templates', 'SpecRunner', 'Specifications', 'Stage'];
 const playNames = ['Screenplay.CanonicalCorpus', 'Screenplay.CanonicalVectors.Specs', 'Screenplay', 'Screenplay.Conformance', 'Screenplay.Contexts', 'Screenplay.Matching', 'Screenplay.Matching.Specs', 'Screenplay.Mcp', 'Tool', 'Screenplay.Contracts', 'Screenplay.ContractCatalog', 'Screenplay.ContractCatalog.Specs'];
@@ -190,6 +190,82 @@ test('CLI resolves origin default merge-base and rejects invalid environment or 
   git('update-ref', '-d', 'refs/remotes/origin/main');
   assert.equal(await main(['--repo', dir], deps), 1); assert.match(error, /pass --from/);
   for (const args of [['--wat'], ['--timeout', '0'], ['--repo']]) assert.equal(await main(args, deps), 1);
+});
+
+function fakeTool(selected) {
+  const fakeDir = mkdtempSync(join(tmpdir(), 'pi-affected-fake-'));
+  const fake = join(fakeDir, 'tool');
+  writeFileSync(fake, `#!/usr/bin/env node\nconsole.log("DRY-RUN: CONTENTS:\\n"+process.cwd()+"/${selected}");\n`);
+  chmodSync(fake, 0o755);
+  return { env: { ...process.env, PI_AFFECTED_TOOL: fake, PI_AFFECTED_CONFIG: join(fakeDir, 'missing') }, fakeDir };
+}
+async function runCli(args, env) {
+  let text = ''; let error = '';
+  const code = await main(args, { env, stdout: s => { text += s; }, stderr: s => { error += s; } });
+  return { code, text, error };
+}
+
+test('solution in a subdirectory: entries resolve relative to the solution, including sln backslashes', async () => {
+  for (const [file, body] of [
+    ['sub/Toy.slnx', '<Solution><Project Path="P/P.csproj"/><Project Path="Q/Q.csproj"/></Solution>'],
+    ['sub/Toy.sln', 'Project("{X}") = "P", "P\\P.csproj", "{Y}"\nProject("{X}") = "Q", "Q\\Q.csproj", "{Z}"'],
+  ]) {
+    const { dir, put, git } = toyRepo();
+    put(file, body);
+    put('sub/P/P.csproj', '<Project/>'); put('sub/Q/Q.csproj', '<Project/>'); put('sub/P/C.cs', 'class C {}');
+    git('add', '.'); git('-c', 'user.name=F', '-c', 'user.email=f@example.invalid', 'commit', '-qm', 'sub');
+    put('sub/P/C.cs', 'class C { int x; }');
+    const { env } = fakeTool('sub/P/P.csproj');
+    const { code, text, error } = await runCli(['--repo', dir, '--solution', file, '--from', 'HEAD', '--json'], env);
+    assert.equal(code, 0, error);
+    const report = JSON.parse(text);
+    assert.equal(report.mode, 'selected', file);
+    assert.deepEqual(report.projects, ['sub/P/P.csproj']);
+    const slnf = JSON.parse(readFileSync(report.target, 'utf8'));
+    assert.equal(slnf.solution.projects.length, 1, file);
+    assert.match(slnf.solution.projects[0], /^P[\\/]P\.csproj$/);
+    assert.equal(resolve(dirname(report.target), slnf.solution.path), join(dir, file));
+  }
+});
+
+test('--out never destroys a file it did not generate, and refuses directories', async () => {
+  const { dir, put } = toyRepo();
+  put('A/Class1.cs', 'public class A { public int X; }');
+  const { env, fakeDir } = fakeTool('A/A.csproj');
+  const precious = join(fakeDir, 'precious.txt');
+  writeFileSync(precious, 'keep me');
+  let result = await runCli(['--repo', dir, '--from', 'HEAD', '--out', precious], env);
+  assert.equal(result.code, 1); assert.match(result.error, /refusing to overwrite/);
+  assert.equal(readFileSync(precious, 'utf8'), 'keep me');
+  result = await runCli(['--repo', dir, '--from', 'HEAD', '--out', fakeDir], env);
+  assert.equal(result.code, 1); assert.ok(existsSync(fakeDir));
+  assert.deepEqual(readdirSync(fakeDir).filter(name => name.includes('.tmp-')), []);
+  const dangling = join(fakeDir, 'dangling.slnf');
+  symlinkSync(join(fakeDir, 'missing-target'), dangling);
+  result = await runCli(['--repo', dir, '--from', 'HEAD', '--out', dangling], env);
+  assert.equal(result.code, 1); assert.match(result.error, /refusing to overwrite/);
+  assert.equal(lstatSync(dangling).isSymbolicLink(), true);
+  put('global.json', '{}');
+  for (const target of [precious, fakeDir]) {
+    result = await runCli(['--repo', dir, '--from', 'HEAD', '--out', target], env);
+    assert.equal(result.code, 0, result.error);
+  }
+  assert.equal(readFileSync(precious, 'utf8'), 'keep me'); assert.ok(existsSync(fakeDir));
+  const generated = join(fakeDir, 'ok.slnf');
+  put('global.json', '{}'); // full mode removes only generated filters
+  writeFileSync(generated, JSON.stringify({ solution: { path: 'x', projects: [] } }));
+  assert.equal((await runCli(['--repo', dir, '--from', 'HEAD', '--out', generated], env)).code, 0);
+  assert.equal(existsSync(generated), false);
+});
+
+test('failed tool install removes its temporary directory and leaves no tool directory', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-affected-install-'));
+  const bin = join(root, 'bin'); const cache = join(root, 'cache');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'dotnet'), '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --tool-path ] && mkdir -p "$2/partial"; shift; done\nexit 1\n');
+  chmodSync(join(bin, 'dotnet'), 0o755);
+  assert.throws(() => install({ ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_AFFECTED_CACHE: cache, DOTNET_ROOT: '/nonexistent' }));
+  assert.deepEqual(readdirSync(cache), []);
 });
 
 test('live: pinned tool relocates, selects dependents and builds slnf over slnx', { skip: !process.env.PI_AFFECTED_LIVE }, async () => {
