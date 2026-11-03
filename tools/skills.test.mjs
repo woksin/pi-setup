@@ -327,21 +327,69 @@ for (const file of reviewFiles) {
     assert.ok(run.result.incomplete.every(problem => problem.includes("verify:")));
   });
 
-  test(`${file}: missing, forged-source, empty and unavailable records fail closed`, async () => {
-    const invalid = [undefined, {}, { source: "self-reported", models: ["kimi/moonshot-v1-128k"] },
-      { source: "model-provenance/v1", models: [] }, { source: "model-provenance/v1", models: [null] }];
-    for (const p of invalid) {
-      const run = await runReview(base, { file, override: (_opts, res) => ({ ...res, runtimeProvenance: p }) });
-      assertUncertified(run.result);
-      assert.equal(run.calls, 3);
-      assert.ok(run.result.incomplete.every(problem => problem.endsWith("no runtime model record")));
+  for (const absent of [undefined, null]) {
+    for (const mode of ["full", "quick"]) {
+      test(`${file}: ${mode} absent (${String(absent)}) provenance is accepted as transitional, marked unavailable and never cached`, async () => {
+        const args = mode === "full" ? base : { ...base, quick: true, force: true, allowFallback: true };
+        const run = await runReview(args, { file, override: (_opts, res) => ({ ...res, runtimeProvenance: absent }) });
+        assert.equal(run.result.passed, true);
+        assert.equal(run.result.complete, true);
+        assert.equal(run.calls, mode === "full" ? 3 : 2);
+        assert.equal(run.requests.filter(request => request.label.startsWith("review:security-")).length, 1);
+        for (const reviewer of run.result.reviewers) {
+          assert.equal(reviewer.provenance, "unavailable (pre-update session)");
+          assert.deepEqual(reviewer.effective, []);
+          assert.equal(reviewer.ok, true);
+        }
+        assert.equal(run.result.reviewCacheKey, undefined);
+        if (mode === "full") {
+          const rerun = await runReview({ ...base, cachedReview: run.result }, { file });
+          assert.equal(rerun.calls, 3);
+          assert.notEqual(rerun.result.cached, true);
+        }
+      });
     }
-    const unavailable = await runReview(base, { file, override: (_opts, res) => {
+  }
+
+  if (loadReview(file).includes("const cacheKey")) {
+    test(`${file}: absent records cannot be reused even under a valid cache key`, async () => {
+      const valid = await runReview(base, { file });
+      assert.ok(valid.result.reviewCacheKey);
+      for (const absent of [undefined, null]) {
+        const run = await runReview(base, { file, override: (_opts, res) => ({ ...res, runtimeProvenance: absent }) });
+        const cached = await runReview({ ...base, cachedReview: { ...valid.result, reviewers: run.result.reviewers } }, { file });
+        assertUncertified(cached.result);
+        assert.equal(cached.calls, 0);
+      }
+    });
+  }
+
+  const invalid = [
+    ["empty-object", (_opts, res) => ({ ...res, runtimeProvenance: {} })],
+    ["forged-source", (_opts, res) => ({ ...res, runtimeProvenance: { source: "self-reported", models: ["kimi/moonshot-v1-128k"] } })],
+    ["empty-models", (_opts, res) => ({ ...res, runtimeProvenance: { source: "model-provenance/v1", models: [] } })],
+    ["null-model", (_opts, res) => ({ ...res, runtimeProvenance: { source: "model-provenance/v1", models: [null] } })],
+    ["unavailable-field", (_opts, res) => {
       res.runtimeProvenance.unavailable = "runtime session records unavailable";
       return res;
-    } });
-    assertUncertified(unavailable.result);
-  });
+    }],
+    ["mismatched", (_opts, res) => withFallback(res, ["kimi/moonshot-v1-128k"])],
+  ];
+  for (const [name, override] of invalid) {
+    for (const mode of ["full", "quick"]) {
+      test(`${file}: ${mode} ${name} provenance fails closed`, async () => {
+        const args = mode === "full" ? base : { ...base, quick: true, force: true, allowFallback: true };
+        const run = await runReview(args, { file, override });
+        assertUncertified(run.result);
+        assert.equal(run.calls, mode === "full" ? 3 : 2);
+        if (name === "mismatched") {
+          for (const problem of run.result.incomplete) assert.match(problem, /kimi\/moonshot-v1-128k/);
+        } else {
+          assert.ok(run.result.incomplete.every(problem => problem.endsWith("no runtime model record")));
+        }
+      });
+    }
+  }
 
   test(`${file}: historical switches and request errors alone do not invalidate coverage`, async () => {
     const run = await runReview(base, { file, override: (_opts, res) => {
@@ -352,15 +400,6 @@ for (const file of reviewFiles) {
     } });
     assert.equal(run.result.passed, true);
     assert.equal(run.calls, 3);
-  });
-
-  test(`${file}: quick-mode missing or different records cannot certify`, async () => {
-    for (const override of [(_opts, res) => ({ ...res, runtimeProvenance: undefined }),
-      (_opts, res) => withFallback(res, ["kimi/moonshot-v1-128k"])]) {
-      const run = await runReview({ ...base, quick: true, force: true, allowFallback: true }, { file, override });
-      assertUncertified(run.result);
-      assert.equal(run.calls, 2);
-    }
   });
 
   test(`${file}: failed review or verification follows existing failure paths`, async () => {

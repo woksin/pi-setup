@@ -10,7 +10,7 @@ Some tools act on your machine when run (marked **acts**). Do not run those just
 
 | Tool | Purpose | Help | Source |
 |---|---|---|---|
-| `pi-profile` | Show, list and switch model profiles. | `pi-profile --help` | [source](../agent/bin/pi-profile) |
+| `pi-profile` | Show, list and switch model profiles; `routing` refreshes only the active profile's managed routing block. | `pi-profile --help` | [source](../agent/bin/pi-profile) |
 | `pi-account` | Switch pi's Anthropic login between saved accounts. Always user-initiated. | `pi-account --help` | [source](../agent/bin/pi-account) |
 | `pi-usage` | Read-only report of provider usage and limit hits from your session logs. | `pi-usage --help` | [source](../agent/bin/pi-usage) |
 | `gpt-meter` | Read-only meter of GPT spend against a daily budget, from session logs. | `gpt-meter --help` | [source](../agent/bin/gpt-meter) |

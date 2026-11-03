@@ -1663,7 +1663,8 @@ class PhaseTests(unittest.TestCase):
         self.assertFalse(pi_phase.cold_worktree(child))
         (child / "obj").rmdir()
         self.configure(container_test_detection="off")
-        with patch.object(pi_phase, "cold_worktree", return_value=True), patch.object(pi_phase, "note") as note:
+        with patch.object(pi_phase, "obj_warmth", return_value=False), \
+                patch.object(pi_phase, "linked_worktree", return_value=True), patch.object(pi_phase, "note") as note:
             code = pi_phase.main(["run", "--kind", "build", "--label", "cold", "--", sys.executable, "-c", "pass"],
                                  state=self.state, configuration=self.config)
         self.assertEqual(code, 0)
@@ -1672,7 +1673,8 @@ class PhaseTests(unittest.TestCase):
         (top / ".git").mkdir()
         self.assertFalse(pi_phase.cold_worktree(child))
         self.configure(cold_worktree_hint=False, container_test_detection="off")
-        with patch.object(pi_phase, "cold_worktree") as cold:
+        with patch.object(pi_phase, "obj_warmth", return_value=False), \
+                patch.object(pi_phase, "linked_worktree") as cold:
             self.assertEqual(pi_phase.main(["run", "--kind", "test", "--label", "disabled", "--",
                                            sys.executable, "-c", "pass"],
                                           state=self.state, configuration=self.config), 0)

@@ -8,6 +8,7 @@ Checks, each failing the run with the offending relative path:
   2. field names that look like credentials in the named JSON configs;
   3. generic PASSWORD=/connection-string shapes in text files;
   4. the live secret-mask scanner (lib/secret-mask.ts), (required).
+Exact synthetic pi-phase fixture paths are allowed types but still text- and secret-scanned.
 Fixtures (files under a test/ directory and *.test.ts) are skipped for 3 and 4 only.
 """
 import json
@@ -37,6 +38,20 @@ MASK_ALLOW_FILE = {  # exact stage path -> patterns, matched against the flagged
     "agent/extensions/cratis-cli-guard.ts": [r"^/\(<<-\?\|1\?>>\?\)\|\($"],
 }
 FIXTURE = re.compile(r"(^|/)test/|\.test\.ts$")
+# Synthetic pi-phase parser fixtures: these stay text- and secret-scanned.
+FIXTURE_FILES = frozenset({
+    "agent/pi-phase/.gitignore",
+    "agent/pi-phase/testdata/failure-logs/MSB3027.log",
+    "agent/pi-phase/testdata/failure-logs/MSB4166.log",
+    "agent/pi-phase/testdata/failure-logs/NU1101.log",
+    "agent/pi-phase/testdata/failure-logs/analyzer-IDE-CA.log",
+    "agent/pi-phase/testdata/failure-logs/blame-hang.log",
+    "agent/pi-phase/testdata/failure-logs/msbuild-CS.log",
+    "agent/pi-phase/testdata/failure-logs/mtp.log",
+    "agent/pi-phase/testdata/failure-logs/noise.log",
+    "agent/pi-phase/testdata/failure-logs/vitest.log",
+    "agent/pi-phase/testdata/failure-logs/vstest.log",
+})
 
 
 def fixture(rel):
@@ -47,6 +62,8 @@ def allowed_type(path, rel):
     name = path.name
     if path.is_symlink():
         return False
+    if rel in FIXTURE_FILES:
+        return True
     if path.suffix in EXTENSIONS or name in NAMED_FILES or name.endswith(".d.ts"):
         return True
     if path.suffix == "" and os.access(path, os.X_OK):

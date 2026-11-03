@@ -227,6 +227,27 @@ class SyncPublishTests(unittest.TestCase):
         (self.pi / "models.json").write_text(json.dumps({"providers": {"x": {"apiKey": ["env:A", "$B"]}}}))
         self.run_command("./sync.sh", cwd=self.scratch)
 
+    def test_refreshes_additional_skills(self):
+        for skill in ("dev-machine-performance", "report-setup-issue", "sol-loop"):
+            live = self.home / ".agents/skills" / skill / "SKILL.md"
+            self.assertTrue(live.exists(), skill)
+            live.write_text(f"# {skill}\nrefreshed marker\n")
+        self.run_command("./sync.sh", cwd=self.scratch)
+        for skill in ("dev-machine-performance", "report-setup-issue", "sol-loop"):
+            self.assertEqual((self.scratch / "skills" / skill / "SKILL.md").read_text(), f"# {skill}\nrefreshed marker\n")
+
+    def test_excludes_live_backups_and_preserves_checkout_backups(self):
+        live = self.pi / "pi-phase/backup-live-test"
+        live.mkdir()
+        (live / "kept.txt").write_text("live backup\n")
+        kept = self.scratch / "agent/pi-phase/backup-checkout-test"
+        kept.mkdir()
+        (kept / "kept.txt").write_text("checkout backup\n")
+        self.run_command("./sync.sh", cwd=self.scratch)
+        self.assertFalse((self.scratch / "agent/pi-phase/backup-live-test").exists())
+        self.assertEqual((kept / "kept.txt").read_text(), "checkout backup\n")
+        self.assertEqual((live / "kept.txt").read_text(), "live backup\n")
+
     def test_scanner_stderr_is_never_echoed(self):
         self.fake_scanner("console.error('SENTINEL_SECRET_ECHO');\nthrow new Error('SENTINEL_SECRET_ECHO');\n"
                           "export function scan() { return { text: '', kinds: [], count: 0, skipped: false }; }\n")

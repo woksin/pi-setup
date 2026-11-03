@@ -11,6 +11,7 @@ Usage:
   pi-profile list            list profiles
   pi-profile use <name>      activate a profile (refuses if live files were edited; --force overrides)
   pi-profile save            copy the live files back into the active profile
+  pi-profile routing         splice only the active profile's routing.md into the AGENTS.md routing block
 
 Also accepts -h, --help or help.
 
@@ -26,8 +27,11 @@ Exit codes:
 See also: docs/reference.md, README.md
 """
 import filecmp
+import os
+import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path.home() / ".pi" / "agent"
@@ -125,6 +129,49 @@ def cmd_save():
     print(f"saved live files into '{name}'")
 
 
+def cmd_routing():
+    """Replace only the bytes between the routing markers with the active profile's routing.md."""
+    name = active()
+    if not name or Path(name).name != name or name in (".", ".."):
+        sys.exit("no valid active profile")
+    source = PROFILES / name / "routing.md"
+    if not source.is_file():
+        sys.exit(f"active profile '{name}' has no routing.md")
+    body = source.read_bytes()
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        sys.exit(f"{source} is not valid UTF-8")
+    start, end = START.encode(), END.encode()
+    if start in body or end in body:
+        sys.exit(f"{source} contains routing markers")
+    target = AGENTS_MD.resolve()
+    data = target.read_bytes()
+    starts = list(re.finditer(rb"(?m)^<!-- pi-profile:routing:start(?: \((?:(?!-->)[^\r\n])*\))? -->\r?\n", data))
+    ends = list(re.finditer(rb"(?m)^<!-- pi-profile:routing:end -->(?:\r?\n|\Z)", data))
+    if data.count(b"pi-profile:routing:") != 2 or len(starts) != 1 or len(ends) != 1:
+        sys.exit(f"expected exactly one routing marker pair in {target}")
+    s_body, e = starts[0].end(), ends[0].start()
+    if e < s_body:
+        sys.exit(f"routing markers are misordered in {target}")
+    head, old, tail = data[:s_body], data[s_body:e], data[e:]
+    if old == body:
+        print(f"routing already matches '{name}'")
+        return
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.routing-", dir=target.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(head + body + tail)
+            stream.flush()
+            os.fsync(stream.fileno())
+        shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    print(f"routing section updated from '{name}'")
+
+
 def main(argv):
     if argv and argv[0] in ("-h", "--help", "help"):
         print(__doc__.strip())
@@ -139,6 +186,8 @@ def main(argv):
         cmd_use(argv[1], "--force" in argv[2:])
     elif argv[0] == "save":
         cmd_save()
+    elif argv[0] == "routing" and len(argv) == 1:
+        cmd_routing()
     else:
         print(__doc__)
         sys.exit(1)

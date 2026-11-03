@@ -27,7 +27,7 @@ TOOLS = {
     "pi-affected": ("agent/bin/pi-affected", ["install"]),
     "pi-cleanup": ("agent/bin/pi-cleanup", []),
     "pi-phase": ("agent/bin/pi-phase", ["status", "run", "withdraw", "report"]),
-    "pi-profile": ("agent/bin/pi-profile", ["list", "use", "save"]),
+    "pi-profile": ("agent/bin/pi-profile", ["list", "use", "save", "routing"]),
     "pi-publish": ("agent/bin/pi-publish", ["check"]),
     "pi-retain": ("agent/bin/pi-retain", ["add", "release", "list", "status"]),
     "pi-setup-tests": ("agent/bin/pi-setup-tests", []),

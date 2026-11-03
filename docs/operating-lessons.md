@@ -115,6 +115,12 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Rule:** before treating a path as held, check the holder's own view (`lsof -p PID`) or the file's link count (`stat -f %l`). A file with more than one link whose holder opened it through another name is not held through this path, and deleting this link cannot affect that holder. Do not file "foreign assembly load" bugs on `lsof +D` evidence alone.
 - **Enforced:** practice (cleanup safety checks); candidate for the ai-work-lifecycle and pi-cleanup holder check to ignore open files whose link count is above 1 when the holder's own path is elsewhere.
 
+### Briefs about secret handling trip the secret mask
+- **Symptom:** an implementer for a secret-redaction feature stopped three times on `[secret-mask]` flags while reading its own brief. Hand-removing the "suspicious" lines missed the real match, which was a planner-written example connection string. Separately, `rg` output with `path:line:` prefixes over a `namespace …;` line was flagged as a connection string although the file itself scans clean.
+- **Cause:** planners writing about redaction put example credential shapes and pattern tables into briefs; the mask scans every tool output. The `path:line:` prefix plus `;` can form a connection-string look-alike.
+- **Rule:** before handing a brief that mentions secrets, tokens or redaction to an agent, run it through the mask's own scanner (`scan()` from `~/.pi/agent/lib/secret-mask.ts` with `{ diagnostics: true }`, which reports kind and line only) and hand out the masked text. Tell implementers to build secret-shaped fixtures from fragments at runtime. To judge a flag's provenance without recovering it, scan the source file alone: zero findings means the flag came from output formatting.
+- **Enforced:** practice; candidate for a pre-delegation check in the planner/brief tooling.
+
 ## 2026-10-31
 
 ### Install setup changes from the reviewed commit, not the working tree
