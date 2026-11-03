@@ -20,7 +20,7 @@ for d in agents extensions early-extensions lib workflows templates loose-thread
   "${RS[@]}" "$PI/$d/" "agent/$d/"
 done
 "${RS[@]}" --exclude=fd --exclude=rg "$PI/bin/" agent/bin/
-"${RS[@]}" --exclude=state --exclude=config.local.json "$PI/pi-phase/" agent/pi-phase/
+"${RS[@]}" --exclude=state --exclude=config.local.json --exclude='backup-*' "$PI/pi-phase/" agent/pi-phase/
 # pi-questions ships as source inside this repo (no npm package); dist/ is the CLI, rebuilt here
 (cd "$PI/local-packages/pi-questions" && node scripts/build.mjs)
 "${RS[@]}" "${PQ_EX[@]}" --exclude='*.tgz' "$PI/local-packages/pi-questions/" agent/local-packages/pi-questions/
@@ -51,7 +51,7 @@ jq 'del(.deviceId, .lastChangelogVersion)
                   | reduce .[] as $p ([]; if any(.[]; . == $p) then . else . + [$p] end))' "$PI/settings.json" > agent/settings.json
 jq '{name, private, dependencies}' "$PI/npm/package.json" > agent/npm-package.json
 
-for s in ai-work-lifecycle github-issue-hygiene; do
+for s in ai-work-lifecycle github-issue-hygiene dev-machine-performance report-setup-issue sol-loop; do
   "${RS[@]}" -L "$HOME/.agents/skills/$s/" "skills/$s/"
 done
 "${RS[@]}" "$HOME/.local/share/ai-work-lifecycle/" tools/ai-work-lifecycle/
@@ -74,7 +74,7 @@ for d in agents extensions early-extensions lib workflows templates loose-thread
   "${RS[@]}" "$STAGE/agent/$d/" "agent/$d/"
 done
 "${RS[@]}" --exclude=fd --exclude=rg "$STAGE/agent/bin/" agent/bin/
-"${RS[@]}" --exclude=state --exclude=config.local.json "$STAGE/agent/pi-phase/" agent/pi-phase/
+"${RS[@]}" --exclude=state --exclude=config.local.json --exclude='backup-*' "$STAGE/agent/pi-phase/" agent/pi-phase/
 "${RS[@]}" "${PQ_EX[@]}" "$STAGE/agent/local-packages/pi-questions/" agent/local-packages/pi-questions/
 "${RS[@]}" --exclude=ACTIVE "$STAGE/agent/profiles/" agent/profiles/
 mkdir -p agent/lane-policy agent/launchd
@@ -83,7 +83,7 @@ cp "$STAGE"/agent/launchd/* agent/launchd/
 for f in AGENTS.md AGENTS.subagent.md models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json settings.json npm-package.json; do
   cp "$STAGE/agent/$f" "agent/$f"
 done
-for s in ai-work-lifecycle github-issue-hygiene; do
+for s in ai-work-lifecycle github-issue-hygiene dev-machine-performance report-setup-issue sol-loop; do
   "${RS[@]}" "$STAGE/skills/$s/" "skills/$s/"
 done
 "${RS[@]}" "$STAGE/tools/ai-work-lifecycle/" tools/ai-work-lifecycle/

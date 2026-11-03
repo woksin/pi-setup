@@ -11,6 +11,7 @@ Usage:
   pi-profile list            list profiles
   pi-profile use <name>      activate a profile (refuses if live files were edited; --force overrides)
   pi-profile save            copy the live files back into the active profile
+  pi-profile routing         splice only the active profile's routing.md into the AGENTS.md routing block
 
 Also accepts -h, --help or help.
 
@@ -26,6 +27,7 @@ Exit codes:
 See also: docs/reference.md, README.md
 """
 import filecmp
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -125,6 +127,44 @@ def cmd_save():
     print(f"saved live files into '{name}'")
 
 
+def cmd_routing():
+    """Replace only the bytes between the routing markers with the active profile's routing.md."""
+    name = active()
+    if not name or Path(name).name != name or name in (".", ".."):
+        sys.exit("no valid active profile")
+    source = PROFILES / name / "routing.md"
+    if not source.is_file():
+        sys.exit(f"active profile '{name}' has no routing.md")
+    body = source.read_bytes()
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        sys.exit(f"{source} is not valid UTF-8")
+    start, end = START.encode(), END.encode()
+    if start in body or end in body:
+        sys.exit(f"{source} contains routing markers")
+    target = AGENTS_MD.resolve()
+    data = target.read_bytes()
+    if data.count(start) != 1 or data.count(end) != 1:
+        sys.exit(f"expected exactly one routing marker pair in {target}")
+    s, e = data.index(start), data.index(end)
+    nl = data.find(b"\n", s)
+    if nl < 0 or e <= nl:
+        sys.exit(f"routing markers are misordered in {target}")
+    head, old, tail = data[: nl + 1], data[nl + 1 : e], data[e:]
+    if old == body:
+        print(f"routing already matches '{name}'")
+        return
+    tmp = target.with_name(f".{target.name}.routing-{os.getpid()}")
+    try:
+        tmp.write_bytes(head + body + tail)
+        shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    print(f"routing section updated from '{name}'")
+
+
 def main(argv):
     if argv and argv[0] in ("-h", "--help", "help"):
         print(__doc__.strip())
@@ -139,6 +179,8 @@ def main(argv):
         cmd_use(argv[1], "--force" in argv[2:])
     elif argv[0] == "save":
         cmd_save()
+    elif argv[0] == "routing" and len(argv) == 1:
+        cmd_routing()
     else:
         print(__doc__)
         sys.exit(1)

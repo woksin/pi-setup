@@ -363,7 +363,7 @@ The lessons behind the global rules are in [docs/operating-lessons.md](docs/oper
 | --- | --- |
 | `AGENTS.md` | Global rules: scope, execution budgets, delegation briefs, review loops, GitHub issue hygiene, shipping, CI minutes, disk hygiene. |
 | `agents/` | Custom subagent types (`implementer`, `reviewer`, `sol-reviewer`, `ops`, `scout`, `grunt`, …), each pinned to a model and thinking level. |
-| `profiles/` | Model-routing profiles (`balanced`, `anthropic-heavy`, `openai-heavy`, …). Switch with `bin/pi-profile use <name>`. |
+| `profiles/` | Model-routing profiles (`balanced`, `anthropic-heavy`, `openai-heavy`, …). Switch with `bin/pi-profile use <name>`; `bin/pi-profile routing` refreshes only the managed routing block in `AGENTS.md` from the active profile. |
 | `extensions/guards.ts` | `/guards` command that turns the guards below on or off. |
 | `extensions/wait-guard.ts` | Blocks long foreground waits and repeated CI status polling. |
 | `extensions/dotnet-guard.ts` | In orchestration mode, blocks unwrapped .NET build/test/run work with a pi-phase replacement; `/guards off dotnet` disables it. |
@@ -396,7 +396,7 @@ The lessons behind the global rules are in [docs/operating-lessons.md](docs/oper
 | `launchd/` | Templates for the `docker-guardian`, `pi-cleanup`, `secret-sweep` and `disk-growth` schedules (placeholders instead of my user name). |
 | `context-budget.json`, `efficiency.json`, `provider-fallback.json`, `subagents.json`, `mcp-adapter.json` | Default configs for the extensions and packages above. |
 | `AGENTS.subagent.md` | Rules for subagents (derived from `AGENTS.md`, without the orchestration policy). |
-| `bin/pi-profile` | Switch model-routing profiles. |
+| `bin/pi-profile` | Switch model-routing profiles, or refresh only the active profile's routing block (`routing`; no profile argument, validates markers and source first, changes nothing else). |
 | `bin/pi-account` | Switch between saved Anthropic logins (tokens are never printed or stored here). |
 | `bin/pi-usage` | Provider usage and limit pressure from session logs. |
 | `bin/secret-sweep` | Read-only daily gitleaks scan of local sessions and `.ai-work` records; redacted reports under `~/.pi/agent/logs/secret-sweep/`. |
@@ -447,7 +447,7 @@ CLI: `pi-publish issue-comment --repo OWNER/REPO --number 123 --body-file .ai-wo
 - `github-issue-hygiene`: keeping issues current and closing them when done (includes `issue-status.py`).
 - `sol-loop`: a bounded review loop with the native `sol-reviewer` agent. Invoked by saying "sol loop"; ships its upstream MIT `LICENSE`.
 
-Descriptions are invocation hints only. Source lives here in `skills/` and the installer copies it to `~/.agents/skills/`; `sync.sh` is an optional live-to-repository snapshot and does not cover `sol-loop`. See [`docs/authoring-skills.md`](docs/authoring-skills.md), [`docs/skill-template.md`](docs/skill-template.md) and [`docs/skills-adoption.md`](docs/skills-adoption.md).
+Descriptions are invocation hints only. Source lives here in `skills/` and the installer copies it to `~/.agents/skills/`; `sync.sh` is an optional live-to-repository snapshot of `ai-work-lifecycle`, `github-issue-hygiene`, `dev-machine-performance`, `report-setup-issue` and `sol-loop`. See [`docs/authoring-skills.md`](docs/authoring-skills.md), [`docs/skill-template.md`](docs/skill-template.md) and [`docs/skills-adoption.md`](docs/skills-adoption.md).
 
 ### `tools/` → `~/.local/`
 
@@ -485,7 +485,7 @@ Run `./install.sh report` for local versions and the target repository (default:
 
 ## Keeping it up to date
 
-`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings, points local checkouts of pi-jobs, pi-recover, pi-context-budget and pi-orch at their npm packages (deduplicated), replaces the local user name in the launchd templates, and checks the result before touching the checkout. It reverse-maps operator references and the repositories root in the copied templates to `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`, using `~/.pi/agent/user.json`. For older installs without that file it uses the original author's login and `/Volumes/sourcecode/repos`; it does not write to the live install. Links, npm names, launchd labels and test fixtures stay unchanged. Review the diff before committing.
+`./sync.sh` copies an allowlisted set of files from the live install into this repo, removes `deviceId` from the settings, points local checkouts of pi-jobs, pi-recover, pi-context-budget and pi-orch at their npm packages (deduplicated), replaces the local user name in the launchd templates, and checks the result before touching the checkout. It reverse-maps operator references and the repositories root in the copied templates to `{{GITHUB_USER}}` and `{{REPOS_ROOT}}`, using `~/.pi/agent/user.json`. For older installs without that file it uses the original author's login and `/Volumes/sourcecode/repos`; it does not write to the live install. `pi-phase/backup-*` directories are never copied, and an existing one in the checkout is left alone. Links, npm names, launchd labels and test fixtures stay unchanged. Review the diff before committing.
 
 The sync first builds the whole published tree in a temporary directory and checks it with `tools/publish-check.py` and `gitleaks`. Only if everything passes is it written into the checkout; otherwise the sync fails, names the file and leaves the checkout unchanged. The checks are: a file-type allowlist (`.ts .mts .js .mjs .cjs .md .py .sh .json .jsonc .toml .yaml .yml .txt .plist`, `LICENSE`/`README`, and executable scripts with a shebang; anything else, including symlinks and binaries, fails), credential-like field names (`apiKey`, `token`, `secret`, `password`, `authorization`, `bearer`, `credential`) holding, or containing, a literal string in the published JSON configs (numbers and `$VAR`/`env:` references are fine), `PASSWORD=`-style assignments and connection strings with embedded passwords, and the live `lib/secret-mask.ts` scanner (required: missing, failing, or a file it skips as too large fails the sync). Files under `test/` and `*.test.ts` are exempt from the text and secret-mask checks only. The few known false positives are listed in `publish-check.py`.
 
