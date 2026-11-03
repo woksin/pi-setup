@@ -610,5 +610,125 @@ class BuildPurgeSafetyTests(RepoFixture):
         self.assertTrue((self.wt / 'bin/a.dll').exists())
 
 
+class KeepMarkerCaseTests(unittest.TestCase):
+    """KEEP markers count only for the exact entry name, on any volume."""
+
+    def setUp(self):
+        self.R = cleanup.BIN_SWEEP['RETAIN']
+        self.reason = self.R['keep_marker_reason']
+
+    def checkout(self, temp):
+        root = Path(temp)
+        (root / '.git/worktrees/wt').mkdir(parents=True)
+        (root / 'project/bin').mkdir(parents=True)
+        return root
+
+    def test_lowercase_keep_archive_is_not_a_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.checkout(temp)
+            plan = root / '.ai-work/keep/removed-worktrees/wt/plan.md'
+            plan.parent.mkdir(parents=True)
+            plan.write_text('x')
+            self.assertIsNone(self.reason(root / 'project/bin'))
+            self.assertIsNone(self.reason(root / '.git/worktrees/wt'))
+
+    def test_case_variants_are_not_markers(self):
+        for name, kind, parent in (('keep', 'file', '.ai-work'), ('Keep', 'dir', '.ai-work'),
+                                   ('keep-perf', 'file', ''), ('Keep-Perf', 'dir', '')):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = self.checkout(temp)
+                base = root / parent if parent else root
+                base.mkdir(exist_ok=True)
+                if kind == 'dir':
+                    (base / name).mkdir()
+                else:
+                    (base / name).write_text('')
+                self.assertIsNone(self.reason(root / 'project/bin'))
+
+    def make_node(self, path, kind):
+        if kind == 'file':
+            path.write_text('')
+        elif kind == 'dir':
+            path.mkdir()
+        elif kind == 'symlink':
+            target = path.parent / 'target-dir'
+            target.mkdir(exist_ok=True)
+            os.symlink(target, path)
+        elif kind == 'dangling':
+            os.symlink(path.parent / 'nowhere', path)
+        else:
+            os.mkfifo(path)
+
+    def test_exact_markers_of_every_node_type_are_kept(self):
+        for kind in ('file', 'dir', 'symlink', 'dangling', 'fifo'):
+            for name, expected in (('KEEP-PERF', 'KEEP marker: KEEP-PERF'),
+                                   ('.ai-work/KEEP', 'KEEP marker: .ai-work/KEEP')):
+                with self.subTest(kind=kind, name=name), tempfile.TemporaryDirectory() as temp:
+                    root = self.checkout(temp)
+                    (root / '.ai-work').mkdir()
+                    self.make_node(root / name, kind)
+                    self.assertEqual(self.reason(root / 'project/bin'), expected)
+
+    def folded_lstat(self, root):
+        real, listing = os.lstat, os.listdir
+
+        def folded(path, *args, **kwargs):
+            p = Path(path)
+            if p.name.upper() in ('KEEP', 'KEEP-PERF') and p.parent in (root, root / '.ai-work'):
+                for entry in listing(p.parent):
+                    if entry.upper() == p.name.upper():
+                        return real(p.parent / entry, *args, **kwargs)
+            return real(path, *args, **kwargs)
+        return folded
+
+    def test_simulated_case_folding_does_not_create_markers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.checkout(temp)
+            (root / '.ai-work/keep').mkdir(parents=True)
+            (root / 'keep-perf').write_text('')
+            with patch.object(os, 'lstat', self.folded_lstat(root)):
+                self.assertIsNone(self.reason(root / 'project/bin'))
+
+    def test_unlistable_parent_fails_closed(self):
+        for exact in (False, True):
+            for name, expected in (('KEEP-PERF', 'KEEP marker: KEEP-PERF'),
+                                   ('.ai-work/KEEP', 'KEEP marker: .ai-work/KEEP')):
+                with self.subTest(exact=exact, name=name), tempfile.TemporaryDirectory() as temp:
+                    root = self.checkout(temp)
+                    (root / '.ai-work').mkdir()
+                    present = name if exact else name.lower()
+                    (root / present).write_text('')
+                    with patch.object(os, 'lstat', self.folded_lstat(root)), \
+                            patch.object(os, 'listdir', side_effect=PermissionError):
+                        self.assertEqual(self.reason(root / 'project/bin'), expected)
+
+    def test_unreadable_marker_path_fails_closed(self):
+        real = os.lstat
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.checkout(temp)
+            marker = root / 'KEEP-PERF'
+
+            def denied(path, *args, **kwargs):
+                if Path(path) == marker:
+                    raise PermissionError
+                return real(path, *args, **kwargs)
+            with patch.object(os, 'lstat', denied):
+                self.assertEqual(self.reason(root / 'project/bin'), 'KEEP marker: KEEP-PERF')
+
+    def test_missing_marker_and_file_ai_work_are_not_markers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.checkout(temp)
+            self.assertIsNone(self.reason(root / 'project/bin'))
+            (root / '.ai-work').write_text('')
+            self.assertIsNone(self.reason(root / 'project/bin'))
+
+    def test_retained_reason_ignores_lowercase_keep_parent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.checkout(temp)
+            (root / '.ai-work/keep').mkdir(parents=True)
+            with patch.dict(os.environ, {'PI_RETAIN_DIR': str(Path(temp) / 'registry')}):
+                self.assertIsNone(cleanup.retained_reason(root / '.git/worktrees/wt'))
+
+
 if __name__ == '__main__':
     unittest.main()

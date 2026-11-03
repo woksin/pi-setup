@@ -97,12 +97,18 @@ def records():
 
 
 def _marker_present(p):
-    """lstat-based existence that fails closed: unreadable means present (protect)."""
+    """Exact-name existence that fails closed: unreadable means present (protect).
+
+    Case-folding volumes make lstat('KEEP') succeed for an entry named 'keep', so a
+    hit only counts when the directory lists the exact name."""
     try:
         os.lstat(p)
-        return True
     except (FileNotFoundError, NotADirectoryError):
         return False
+    except OSError:
+        return True
+    try:
+        return p.name in os.listdir(p.parent)
     except OSError:
         return True
 
