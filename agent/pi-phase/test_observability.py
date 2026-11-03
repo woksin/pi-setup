@@ -527,8 +527,11 @@ class RetryTests(RunBase):
         self.assertIsNone(ledger.retry_of())
 
     def test_retry_reason_is_recorded_validated_and_silent(self):
-        plain = self.run_state(["true"], "gate", "dirtyhash")
-        flagged = self.run_state(["true"], "gate", "dirtyhash", "--retry-reason", "flaky docker")
+        # The real observation scans every host ps row, so its completeness varies between runs.
+        fixed = ([], "completeness=complete matched=0 omitted=0 malformed=0", "absent_at_snapshot")
+        with patch.object(pi_phase, "cleanup_snapshot_observation", return_value=fixed):
+            plain = self.run_state(["true"], "gate", "dirtyhash")
+            flagged = self.run_state(["true"], "gate", "dirtyhash", "--retry-reason", "flaky docker")
         strip = lambda text: re.sub(r"\d+", "N", text)
         self.assertEqual(strip(flagged[1]), strip(plain[1]))  # no new console output
         self.assertEqual(self.records()[1]["retryReason"], "flaky docker")
