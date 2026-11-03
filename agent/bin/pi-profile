@@ -28,8 +28,10 @@ See also: docs/reference.md, README.md
 """
 import filecmp
 import os
+import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path.home() / ".pi" / "agent"
@@ -145,19 +147,24 @@ def cmd_routing():
         sys.exit(f"{source} contains routing markers")
     target = AGENTS_MD.resolve()
     data = target.read_bytes()
-    if data.count(start) != 1 or data.count(end) != 1:
+    starts = list(re.finditer(rb"(?m)^<!-- pi-profile:routing:start(?: \((?:(?!-->)[^\r\n])*\))? -->\r?\n", data))
+    ends = list(re.finditer(rb"(?m)^<!-- pi-profile:routing:end -->(?:\r?\n|\Z)", data))
+    if data.count(b"pi-profile:routing:") != 2 or len(starts) != 1 or len(ends) != 1:
         sys.exit(f"expected exactly one routing marker pair in {target}")
-    s, e = data.index(start), data.index(end)
-    nl = data.find(b"\n", s)
-    if nl < 0 or e <= nl:
+    s_body, e = starts[0].end(), ends[0].start()
+    if e < s_body:
         sys.exit(f"routing markers are misordered in {target}")
-    head, old, tail = data[: nl + 1], data[nl + 1 : e], data[e:]
+    head, old, tail = data[:s_body], data[s_body:e], data[e:]
     if old == body:
         print(f"routing already matches '{name}'")
         return
-    tmp = target.with_name(f".{target.name}.routing-{os.getpid()}")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.routing-", dir=target.parent)
+    tmp = Path(tmp_name)
     try:
-        tmp.write_bytes(head + body + tail)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(head + body + tail)
+            stream.flush()
+            os.fsync(stream.fileno())
         shutil.copymode(target, tmp)
         os.replace(tmp, target)
     finally:

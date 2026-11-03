@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 9d81a9d45ae63b7cff757ba8263ecb991c16e72b64b17c67151a4dc776a1b0c8
+// pi-setup-source-sha256: c2b2a245351773ff984d6afd07f49c22cdb757ebcb4b81b07199539a02e82d63
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -4750,7 +4750,7 @@ var init_fsx = __esm({
   "src/fsx.ts"() {
     pad = (n3) => String(n3).padStart(2, "0");
     isClutterFile = (name) => name.endsWith(".pi-setup-new") || name.endsWith(".pyc") || name === ".DS_Store" || name.startsWith("._");
-    isClutterDir = (name) => name === "__pycache__" || name === "node_modules";
+    isClutterDir = (name) => name === "__pycache__" || name === "node_modules" || name === ".ai-work";
   }
 });
 
