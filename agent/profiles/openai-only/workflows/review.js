@@ -41,7 +41,10 @@ if (since && !prior) return { passed: false, error: 'since requires prior findin
 if (round > 3 && input.force !== true) {
   return { passed: false, error: 'Three-round cap reached. Make a structural fix or ask the user.' }
 }
-// Complete only when every runtime-recorded model matches its configured agent; no retry or override.
+// Complete only when every runtime-recorded model, when a record exists, matches its configured agent.
+// Fallback, malformed or unavailable records make it incomplete; no retry or override.
+// Transitional (pi-setup#87): no record at all (session started before model-provenance was installed)
+// is reported as `unavailable (pre-update session)` and does not block; remove once no pre-update sessions remain.
 // Pinned models, not provider labels. Keep synchronized with agent frontmatter.
 const AGENT_MODELS = {
   reviewer: 'openai-codex/gpt-6-astra',

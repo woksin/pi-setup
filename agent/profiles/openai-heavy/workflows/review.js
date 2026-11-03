@@ -52,8 +52,11 @@
  *
  * Result: every return carries `passed` (boolean). It is true only when the review completed
  * (every reviewer and verifier returned) and no blocking finding is confirmed or unverified,
- * and every reviewer's runtime-recorded model (child session records, via model-provenance)
- * equals the agent's configured model. Fallback or missing records make it incomplete: no retry, no override.
+ * and every reviewer's runtime-recorded model, when a record exists, equals the agent's
+ * configured model. Fallback, malformed or unavailable records make it incomplete: no retry, no override.
+ * Transitional (pi-setup#87): a reviewer with no record at all (session started before model-provenance
+ * was installed) is reported as `unavailable (pre-update session)`, does not block and never makes
+ * the result reusable from cache; remove once no pre-update sessions remain.
  * The result is kept compact (blocking findings in full, advisory as one-liners) so the parent's
  * notification is not truncated. A failed,
  * missing or incomplete review is never a pass — gate merges on `passed === true`, not on an
