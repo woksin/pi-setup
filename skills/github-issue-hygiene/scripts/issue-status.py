@@ -33,7 +33,9 @@ END = '<!-- agent-status:end -->'
 MISMATCH_EXIT = 3
 SCAN_REFUSED_EXIT = 4
 SCAN_TIMEOUT = 60
-# The only scanner output lines that are ever forwarded; everything else is withheld.
+# The one value-free code line forwarded for infrastructure failures (any non-zero exit other than 3).
+CODE_LINE = re.compile(r'^publish: [a-z-]{1,40}$')
+# The only scanner output lines that are ever forwarded on a refusal; everything else is withheld.
 SCAN_LINE = re.compile(r'^(publish: [a-z-]+|[\w\[\]]+: line \d+ [a-z-]+|findings: \d+)$')
 
 
@@ -104,6 +106,9 @@ def scan_status(block):
     if result.returncode == 0:
         return
     if result.returncode != 3:
+        code_line = next((line for line in result.stdout.splitlines() if CODE_LINE.match(line)), None)
+        if code_line:
+            print(code_line, file=sys.stderr)
         sys.exit(f'publication scanner failed (exit {result.returncode}); status not written')
     forwarded = [line for line in result.stdout.splitlines() if SCAN_LINE.match(line)]
     print('\n'.join(forwarded) if forwarded else 'scanner output withheld', file=sys.stderr)

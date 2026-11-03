@@ -288,7 +288,13 @@ Unfinished sections/items say `not measured (budget)` and are never marked remov
 Sizes are optional; `--apply` ignores this budget and retains its full safety checks.
 Dry runs use existing remote-tracking refs without fetching (`remote refs not refreshed
 (dry run)`). Budget expiry signals only the section worker, never its git children;
-`--apply` still fetches before classifying worktrees.
+`--apply` fetches each repository once per run before classifying worktrees and keeps a
+worktree whose only proof of being merged is the default branch when that fetch fails (a merged PR still counts).
+Unused, unpinned `cratis/*` images with no release tag also age out per tag (`docker rmi <ref>`, never `-f`)
+after `--dev-image-age-days` (default 2, by last tag time) unless a tracked Dockerfile/compose file in any
+checkout names them; a reference without a literal tag (no tag, `:latest`, a variable) protects every tag of that repository, a digest
+reference protects that image, and the same guard applies to the general `--image-age-days` rule; a failed scan,
+an unreadable pin file, an unknown tag time or a docker error keeps everything.
 `PI_CLEANUP_TIMING=1` prints planning milestones to stderr even without a terminal.
 The caches step also lists stale, user-owned `pisync.*` and `gr-stage-ui*` directories
 under `/tmp` and `/private/tmp`, deduplicating their aliases. `--apply` removes only

@@ -94,6 +94,66 @@ class BinSweepScenarios(CleanupConfigTests):
         self.assertFalse(self.bin.exists())
         self.assertEqual(self.obj.read_text(), 'incremental state')
 
+    def second_bin(self, root, name='Other', content=b'other bin bytes!'):
+        directory = root / 'Source' / name / 'bin'
+        directory.mkdir(parents=True)
+        (directory.parent / (name + '.csproj')).write_text('<Project />')
+        (directory / 'out.dll').write_bytes(content)
+        os.utime(directory / 'out.dll', (time.time() - 7200,) * 2)
+        return directory
+
+    def scheduled(self, roots, ready):
+        """Run scheduled_bins over ROOTS; ctx.ready() answers from the READY list, then False."""
+        ctx = cleanup.Ctx(cleanup.parse_args([]))
+        ctx.deadline = cleanup.StepDeadline('bins', 3600, [])
+        answers = iter(ready)
+        ctx.ready = lambda: next(answers, False)
+        checkouts = [type('C', (), {'path': str(r), 'exists': True})() for r in roots]
+        return cleanup.scheduled_bins(ctx, checkouts, self.probe)
+
+    def test_deadline_mid_root_keeps_the_partial_cleared_row(self):
+        other = self.second_bin(self.root)
+        sizes = {self.bin: len(b'package copy'), other: len(b'other bin bytes!')}
+        rows = self.scheduled([self.root], [True])
+        self.assertEqual(len(rows), 1)
+        gone = [path for path in sizes if not path.exists()]
+        self.assertEqual(len(gone), 1)
+        self.assertEqual(rows[0]['action'], 'cleared')
+        self.assertEqual(rows[0]['bytes_freed'], sizes[gone[0]])
+        self.assertIn('step deadline (partial root; continues next run)', rows[0]['reason'])
+        self.assertTrue(next(path for path in sizes if path.exists()).exists())
+
+    def test_deadline_after_first_root_keeps_its_row_and_marks_the_next_partial(self):
+        second = self.home / 'repos/second'
+        subprocess.run(['git', 'init', '-q', str(second)], check=True, capture_output=True, env=self.genv)
+        other = self.second_bin(second, 'App')
+        rows = self.scheduled([self.root, second], [True, False])
+        self.assertEqual([row['path'] for row in rows], [str(self.root.resolve()), str(second.resolve())])
+        self.assertEqual(rows[0]['action'], 'cleared')
+        self.assertEqual(rows[0]['bytes_freed'], len(b'package copy'))
+        self.assertNotIn('step deadline', rows[0]['reason'])
+        self.assertEqual(rows[1]['action'], 'skipped')
+        self.assertEqual(rows[1]['bytes_freed'], 0)
+        self.assertIn('step deadline (partial root; continues next run)', rows[1]['reason'])
+        self.assertTrue(other.exists())
+
+    def test_deadline_partial_row_still_renders_retained_notes(self):
+        other = self.second_bin(self.root)
+        namespace = cleanup.BIN_SWEEP['sweep'].__globals__
+        real = namespace['delete_candidate']
+        calls = []
+        def delete(path, remove):
+            calls.append(path)
+            return 'kept by test' if len(calls) == 1 else real(path, remove)
+        with patch.dict(namespace, {'delete_candidate': delete}):
+            rows = self.scheduled([self.root], [True, False])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['action'], rows[0]['bytes_freed']), ('skipped', 0))
+        self.assertIn('step deadline (partial root; continues next run)', rows[0]['reason'])
+        self.assertIn('kept by test ' + str(calls[0]), rows[0]['reason'])
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(other.exists() and self.bin.exists())
+
     def test_non_dotnet_bins_and_pruned_environments_are_kept(self):
         kept = []
         for name in ('.venv', 'venv', '.tox/python', 'vendor', 'target', '__pycache__', 'tools'):

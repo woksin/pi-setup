@@ -192,6 +192,33 @@ class IssueStatusTest(unittest.TestCase):
             code, _, err = self.run_update(fake, 'new')
         self.assertEqual(code, 1); self.assertNotIn('SECRET', err); self.assertEqual(fake.writes, [])
 
+    def test_infrastructure_failures_forward_only_the_value_free_code_line(self):
+        issue_status.scan_status = self.real_scan
+        cases = [(2, "publish: invalid-request"), (4, "publish: payload-unreadable"), (4, "publish: adapter-failed"),
+                 (4, "publish: cleanup-failed"), (5, "publish: gh-unavailable"), (130, "publish: cancelled")]
+        for rc, line in cases:
+            with self.subTest(rc=rc, line=line):
+                fake = FakeGitHub(["Body"])
+                out = f"{line}\nstatus: line 2 token\nfindings: 1\nleaked SECRET-VALUE\n"
+                done = subprocess.CompletedProcess([], rc, stdout=out, stderr="SECRET-STDERR")
+                issue_status.gh_json = fake
+                err = io.StringIO()
+                with mock.patch.object(subprocess, "run", return_value=done), contextlib.redirect_stderr(err), \
+                        self.assertRaises(SystemExit) as raised:
+                    issue_status.main(["update", "--repo", "o/r", "--issue", "1", "--file", self.file("s.md", "new")])
+                self.assertEqual(raised.exception.code, f"publication scanner failed (exit {rc}); status not written")
+                self.assertEqual(err.getvalue(), line + "\n")
+                self.assertEqual(fake.writes, [])
+                self.assertNotIn("SECRET", err.getvalue() + str(raised.exception.code))
+        for bad in ("publish: Adapter-Failed", "publish: adapter-failed extra", "publish: " + "a" * 41, "xpublish: cancelled"):
+            with self.subTest(bad=bad):
+                done = subprocess.CompletedProcess([], 4, stdout=bad + "\n", stderr="")
+                err = io.StringIO()
+                with mock.patch.object(subprocess, "run", return_value=done), contextlib.redirect_stderr(err), \
+                        self.assertRaises(SystemExit):
+                    issue_status.scan_status("block")
+                self.assertEqual(err.getvalue(), "")
+
     def test_scanner_gets_a_private_file_with_the_exact_bytes_and_cleans_up(self):
         issue_status.scan_status = self.real_scan
         seen = {}
