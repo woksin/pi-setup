@@ -288,7 +288,8 @@ Unfinished sections/items say `not measured (budget)` and are never marked remov
 Sizes are optional; `--apply` ignores this budget and retains its full safety checks.
 Dry runs use existing remote-tracking refs without fetching (`remote refs not refreshed
 (dry run)`). Budget expiry signals only the section worker, never its git children;
-`--apply` still fetches before classifying worktrees.
+`--apply` fetches each repository once per run before classifying worktrees and falls back
+to the existing remote-tracking refs when a fetch fails (`refs not refreshed`).
 `PI_CLEANUP_TIMING=1` prints planning milestones to stderr even without a terminal.
 The caches step also lists stale, user-owned `pisync.*` and `gr-stage-ui*` directories
 under `/tmp` and `/private/tmp`, deduplicating their aliases. `--apply` removes only

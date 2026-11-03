@@ -628,6 +628,7 @@ class Ctx:
         self.docker_up = None
         self.docker_unresponsive = False
         self.deadline = None
+        self.fetched = {}  # parent repo -> (rc, error) of this run's one fetch
 
     def items(self, items):
         return self.deadline.items(items) if self.deadline else items
@@ -919,28 +920,29 @@ def plan_worktrees(ctx: Ctx, checkouts, notes):
     # fetch each parent that still has a candidate, once
     parents = sorted({r["parent"] for r in rows if not r["blockers"]})
     def fetch(parent):
-        rc, out, err = git(["fetch", "--prune", "origin"], parent, timeout=120, detach=True)
+        rc, out, err = git(["fetch", "--prune", "origin"], parent, timeout=60, detach=True)
         return parent, rc, err.strip()[:100]
 
     fetched = {parent: (0, "") for parent in parents}
     if ctx.args.apply:
-        progress(f"worktrees: fetching {len(parents)} parent repos")
+        todo = [parent for parent in parents if parent not in ctx.fetched]
+        if todo:
+            progress(f"worktrees: fetching {len(todo)} parent repos")
         with ThreadPoolExecutor(POOL) as ex:
-            for parent, rc, err in ex.map(fetch, parents):
-                fetched[parent] = (rc, err)
+            for parent, rc, err in ex.map(fetch, todo):
+                ctx.fetched[parent] = (rc, err)
                 if rc != 0:
-                    notes.append(f"fetch failed for {parent}: {err}")
+                    notes.append(f"fetch failed for {parent}: {err}; using existing remote refs")
+        fetched = {parent: ctx.fetched[parent] for parent in parents}
     else:
         notes.append("remote refs not refreshed (dry run)")
-    refs = {p: default_ref(p) for p in parents if fetched[p][0] == 0}
+    # A failed fetch only leaves older remote refs: an ancestry check against them can under-report merges, never over-report.
+    refs = {p: default_ref(p) for p in parents}
 
     def merge(r):
         if r["blockers"]:
             return
         parent = r["parent"]
-        if fetched[parent][0] != 0:
-            r["blockers"].append("fetch-failed")
-            return
         ref = refs.get(parent)
         if not ref:
             r["blockers"].append("no-origin-default-branch")
@@ -967,6 +969,8 @@ def plan_worktrees(ctx: Ctx, checkouts, notes):
         list(ex.map(merge, rows))
     for r in rows:
         r["action"] = "keep" if r["blockers"] else "remove"
+        if not r["blockers"] and r["parent"] in fetched and fetched[r["parent"]][0] != 0:
+            r["basis"] = f"{r['basis']} (refs not refreshed)"
     return rows
 
 

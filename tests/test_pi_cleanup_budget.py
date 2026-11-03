@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import Mock, call, patch
 
-from test_pi_cleanup import cleanup, RepoFixture
+from test_pi_cleanup import cleanup, g, RepoFixture
 
 
 class FlushBuffer(io.StringIO):
@@ -197,6 +197,59 @@ class RemoteRefTests(RepoFixture):
         with patch.object(cleanup, 'git', wraps=cleanup.git) as git:
             cleanup.plan_worktrees(ctx, self.checkouts, [])
         self.assertTrue(any(call.args[0] == ['fetch', '--prune', 'origin'] for call in git.call_args_list))
+
+
+class FetchFailureTests(RepoFixture):
+    def failing_fetch(self):
+        real = cleanup.git
+        calls = []
+        def fake(args, *a, **kw):
+            if args[0] == 'fetch':
+                calls.append(args)
+                return 124, '', 'timeout'
+            return real(args, *a, **kw)
+        return patch.object(cleanup, 'git', side_effect=fake), calls
+
+    def test_failed_fetch_falls_back_to_existing_refs_for_a_merged_worktree(self):
+        ctx = self.context('--apply')
+        notes = []
+        patcher, _ = self.failing_fetch()
+        with patcher:
+            rows = cleanup.plan_worktrees(ctx, self.checkouts, notes)
+        self.assertEqual(rows[0]['action'], 'remove')
+        self.assertIn('refs not refreshed', rows[0]['basis'])
+        self.assertIn(f"fetch failed for {self.main}: timeout; using existing remote refs", notes)
+        self.assertNotIn('fetch-failed', rows[0]['blockers'])
+
+    def test_failed_fetch_keeps_an_unmerged_worktree(self):
+        g(self.wt, 'commit', '-q', '--allow-empty', '-m', 'unmerged work')
+        ctx = self.context('--apply')
+        patcher, _ = self.failing_fetch()
+        with patcher:
+            rows = cleanup.plan_worktrees(ctx, self.checkouts, [])
+        self.assertEqual(rows[0]['action'], 'keep')
+        self.assertTrue(any(b.startswith('unmerged(') for b in rows[0]['blockers']), rows[0]['blockers'])
+
+    def test_failed_fetch_without_an_origin_default_ref_is_blocked(self):
+        g(self.main, 'remote', 'remove', 'origin')
+        ctx = self.context('--apply')
+        patcher, _ = self.failing_fetch()
+        with patcher:
+            rows = cleanup.plan_worktrees(ctx, self.checkouts, [])
+        self.assertIn('no-origin-default-branch', rows[0]['blockers'])
+
+    def test_one_fetch_per_parent_per_run(self):
+        ctx = self.context('--apply')
+        real = cleanup.git
+        fetches = []
+        def fake(args, *a, **kw):
+            if args[0] == 'fetch':
+                fetches.append(args)
+            return real(args, *a, **kw)
+        with patch.object(cleanup, 'git', side_effect=fake):
+            for checkout in [c for c in self.checkouts if c.kind == 'linked'] * 2:
+                cleanup.plan_worktrees(ctx, [checkout], [])
+        self.assertEqual(len(fetches), 1)
 
 
 class TemporaryDirectoryTests(unittest.TestCase):
