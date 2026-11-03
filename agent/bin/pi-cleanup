@@ -121,6 +121,12 @@ delete_candidate = BIN_SWEEP["delete_candidate"]
 LOG_DIR = os.path.expanduser("~/.pi/agent/logs")
 LOG_FILE = os.path.join(LOG_DIR, "pi-cleanup.log")
 LOCK_FILE = os.path.join(LOG_DIR, "pi-cleanup.lock")
+DISCOVERY_CACHE = os.path.join(LOG_DIR, "pi-cleanup-discovery-cache.json")
+DISCOVERY_PRUNE_DIRS = {
+    "node_modules", "bin", "obj", ".vs", ".idea", "TestResults", "packages", ".nuget",
+    "dist", "build", "build-output", "out", "target", "coverage", "coverage-results",
+    "artifacts", "Artifacts", ".next", ".nuxt", ".turbo", ".gradle", "__pycache__",
+}
 LOG_MAX = 900_000  # bytes; truncate oldest lines above this (limit is 1 MB)
 LOG_KEEP = 600_000
 POOL = 8
@@ -171,7 +177,7 @@ def progress(msg: str) -> None:
         print(f"[{time.time() - _progress_t0:6.1f}s] {msg}", file=sys.stderr, flush=True)
 
 
-def run(args, cwd=None, timeout=60, detach=False, env=None):
+def run(args, cwd=None, timeout=60, detach=False, env=None, keep_partial=False):
     """Run a command; returns (rc, stdout, stderr). 124 timeout, 127 missing, 126 OS error."""
     command_env = env or ENV
     if DRY_WORKER and os.path.basename(args[0]) == "git":
@@ -180,8 +186,13 @@ def run(args, cwd=None, timeout=60, detach=False, env=None):
         r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, errors="replace",
                            timeout=timeout, stdin=subprocess.DEVNULL, env=command_env, start_new_session=detach)
         return r.returncode, r.stdout, r.stderr
-    except subprocess.TimeoutExpired:
-        return 124, "", "timeout"
+    except subprocess.TimeoutExpired as error:
+        # communicate() collects stdout incrementally; TimeoutExpired retains it as bytes
+        # even in text mode. Only discovery opts in to consuming incomplete output.
+        out = error.stdout or "" if keep_partial else ""
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        return 124, out, "timeout"
     except FileNotFoundError:
         return 127, "", f"{args[0]}: not found"
     except OSError as e:
@@ -404,17 +415,70 @@ def parse_worktree_list(out: str):
     return entries
 
 
-def discover(roots, notes):
-    """Find git checkouts under roots (find -maxdepth 5, node_modules pruned) plus every
-    linked worktree of each discovered repo (which can live anywhere)."""
+def read_discovery_cache():
+    """Cache entries are hints only: require an existing .git under the cached root."""
+    try:
+        with open(DISCOVERY_CACHE) as stream:
+            data = json.load(stream)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    cache = {}
+    for root, paths in data.items():
+        if not os.path.isabs(root) or not isinstance(paths, list):
+            continue
+        cache[root] = sorted({os.path.realpath(path) for path in paths
+                              if isinstance(path, str) and os.path.isabs(path)
+                              and os.path.commonpath([root, os.path.realpath(path)]) == root
+                              and os.path.exists(os.path.join(path, ".git"))})
+    return cache
+
+
+def write_discovery_cache(cache, notes):
+    temporary = None
+    try:
+        directory = os.path.dirname(DISCOVERY_CACHE)
+        os.makedirs(directory, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+            temporary = stream.name
+            json.dump(cache, stream)
+        os.replace(temporary, DISCOVERY_CACHE)
+    except OSError as error:
+        notes.append(f"discovery cache could not be written: {error}")
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def discover_paths(roots, notes):
+    cache = read_discovery_cache()
     found = set()
+    prune = []
+    for name in sorted(DISCOVERY_PRUNE_DIRS):
+        if prune:
+            prune.append("-o")
+        prune.extend(["-name", name])
     for root in roots:
-        rc, out, err = run(["find", root, "-maxdepth", "5", "(", "-name", "node_modules", "-prune", ")",
-                            "-o", "(", "-name", ".git", "-print", "-prune", ")"], timeout=110)
+        root = os.path.realpath(root)
+        rc, out, err = run(["find", root, "-maxdepth", "5", "(", "-type", "d", "(", *prune,
+                            ")", "-prune", ")", "-o", "(", "-name", ".git", "-print", "-prune", ")"],
+                           timeout=110, keep_partial=True)
+        paths = {os.path.realpath(os.path.dirname(line)) for line in out.splitlines()
+                 if os.path.basename(line) == ".git" and os.path.exists(line)}
         if rc == 124:
             notes.append(f"discovery timed out under {root}; results incomplete")
-        for line in out.splitlines():
-            found.add(os.path.realpath(os.path.dirname(line)))
+            paths.update(cache.get(root, []))
+        cache[root] = sorted(paths)
+        found.update(paths)
+    write_discovery_cache(cache, notes)
+    return found
+
+
+def discover(roots, notes):
+    """Find git checkouts under roots (find -maxdepth 5, heavy output dirs pruned) plus
+    every linked worktree of each discovered repo (which can live anywhere)."""
+    found = discover_paths(roots, notes)
     repos: dict = {}
     for d in sorted(found):
         gd = resolve_gitdir(d)
