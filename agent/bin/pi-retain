@@ -96,9 +96,29 @@ def records():
     return result
 
 
+def keep_marker_reason(path):
+    """Check only the nearest checkout; ancestor traversal is bounded by the path."""
+    path = Path(path)
+    for root in (path, *path.parents):
+        # lexists uses lstat, so dangling marker symlinks count without following them.
+        if not os.path.lexists(root / '.git'):
+            continue
+        if os.path.lexists(root / 'KEEP-PERF'):
+            return 'KEEP marker: KEEP-PERF'
+        # Do not traverse a symlinked .ai-work directory outside the checkout.
+        ai_work = root / '.ai-work'
+        if not ai_work.is_symlink() and os.path.lexists(ai_work / 'KEEP'):
+            return 'KEEP marker: .ai-work/KEEP'
+        break
+    return None
+
+
 def retained_reason(path, recursive=True, now=None):
     """Recursive operations must also preserve retained descendants of their target."""
     path = canonical(path)
+    reason = keep_marker_reason(path)
+    if reason:
+        return reason
     now = time.time() if now is None else now
     for record in records():
         if 'error' not in record and record['expires'] <= now:
