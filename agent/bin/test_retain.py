@@ -26,6 +26,87 @@ cleanup = load('cleanup', 'pi-cleanup')
 bins = load('bins', 'bin_sweep.py')
 
 
+class DiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        parent = Path.cwd() / '.ai-work/discovery-tests'
+        parent.mkdir(parents=True, exist_ok=True)
+        self.tmp = Path(tempfile.mkdtemp(dir=parent)).resolve()
+        self.root = self.tmp / 'repos'
+        self.root.mkdir()
+        self.cache = self.tmp / 'discovery-cache.json'
+        cache = patch.object(cleanup, 'DISCOVERY_CACHE', str(self.cache))
+        cache.start()
+        self.addCleanup(cache.stop)
+
+    def checkout(self, relative):
+        path = self.root / relative
+        (path / '.git').mkdir(parents=True)
+        return str(path)
+
+    def test_heavy_directories_are_pruned_but_worktree_containers_are_searched(self):
+        for name in cleanup.DISCOVERY_PRUNE_DIRS:
+            self.checkout(f'{name}/hidden')
+        visible = {self.checkout('main'), self.checkout('.worktrees/linked'),
+                   self.checkout('.ai-work/checkout')}
+        # A .git directory itself must still be printed and pruned.
+        self.checkout('main/.git/hidden')
+        notes = []
+        self.assertEqual(cleanup.discover_paths([str(self.root)], notes), visible)
+        self.assertEqual(notes, [])
+        self.assertEqual(json.loads(self.cache.read_text()), {str(self.root): sorted(visible)})
+
+    def test_timeout_preserves_incrementally_collected_stdout_only_when_requested(self):
+        for output in (b'/repos/early/.git\n', '/repos/early/.git\n'):
+            with self.subTest(output=output):
+                error = cleanup.subprocess.TimeoutExpired(['find'], 110, output=output)
+                with patch.object(cleanup.subprocess, 'run', side_effect=error):
+                    self.assertEqual(cleanup.run(['find'], keep_partial=True),
+                                     (124, '/repos/early/.git\n', 'timeout'))
+                    self.assertEqual(cleanup.run(['find']), (124, '', 'timeout'))
+
+    def test_timeout_unions_partial_paths_with_existing_cached_paths(self):
+        cached = self.checkout('cached')
+        early = self.checkout('early')
+        self.cache.write_text(json.dumps({str(self.root): [cached]}))
+        notes = []
+        with patch.object(cleanup, 'run', return_value=(124, early + '/.git\n', 'timeout')) as run:
+            self.assertEqual(cleanup.discover_paths([str(self.root)], notes), {cached, early})
+        self.assertEqual(run.call_args.kwargs, {'timeout': 110, 'keep_partial': True})
+        self.assertEqual(notes, [f'discovery timed out under {self.root}; results incomplete'])
+        self.assertEqual(json.loads(self.cache.read_text())[str(self.root)], sorted([cached, early]))
+
+    def test_disappeared_cache_entries_are_dropped_on_timeout(self):
+        existing = self.checkout('existing')
+        no_git = self.root / 'no-git'
+        no_git.mkdir()
+        missing = str(self.root / 'missing')
+        self.cache.write_text(json.dumps({str(self.root): [existing, str(no_git), missing]}))
+        with patch.object(cleanup, 'run', return_value=(124, '', 'timeout')):
+            self.assertEqual(cleanup.discover_paths([str(self.root)], []), {existing})
+        self.assertEqual(json.loads(self.cache.read_text()), {str(self.root): [existing]})
+
+    def test_cache_does_not_expand_requested_roots(self):
+        outside = self.tmp / 'outside'
+        (outside / '.git').mkdir(parents=True)
+        self.cache.write_text(json.dumps({str(self.root): [str(outside)], str(outside): [str(outside)]}))
+        with patch.object(cleanup, 'run', return_value=(124, '', 'timeout')):
+            self.assertEqual(cleanup.discover_paths([str(self.root)], []), set())
+
+    def test_completed_walk_replaces_cached_entries(self):
+        cached = self.checkout('cached')
+        self.cache.write_text(json.dumps({str(self.root): [cached]}))
+        with patch.object(cleanup, 'run', return_value=(0, '', '')):
+            self.assertEqual(cleanup.discover_paths([str(self.root)], []), set())
+        self.assertEqual(json.loads(self.cache.read_text()), {str(self.root): []})
+
+    def test_corrupt_cache_does_not_block_discovery(self):
+        for data in ('{', '[]', '{"relative": [], "/absolute": "invalid"}'):
+            with self.subTest(data=data):
+                self.cache.write_text(data)
+                with patch.object(cleanup, 'run', return_value=(124, '', 'timeout')):
+                    self.assertEqual(cleanup.discover_paths([str(self.root)], []), set())
+
+
 class RetainTests(unittest.TestCase):
     def setUp(self):
         parent = Path(os.environ.get('PI_RETAIN_TEST_TMP', str(Path.cwd() / '.ai-work/retain-tests')))
