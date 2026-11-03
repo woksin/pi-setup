@@ -136,6 +136,28 @@ def remove_bin(candidate):
     shutil.rmtree(candidate)
 
 
+class SweepInterrupted(Exception):
+    """Raised from the deletion callback to stop a sweep; `rows` carries the rows finished or in progress."""
+    rows = ()
+
+
+def add_notes(rows):
+    for row in rows:
+        notes = [item['reason'] + ' ' + item['path'] for item in row.get('retained', [])]
+        if notes:
+            row['reason'] = '; '.join(filter(None, [row['reason'], *notes]))
+
+
+def interrupted_row(row, pending, freed, deleted, deadline):
+    """Account for a deadline stop with `pending` bins left: bytes freed so far, and the reason to continue next run."""
+    reason = 'step deadline (partial root; continues next run)'
+    try:
+        freed -= sum(bin_bytes(path, deadline) for path in pending)
+    except OSError:
+        freed, reason = 0, reason + '; freed size unknown'
+    row.update(action='cleared' if deleted else 'skipped', bytes_freed=max(0, freed) if deleted else 0, reason=reason)
+
+
 def sweep(roots, runner, apply=False, budget=60):
     limit = threshold()
     deadline = time.monotonic() + budget
@@ -201,8 +223,14 @@ def sweep(roots, runner, apply=False, budget=60):
             try:
                 freed = size
                 deleted = 0
-                for path in bins:
-                    reason = delete_candidate(path, remove_bin)
+                for index, path in enumerate(bins):
+                    try:
+                        reason = delete_candidate(path, remove_bin)
+                    except SweepInterrupted as stop:
+                        interrupted_row(row, bins[index:], freed, deleted, deadline)
+                        add_notes(rows)
+                        stop.rows = rows
+                        raise
                     if reason:
                         row.setdefault('retained', []).append({'path': str(path), 'reason': reason})
                         freed -= bin_bytes(path, deadline)
@@ -211,10 +239,7 @@ def sweep(roots, runner, apply=False, budget=60):
                 row.update(action='cleared' if deleted else 'skipped', bytes_freed=max(0, freed) if deleted else 0)
             except OSError as error:
                 row.update(action='failed', reason=str(error))
-    for row in rows:
-        notes = [item['reason'] + ' ' + item['path'] for item in row.get('retained', [])]
-        if notes:
-            row['reason'] = '; '.join(filter(None, [row['reason'], *notes]))
+    add_notes(rows)
     return rows
 
 

@@ -2676,7 +2676,7 @@ def parse_args(argv):
     return a
 
 
-class StepDeadlineReached(Exception):
+class StepDeadlineReached(BIN_SWEEP["SweepInterrupted"]):
     pass
 
 
@@ -2699,9 +2699,11 @@ def scheduled_bins(ctx, checkouts, probe):
             try:
                 remaining = max(0, ctx.deadline.end - time.monotonic())
                 rows.extend(BIN_SWEEP["sweep"]([checkout.path], probe, True, budget=min(60, remaining)))
-            except StepDeadlineReached:
-                rows.append({"path": checkout.path, "action": "skipped", "bytes": 0, "bytes_freed": 0,
-                             "reason": "step deadline (partial root; continues next run)"})
+            except StepDeadlineReached as stop:
+                rows.extend(stop.rows)
+                if not stop.rows:
+                    rows.append({"path": checkout.path, "action": "skipped", "bytes": 0, "bytes_freed": 0,
+                                 "reason": "step deadline (partial root; continues next run)"})
                 break
     finally:
         namespace["delete_candidate"] = original
