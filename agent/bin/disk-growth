@@ -146,7 +146,9 @@ class AttributionCommands:
     """Walk-free commands share a deadline, including per-process cwd lookups."""
 
     def __init__(self):
-        self.deadline = time.monotonic() + 14
+        # Under heavy load (exactly when disk-growth fires) ps and pi-phase status can take
+        # several seconds each, so the shared budget must cover all of them.
+        self.deadline = time.monotonic() + 25
 
     def run(self, command, timeout):
         remaining = self.deadline - time.monotonic()
@@ -280,7 +282,7 @@ def writer_command(command, args):
 
 
 def recent_processes(commands, window):
-    output = commands.run(['ps', '-axo', 'pid,etime,comm,args'], 2)
+    output = commands.run(['ps', '-axo', 'pid,etime,comm,args'], 8)
     processes = []
     for line in output.splitlines():
         parts = line.split(None, 3)
@@ -322,7 +324,7 @@ def container_age(status):
 
 
 def container_lines(commands, window, home):
-    output = commands.run(['docker', 'ps', '--format', '{{.ID}}\t{{.Names}}\t{{.Status}}'], 2)
+    output = commands.run(['docker', 'ps', '--format', '{{.ID}}\t{{.Names}}\t{{.Status}}'], 4)
     lines = []
     for line in output.splitlines():
         parts = line.split('\t', 2)
@@ -350,13 +352,18 @@ def attribution_lines(info, cfg):
     commands = AttributionCommands()
     window = info['current']['ts'] - info['baseline']['ts']
     home = cfg['home']
-    phases = attribution_section('Running pi-phase phases (started within drop window first)',
-                                 lambda: phase_lines(commands, window, home), home)
-    # Query Docker before spending the remaining budget on per-process cwd.
+    # Cheapest and most telling first: one ps snapshot, then Docker, then pi-phase status
+    # (slowest under load), and per-process cwd lookups last with whatever budget remains.
+    recent = attribution_section('', lambda: [recent_processes(commands, window)], home)
     containers = attribution_section('Docker containers started within drop window (approximate uptime)',
                                      lambda: container_lines(commands, window, home), home)
-    processes = attribution_section('Recently started heavy processes (drop window +60s)',
-                                    lambda: process_lines(recent_processes(commands, window), commands, home), home)
+    phases = attribution_section('Running pi-phase phases (started within drop window first)',
+                                 lambda: phase_lines(commands, window, home), home)
+    heading = 'Recently started heavy processes (drop window +60s)'
+    if isinstance(recent[1], list):
+        processes = [heading + ':', *process_lines(recent[1], commands, home)]
+    else:
+        processes = [heading + ':', recent[1]]
     lines = ['Likely writers (walk-free attribution; not proof of disk growth):',
              *phases, *processes, *containers]
     for path, size in info['current'].get('watch', {}).items():

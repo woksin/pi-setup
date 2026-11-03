@@ -334,7 +334,7 @@ class DiskGrowthTests(unittest.TestCase):
                 self.assertIn('Next notice after', text)
 
     def test_attribution_shared_deadline_and_cwd_failures(self):
-        with patch.object(dg.time, 'monotonic', side_effect=[0, 13, 14]), \
+        with patch.object(dg.time, 'monotonic', side_effect=[0, 24, 25]), \
                 patch.object(dg.subprocess, 'run', return_value=Mock(returncode=0, stdout='', stderr='')) as run:
             commands = dg.AttributionCommands()
             commands.run(['ps'], 2)
