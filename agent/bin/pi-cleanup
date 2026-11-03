@@ -2113,11 +2113,12 @@ def summarize_build(rows, apply):
             key = re.sub(r"[:(].*", "", r["skip"]).strip() or r["skip"]
             key = "ACTIVE(process)" if r["skip"].startswith("ACTIVE: process") else \
                 "ACTIVE(recent)" if r["skip"].startswith("ACTIVE: modified") else key
+            key = keep_marker_action(key, r["skip"])
             s["skip_reasons"][key] = s["skip_reasons"].get(key, 0) + 1
         for d in r["dirs"]:
             if d["action"] == "skip":
                 s["dirs_skipped"] += 1
-                k = "dir:" + d["reason"]
+                k = keep_marker_action("dir:" + d["reason"], d["reason"])
                 s["skip_reasons"][k] = s["skip_reasons"].get(k, 0) + 1
             elif d.get("result") == "deleted":
                 s["dirs_deleted"] += 1
@@ -2126,6 +2127,10 @@ def summarize_build(rows, apply):
             else:
                 s["dirs_planned"] += 1
     return s
+
+
+def keep_marker_action(action, reason):
+    return "kept (KEEP marker)" if "KEEP marker:" in (reason or "") else action
 
 
 def render_build(rows, apply, out):
@@ -2155,7 +2160,7 @@ def render_build(rows, apply, out):
             note = "; ".join(f"{k}x{v}" for k, v in sorted(reasons.items()))
             if failed:
                 note = (note + "; " if note else "") + failed[0]["result"]
-        show.append([r["path"], det, action, note])
+        show.append([r["path"], det, keep_marker_action(action, note), note])
     if show:
         table(["path", "dirs", "action", "skip reason / note"], show, out)
     quiet = len(rows) - len(show)
@@ -2179,7 +2184,8 @@ def render_worktrees(rows, apply, out):
         elif r["action"] == "failed":
             trs.append([r["path"], size, "FAILED", r["result"]])
         else:
-            trs.append([r["path"], size, "keep", "; ".join(r["blockers"]) + (f" [{r['note']}]" if r["note"] else "")])
+            blockers = "; ".join(r["blockers"])
+            trs.append([r["path"], size, keep_marker_action("keep", blockers), blockers + (f" [{r['note']}]" if r["note"] else "")])
     table(["path", "size", "action", "basis / blockers"], trs, out)
 
 
@@ -2234,7 +2240,8 @@ def build_summary_lines(rep):
         L += caches_summary_lines(rep["steps"]["caches"], rep["apply"])
     if "bins" in rep["steps"]:
         for row in rep["steps"]["bins"]["rows"]:
-            L.append(f"bins: {row['path']}: {row['action']} ({row['reason']}); "
+            action = keep_marker_action(row['action'], row['reason'])
+            L.append(f"bins: {row['path']}: {action} ({row['reason']}); "
                      f"eligible {human(row['bytes'])}, freed {human(row['bytes_freed'])}")
     for f in rep["df"]:
         line = f"df {f['mount']}: free {human(f['before'])}"
@@ -2455,6 +2462,7 @@ def worktree_report(rows):
     for row in rows:
         for blocker in row["blockers"]:
             key = "ACTIVE" if blocker.startswith("ACTIVE") else re.sub(r"[:(].*", "", blocker).strip()
+            key = keep_marker_action(key, blocker)
             blockers[key] = blockers.get(key, 0) + 1
     removable = [row for row in rows if row["action"] == "remove"]
     return {"rows": rows, "summary": {
@@ -2472,7 +2480,7 @@ def stream_step(args, name, plan):
                  "docker": render_docker, "caches": render_caches}
     if name == "bins":
         table(["path", "action", "reason"],
-              [[row["path"], row["action"], row["reason"]] for row in plan["rows"]], out)
+              [[row["path"], keep_marker_action(row["action"], row["reason"]), row["reason"]] for row in plan["rows"]], out)
     else:
         data = plan["rows"] if name in ("build", "worktrees") else plan
         renderers[name](data, False, out)
@@ -2968,6 +2976,7 @@ def main(argv=None):
                     for b in r["blockers"]:
                         k = re.sub(r"[:(].*", "", b).strip()
                         k = "ACTIVE" if b.startswith("ACTIVE") else k
+                        k = keep_marker_action(k, b)
                         blockers[k] = blockers.get(k, 0) + 1
             cnt = lambda a: sum(1 for r in wt_rows if r["action"] == a)
             basis = lambda p: sum(1 for r in wt_rows if r["action"] in ("remove", "removed") and (r["basis"] or "").startswith(p))

@@ -295,6 +295,103 @@ class RetainTests(unittest.TestCase):
         self.assertEqual(row['dirs'][0]['action'], 'delete')
         self.assertEqual(self.bin_plan(root)['action'], 'planned')
 
+    def keep_marker(self, marker='KEEP-PERF'):
+        (self.root / '.git').write_text('gitdir: /git/worktrees/lane\n')
+        path = self.root / marker
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return 'KEEP marker: ' + marker
+
+    def assert_marker_protected(self, reason):
+        for root in (self.root, self.output.parent):
+            self.assertEqual(self.build_plan(root)['skip'], reason)
+            self.assertEqual(self.bin_plan(root)['reason'], reason)
+        self.assertEqual(retain.retained_reason(self.output, now=self.now + 10 ** 9), reason)
+
+    def test_keep_perf_skips_root_and_nested_build_and_bins_without_expiry(self):
+        self.assert_marker_protected(self.keep_marker())
+
+    def test_ai_work_keep_skips_root_and_nested_build_and_bins(self):
+        self.assert_marker_protected(self.keep_marker('.ai-work/KEEP'))
+
+    def test_checkout_without_marker_preserves_build_and_bins_behaviour(self):
+        (self.root / '.git').mkdir()
+        self.assert_unprotected(self.root)
+        self.assert_unprotected(self.output.parent)
+
+    def test_marker_lookup_stops_at_nearest_checkout(self):
+        self.keep_marker()
+        nested = self.root / 'nested'
+        (nested / '.git').mkdir(parents=True)
+        self.assertIsNone(retain.retained_reason(nested / 'project/bin'))
+
+    def test_marker_outside_checkout_does_not_protect_it(self):
+        (self.tmp / 'KEEP-PERF').touch()
+        (self.root / '.git').mkdir()
+        self.assertIsNone(retain.retained_reason(self.output))
+
+    def test_symlinked_markers_count_without_following_targets(self):
+        for marker in ('KEEP-PERF', '.ai-work/KEEP'):
+            with self.subTest(marker=marker):
+                root = self.tmp / marker.replace('/', '-')
+                (root / '.git').mkdir(parents=True)
+                path = root / marker
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(self.tmp / 'missing-outside')
+                self.assertEqual(retain.retained_reason(root / 'project/bin'), 'KEEP marker: ' + marker)
+
+    def test_symlinked_ai_work_is_not_traversed(self):
+        (self.root / '.git').mkdir()
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        (outside / 'KEEP').touch()
+        (self.root / '.ai-work').symlink_to(outside, target_is_directory=True)
+        self.assertIsNone(retain.retained_reason(self.output))
+
+    def test_marker_created_after_planning_blocks_final_deletion(self):
+        self.assert_unprotected(self.root)
+        reason = self.keep_marker()
+        for delete_candidate in (cleanup.delete_candidate, bins.delete_candidate):
+            delete = Mock()
+            self.assertEqual(delete_candidate(self.output, delete), reason)
+            delete.assert_not_called()
+
+    def test_marker_blocks_worktree_plan_and_removal_recheck(self):
+        reason = self.keep_marker()
+        checkout = cleanup.Checkout(str(self.root), 'linked', gitdir='/git/worktrees/lane', parent=str(self.tmp))
+        ctx = cleanup.Ctx(cleanup.parse_args(['--only', 'worktrees']))
+        rows = cleanup.plan_worktrees(ctx, [checkout], [])
+        self.assertEqual(rows[0]['action'], 'keep')
+        self.assertIn(reason, rows[0]['blockers'])
+        with patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])):
+            self.assertEqual(cleanup.fresh_recheck(ctx, checkout, {}), reason)
+        self.assertEqual(cleanup.worktree_report(rows)['summary']['blockers'], {'kept (KEEP marker)': 1})
+        out = []
+        cleanup.render_worktrees(rows, False, out)
+        self.assertIn('kept (KEEP marker)', '\n'.join(out))
+
+    def test_marker_is_reported_in_build_and_bins_summary(self):
+        self.keep_marker()
+        rows = [self.build_plan(self.root)]
+        summary = cleanup.summarize_build(rows, False)
+        self.assertEqual(summary['skip_reasons'], {'kept (KEEP marker)': 1})
+        out = []
+        cleanup.render_build(rows, False, out)
+        self.assertIn('kept (KEEP marker)', '\n'.join(out))
+        rep = {'apply': False, 'steps': {'build': {'summary': summary},
+                                       'bins': {'rows': [self.bin_plan(self.root)]}}, 'df': [], 'notes': [], 'errors': []}
+        self.assertIn('bins: ' + str(self.root) + ': kept (KEEP marker)',
+                      '\n'.join(cleanup.build_summary_lines(rep)))
+
+    def test_marker_protects_other_deletion_steps_inside_checkout(self):
+        reason = self.keep_marker()
+        ctx = cleanup.Ctx(cleanup.parse_args(['--only', 'caches']))
+        self.assertEqual(cleanup.tmp_state(str(self.output), self.now)[1], reason)
+        self.assertEqual(cleanup.gzip_session(ctx, {'path': str(self.root / 'session.jsonl')}), 'skipped: ' + reason)
+        items = [dict(name='cache', action='run', paths=[str(self.output)])]
+        cleanup.protect_cache_items(items)
+        self.assertTrue(all(item['action'] == 'skip' and item['reason'] == reason for item in items))
+
     def test_retained_root_skipped_in_both_cleaners(self):
         self.add()
         self.assert_protected(self.root)
