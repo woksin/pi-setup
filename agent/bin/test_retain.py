@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest import mock
 from unittest.mock import Mock, patch
 
 BIN = Path(__file__).resolve().parent
@@ -105,6 +106,144 @@ class DiscoveryTests(unittest.TestCase):
                 self.cache.write_text(data)
                 with patch.object(cleanup, 'run', return_value=(124, '', 'timeout')):
                     self.assertEqual(cleanup.discover_paths([str(self.root)], []), set())
+
+
+class ScheduledDeadlineTests(unittest.TestCase):
+    def setUp(self):
+        parent = Path.cwd() / '.ai-work/deadline-tests'
+        parent.mkdir(parents=True, exist_ok=True)
+        self.root = Path(tempfile.mkdtemp(dir=parent)).resolve()
+        self.clock = [0.0]
+        for patcher in (mock.patch.object(cleanup, "STATE_DIR", str(self.root / "state")),
+                        mock.patch.object(cleanup.time, "monotonic", side_effect=lambda: self.clock[0])):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_deadline_finishes_item_then_reports_once(self):
+        notes, done = [], []
+        deadline = cleanup.StepDeadline("build", 5, notes)
+        for item in deadline.items(range(3)):
+            done.append(item)
+            self.clock[0] = 6
+            done.append("finished")
+        self.assertEqual(done, [0, "finished"])
+        self.assertFalse(deadline.ready())
+        self.assertEqual(notes, ["step build stopped at deadline after 1 items; continues next run"])
+
+    def test_rotation_advances_and_handles_corrupt_missing_or_stale_state(self):
+        items = ["c", "a", "b"]
+        self.assertEqual(cleanup.rotation_order("build", items), ["a", "b", "c"])
+        cleanup.rotation_advance("build", "a", [])
+        self.assertEqual(cleanup.rotation_order("build", items), ["b", "c", "a"])
+        state = self.root / "state" / "build.json"
+        for corrupt in ("{broken", "[]", "null"):
+            state.write_text(corrupt)
+            self.assertEqual(cleanup.rotation_order("build", items), ["a", "b", "c"])
+        cleanup.rotation_advance("build", "bb", [])
+        self.assertEqual(cleanup.rotation_order("build", items), ["c", "a", "b"])
+        self.assertEqual(list(state.parent.glob("*.tmp")), [])
+
+    def test_build_rotates_and_next_step_gets_a_fresh_deadline(self):
+        args = cleanup.parse_args(["--scheduled", "--only", "build,docker", "--build-step-seconds", "5"])
+        ctx = cleanup.Ctx(args)
+        ctx.args.steps = ["build", "docker"]
+        checkouts = [cleanup.Checkout(str(self.root / name), "main") for name in ("a", "b")]
+        deleted, docker_started = [], []
+
+        def plan(_ctx, checkout, _queued):
+            return {"path": checkout.path, "skip": None,
+                    "dirs": [{"path": checkout.path + "/" + name, "action": "delete", "size": 0}
+                             for name in ("bin", "obj")]}
+
+        def remove(path, _remover):
+            deleted.append(path)
+            self.clock[0] += 6
+
+        def docker(_ctx, _plan):
+            docker_started.append(_ctx.ready())
+
+        with mock.patch.object(cleanup, "plan_root_build", side_effect=plan), \
+             mock.patch.object(cleanup, "take_snapshot"), \
+             mock.patch.object(ctx, "active_reason", return_value=None), \
+             mock.patch.object(cleanup, "held_inside", return_value=None), \
+             mock.patch.object(cleanup, "delete_candidate", side_effect=remove), \
+             mock.patch.object(cleanup, "plan_docker", return_value={}), \
+             mock.patch.object(cleanup, "apply_docker", side_effect=docker):
+            for _ in range(2):
+                notes = []
+                cleanup.scheduled_steps(ctx, checkouts, notes, {"steps": {}, "errors": []})
+                self.assertTrue(any(note.startswith("step build stopped at deadline after") for note in notes))
+        self.assertEqual(deleted, [checkouts[0].path + "/bin", checkouts[1].path + "/bin"])
+        self.assertEqual(docker_started, [True, True])
+
+    def test_bins_check_deadline_between_deletions_and_restore_callback(self):
+        ctx = cleanup.Ctx(cleanup.parse_args([]))
+        ctx.deadline = cleanup.StepDeadline("bins", 5, [])
+        namespace = cleanup.BIN_SWEEP["sweep"].__globals__
+        original = namespace["delete_candidate"]
+        removed = []
+        for name in ("first", "second"):
+            (self.root / name).mkdir()
+
+        def sweep(_roots, _probe, _apply, budget):
+            for path in (self.root / "first", self.root / "second"):
+                namespace["delete_candidate"](path, remove)
+            return []
+
+        def remove(path):
+            removed.append(path)
+            self.clock[0] += 6
+
+        with mock.patch.dict(cleanup.BIN_SWEEP, {"sweep": mock.Mock(side_effect=sweep, __globals__=namespace)}):
+            rows = cleanup.scheduled_bins(ctx, [mock.Mock(path=str(self.root), exists=True)], mock.Mock())
+        self.assertEqual(removed, [self.root / "first"])
+        self.assertIn("step deadline", rows[0]["reason"])
+        self.assertIs(namespace["delete_candidate"], original)
+
+    def test_deadline_flags_defaults_and_validation(self):
+        args = cleanup.parse_args([])
+        for step, seconds in cleanup.STEP_SECONDS.items():
+            self.assertEqual(getattr(args, step + "_step_seconds"), seconds)
+        self.assertEqual(cleanup.parse_args(["--build-step-seconds", "0"]).build_step_seconds, 0)
+        for value in ("-1", "nan", "inf"):
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                cleanup.parse_args(["--build-step-seconds", value])
+
+    def test_deadline_note_is_written_to_scheduled_log(self):
+        note = "step caches stopped at deadline after 7 items; continues next run"
+        rep = {"exit": 0, "runtime_s": 1, "notes": [note]}
+        with mock.patch.object(cleanup, "LOG_DIR", str(self.root)), \
+             mock.patch.object(cleanup, "LOG_FILE", str(self.root / "cleanup.log")), \
+             mock.patch.object(cleanup, "build_summary_lines", return_value=[]), \
+             mock.patch.object(cleanup, "trim_log"):
+            cleanup.write_log(rep)
+        self.assertIn(note, (self.root / "cleanup.log").read_text())
+
+
+class DockerDetectionTests(unittest.TestCase):
+    def test_timeout_then_success(self):
+        with mock.patch.object(cleanup, "run", side_effect=[(124, "", "timeout"), (0, "27.0\n", "")]) as probe:
+            notes = []
+            self.assertTrue(cleanup.docker_running(notes))
+        self.assertEqual([call.kwargs["timeout"] for call in probe.call_args_list], [20, 45])
+        self.assertEqual(notes, [])
+
+    def test_twice_timeout_reports_unresponsive_not_not_running(self):
+        with mock.patch.object(cleanup, "run", return_value=(124, "", "timeout")) as probe:
+            notes = []
+            self.assertFalse(cleanup.docker_running(notes))
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(notes, ["docker unresponsive (timed out twice): docker step skipped"])
+        ctx = cleanup.Ctx(cleanup.parse_args([]))
+        ctx.docker_up, ctx.docker_unresponsive = False, True
+        self.assertEqual(cleanup.plan_docker(ctx)["skip"], notes[0])
+
+    def test_not_running_does_not_retry(self):
+        with mock.patch.object(cleanup, "run", return_value=(1, "", "Cannot connect to the Docker daemon")) as probe:
+            notes = []
+            self.assertFalse(cleanup.docker_running(notes))
+        probe.assert_called_once()
+        self.assertEqual(notes, [])
 
 
 class RetainTests(unittest.TestCase):
@@ -456,7 +595,7 @@ class PlanRmiPinTests(unittest.TestCase):
         self.assertIn('cannot read docker pin file', err)
 
     def test_apply_recompute_refuses_when_pin_file_unreadable(self):
-        ctx = Mock()
+        ctx = cleanup.Ctx(cleanup.parse_args([]))
         ctx.args.image_age_days = 30
         d = {'prunes': [], 'rmi': [], 'rmi_kept': [], 'error': None}
         calls = []
@@ -506,6 +645,36 @@ class NugetTrimTests(unittest.TestCase):
 
     def plan(self):
         return cleanup.plan_nuget_trim(self.ctx)
+
+    def test_scheduled_trim_rotates_versions_and_never_removes_newest(self):
+        for name in ("alpha", "beta"):
+            self.version(name, "1.0.0")
+            self.version(name, "2.0.0")
+        clock, deleted = [0.0], []
+        self.ctx.args.nuget_keep_versions = 1
+
+        def remove(path, _cutoff):
+            deleted.append(path)
+            clock[0] += 6
+            return "deleted"
+
+        with mock.patch.object(cleanup, "STATE_DIR", str(self.tmp / "state")), \
+             mock.patch.object(cleanup.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(cleanup, "trash_remove", side_effect=remove), \
+             mock.patch.object(cleanup, "which", side_effect=lambda tool: tool == "dotnet"), \
+             mock.patch.object(cleanup, "procs_running", return_value=[]), \
+             mock.patch.object(cleanup, "take_snapshot", return_value=cleanup.PathSet([])), \
+             mock.patch.object(cleanup, "run", return_value=(0, "", "")), \
+             mock.patch.object(cleanup, "plan_session_gzip", return_value=([], 0)):
+            for _ in range(2):
+                notes = []
+                self.ctx.deadline = cleanup.StepDeadline("caches", 5, notes)
+                plan = cleanup.plan_caches(self.ctx, [], include_tmp=False,
+                                           consume=lambda batch: cleanup.apply_caches(self.ctx, batch))
+                item = next(it for it in plan["items"] if it["name"] == "nuget packages trim")
+                self.assertEqual(item["result"]["deleted"], 1)
+                self.assertTrue(any(note.startswith("step caches stopped at deadline after") for note in notes))
+        self.assertEqual(deleted, [str(self.link / name / "1.0.0") for name in ("alpha", "beta")])
 
     def test_defaults(self):
         self.assertEqual(self.ctx.args.nuget_age_days, 7)
