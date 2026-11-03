@@ -122,6 +122,9 @@ LOG_DIR = os.path.expanduser("~/.pi/agent/logs")
 LOG_FILE = os.path.join(LOG_DIR, "pi-cleanup.log")
 LOCK_FILE = os.path.join(LOG_DIR, "pi-cleanup.lock")
 DISCOVERY_CACHE = os.path.join(LOG_DIR, "pi-cleanup-discovery-cache.json")
+STATE_DIR = os.path.expanduser("~/.pi/agent/pi-cleanup")
+STEP_SECONDS = {"build": 25 * 60, "worktrees": 15 * 60, "caches": 20 * 60,
+                "bins": 10 * 60, "docker": 10 * 60}
 DISCOVERY_PRUNE_DIRS = {
     "node_modules", "bin", "obj", ".vs", ".idea", "TestResults", "packages", ".nuget",
     "dist", "build", "build-output", "out", "target", "coverage", "coverage-results",
@@ -557,6 +560,64 @@ def age_str(seconds: float) -> str:
     return f"{seconds / 3600:.0f}h" if seconds < 48 * 3600 else f"{seconds / 86400:.1f}d"
 
 
+class StepDeadline:
+    """Cooperative scheduled deadline: finish the current item, never interrupt it."""
+
+    def __init__(self, name, seconds, notes):
+        self.name = name
+        self.end = time.monotonic() + seconds
+        self.notes = notes
+        self.count = 0
+        self.stopped = False
+
+    def ready(self):
+        if time.monotonic() < self.end:
+            return True
+        if not self.stopped:
+            self.notes.append(f"step {self.name} stopped at deadline after {self.count} items; continues next run")
+            self.stopped = True
+        return False
+
+    def items(self, items):
+        for item in items:
+            if not self.ready():
+                break
+            yield item
+            self.count += 1
+
+
+def rotation_order(name, items, key=lambda item: item):
+    ordered = sorted(items, key=key)
+    try:
+        with open(os.path.join(STATE_DIR, name + ".json")) as stream:
+            last = json.load(stream)
+        if not isinstance(last, str):
+            return ordered
+    except (OSError, ValueError):
+        return ordered
+    split = bisect.bisect_right([key(item) for item in ordered], last)
+    return ordered[split:] + ordered[:split]
+
+
+def rotation_advance(name, last, notes):
+    tmp = None
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, prefix=name + ".", suffix=".tmp")
+        with os.fdopen(fd, "w") as stream:
+            json.dump(last, stream)
+        os.replace(tmp, os.path.join(STATE_DIR, name + ".json"))
+        tmp = None
+    except OSError as error:
+        notes.append(f"cannot save {name} rotation state: {error}")
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 class Ctx:
     def __init__(self, args):
         self.args = args
@@ -565,6 +626,14 @@ class Ctx:
         self.roots: PathSet = PathSet([])
         self.mounts: PathSet = PathSet([])
         self.docker_up = None
+        self.docker_unresponsive = False
+        self.deadline = None
+
+    def items(self, items):
+        return self.deadline.items(items) if self.deadline else items
+
+    def ready(self):
+        return self.deadline is None or self.deadline.ready()
 
     def active_reason(self, c: Checkout, idle=None, worktree=False, build_output=False):
         """ACTIVE: a process holds something inside, or modified within `idle` days
@@ -593,8 +662,13 @@ class Ctx:
 # ----------------------------------------------------------------------------
 # docker helpers
 # ----------------------------------------------------------------------------
-def docker_running() -> bool:
-    rc, out, _ = run(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=20)
+def docker_running(notes=None) -> bool:
+    command = ["docker", "info", "--format", "{{.ServerVersion}}"]
+    rc, out, _ = run(command, timeout=20)
+    if rc == 124:
+        rc, out, _ = run(command, timeout=45)
+        if rc == 124 and notes is not None:
+            notes.append("docker unresponsive (timed out twice): docker step skipped")
     return rc == 0 and bool(out.strip())
 
 
@@ -704,8 +778,12 @@ def apply_build(ctx: Ctx, rows, by_path):
         except Exception as e:  # report and continue; counted as partial
             d["result"] = "failed: " + str(e)[:150]
 
-    with ThreadPoolExecutor(4) as ex:
-        list(ex.map(rm, jobs))
+    if ctx.deadline:
+        for d in ctx.items(jobs):
+            rm(d)
+    else:
+        with ThreadPoolExecutor(4) as ex:
+            list(ex.map(rm, jobs))
 
 
 # ----------------------------------------------------------------------------
@@ -960,7 +1038,7 @@ def archive_ai_work(r):
 def apply_worktrees(ctx: Ctx, rows, by_path):
     """Sequential archive → re-check → `git worktree remove` (never --force) → prune.
     A removal failure stops all worktree processing."""
-    for r in rows:
+    for r in ctx.items(rows):
         if r["action"] != "remove":
             continue
         c = by_path[r["path"]]
@@ -1042,7 +1120,7 @@ def pinned_by(pins: list, iid: str, tags: list, digests: list):
     return None
 
 
-def plan_rmi(age_days: float):
+def plan_rmi(age_days: float, deadline=None):
     """(candidates, kept-notes, error). Images used by no container (by image ID and by name)."""
     try:
         pins = docker_pins()
@@ -1058,6 +1136,8 @@ def plan_rmi(age_days: float):
     cids = out.split()
     used_ids, used_names = set(), set()
     for i in range(0, len(cids), 100):
+        if deadline and not deadline.ready():
+            return [], [], None  # incomplete in-use inventory: never propose removals
         rc, out, err = run(["docker", "inspect", "-f", "{{.Image}}|{{.Config.Image}}", *cids[i:i + 100]], timeout=60)
         if rc != 0:
             return [], [], "docker inspect (containers) failed: cannot tell which images are used"
@@ -1068,6 +1148,8 @@ def plan_rmi(age_days: float):
     cands, kept = [], []
     cutoff = time.time() - age_days * 86400
     for i in range(0, len(img_ids), 100):
+        if deadline and not deadline.ready():
+            break
         chunk = img_ids[i:i + 100]
         rc, out, err = run(["docker", "image", "inspect", "-f",
                             "{{.Id}}|{{.Created}}|{{json .RepoTags}}|{{.Size}}|{{json .RepoDigests}}", *chunk], timeout=120)
@@ -1105,14 +1187,15 @@ def plan_rmi(age_days: float):
 def plan_docker(ctx: Ctx):
     d = {"up": ctx.docker_up, "prunes": [], "rmi": [], "rmi_kept": [], "info": [], "error": None}
     if not ctx.docker_up:
-        d["skip"] = "docker not running (or not installed)"
+        d["skip"] = ("docker unresponsive (timed out twice): docker step skipped" if ctx.docker_unresponsive
+                     else "docker not running (or not installed)")
         return d
     for label, cmd in DOCKER_PRUNES:
         d["prunes"].append({"label": label, "cmd": " ".join(cmd), "action": "prune"})
     rc, out, _ = run(["docker", "system", "df", "--format", "{{.Type}}: {{.Size}} (reclaimable {{.Reclaimable}})"], timeout=60)
     if rc == 0:
         d["info"] = out.strip().splitlines()
-    cands, kept, err = plan_rmi(ctx.args.image_age_days)
+    cands, kept, err = plan_rmi(ctx.args.image_age_days, ctx.deadline)
     d["rmi"], d["rmi_kept"], d["error"] = cands, kept, err
     return d
 
@@ -1120,16 +1203,18 @@ def plan_docker(ctx: Ctx):
 def apply_docker(ctx: Ctx, d):
     if d.get("skip"):
         return
-    for p in d["prunes"]:
+    for p in ctx.items(d["prunes"]):
         cmd = p["cmd"].split()
         rc, out, err = run(cmd, timeout=300)
         m = re.search(r"Total reclaimed space:\s*(.+)", out)
         p["result"] = ("ok, reclaimed " + m.group(1).strip()) if rc == 0 and m else ("ok" if rc == 0 else
                        f"failed (rc={rc}): {err.strip()[:150]}")
         p["failed"] = rc != 0
-    cands, kept, err = plan_rmi(ctx.args.image_age_days)  # recompute: prunes may free images
+    if not ctx.ready():
+        return
+    cands, kept, err = plan_rmi(ctx.args.image_age_days, ctx.deadline)  # recompute: prunes may free images
     d["rmi"], d["rmi_kept"], d["error"] = cands, kept, err
-    for it in cands:
+    for it in ctx.items(cands):
         rc, out, e = run(["docker", "rmi", it["id"]], timeout=120)
         if rc == 0:
             it["result"] = "removed"
@@ -1394,8 +1479,8 @@ def trash_remove(vd: str, cutoff=None):
 def plan_session_gzip(ctx: Ctx):
     cutoff = ctx.now - ctx.args.session_age_days * 86400
     cands, open_skipped = [], 0
-    for dp, dns, fns in os.walk(SESSIONS_DIR):
-        for fn in fns:
+    for dp, dns, fns in ctx.items(os.walk(SESSIONS_DIR)):
+        for fn in ctx.items(fns):
             if not fn.endswith(".jsonl"):
                 continue
             p = os.path.join(dp, fn)
@@ -1443,7 +1528,11 @@ def tmp_locked(path):
 
 
 def plan_tmp(ctx):
-    items, seen = [], set()
+    return list(iter_tmp(ctx))
+
+
+def iter_tmp(ctx):
+    seen = set()
     for raw in TMP_ROOTS:
         root = os.path.realpath(raw)
         if root in seen:
@@ -1453,7 +1542,7 @@ def plan_tmp(ctx):
             names = sorted(os.listdir(root))
         except OSError:
             continue
-        for name in names:
+        for name in ctx.items(names):
             if not name.startswith(TMP_PREFIXES):
                 continue
             path = os.path.join(root, name)
@@ -1461,10 +1550,9 @@ def plan_tmp(ctx):
             if not reason and (ctx.snap is None or ctx.snap.first_inside(path) or tmp_locked(path)):
                 reason = "process holds directory (or process snapshot unavailable)"
             size = du_bytes(path, 2) if not reason else None
-            items.append({"name": "temporary directory " + path, "tmp_path": path,
-                          "identity": identity, "size": size, "action": "skip" if reason else "run",
-                          "reason": reason})
-    return items
+            yield {"name": "temporary directory " + path, "tmp_path": path,
+                   "identity": identity, "size": size, "action": "skip" if reason else "run",
+                   "reason": reason}
 
 
 def apply_tmp(ctx, item):
@@ -1543,7 +1631,7 @@ def protect_cache_items(items):
         if reason:
             item.update(action="skip", reason=reason)
         for key in ("paths", "files", "repos"):
-            if key not in item:
+            if key not in item or (key == "paths" and item.get("scheduled_trim")):
                 continue
             allowed = []
             for value in item[key]:
@@ -1559,15 +1647,26 @@ def protect_cache_items(items):
     items.extend(skips)
 
 
-def plan_caches(ctx: Ctx, checkouts, include_tmp=True):
-    """Plan items: {name, action: run|skip, reason, ...}."""
-    items = plan_tmp(ctx) if include_tmp else []
+def plan_caches(ctx: Ctx, checkouts, include_tmp=True, consume=None):
+    """Plan items; scheduled runs consume each item before planning the next."""
+    items = []
+
+    def add(entry):
+        batch = {"items": [entry]}
+        if consume and ctx.ready() and entry["action"] == "run":
+            consume(batch)
+        items.extend(batch["items"])
+        return entry
 
     def item(name, action, reason=None, **kw):
-        d = {"name": name, "action": action, "reason": reason, **kw}
-        items.append(d)
-        return d
+        return add({"name": name, "action": action, "reason": reason, **kw})
 
+    if include_tmp:
+        for entry in iter_tmp(ctx):
+            add(entry)
+
+    if not ctx.ready():
+        return {"items": items}
     # a. go (GOCACHE from env or the macOS default; `go env` is not run)
     if not which("go"):
         item("go build cache", "skip", "go not on PATH")
@@ -1586,6 +1685,8 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True):
                 item("go build cache", "skip", f"only {human(size)} (<= {human(GO_CACHE_MIN)})", size=size)
             else:
                 item("go build cache", "run", cmd=["go", "clean", "-cache"], size=size, gocache=gc)
+    if not ctx.ready():
+        return {"items": items}
     # b. nuget
     if not which("dotnet"):
         item("nuget", "skip", "dotnet not on PATH")
@@ -1597,12 +1698,18 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True):
             item("nuget http-cache", "run", cmd=["dotnet", "nuget", "locals", "http-cache", "--clear"])
             item("nuget temp", "run", cmd=["dotnet", "nuget", "locals", "temp", "--clear"])
         # the packages trim is atime-gated, so it is safe while dotnet runs
-        cands, kept_local, local_bytes, cand_bytes = plan_nuget_trim(ctx)
-        trash = find_nuget_trash(os.path.realpath(NUGET_PACKAGES))
-        item("nuget packages trim", "run" if cands or trash else "skip", None if cands or trash else "nothing old enough",
+        if ctx.deadline:
+            cands, kept_local, local_bytes, cand_bytes = [], 0, 0, 0
+        else:
+            cands, kept_local, local_bytes, cand_bytes = plan_nuget_trim(ctx)
+        trash = [] if ctx.deadline else find_nuget_trash(os.path.realpath(NUGET_PACKAGES))
+        item("nuget packages trim", "run" if ctx.deadline or cands or trash else "skip", None if ctx.deadline or cands or trash else "nothing old enough",
+             **({"scheduled_trim": True} if ctx.deadline else {}),
              paths=cands, size=cand_bytes, trash=len(trash),
              note=f"{kept_local} local/other-source versions never touched ({human(local_bytes)})"
                   + (f"; {len(trash)} leftover trash dirs to recover" if trash else ""))
+    if not ctx.ready():
+        return {"items": items}
     # c. yarn / npm
     for tool, cmd in (("yarn", ["yarn", "cache", "clean"]), ("npm", ["npm", "cache", "clean", "--force"])):
         if which(tool):
@@ -1617,13 +1724,14 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True):
     parents = sorted({c.parent or c.path for c in checkouts if c.exists and (c.parent or c.kind == "main")
                       and os.path.isdir(c.parent or c.path)})
     stale = []
-    for pth in parents:
+    for pth in ctx.items(parents):
         rc, out, err = git(["worktree", "prune", "--dry-run", "-v"], pth, timeout=60)
         if rc == 0 and out.strip():
             stale.append({"repo": pth, "lines": out.strip().splitlines()})
     item("git worktree prune", "run" if stale else "skip", None if stale else f"nothing stale in {len(parents)} repos",
          repos=stale)
-    protect_cache_items(items)
+    if not consume:
+        protect_cache_items(items)
     return {"items": items}
 
 
@@ -1748,10 +1856,103 @@ def gzip_session(ctx: Ctx, f: dict):
 NUGET_PROCS = ["dotnet", "MSBuild", "VBCSCompiler"]
 
 
+def apply_nuget_paths(ctx, it):
+    res = {"deleted": 0, "failed": 0, "skipped": 0, "recovered": 0}
+    cutoff = ctx.now - ctx.args.nuget_age_days * 86400
+    root_real = os.path.realpath(NUGET_PACKAGES)
+    ids = set()
+    for tp in ctx.items(find_nuget_trash(root_real) if it.get("recover_trash", True) else []):
+        try:
+            shutil.rmtree(tp)
+            res["recovered"] += 1
+        except Exception as e:
+            res["failed"] += 1
+            res["first_error"] = res.get("first_error") or f"{tp}: {str(e)[:100]}"
+    for vd in ctx.items(it["paths"]):
+        reason = retained_reason(vd)
+        ok, _ = nuget_eligible(vd, cutoff, root_real)
+        if reason or not ok:
+            res["skipped"] += 1
+            if reason:
+                it.setdefault("retained", []).append({"path": vd, "reason": reason})
+            continue
+        r = trash_remove(vd, cutoff)
+        if r == "deleted":
+            res["deleted"] += 1
+        elif r == "skipped":
+            res["skipped"] += 1
+        else:
+            res["failed"] += 1
+            res["first_error"] = res.get("first_error") or r
+        ids.add(os.path.dirname(vd))
+    for idp in ctx.items(ids):
+        try:
+            if not retained_reason(idp) and statmod.S_ISDIR(os.lstat(idp).st_mode):
+                os.rmdir(idp)  # only succeeds when empty
+        except OSError:
+            pass
+    it["result"] = res
+
+
+def scheduled_nuget_versions(ctx):
+    """List version identities only; expensive checks happen in rotating order."""
+    versions = []
+    try:
+        ids = sorted(os.listdir(NUGET_PACKAGES))
+    except OSError:
+        return versions
+    for pid in ids:
+        idp = os.path.join(NUGET_PACKAGES, pid)
+        try:
+            if not statmod.S_ISDIR(os.lstat(idp).st_mode):
+                continue
+            valid = nuget_valid_versions(idp, os.listdir(idp))
+        except OSError:
+            continue
+        newest = nuget_newest(valid, ctx.args.nuget_keep_versions)
+        versions.extend((os.path.join(idp, version), version in newest) for version in valid)
+    return rotation_order("nuget", versions, key=lambda item: item[0])
+
+
+def apply_scheduled_nuget(ctx, it):
+    recovery = {"paths": []}
+    apply_nuget_paths(ctx, recovery)
+    it["result"] = recovery["result"]
+    if not ctx.ready():
+        return
+    root_real = os.path.realpath(NUGET_PACKAGES)
+    cutoff = ctx.now - ctx.args.nuget_age_days * 86400
+    kept_local, local_bytes = 0, 0
+    for vd, protected in ctx.items(scheduled_nuget_versions(ctx)):
+        ok, local, size = nuget_check(vd, 0.0 if protected else cutoff, root_real)
+        if local:
+            kept_local += 1
+            local_bytes += tree_usage(vd)[1]
+        if ok and not protected:
+            batch = {"paths": [vd], "recover_trash": False}
+            # Finish this version's re-check and deletion before advancing the cursor.
+            # The outer iterator is the deadline boundary for this single item.
+            deadline, ctx.deadline = ctx.deadline, None
+            try:
+                apply_nuget_paths(ctx, batch)
+            finally:
+                ctx.deadline = deadline
+            it["paths"].append(vd)
+            it["size"] += size
+            for key, value in batch["result"].items():
+                if key == "first_error":
+                    it["result"].setdefault(key, value)
+                else:
+                    it["result"][key] += value
+            it.setdefault("retained", []).extend(batch.get("retained", []))
+        rotation_advance("nuget", vd, ctx.deadline.notes)
+    it["note"] = f"{kept_local} local/other-source versions never touched ({human(local_bytes)})"
+
+
 def apply_caches(ctx: Ctx, plan):
     protect_cache_items(plan["items"])
     ctx.snap = take_snapshot()  # refreshed open-file view, used below
-    for it in plan["items"]:
+    for it in ctx.items(plan["items"]):
         if it["action"] != "run":
             continue
         n = it["name"]
@@ -1775,46 +1976,13 @@ def apply_caches(ctx: Ctx, plan):
             env = dict(ENV, GOCACHE=it["gocache"]) if it.get("gocache") else None
             rc, out, err = run(it["cmd"], timeout=300, env=env)
             it["result"] = "ok" if rc == 0 else f"failed: rc={rc} {(err.strip() or out.strip())[:120]}"
+        elif n == "nuget packages trim" and it.get("scheduled_trim"):
+            apply_scheduled_nuget(ctx, it)
         elif n == "nuget packages trim":
-            res = {"deleted": 0, "failed": 0, "skipped": 0}
-            cutoff = ctx.now - ctx.args.nuget_age_days * 86400
-            root_real = os.path.realpath(NUGET_PACKAGES)
-            ids = set()
-            res["recovered"] = 0
-            for tp in find_nuget_trash(root_real):
-                try:
-                    shutil.rmtree(tp)
-                    res["recovered"] += 1
-                except Exception as e:
-                    res["failed"] += 1
-                    res["first_error"] = res.get("first_error") or f"{tp}: {str(e)[:100]}"
-            for i, vd in enumerate(it["paths"]):
-                reason = retained_reason(vd)
-                ok, _ = nuget_eligible(vd, cutoff, root_real)
-                if reason or not ok:
-                    res["skipped"] += 1
-                    if reason:
-                        it.setdefault("retained", []).append({"path": vd, "reason": reason})
-                    continue
-                r = trash_remove(vd, cutoff)
-                if r == "deleted":
-                    res["deleted"] += 1
-                elif r == "skipped":
-                    res["skipped"] += 1
-                else:
-                    res["failed"] += 1
-                    res["first_error"] = res.get("first_error") or r
-                ids.add(os.path.dirname(vd))
-            for idp in ids:
-                try:
-                    if not retained_reason(idp) and statmod.S_ISDIR(os.lstat(idp).st_mode):
-                        os.rmdir(idp)  # only succeeds when empty
-                except OSError:
-                    pass
-            it["result"] = res
+            apply_nuget_paths(ctx, it)
         elif n == "pi session gzip":
             res = {"gzipped": 0, "skipped": 0, "failed": 0, "saved": 0}
-            for f in it["files"]:
+            for f in ctx.items(it["files"]):
                 r = gzip_session(ctx, f)
                 if r == "gzipped":
                     res["gzipped"] += 1
@@ -1830,7 +1998,7 @@ def apply_caches(ctx: Ctx, plan):
             it["result"] = res
         elif n == "git worktree prune":
             res = {"pruned": 0, "failed": 0}
-            for r in it["repos"]:
+            for r in ctx.items(it["repos"]):
                 reason = prune_retention(r["repo"])
                 if reason:
                     it.setdefault("retained", []).append({"path": r["repo"], "reason": reason})
@@ -2157,7 +2325,10 @@ def render_text(rep):
 def write_log(rep):
     os.makedirs(LOG_DIR, exist_ok=True)
     head = f"=== {datetime.now():%Y-%m-%d %H:%M:%S} pi-cleanup --scheduled exit={rep['exit']} runtime={rep['runtime_s']:.0f}s"
-    body = "\n".join([head] + [f"  {x}" for x in build_summary_lines(rep)] + [""])
+    body = "\n".join([head] + [f"  {x}" for x in build_summary_lines(rep)]
+                     + [f"  {note}" for note in rep["notes"] if note.startswith("step ")
+                        or note.startswith("docker unresponsive")]
+                     + [""])
     with open(LOG_FILE, "a") as f:
         f.write(body + "\n")
     trim_log()
@@ -2377,7 +2548,11 @@ def dry_run(args, rep, t0, budget):
         print(render_text(rep).split("\n\n", 1)[0], flush=True)
     ctx = Ctx(args)
     extend_path()
-    ctx.docker_up = budget.measure("docker state", 2, docker_running, None)
+    docker_notes = []
+    ctx.docker_up, docker_notes = budget.measure("docker state", 2,
+        lambda: (docker_running(docker_notes), docker_notes), (None, []))
+    rep["notes"].extend(docker_notes)
+    ctx.docker_unresponsive = bool(docker_notes)
     snapshot = budget.measure("process snapshot", 4, lambda: snapshot_parts(take_snapshot()), None)
     ctx.snap = snapshot_from_parts(snapshot) if snapshot is not None else None
     checkout_data, notes = budget.measure("discovery", 9, lambda: dry_discover(rep["roots"]), ([], []))
@@ -2474,6 +2649,9 @@ def parse_args(argv):
     ap.add_argument("--roots", nargs="+", default=None, metavar="PATH")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--scheduled", action="store_true")
+    for step, seconds in STEP_SECONDS.items():
+        ap.add_argument(f"--{step}-step-seconds", type=budget_seconds, default=seconds,
+                        help=f"scheduled {step} deadline (default {seconds} seconds)")
     a = ap.parse_args(argv)
     steps = [s.strip() for s in a.only.split(",") if s.strip()]
     bad = [s for s in steps if s not in STEPS_ALL]
@@ -2488,6 +2666,85 @@ def parse_args(argv):
         steps, a.apply = ["build", "docker", "caches", "worktrees", "bins"], True
     a.steps = [s for s in STEPS_ALL if s in steps]
     return a
+
+
+class StepDeadlineReached(Exception):
+    pass
+
+
+def scheduled_bins(ctx, checkouts, probe):
+    """Adapt the bin sweep's deletion callback without changing its safety checks."""
+    namespace = BIN_SWEEP["sweep"].__globals__
+    original = namespace["delete_candidate"]
+
+    def delete_between_items(path, remove):
+        if not ctx.ready():
+            raise StepDeadlineReached()
+        result = original(path, remove)
+        ctx.deadline.count += 1
+        return result
+
+    rows = []
+    namespace["delete_candidate"] = delete_between_items
+    try:
+        for checkout in ctx.items(c for c in checkouts if c.exists):
+            try:
+                remaining = max(0, ctx.deadline.end - time.monotonic())
+                rows.extend(BIN_SWEEP["sweep"]([checkout.path], probe, True, budget=min(60, remaining)))
+            except StepDeadlineReached:
+                rows.append({"path": checkout.path, "action": "skipped", "bytes": 0, "bytes_freed": 0,
+                             "reason": "step deadline (partial root; continues next run)"})
+                break
+    finally:
+        namespace["delete_candidate"] = original
+    return rows
+
+
+def scheduled_steps(ctx, checkouts, notes, rep):
+    """Plan and apply together so planning cannot starve deletion of its budget."""
+    by_path = {c.path: c for c in checkouts}
+    wt_rows, build_rows, docker_plan, caches_plan = [], [], None, None
+    queued = set()
+    # Worktree removal first retains the rule that build purge skips queued roots.
+    for name in ("worktrees", "build", "docker", "caches", "bins"):
+        if name not in ctx.args.steps:
+            continue
+        ctx.deadline = StepDeadline(name, getattr(ctx.args, name + "_step_seconds"), notes)
+        progress(f"{name}: starting scheduled step")
+        if name == "worktrees":
+            for checkout in ctx.items(c for c in checkouts if c.kind == "linked"):
+                rows = plan_worktrees(ctx, [checkout], notes)
+                if ctx.ready():
+                    measure_sizes(rows)
+                failed = apply_worktrees(ctx, rows, by_path)
+                wt_rows.extend(rows)
+                queued.update(r["path"] for r in rows if r["action"] in ("remove", "removed"))
+                if failed:
+                    rep["errors"].append(f"worktree removal failed, worktree processing stopped: {failed['path']}: {failed['result']}")
+                    break
+        elif name == "build":
+            ordered = rotation_order("build", checkouts, key=lambda c: c.path)
+            for checkout in ctx.items(ordered):
+                row = plan_root_build(ctx, checkout, queued)
+                apply_build(ctx, [row], by_path)
+                build_rows.append(row)
+                rotation_advance("build", checkout.path, notes)
+        elif name == "docker":
+            if ctx.ready():
+                docker_plan = plan_docker(ctx)
+                apply_docker(ctx, docker_plan)
+        elif name == "caches":
+            if ctx.ready():
+                caches_plan = plan_caches(ctx, checkouts, consume=lambda batch: apply_caches(ctx, batch))
+        else:
+            def probe(cmd, timeout=10):
+                rc, out, _ = run(cmd, timeout=timeout)
+                return out if rc == 0 else None
+            rep["steps"]["bins"] = {"rows": scheduled_bins(ctx, checkouts, probe)}
+        ctx.deadline.ready()
+        progress(f"{name}: scheduled step done")
+    ctx.deadline = None
+    return wt_rows, build_rows, docker_plan, caches_plan
 
 
 def free_space_probes(args):
@@ -2598,8 +2855,9 @@ def main(argv=None):
         if "caches" in args.steps:
             extend_path()
         if "docker" in args.steps or need_fs:
-            ctx.docker_up = docker_running()
-        if not ctx.docker_up:
+            ctx.docker_up = docker_running(notes)
+            ctx.docker_unresponsive = any(note.startswith("docker unresponsive") for note in notes)
+        if not ctx.docker_up and not any(note.startswith("docker unresponsive") for note in notes):
             notes.append("docker is not running: docker step skipped, container mounts not checked")
 
         if need_fs:
@@ -2615,7 +2873,7 @@ def main(argv=None):
             if ctx.docker_up:
                 ctx.mounts = PathSet(docker_mounts_all())
 
-        if "bins" in args.steps:
+        if "bins" in args.steps and not args.scheduled:
             if not need_fs:
                 checkouts = discover(roots, notes)
             def bin_probe(cmd, timeout=10):
@@ -2632,27 +2890,39 @@ def main(argv=None):
         if os.path.isdir(nuget):
             nuget_f = pool.submit(du_bytes, os.path.realpath(nuget), 30)
 
-        wt_rows = []
-        queued = set()
-        if "worktrees" in args.steps:
-            wt_rows = plan_worktrees(ctx, checkouts, notes)
-            queued = {r["path"] for r in wt_rows if r["action"] == "remove"}
-            progress(f"worktrees planned: {len(queued)} removable of {len(wt_rows)}")
-        build_rows = []
-        if "build" in args.steps:
-            build_rows = plan_build(ctx, checkouts, queued)
-            progress("build planned")
-        docker_plan = plan_docker(ctx) if "docker" in args.steps else None
-        if docker_plan is not None:
-            progress("docker planned")
-        caches_plan = None
-        if "caches" in args.steps:
-            caches_plan = plan_caches(ctx, checkouts)
-            progress("caches planned")
-        if wt_rows:
-            progress("worktree sizes: measuring")
-            measure_sizes(wt_rows)
-            progress("worktree sizes: done")
+        if args.scheduled:
+            # Capture filesystem baselines before the item-at-a-time apply path.
+            scheduled_fs = {}
+            for path in [os.path.expanduser("~")] + [c.path for c in checkouts if c.exists]:
+                dev, real = fs_key(path)
+                if dev not in scheduled_fs:
+                    info = df_free(real)
+                    if info:
+                        scheduled_fs[dev] = {"mount": info["mount"], "before": info["free"], "probe": real}
+            wt_rows, build_rows, docker_plan, caches_plan = scheduled_steps(ctx, checkouts, notes, rep)
+            failures += sum(r["action"] == "failed" for r in rep["steps"].get("bins", {}).get("rows", []))
+        else:
+            wt_rows = []
+            queued = set()
+            if "worktrees" in args.steps:
+                wt_rows = plan_worktrees(ctx, checkouts, notes)
+                queued = {r["path"] for r in wt_rows if r["action"] == "remove"}
+                progress(f"worktrees planned: {len(queued)} removable of {len(wt_rows)}")
+            build_rows = []
+            if "build" in args.steps:
+                build_rows = plan_build(ctx, checkouts, queued)
+                progress("build planned")
+            docker_plan = plan_docker(ctx) if "docker" in args.steps else None
+            if docker_plan is not None:
+                progress("docker planned")
+            caches_plan = None
+            if "caches" in args.steps:
+                caches_plan = plan_caches(ctx, checkouts)
+                progress("caches planned")
+            if wt_rows:
+                progress("worktree sizes: measuring")
+                measure_sizes(wt_rows)
+                progress("worktree sizes: done")
 
         # df before, for every filesystem that any planned action touches
         touched = {os.path.expanduser("~")} if docker_plan and not docker_plan.get("skip") else set()
@@ -2660,8 +2930,8 @@ def main(argv=None):
             touched.add(os.path.expanduser("~"))
         touched |= {r["path"] for r in build_rows if any(d["action"] == "delete" for d in r["dirs"])}
         touched |= {r["path"] for r in wt_rows if r["action"] == "remove"}
-        fs = {}
-        for p in sorted(touched):
+        fs = scheduled_fs if args.scheduled else {}
+        for p in ([] if args.scheduled else sorted(touched)):
             dev, real = fs_key(p)
             if dev not in fs:
                 info = df_free(real)
@@ -2669,7 +2939,7 @@ def main(argv=None):
                     fs[dev] = {"mount": info["mount"], "before": info["free"], "probe": real}
         rep["df"] = list(fs.values())
 
-        if args.apply:
+        if args.apply and not args.scheduled:
             if "build" in args.steps:
                 progress("applying build purge")
                 apply_build(ctx, build_rows, by_path)
@@ -2684,9 +2954,9 @@ def main(argv=None):
             if caches_plan is not None:
                 progress("applying caches cleanup")
                 apply_caches(ctx, caches_plan)
-            for f in fs.values():
-                info = df_free(f["probe"])
-                f["after"] = info["free"] if info else None
+        for f in fs.values():
+            info = df_free(f["probe"])
+            f["after"] = info["free"] if info else None
 
         # step reports
         if "build" in args.steps:
