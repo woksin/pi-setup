@@ -210,16 +210,28 @@ class FetchFailureTests(RepoFixture):
             return real(args, *a, **kw)
         return patch.object(cleanup, 'git', side_effect=fake), calls
 
-    def test_failed_fetch_falls_back_to_existing_refs_for_a_merged_worktree(self):
+    def test_failed_fetch_never_lets_a_stale_ref_prove_a_worktree_merged(self):
+        """The default branch may have been rewound on the remote: the stale local ref still contains this HEAD."""
         ctx = self.context('--apply')
         notes = []
         patcher, _ = self.failing_fetch()
-        with patcher:
+        with patcher, patch.object(cleanup, 'merged_pr', return_value=(None, '')):
             rows = cleanup.plan_worktrees(ctx, self.checkouts, notes)
+        self.assertEqual(rows[0]['action'], 'keep')
+        self.assertTrue(any(b.startswith('fetch-failed(') for b in rows[0]['blockers']), rows[0]['blockers'])
+        self.assertIn(f"fetch failed for {self.main}: timeout; default-branch proof unavailable, merged PRs only", notes)
+
+    def test_failed_fetch_still_removes_a_worktree_with_a_merged_pr(self):
+        ctx = self.context('--apply')
+        patcher, _ = self.failing_fetch()
+        with patcher, patch.object(cleanup, 'merged_pr', return_value=('https://example.invalid/pr/1', '')):
+            rows = cleanup.plan_worktrees(ctx, self.checkouts, [])
+        self.assertEqual((rows[0]['action'], rows[0]['basis']), ('remove', 'merged-pr'))
+
+    def test_successful_fetch_still_accepts_the_default_branch_as_proof(self):
+        rows = cleanup.plan_worktrees(self.context('--apply'), self.checkouts, [])
         self.assertEqual(rows[0]['action'], 'remove')
-        self.assertIn('refs not refreshed', rows[0]['basis'])
-        self.assertIn(f"fetch failed for {self.main}: timeout; using existing remote refs", notes)
-        self.assertNotIn('fetch-failed', rows[0]['blockers'])
+        self.assertTrue(rows[0]['basis'].startswith('on-default'))
 
     def test_failed_fetch_keeps_an_unmerged_worktree(self):
         g(self.wt, 'commit', '-q', '--allow-empty', '-m', 'unmerged work')

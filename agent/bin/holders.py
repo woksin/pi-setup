@@ -109,7 +109,7 @@ def _lsof_outputs(timeout, runner):
         f_cwd = ex.submit(runner, ["lsof", "-nP", "-d", "cwd", "-FpRcn"], timeout)
         results = [f_all.result(), f_cwd.result()]
     for rc, out, err in results:
-        if rc in (124, 126, 127) or not out:
+        if rc != 0 or not out:  # non-zero with output is partial (unreadable pids, timeouts): unknown, never free
             raise SnapshotError(f"lsof failed (rc={rc}): {err.strip()[:200]}")
     return results[0][1], results[1][1]
 

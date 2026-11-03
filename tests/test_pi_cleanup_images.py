@@ -52,7 +52,7 @@ class Docker:
         return [c for c in self.calls if c[:2] == ['docker', 'rmi']]
 
 
-class DevImageTests(unittest.TestCase):
+class ImageCase(unittest.TestCase):
     def setUp(self):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
@@ -78,6 +78,8 @@ class DevImageTests(unittest.TestCase):
     def image(self, tag='cratis/chronicle:19.114.0-development', created=30, last=3, iid='sha256:a', digests=()):
         return (iid, tag if isinstance(tag, list) else [tag], created, last, list(digests))
 
+
+class DevImageTests(ImageCase):
     def test_a_unused_dev_tag_older_than_two_days_is_a_candidate(self):
         cands, kept, err = self.plan(Docker([self.image(created=3)]))
         self.assertIsNone(err)
@@ -151,10 +153,11 @@ class DevImageTests(unittest.TestCase):
     def test_i_old_created_but_recent_tag_is_kept(self):
         self.assertEqual(self.plan(Docker([self.image(created=400, last=1)]))[0], [])
 
-    def test_j_zero_last_tag_time_falls_back_to_created(self):
-        zero = '0001-01-01T00:00:00Z'
-        self.assertEqual(self.ids(self.plan(Docker([self.image(created=3, last=zero)]))[0]), ['sha256:a'])
-        self.assertEqual(self.plan(Docker([self.image(created=1, last=zero)]))[0], [])
+    def test_j_unknown_last_tag_time_keeps_the_image(self):
+        """A pulled image has no tag time and an old Created: its age is unknown, so it is never a dev candidate."""
+        for last in ('0001-01-01T00:00:00Z', '', 'garbage'):
+            with self.subTest(last=last):
+                self.assertEqual(self.plan(Docker([self.image(created=30, last=last)]))[0], [])
 
     def test_k_multi_tag_image_is_one_candidate_and_apply_untags_each_ref_without_force(self):
         tags = ['cratis/chronicle:local-development', 'cratis/chronicle:latest-development']
@@ -234,6 +237,102 @@ class DevImageTests(unittest.TestCase):
     def test_dev_flag_default_and_validation(self):
         self.assertEqual(cleanup.parse_args([]).dev_image_age_days, 2)
         self.assertEqual(cleanup.parse_args(['--dev-image-age-days', '0.5']).dev_image_age_days, 0.5)
+
+
+DIGEST_A = 'sha256:' + 'a' * 64
+DIGEST_B = 'sha256:' + 'b' * 64
+
+
+class UnresolvedReferenceTests(ImageCase):
+    """A Dockerfile/compose reference that does not name one literal repo:tag protects fail-closed."""
+
+    def planned(self, grep_out, image=None, **kw):
+        image = image or self.image('cratis/chronicle:19.114.0-development', created=30, last=30,
+                                    digests=['cratis/chronicle@' + DIGEST_A])
+        docker = Docker([image], grep=(0, grep_out, ''))
+        return self.plan(docker, **kw), docker
+
+    def assert_protected(self, grep_out, image=None):
+        (cands, kept, err), _ = self.planned(grep_out, image)
+        self.assertEqual((cands, err), ([], None))
+        self.assertEqual(len(kept), 1, kept)
+        self.assertIn('Dockerfile/compose', kept[0]['reason'])
+
+    def test_tagless_reference_protects_every_tag_of_the_repository(self):
+        for line in ('cratis/chronicle\n', 'ghcr.io/cratis/chronicle\n', 'cratis/chronicle:latest\n', 'docker.io/cratis/chronicle:latest\n'):
+            with self.subTest(line=line):
+                self.assert_protected(line)
+                self.assert_protected(line, self.image('cratis/chronicle:4.210.2', created=30, last=30))  # general rule too
+
+    def test_variable_tag_protects_every_tag_of_the_repository(self):
+        for line in ('cratis/chronicle:${VERSION}\n', 'cratis/chronicle:$VERSION\n', 'cratis/chronicle:${V:-1.0}\n',
+                     'cratis/chronicle:1.0-${SUFFIX}\n'):
+            with self.subTest(line=line):
+                self.assert_protected(line)
+
+    def test_digest_reference_protects_only_the_image_with_that_digest(self):
+        self.assert_protected('cratis/other@' + DIGEST_A + '\n')  # digest match, whatever the repo/tag
+        (cands, kept, _), _ = self.planned('cratis/chronicle@' + DIGEST_B + '\n')
+        self.assertEqual((len(cands), kept), (1, []))  # a different digest does not protect it
+        self.assert_protected('cratis/chronicle:1.0@' + DIGEST_A + '\n')
+
+    def test_unparsable_repository_protects_by_literal_prefix(self):
+        for line in ('cratis/${NAME}:1\n', 'ghcr.io/cratis/chron${X}:1\n', 'cratis/Chronicle:1\n', 'cratis/\n'):
+            with self.subTest(line=line):
+                self.assert_protected(line)
+
+    def test_unrelated_repository_is_not_protected_by_a_variable_reference(self):
+        (cands, kept, _), _ = self.planned('cratis/other:${VERSION}\n')
+        self.assertEqual((len(cands), kept), (1, []))
+
+    def test_general_age_rule_keeps_a_referenced_old_release_image(self):
+        image = self.image('cratis/stage:4.210.2', created=30, last=30)
+        (cands, kept, _), _ = self.planned('cratis/stage:4.210.2\n', image)
+        self.assertEqual((cands, len(kept)), ([], 1))
+        (cands, kept, _), _ = self.planned('cratis/other:1.0.0\n', image)
+        self.assertEqual((len(cands), kept), (1, []))
+
+    def test_failed_scan_skips_every_cratis_removal_but_not_foreign_images(self):
+        images = [self.image('cratis/stage:4.210.2', created=30, last=30), self.image(created=30, iid='sha256:d'),
+                  self.image('mongo:7', created=30, last=30, iid='sha256:m')]
+        docker = Docker(images)
+        with patch.object(cleanup, 'run', side_effect=docker):
+            cands, kept, err = cleanup.plan_rmi(7, None, 2, None)
+        self.assertEqual((self.ids(cands), kept, err), (['sha256:m'], [], None))
+        with patch.object(cleanup, 'run', side_effect=docker):
+            cands, _, _ = cleanup.plan_rmi(7)  # no scan result at all
+        self.assertEqual(self.ids(cands), ['sha256:m'])
+
+    def test_scan_includes_untracked_files(self):
+        _, docker = self.planned('')
+        scan = next(c for c in docker.calls if c[:2] == ['git', 'grep'])
+        self.assertIn('--untracked', scan)
+
+
+class RealScanTests(ImageCase):
+    """The real git grep + parser over files on disk (no fake runner)."""
+
+    def scan(self, **files):
+        import subprocess
+        repo = self.state / 'repo'
+        repo.mkdir()
+        env = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull}
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True, env=env)
+        for name, text in files.items():
+            (repo / name.replace('__', '/')).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name.replace('__', '/')).write_text(text)
+        refs, error = cleanup.dockerfile_refs([type('C', (), {'path': str(repo), 'exists': True})()])
+        self.assertIsNone(error)
+        return refs
+
+    def test_untracked_dockerfile_forms_all_protect(self):
+        refs = self.scan(Dockerfile='FROM cratis/chronicle AS base\nFROM cratis/web:${VERSION}\nFROM cratis/api@' + DIGEST_A + '\n',
+                         **{'docker__compose.yml': 'services:\n  a:\n    image: "ghcr.io/cratis/stage:$TAG"\n  b:\n    image: cratis/pinned:1.2.3\n'})
+        for tag in ('cratis/chronicle:1.0-development', 'cratis/web:9.9', 'cratis/stage:x', 'cratis/pinned:1.2.3'):
+            self.assertTrue(refs.protecting([tag], []), tag)
+        self.assertTrue(refs.protecting([], ['cratis/api@' + DIGEST_A]))
+        self.assertIsNone(refs.protecting(['cratis/pinned:9.9.9'], []))
+        self.assertIsNone(refs.protecting(['cratis/unrelated:1'], []))
 
 
 if __name__ == '__main__':

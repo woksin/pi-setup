@@ -299,7 +299,7 @@ def take_snapshot() -> PathSet:
     paths: set = set()
     cwds: set = set()
     for (rc, out, err), into in zip(results, (paths, cwds)):
-        if rc in (124, 126, 127) or not out:
+        if rc != 0 or not out:  # non-zero with output is partial (unreadable pids, timeouts): unknown, never free
             raise SnapshotError(f"lsof failed (rc={rc}): {err.strip()[:200]}")
         _parse_lsof(out, me, into)
     paths |= cwds
@@ -918,11 +918,12 @@ def plan_worktrees(ctx: Ctx, checkouts, notes):
             for parent, rc, err in ex.map(fetch, todo):
                 ctx.fetched[parent] = (rc, err)
                 if rc != 0:
-                    notes.append(f"fetch failed for {parent}: {err}; using existing remote refs")
+                    notes.append(f"fetch failed for {parent}: {err}; default-branch proof unavailable, merged PRs only")
         fetched = {parent: ctx.fetched[parent] for parent in parents}
     else:
         notes.append("remote refs not refreshed (dry run)")
-    # A failed fetch only leaves older remote refs: an ancestry check against them can under-report merges, never over-report.
+    # A failed fetch leaves remote refs that may be stale (e.g. a rewound default branch still contains commits the
+    # remote has dropped), so "on the default branch" is NOT accepted as proof of merged then; a merged PR still is.
     refs = {p: default_ref(p) for p in parents}
 
     def merge(r):
@@ -938,7 +939,8 @@ def plan_worktrees(ctx: Ctx, checkouts, notes):
             r["blockers"].append("merge-check-failed")
             return
         ahead = int(out.strip() or -1)
-        if ahead == 0:
+        stale = fetched[parent][0] != 0
+        if ahead == 0 and not stale:
             r["basis"] = f"on-default ({ref})"
             return
         if r["branch"]:
@@ -949,14 +951,13 @@ def plan_worktrees(ctx: Ctx, checkouts, notes):
                 return
             if note:
                 r["note"] = note
-        r["blockers"].append(f"unmerged({ahead} ahead of {ref})")
+        r["blockers"].append(f"fetch-failed(stale {ref} cannot prove merged)" if ahead == 0
+                             else f"unmerged({ahead} ahead of {ref})")
 
     with ThreadPoolExecutor(POOL) as ex:
         list(ex.map(merge, rows))
     for r in rows:
         r["action"] = "keep" if r["blockers"] else "remove"
-        if not r["blockers"] and r["parent"] in fetched and fetched[r["parent"]][0] != 0:
-            r["basis"] = f"{r['basis']} (refs not refreshed)"
     return rows
 
 
@@ -1112,7 +1113,10 @@ def pinned_by(pins: list, iid: str, tags: list, digests: list):
 
 DEV_TAG = re.compile(r"^(?:(?:ghcr\.io|docker\.io)/)?cratis/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*:[A-Za-z0-9._-]+$")
 RELEASE_TAG = re.compile(r"^v?\d+(?:\.\d+){1,3}$")
-REF_PATTERN = r"(ghcr\.io/|docker\.io/)?cratis/[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+"
+REF_PATTERN = r"(ghcr\.io/|docker\.io/)?cratis/[^[:space:]\"'`,;)]*"  # every cratis/ token, resolvable or not
+DIGEST = re.compile(r"@(sha256:[0-9a-f]{64})$")
+LITERAL_REPO = re.compile(r"^cratis/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$")
+LITERAL_TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 REF_PATHSPECS = [":(glob)**/Dockerfile*", ":(glob)**/*.Dockerfile", ":(glob)**/*compose*.yml", ":(glob)**/*compose*.yaml"]
 
 
@@ -1124,19 +1128,64 @@ def image_key(ref: str) -> str:
     return ref
 
 
+class ImageRefs:
+    """What tracked Dockerfile/compose files protect. Fail closed: anything that does not name one literal
+    repo:tag protects every tag of the repository (or, if even the repository is unresolved, of every
+    repository with the same literal prefix); a digest reference protects the image with that digest."""
+
+    def __init__(self, tokens=()):
+        self.exact, self.repos, self.prefixes, self.digests = set(), set(), set(), set()
+        for token in tokens:
+            self.add(token)
+
+    def add(self, token):
+        ref = image_key(token)
+        digest = DIGEST.search(ref)
+        if digest:
+            self.digests.add(digest.group(1))
+            ref = ref[:digest.start()]
+            if LITERAL_REPO.match(ref):
+                return  # repo@sha256:...: the digest alone identifies the image
+        named_tag = ":" in ref.rsplit("/", 1)[-1]
+        repo, tag = ref.rsplit(":", 1) if named_tag else (ref, "")
+        if not LITERAL_REPO.match(repo):
+            self.prefixes.add((re.split(r"[^A-Za-z0-9._/-]", repo, maxsplit=1)[0] or "cratis/").lower())
+        elif not named_tag or tag == "latest" or not LITERAL_TAG.match(tag):
+            self.repos.add(repo)
+        else:
+            self.exact.add(f"{repo}:{tag}")
+
+    def protecting(self, tags, digests):
+        """Why this image (tags, RepoDigests) is protected, or None."""
+        for digest in digests:
+            if digest.rsplit("@", 1)[-1] in self.digests:
+                return "digest referenced by Dockerfile/compose"
+        for tag in tags:
+            key = image_key(tag)
+            repo = key.rsplit(":", 1)[0] if ":" in key.rsplit("/", 1)[-1] else key
+            if key in self.exact or repo in self.repos or any(repo.lower().startswith(x) for x in self.prefixes):
+                return "referenced by Dockerfile/compose"
+        return None
+
+
+def is_cratis(tags, digests=()):
+    return any(image_key(r).startswith("cratis/") for r in (*tags, *digests))
+
+
 def dev_shaped(tags: list) -> bool:
     """Every tag is a cratis/* image tag and none is a plain release version."""
     return bool(tags) and all(DEV_TAG.match(t) and not RELEASE_TAG.match(t.rsplit(":", 1)[1]) for t in tags)
 
 
-def tag_time(last_tag: str, created: str):
-    """Epoch of the last tagging, falling back to Created when it is missing, zero or before 1970."""
+def tag_time(last_tag: str):
+    """Epoch of the last tagging, or None when missing, zero or before 1970 (a pulled image: Created says nothing
+    about when it arrived, so the age is unknown and the image is kept)."""
     try:
         value = json.loads(last_tag)
     except ValueError:
         value = last_tag
     ts = parse_ts(value) if isinstance(value, str) else None
-    return ts if ts is not None and ts > 0 else parse_ts(created)
+    return ts if ts is not None and ts > 0 else None
 
 
 def dockerfile_refs(checkouts, deadline=None):
@@ -1144,21 +1193,23 @@ def dockerfile_refs(checkouts, deadline=None):
     Any scan failure returns an error, because an incomplete reference set must never allow removals."""
     paths = [c.path for c in checkouts if c.exists]
     if not paths:
-        return set(), "no checkouts known"
+        return ImageRefs(), "no checkouts known"
 
     def scan(path):
         if deadline and not deadline.ready():
             return None, "step deadline"
-        rc, out, err = run(["git", "grep", "-I", "-h", "-o", "-E", REF_PATTERN, "--", *REF_PATHSPECS], cwd=path, timeout=15)
+        rc, out, err = run(["git", "grep", "--untracked", "-I", "-h", "-o", "-E", REF_PATTERN, "--", *REF_PATHSPECS],
+                           cwd=path, timeout=15)
         if rc == 1:
             return set(), ""
         return (set(out.split()), "") if rc == 0 else (None, f"{path}: rc={rc}")
-    refs = set()
+    refs = ImageRefs()
     with ThreadPoolExecutor(POOL) as ex:
         for found, error in ex.map(scan, paths):
             if found is None:
-                return set(), f"repo reference scan failed: {error}"
-            refs |= {image_key(r) for r in found}
+                return ImageRefs(), f"repo reference scan failed: {error}"
+            for token in found:
+                refs.add(token)
     return refs, None
 
 
@@ -1167,6 +1218,8 @@ def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None):
     With dev_age_days and refs (the tracked Dockerfile/compose references), unused unpinned unreferenced
     cratis/* images without a release tag age out by tag time after dev_age_days (item["dev"], item["refs"])."""
     dev_on = dev_age_days is not None and refs is not None
+    if refs is not None and not isinstance(refs, ImageRefs):
+        refs = ImageRefs(refs)  # plain reference strings
     dev_cutoff = time.time() - (dev_age_days or 0) * 86400
     try:
         pins = docker_pins()
@@ -1216,9 +1269,11 @@ def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None):
                     "age_days": None if ts is None else round((time.time() - ts) / 86400, 1)}
             if iid in used_ids or any(t in used_names for t in tags):
                 continue  # in use: not a candidate, not worth listing
+            if is_cratis(tags, digests) and refs is None:
+                continue  # reference scan unavailable: never remove cratis images (fail closed)
             dev = dev_on and dev_shaped(tags)
             if dev:
-                tagged = tag_time(last_tag, created)
+                tagged = tag_time(last_tag)
                 if tagged is None or tagged > dev_cutoff:
                     continue
                 item["age_days"] = round((time.time() - tagged) / 86400, 1)
@@ -1228,8 +1283,8 @@ def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None):
             if pin:
                 item["reason"] = f"pinned: {pin}"
                 kept.append(item)
-            elif dev and any(image_key(t) in refs for t in tags):
-                item["reason"] = "referenced by Dockerfile/compose"
+            elif refs is not None and (why := refs.protecting(tags, digests)):
+                item["reason"] = why
                 kept.append(item)
             elif dev:
                 item.update(dev=True, refs=list(tags))

@@ -88,6 +88,17 @@ class HolderSpecs(HoldersCase):
                 self.assertEqual(code, 3)
                 self.assertIn('inspection failed', err)
 
+    def test_partial_lsof_output_is_unknown_never_free(self):
+        """lsof exits non-zero with partial output when it cannot read some processes: that is unknown, not clear."""
+        clear = self.proc(1, 'launchd', '/')
+        for canned in ({'rc': 1, 'everything': clear, 'cwds': clear}, {'cwd_rc': 1, 'everything': clear, 'cwds': clear},
+                       {'rc': 2, 'everything': self.proc(7, 'x', self.root)}, {'cwd_rc': 1, 'everything': clear, 'cwds': clear}):
+            with self.subTest(canned=canned):
+                code, out, err = self.main('--json', str(self.target), **canned)
+                self.assertEqual(code, 3)
+                self.assertEqual(json.loads(out)['status'], 'error')
+                self.assertIn('inspection failed', err)
+
     def test_f_own_pid_and_children_are_excluded(self):
         me = os.getpid()
         everything = (self.proc(me, 'python', self.file) + self.proc(555, 'lsof', self.file, parent=me)
@@ -134,6 +145,19 @@ class HolderSpecs(HoldersCase):
 
 
 class CleanupRuleSpecs(HoldersCase):
+    def test_pi_cleanup_snapshot_treats_partial_lsof_as_unavailable(self):
+        clear = 'p1\nn/\n'
+        for results in (((1, clear, 'permission denied'), (0, clear, '')), ((0, clear, ''), (1, clear, 'denied')),
+                        ((0, '', ''), (0, clear, '')), ((124, clear, 'timeout'), (0, clear, ''))):
+            with self.subTest(results=[r[0] for r in results]):
+                with patch.object(cleanup, 'run', side_effect=lambda cmd, *a, **k: results[1 if '-d' in cmd else 0]):
+                    with self.assertRaises(cleanup.SnapshotError):
+                        cleanup.take_snapshot()
+
+    def test_pi_cleanup_complete_lsof_is_accepted(self):
+        with patch.object(cleanup, 'run', side_effect=lambda *a, **k: (0, 'p1\nn/\n', '')):
+            self.assertIsNotNone(cleanup.take_snapshot())
+
     """pi-cleanup keeps its narrower rule; a true holder still blocks every kind of removal."""
 
     def snap(self, files=(), cwds=()):
