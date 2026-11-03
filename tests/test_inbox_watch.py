@@ -24,6 +24,32 @@ def matches(names, *args, env=None):
         return set(result.stdout.split())
 
 
+def moved_report(preexisting, moved):
+    """Arm the marker, then rename MOVED (old mtime) into the inbox; return reported names."""
+    with tempfile.TemporaryDirectory() as base:
+        inbox = Path(base, "inbox")
+        inbox.mkdir()
+        outside = Path(base, "sibling")
+        outside.mkdir()
+        old = time.time() - 3600
+        for name in preexisting:
+            path = inbox / name
+            path.write_text("x\n")
+            os.utime(path, (old, old))
+        env = {**os.environ, "INBOX_DIR": str(inbox)}
+        first = subprocess.run(["bash", str(SCRIPT), "L1"], env=env, capture_output=True, text=True)
+        assert first.returncode == 1, first.stderr
+        time.sleep(1.1)
+        for name in moved:
+            src = outside / name
+            src.write_text("x\n")
+            os.utime(src, (old, old))
+            os.rename(src, inbox / name)
+        result = subprocess.run(["bash", str(SCRIPT), "L1"], env=env, capture_output=True, text=True)
+        assert result.returncode in (0, 1), result.stderr
+        return set(result.stdout.split())
+
+
 class InboxDefaultSpecs(unittest.TestCase):
     def check_default(self, user=None, override=None):
         with tempfile.TemporaryDirectory() as home:
@@ -115,6 +141,12 @@ class InboxWatchSpecs(unittest.TestCase):
 
     def test_unstructured_name_falls_back_to_token_match(self):
         self.assertEqual(matches(["PISETUP-status-note.md", "other-note.md"], "PISETUP"), {"PISETUP-status-note.md"})
+
+    def test_file_moved_into_inbox_with_old_mtime_is_reported(self):
+        self.assertEqual(moved_report([], ["L2-to-L1-moved.md"]), {"L2-to-L1-moved.md"})
+
+    def test_old_file_present_before_arming_is_not_reported(self):
+        self.assertEqual(moved_report(["L2-to-L1-old.md"], []), set())
 
     def test_invalid_alias_is_usage_error(self):
         with tempfile.TemporaryDirectory() as inbox:

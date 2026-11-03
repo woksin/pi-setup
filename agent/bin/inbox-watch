@@ -85,7 +85,8 @@ if [[ ! -e $mark ]]; then
 fi
 args=(. -maxdepth 1 -type f -name '*.md')
 if [[ -e $mark ]]; then
-    args+=(-newer "$mark")
+    # -newercm: file ctime vs marker mtime (= scan start). A file moved into the inbox keeps its old mtime but gets a new ctime.
+    args+=(-newercm "$mark")
 fi
 find "${args[@]}" -print > "$listing" || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
 me=("$lane" ${aliases[@]+"${aliases[@]}"})
