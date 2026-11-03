@@ -1102,9 +1102,27 @@ def docker_pins() -> list:
         return []  # missing file = no pins; any other read error propagates (fail closed)
 
 
+def repo_of(ref: str) -> str:
+    """Repository of an image reference: registry prefix, @digest and :tag removed."""
+    key = image_key(ref).split("@", 1)[0]
+    return key.rsplit(":", 1)[0] if ":" in key.rsplit("/", 1)[-1] else key
+
+
+def used_by_name(used_names, tags, digests) -> bool:
+    """True when a container's configured image names one of these tags or digests (a tagless name means :latest)."""
+    names = set()
+    for name in used_names:
+        key = image_key(name)
+        names |= {name, key}
+        if "@" not in key and ":" not in key.rsplit("/", 1)[-1]:
+            names.add(key + ":latest")
+    return any(t in names or image_key(t) in names for t in tags) or any(
+        d in names or image_key(d) in names or any(n.endswith("@" + d.rsplit("@", 1)[-1]) for n in names) for d in digests)
+
+
 def pinned_by(pins: list, iid: str, tags: list, digests: list):
     """First pin glob matching the image id, a tag (any @sha256 suffix stripped) or a RepoDigest, else None."""
-    refs = [iid, *tags, *(t.split("@", 1)[0] for t in tags), *digests]
+    refs = [iid, *tags, *(t.split("@", 1)[0] for t in tags), *digests, *(repo_of(d) for d in digests)]
     for pin in pins:
         if any(fnmatch.fnmatchcase(r, pin) for r in refs):
             return pin
@@ -1160,10 +1178,9 @@ class ImageRefs:
         for digest in digests:
             if digest.rsplit("@", 1)[-1] in self.digests:
                 return "digest referenced by Dockerfile/compose"
-        for tag in tags:
-            key = image_key(tag)
-            repo = key.rsplit(":", 1)[0] if ":" in key.rsplit("/", 1)[-1] else key
-            if key in self.exact or repo in self.repos or any(repo.lower().startswith(x) for x in self.prefixes):
+        for ref in (*tags, *digests):  # a digest-only image has no tags: its repository comes from RepoDigests
+            repo = repo_of(ref)
+            if image_key(ref) in self.exact or repo in self.repos or any(repo.lower().startswith(x) for x in self.prefixes):
                 return "referenced by Dockerfile/compose"
         return None
 
@@ -1267,7 +1284,7 @@ def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None):
             ts = parse_ts(created)
             item = {"id": iid, "tags": tags, "size": int(size) if size.isdigit() else None,
                     "age_days": None if ts is None else round((time.time() - ts) / 86400, 1)}
-            if iid in used_ids or any(t in used_names for t in tags):
+            if iid in used_ids or used_by_name(used_names, tags, digests):
                 continue  # in use: not a candidate, not worth listing
             if is_cratis(tags, digests) and refs is None:
                 continue  # reference scan unavailable: never remove cratis images (fail closed)

@@ -309,6 +309,45 @@ class UnresolvedReferenceTests(ImageCase):
         self.assertIn('--untracked', scan)
 
 
+class DigestOnlyImageTests(ImageCase):
+    """An image pulled by digest (or left untagged) has no RepoTags; its repository comes from RepoDigests."""
+
+    def only_digest(self, repo='cratis/chronicle', digest=DIGEST_A, created=30):
+        return ('sha256:d1', [], created, 30, [f'{repo}@{digest}'])
+
+    def test_repo_level_references_protect_a_digest_only_image(self):
+        for line in ('cratis/chronicle\n', 'cratis/chronicle:latest\n', 'cratis/chronicle:${VERSION}\n',
+                     'ghcr.io/cratis/chronicle:$V\n', 'cratis/${NAME}:1\n', 'cratis/chron${X}\n'):
+            with self.subTest(line=line):
+                docker = Docker([self.only_digest()], grep=(0, line, ''))
+                cands, kept, err = self.plan(docker)
+                self.assertEqual((cands, err, len(kept)), ([], None, 1))
+
+    def test_digest_only_image_of_an_unreferenced_repo_is_still_a_general_candidate(self):
+        docker = Docker([self.only_digest()], grep=(0, 'cratis/other:${V}\n', ''))
+        self.assertEqual(len(self.plan(docker)[0]), 1)
+
+    def test_exact_digest_reference_still_protects(self):
+        docker = Docker([self.only_digest()], grep=(0, 'cratis/elsewhere@' + DIGEST_A + '\n', ''))
+        self.assertEqual(len(self.plan(docker)[1]), 1)
+
+    def test_pin_on_the_repository_protects_a_digest_only_image(self):
+        docker = Docker([self.only_digest()])
+        cands, kept, _ = self.plan(docker, pins='cratis/chronicle\n')
+        self.assertEqual((cands, len(kept)), ([], 1))
+
+    def test_a_container_naming_the_digest_or_a_tagless_name_keeps_the_image(self):
+        for name in ('cratis/chronicle@' + DIGEST_A, 'docker.io/cratis/chronicle@' + DIGEST_A):
+            with self.subTest(name=name):
+                docker = Docker([self.only_digest()], containers=[('c1', 'sha256:zzz', name)])
+                self.assertEqual(self.plan(docker)[:2], ([], []))
+        tagged = self.image('cratis/chronicle:latest', created=30, last=30)
+        for name in ('cratis/chronicle', 'docker.io/cratis/chronicle'):
+            with self.subTest(name=name):
+                docker = Docker([tagged], containers=[('c1', 'sha256:zzz', name)])
+                self.assertEqual(self.plan(docker)[:2], ([], []))
+
+
 class RealScanTests(ImageCase):
     """The real git grep + parser over files on disk (no fake runner)."""
 
