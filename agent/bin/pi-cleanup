@@ -120,6 +120,7 @@ from datetime import datetime
 DEFAULT_ROOTS = ["{{REPOS_ROOT}}"]
 STEPS_ALL = ["build", "worktrees", "docker", "caches", "bins"]
 BIN_SWEEP = runpy.run_path(str(Path(__file__).resolve().with_name("bin_sweep.py")))
+HOLDERS = runpy.run_path(str(Path(__file__).resolve().with_name("holders.py")))
 retained_reason = BIN_SWEEP["retained_reason"]
 delete_candidate = BIN_SWEEP["delete_candidate"]
 LOG_DIR = os.path.expanduser("~/.pi/agent/logs")
@@ -284,21 +285,8 @@ class PathSet:
             i += 1
 
 
-class SnapshotError(Exception):
-    pass
-
-
-def _parse_lsof(out: str, me: int, into: set) -> None:
-    skip = False
-    for line in out.splitlines():
-        c, v = line[:1], line[1:]
-        if c == "p":
-            skip = v == str(me)
-        elif c == "R":
-            if v == str(me):
-                skip = True
-        elif c == "n" and not skip and v.startswith("/"):
-            into.add(v)
+SnapshotError = HOLDERS["SnapshotError"]
+_parse_lsof = HOLDERS["parse_names"]
 
 
 def take_snapshot() -> PathSet:
@@ -351,15 +339,8 @@ def held_inside(snap: PathSet, path: str, build_output=False, is_build_dir=False
         return hit
     base = path.rstrip("/")
     for p in snap.iter_inside(path):
-        rel = p[len(base):].lower().split("/")[1:-1] if p.lower() != base.lower() else []
-        if is_build_dir or any(part in BUILD_DIRS_LOWER for part in rel):
-            try:
-                st = os.lstat(p)
-            except OSError:
-                return p
-            if statmod.S_ISREG(st.st_mode) and st.st_nlink > 1:
-                continue
-        return p
+        if HOLDERS["classify"](p, base, False, is_build_dir, BUILD_DIRS_LOWER) != HOLDERS["SHARED"]:
+            return p
     return None
 
 

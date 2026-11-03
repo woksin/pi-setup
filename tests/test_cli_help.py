@@ -26,6 +26,7 @@ TOOLS = {
     "pi-account": ("agent/bin/pi-account", ["save", "use", "next", "list"]),
     "pi-affected": ("agent/bin/pi-affected", ["install"]),
     "pi-cleanup": ("agent/bin/pi-cleanup", []),
+    "pi-holders": ("agent/bin/pi-holders", []),
     "pi-phase": ("agent/bin/pi-phase", ["status", "run", "withdraw", "report"]),
     "pi-profile": ("agent/bin/pi-profile", ["list", "use", "save", "routing"]),
     "pi-publish": ("agent/bin/pi-publish", ["check"]),
@@ -48,6 +49,7 @@ TOOLS = {
 # path -> reason it has no help of its own
 EXEMPT = {
     "agent/bin/bin_sweep.py": "library, no __main__",
+    "agent/bin/holders.py": "library, no __main__",
     "agent/bin/package_cache.py": "library, no __main__",
     "agent/bin/phase_status.py": "library, no __main__",
     "agent/bin/disk_growth_probe.py": "internal; reads a JSON request on stdin",
@@ -73,7 +75,7 @@ REQUIRED = [r"(?i)usage:", r"Examples:", r"Exit codes:", r"See also:"]
 
 # Tools whose first argument is data (a lane, directory, provider, kind or day count): a bare
 # `help` there is valid input, so only -h/--help may select help.
-POSITIONAL_DATA = ["inbox-watch", "pi-setup-tests", "publish-check", "provider-restore", "cratis-local-run", "pi-usage", "renice-builders", "reap-build-servers", "docker-guardian", "release-check"]
+POSITIONAL_DATA = ["inbox-watch", "pi-setup-tests", "publish-check", "provider-restore", "cratis-local-run", "pi-usage", "renice-builders", "reap-build-servers", "docker-guardian", "release-check", "pi-holders"]
 BARE_HELP = re.compile(r"--help\|help\)|\"--help\", \"help\"|=== \"help\"")
 
 

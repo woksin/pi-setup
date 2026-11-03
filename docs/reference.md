@@ -94,6 +94,7 @@ Lanes are several coordinated sessions. See [Lanes](../README.md#parallel-sessio
 |---|---|---|---|
 | `dev-doctor` | Read-only diagnostics for slow gates, queues, swap and Docker memory. | `dev-doctor --help` | [source](../agent/bin/dev-doctor) |
 | `pi-cleanup` | Disk cleanup for checkouts, worktrees and Docker. Dry run by default; `--apply` executes. | `pi-cleanup --help` | [source](../agent/bin/pi-cleanup) |
+| `pi-holders` | Read-only: which processes hold a path (cwd or open file), hard-link aware; exit 3 means inspection failed. | `pi-holders --help` | [source](../agent/bin/pi-holders) |
 | `pi-retain` | Owner-scoped, expiring protection for cleanup roots, so scheduled cleanup skips active verification chains. | `pi-retain --help` | [source](../agent/bin/pi-retain) |
 | `disk-growth` | Samples free disk space and alerts on a fast drop. Runs on a schedule. | `disk-growth --help` | [source](../agent/bin/disk-growth) |
 | `docker-guardian` | **Acts.** Keeps Docker Desktop usable: restarts it when unresponsive and removes stale containers and images. Runs on a schedule. | `docker-guardian --help` | [source](../agent/bin/docker-guardian) |

@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""pi-holders — which processes hold a path (cwd or open file), hard-link aware. Read-only.
+
+Usage: pi-holders [--json] [--verbose] [--timeout SECONDS] PATH [PATH ...]
+
+One lsof snapshot of every process (this process and its children excluded). A process holds PATH when its
+cwd is PATH or below it, or when it has an open name below PATH that is not ambiguous. An open name that is a
+regular file with more than one hard link is ambiguous: lsof may report another link's name, and unlinking this
+name never affects a holder of the inode. Ambiguous names are counted separately and do not hold. Names open
+only outside PATH are never reported. A name below PATH that cannot be stat'ed counts as holding.
+
+  --json             machine-readable output on stdout
+  --verbose          also list the ambiguous (shared-inode) names
+  --timeout SECONDS  limit for each lsof call (default 60)
+
+Examples:
+  pi-holders ~/repos/Stage/.worktrees/old-wt
+  pi-holders --verbose --json /Volumes/work/repo/Source/App/bin
+
+Output: one line per holding process and path: `PID COMMAND cwd|open NAME`.
+
+Exit codes:
+  0  no path is held
+  1  at least one path is held
+  2  usage error
+  3  inspection failed, timed out or was incomplete: do not treat the path as free
+
+See also: pi-cleanup (uses the same rule for worktree and build-output removal), pi-retain, `lsof -p PID`.
+"""
+import json
+import os
+import runpy
+import sys
+from pathlib import Path
+
+HOLDERS = runpy.run_path(str(Path(__file__).resolve().with_name("holders.py")))
+USAGE = "Usage: pi-holders [--json] [--verbose] [--timeout SECONDS] PATH [PATH ...]"
+
+
+def parse(argv):
+    """-> (paths, json, verbose, timeout) or None after printing help; raises ValueError on bad usage."""
+    flags = {"json": False, "verbose": False}
+    timeout, paths = 60.0, []
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg in ("-h", "--help"):
+            print(__doc__.strip())
+            return None
+        if arg in ("--json", "--verbose"):
+            flags[arg[2:]] = True
+        elif arg == "--timeout" or arg.startswith("--timeout="):
+            if arg == "--timeout":
+                index += 1
+                value = argv[index] if index < len(argv) else ""
+            else:
+                value = arg.split("=", 1)[1]
+            try:
+                timeout = float(value)
+            except ValueError:
+                raise ValueError(f"invalid --timeout: {value!r}")
+            if not 0 < timeout < float("inf"):
+                raise ValueError(f"invalid --timeout: {value!r}")
+        elif arg == "--":
+            paths += argv[index + 1:]
+            break
+        elif arg.startswith("-") and arg != "-":
+            raise ValueError(f"unknown option: {arg}")
+        else:
+            paths.append(arg)  # a bare `help` is a path, not a request for help
+        index += 1
+    if not paths:
+        raise ValueError("no PATH given")
+    return paths, flags["json"], flags["verbose"], timeout
+
+
+def canonical(path):
+    return os.path.realpath(os.path.expanduser(path))
+
+
+def main(argv):
+    try:
+        parsed = parse(argv)
+    except ValueError as error:
+        print(f"pi-holders: {error}\n{USAGE}", file=sys.stderr)
+        return 2
+    if parsed is None:
+        return 0
+    paths, as_json, verbose, timeout = parsed
+    try:
+        processes = HOLDERS["snapshot"](timeout)
+    except HOLDERS["SnapshotError"] as error:
+        if as_json:
+            print(json.dumps({"status": "error", "error": str(error)}))
+        print(f"pi-holders: inspection failed: {error}", file=sys.stderr)
+        return 3
+    report = []
+    for path in paths:
+        base = canonical(path)
+        held, ambiguous = HOLDERS["holders_of"](processes, base, forgive_shared=True)
+        report.append({"path": path, "resolved": base, "held": bool(held), "holders": held,
+                       "ambiguous": len(ambiguous), **({"ambiguous_names": ambiguous} if verbose else {})})
+    any_held = any(r["held"] for r in report)
+    if as_json:
+        print(json.dumps({"status": "held" if any_held else "clear", "paths": report}))
+    else:
+        for r in report:
+            for h in r["holders"]:
+                print(f"{h['pid']} {h['command']} {h['kind']} {h['name']}")
+            note = f" ({r['ambiguous']} shared-inode names ignored)" if r["ambiguous"] else ""
+            print(f"pi-holders: {r['path']}: {'held' if r['held'] else 'not held'}{note}", file=sys.stderr)
+            if verbose:
+                for a in r.get("ambiguous_names", []):
+                    print(f"ambiguous {a['pid']} {a['command']} {a['name']}")
+    return 1 if any_held else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
