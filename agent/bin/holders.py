@@ -7,6 +7,7 @@ the process may hold another link, and unlinking this name never affects it. Uns
 import os
 import stat as statmod
 import subprocess
+from typing import NamedTuple
 from concurrent.futures import ThreadPoolExecutor
 
 HOLD, SHARED = "hold", "shared"
@@ -18,54 +19,68 @@ class SnapshotError(Exception):
 
 def parse_names(out, me, into):
     """Add every absolute name lsof -F reports to `into`, skipping this process and its children."""
-    skip = False
-    for line in out.splitlines():
-        c, v = line[:1], line[1:]
-        if c == "p":
-            skip = v == str(me)
-        elif c == "R":
-            if v == str(me):
-                skip = True
-        elif c == "n" and not skip and v.startswith("/"):
-            into.add(v)
+    for record in parse_records(out, me).values():
+        into.update(record["names"])
+
+
+class _Records:
+    """Accumulates lsof -FpRcn lines; the current process is None while skipping this process or its children."""
+
+    def __init__(self, me):
+        self.me, self.records, self.current = str(me), {}, None
+
+    def p(self, value):
+        self.current = None if value == self.me else self.records.setdefault(value, {"pid": value, "command": "", "names": []})
+
+    def R(self, value):
+        if value == self.me and self.current is not None:
+            self.records.pop(self.current["pid"], None)
+            self.current = None
+
+    def c(self, value):
+        if self.current is not None:
+            self.current["command"] = value
+
+    def n(self, value):
+        if self.current is not None and value.startswith("/"):
+            self.current["names"].append(value)
 
 
 def parse_records(out, me):
     """lsof -FpRcn output -> {pid: {"pid", "command", "names": [..]}}, skipping this process and its children."""
-    records, current, skip = {}, None, False
+    parser = _Records(me)
     for line in out.splitlines():
-        c, v = line[:1], line[1:]
-        if c == "p":
-            skip = v == str(me)
-            current = None if skip else records.setdefault(v, {"pid": v, "command": "", "names": []})
-        elif c == "R":
-            if v == str(me) and current is not None:
-                records.pop(current["pid"], None)
-                skip, current = True, None
-        elif c == "c" and current is not None:
-            current["command"] = v
-        elif c == "n" and current is not None and v.startswith("/"):
-            current["names"].append(v)
-    return records
+        handler = getattr(parser, line[:1], None) if line[:1] in "pRcn" else None
+        if handler:
+            handler(line[1:])
+    return parser.records
 
 
-def classify(name, base, forgive_shared, is_build_dir=False, build_dirs=frozenset()):
-    """HOLD or SHARED for an open name at or below `base`.
+class Policy(NamedTuple):
+    """How to judge an open name: forgive_shared forgives any shared inode; otherwise only below a build dir."""
+    forgive_shared: bool
+    is_build_dir: bool = False
+    build_dirs: frozenset = frozenset()
 
-    forgive_shared=True: any regular file with st_nlink > 1 is SHARED.
-    forgive_shared=False: only below a build dir (is_build_dir, or a path part in build_dirs), as pi-cleanup
-    deletes build output only there; everything else, and any stat failure, is HOLD.
-    """
-    base = base.rstrip("/")
-    if not forgive_shared:
-        rel = name[len(base):].lower().split("/")[1:-1] if name.lower() != base.lower() else []
-        if not (is_build_dir or any(part in build_dirs for part in rel)):
-            return HOLD
+
+def _below_build_dir(name, base, policy):
+    rel = name[len(base):].lower().split("/")[1:-1] if name.lower() != base.lower() else []
+    return policy.is_build_dir or any(part in policy.build_dirs for part in rel)
+
+
+def _is_shared_inode(name):
     try:
         st = os.lstat(name)
     except OSError:
+        return False
+    return statmod.S_ISREG(st.st_mode) and st.st_nlink > 1
+
+
+def classify(name, base, policy):
+    """HOLD or SHARED for an open name at or below `base` (see Policy). Stat failures are HOLD (fail closed)."""
+    if not policy.forgive_shared and not _below_build_dir(name, base.rstrip("/"), policy):
         return HOLD
-    return SHARED if statmod.S_ISREG(st.st_mode) and st.st_nlink > 1 else HOLD
+    return SHARED if _is_shared_inode(name) else HOLD
 
 
 def inside(name, base):
@@ -87,11 +102,8 @@ def run(args, timeout):
         return 126, "", str(e)
 
 
-def snapshot(timeout=60, runner=None):
-    """One lsof snapshot of every process: [{"pid", "command", "cwds": [...], "names": [...]}].
-    Excludes this process and its children. Raises SnapshotError when lsof fails, times out or prints nothing."""
-    me = os.getpid()
-    runner = runner or run
+def _lsof_outputs(timeout, runner):
+    """(everything, cwd-only) lsof outputs; raises SnapshotError on failure, timeout or empty output."""
     with ThreadPoolExecutor(2) as ex:
         f_all = ex.submit(runner, ["lsof", "-nP", "-FpRcn"], timeout)
         f_cwd = ex.submit(runner, ["lsof", "-nP", "-d", "cwd", "-FpRcn"], timeout)
@@ -99,16 +111,35 @@ def snapshot(timeout=60, runner=None):
     for rc, out, err in results:
         if rc in (124, 126, 127) or not out:
             raise SnapshotError(f"lsof failed (rc={rc}): {err.strip()[:200]}")
-    everything, cwds = parse_records(results[0][1], me), parse_records(results[1][1], me)
+    return results[0][1], results[1][1]
+
+
+def snapshot(timeout=60, runner=None):
+    """One lsof snapshot of every process: [{"pid", "command", "cwds": [...], "names": [...]}].
+    Excludes this process and its children. Raises SnapshotError when lsof fails, times out or prints nothing."""
+    me = os.getpid()
+    out_all, out_cwd = _lsof_outputs(timeout, runner or run)
+    everything, cwds = parse_records(out_all, me), parse_records(out_cwd, me)
     processes = []
     for pid, record in everything.items():
         own = cwds.get(pid, {"names": []})["names"]
         processes.append({"pid": pid, "command": record["command"] or cwds.get(pid, {}).get("command", ""),
                           "cwds": own, "names": [n for n in record["names"] if n not in own]})
-    for pid, record in cwds.items():
-        if pid not in everything:
-            processes.append({"pid": pid, "command": record["command"], "cwds": record["names"], "names": []})
+    processes += [{"pid": pid, "command": r["command"], "cwds": r["names"], "names": []}
+                  for pid, r in cwds.items() if pid not in everything]
     return processes
+
+
+def _first_hold(process, base, forgive_shared, ambiguous):
+    """("cwd"|"open", name) for the first holding name of `process`, else None; shared names go to `ambiguous`."""
+    cwd = next((n for n in process["cwds"] if inside(n, base)), None)
+    if cwd:
+        return "cwd", cwd
+    for name in (n for n in process["names"] if inside(n, base)):
+        if classify(name, base, Policy(forgive_shared)) == HOLD:
+            return "open", name
+        ambiguous.append({"pid": process["pid"], "command": process["command"], "name": name})
+    return None
 
 
 def holders_of(processes, base, forgive_shared=True):
@@ -116,14 +147,7 @@ def holders_of(processes, base, forgive_shared=True):
     ambiguous are the shared-inode names below `base` that were not counted as holding."""
     held, ambiguous = [], []
     for process in processes:
-        hit = next((("cwd", n) for n in process["cwds"] if inside(n, base)), None)
-        for name in process["names"]:
-            if hit or not inside(name, base):
-                continue
-            if classify(name, base, forgive_shared) == HOLD:
-                hit = ("open", name)
-            else:
-                ambiguous.append({"pid": process["pid"], "command": process["command"], "name": name})
+        hit = _first_hold(process, base, forgive_shared, ambiguous)
         if hit:
             held.append({"pid": process["pid"], "command": process["command"], "kind": hit[0], "name": hit[1]})
     return held, ambiguous

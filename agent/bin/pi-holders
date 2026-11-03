@@ -27,6 +27,7 @@ Exit codes:
 
 See also: pi-cleanup (uses the same rule for worktree and build-output removal), pi-retain, `lsof -p PID`.
 """
+import argparse
 import json
 import os
 import runpy
@@ -37,45 +38,62 @@ HOLDERS = runpy.run_path(str(Path(__file__).resolve().with_name("holders.py")))
 USAGE = "Usage: pi-holders [--json] [--verbose] [--timeout SECONDS] PATH [PATH ...]"
 
 
+class UsageParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
+
+
+def positive_seconds(value):
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = 0.0
+    if not 0 < seconds < float("inf"):
+        raise ValueError(f"invalid --timeout: {value!r}")
+    return seconds
+
+
 def parse(argv):
-    """-> (paths, json, verbose, timeout) or None after printing help; raises ValueError on bad usage."""
-    flags = {"json": False, "verbose": False}
-    timeout, paths = 60.0, []
-    index = 0
-    while index < len(argv):
-        arg = argv[index]
-        if arg in ("-h", "--help"):
-            print(__doc__.strip())
-            return None
-        if arg in ("--json", "--verbose"):
-            flags[arg[2:]] = True
-        elif arg == "--timeout" or arg.startswith("--timeout="):
-            if arg == "--timeout":
-                index += 1
-                value = argv[index] if index < len(argv) else ""
-            else:
-                value = arg.split("=", 1)[1]
-            try:
-                timeout = float(value)
-            except ValueError:
-                raise ValueError(f"invalid --timeout: {value!r}")
-            if not 0 < timeout < float("inf"):
-                raise ValueError(f"invalid --timeout: {value!r}")
-        elif arg == "--":
-            paths += argv[index + 1:]
-            break
-        elif arg.startswith("-") and arg != "-":
-            raise ValueError(f"unknown option: {arg}")
-        else:
-            paths.append(arg)  # a bare `help` is a path, not a request for help
-        index += 1
-    if not paths:
+    """-> (paths, json, verbose, timeout), or None after printing help; raises ValueError on bad usage.
+    A bare `help` is a path, not a request for help."""
+    if any(arg in ("-h", "--help") for arg in argv[: argv.index("--") if "--" in argv else len(argv)]):
+        print(__doc__.strip())
+        return None
+    parser = UsageParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--timeout", type=positive_seconds, default=60.0)
+    parser.add_argument("paths", nargs="*")
+    args = parser.parse_args(argv)
+    if not args.paths:
         raise ValueError("no PATH given")
-    return paths, flags["json"], flags["verbose"], timeout
+    return args.paths, args.json, args.verbose, args.timeout
 
 
 def canonical(path):
     return os.path.realpath(os.path.expanduser(path))
+
+
+def build_report(processes, paths, verbose):
+    report = []
+    for path in paths:
+        base = canonical(path)
+        held, ambiguous = HOLDERS["holders_of"](processes, base, forgive_shared=True)
+        entry = {"path": path, "resolved": base, "held": bool(held), "holders": held, "ambiguous": len(ambiguous)}
+        if verbose:
+            entry["ambiguous_names"] = ambiguous
+        report.append(entry)
+    return report
+
+
+def print_text(report, verbose):
+    for entry in report:
+        for holder in entry["holders"]:
+            print(f"{holder['pid']} {holder['command']} {holder['kind']} {holder['name']}")
+        note = f" ({entry['ambiguous']} shared-inode names ignored)" if entry["ambiguous"] else ""
+        print(f"pi-holders: {entry['path']}: {'held' if entry['held'] else 'not held'}{note}", file=sys.stderr)
+        for item in entry.get("ambiguous_names", []) if verbose else []:
+            print(f"ambiguous {item['pid']} {item['command']} {item['name']}")
 
 
 def main(argv):
@@ -94,24 +112,12 @@ def main(argv):
             print(json.dumps({"status": "error", "error": str(error)}))
         print(f"pi-holders: inspection failed: {error}", file=sys.stderr)
         return 3
-    report = []
-    for path in paths:
-        base = canonical(path)
-        held, ambiguous = HOLDERS["holders_of"](processes, base, forgive_shared=True)
-        report.append({"path": path, "resolved": base, "held": bool(held), "holders": held,
-                       "ambiguous": len(ambiguous), **({"ambiguous_names": ambiguous} if verbose else {})})
-    any_held = any(r["held"] for r in report)
+    report = build_report(processes, paths, verbose)
+    any_held = any(entry["held"] for entry in report)
     if as_json:
         print(json.dumps({"status": "held" if any_held else "clear", "paths": report}))
     else:
-        for r in report:
-            for h in r["holders"]:
-                print(f"{h['pid']} {h['command']} {h['kind']} {h['name']}")
-            note = f" ({r['ambiguous']} shared-inode names ignored)" if r["ambiguous"] else ""
-            print(f"pi-holders: {r['path']}: {'held' if r['held'] else 'not held'}{note}", file=sys.stderr)
-            if verbose:
-                for a in r.get("ambiguous_names", []):
-                    print(f"ambiguous {a['pid']} {a['command']} {a['name']}")
+        print_text(report, verbose)
     return 1 if any_held else 0
 
 

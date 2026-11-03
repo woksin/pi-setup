@@ -155,13 +155,13 @@ class CleanupRuleSpecs(HoldersCase):
         self.assertEqual(cleanup.held_inside(snap, str(self.target), True, False), str(self.file))  # not below a build dir
 
     def test_pi_cleanup_and_the_library_agree_on_the_names_they_share(self):
-        classify = cleanup.HOLDERS['classify']
+        classify, policy = cleanup.HOLDERS['classify'], cleanup.HOLDERS['Policy']
         os.link(self.file, self.root / 'sibling/a.dll')
         single = self.target / 'b.dll'
         single.write_text('y')
         for name, shared in ((self.file, True), (single, False), (self.target / 'gone', False)):
-            self.assertEqual(classify(str(name), str(self.target), True) == 'shared', shared)
-            self.assertEqual(classify(str(name), str(self.target), False, True) == 'shared', shared)
+            self.assertEqual(classify(str(name), str(self.target), policy(True)) == 'shared', shared)
+            self.assertEqual(classify(str(name), str(self.target), policy(False, True)) == 'shared', shared)
 
 
 if __name__ == '__main__':

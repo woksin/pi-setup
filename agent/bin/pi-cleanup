@@ -339,7 +339,7 @@ def held_inside(snap: PathSet, path: str, build_output=False, is_build_dir=False
         return hit
     base = path.rstrip("/")
     for p in snap.iter_inside(path):
-        if HOLDERS["classify"](p, base, False, is_build_dir, BUILD_DIRS_LOWER) != HOLDERS["SHARED"]:
+        if HOLDERS["classify"](p, base, HOLDERS["Policy"](False, is_build_dir, BUILD_DIRS_LOWER)) != HOLDERS["SHARED"]:
             return p
     return None
 
