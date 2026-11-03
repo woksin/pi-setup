@@ -1,0 +1,2 @@
+source.cs(2,1): error IDE0005: Using directive is unnecessary
+source.cs(5,1): error CA1822: Mark members as static

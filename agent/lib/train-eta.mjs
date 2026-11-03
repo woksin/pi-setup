@@ -81,6 +81,7 @@ function holdRecommendation(due, gate, now) {
   const duration = durationText(gate.gateSeconds);
   const seconds = (Date.parse(due.eta) - Date.parse(now)) / 1000;
   const readiness = seconds < 0 ? 'due now (overdue)' : `due in ${durationText(seconds)}`;
-  const history = gate.gateSource === 'ledger' ? `, p90 from ${gate.gateRuns} runs` : '';
+  const history = gate.gateSource === 'ledger-chain' ? `, median of ${gate.gateRuns} measured gate chains`
+    : gate.gateSource === 'ledger-sum' ? `, p90 from ${gate.gateRuns} runs` : '';
   return { recommendation: 'hold', recommendationText: `recommendation: hold — ${deliveryName(due)} ${readiness} (gate ≈ ${duration}${history})` };
 }

@@ -1,0 +1,14 @@
+{
+  "heavy_slots": 5,
+  "integration_slots": 2,
+  "msbuild_max_cpu": 3,
+  "phase_nice": 10,
+  "fast_lane": {
+    "slots": 3,
+    "max_expected_s": 120
+  },
+  "memory_admission": {
+    "min_free_percent": 15,
+    "min_swap_free_mb": 500
+  }
+}

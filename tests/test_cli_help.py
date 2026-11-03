@@ -15,6 +15,7 @@ REFERENCE = ROOT / "docs" / "reference.md"
 
 # name -> (path relative to the repo, subcommand words the help must mention)
 TOOLS = {
+    "ci-feedback": ("agent/bin/ci-feedback", []),
     "cratis-local-run": ("agent/bin/cratis-local-run", []),
     "dev-doctor": ("agent/bin/dev-doctor", []),
     "disk-growth": ("agent/bin/disk-growth", []),
@@ -23,14 +24,17 @@ TOOLS = {
     "inbox-watch": ("agent/bin/inbox-watch", []),
     "lane-status": ("agent/bin/lane-status", ["set", "clear", "get"]),
     "pi-account": ("agent/bin/pi-account", ["save", "use", "next", "list"]),
+    "pi-affected": ("agent/bin/pi-affected", ["install"]),
     "pi-cleanup": ("agent/bin/pi-cleanup", []),
-    "pi-phase": ("agent/bin/pi-phase", ["status", "run", "withdraw"]),
+    "pi-phase": ("agent/bin/pi-phase", ["status", "run", "withdraw", "report"]),
     "pi-profile": ("agent/bin/pi-profile", ["list", "use", "save"]),
     "pi-publish": ("agent/bin/pi-publish", ["check"]),
+    "pi-retain": ("agent/bin/pi-retain", ["add", "release", "list", "status"]),
     "pi-setup-tests": ("agent/bin/pi-setup-tests", []),
     "pi-train": ("agent/bin/pi-train", ["init", "fold", "status", "ship"]),
     "pi-usage": ("agent/bin/pi-usage", []),
     "provider-restore": ("agent/bin/provider-restore", []),
+    "reap-build-servers": ("agent/bin/reap-build-servers", []),
     "renice-builders": ("agent/bin/renice-builders", []),
     "secret-sweep": ("agent/bin/secret-sweep", []),
     "session-watchdog": ("agent/bin/session-watchdog", []),
@@ -48,6 +52,7 @@ EXEMPT = {
     "agent/bin/phase_status.py": "library, no __main__",
     "agent/bin/disk_growth_probe.py": "internal; reads a JSON request on stdin",
     "agent/bin/test_lane_status.py": "test",
+    "agent/bin/test_retain.py": "test",
     "agent/bin/test_session_watchdog.py": "test",
     "tools/skills.test.mjs": "test",
     "tools/bin/ai-work-lifecycle": "3-line wrapper that execs the installed copy; the source script is covered instead",
@@ -58,6 +63,7 @@ EXEMPT = {
 GUARDS = {
     "docker-guardian": ('-h|--help', 'export PATH='),
     "renice-builders": ('sys.argv[1:2]', 'sys.exit(main())'),
+    "reap-build-servers": ('sys.argv[1:2]', 'sys.exit(main())'),
     "provider-restore": ('args[0] === "-h"', 'const providers'),
     "release-check": ('-h|--help', 'cd "$(dirname'),
     "pi-setup-tests": ('-h|--help', 'agent="$(cd'),
@@ -67,7 +73,7 @@ REQUIRED = [r"(?i)usage:", r"Examples:", r"Exit codes:", r"See also:"]
 
 # Tools whose first argument is data (a lane, directory, provider, kind or day count): a bare
 # `help` there is valid input, so only -h/--help may select help.
-POSITIONAL_DATA = ["inbox-watch", "pi-setup-tests", "publish-check", "provider-restore", "cratis-local-run", "pi-usage", "renice-builders", "docker-guardian", "release-check"]
+POSITIONAL_DATA = ["inbox-watch", "pi-setup-tests", "publish-check", "provider-restore", "cratis-local-run", "pi-usage", "renice-builders", "reap-build-servers", "docker-guardian", "release-check"]
 BARE_HELP = re.compile(r"--help\|help\)|\"--help\", \"help\"|=== \"help\"")
 
 

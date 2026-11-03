@@ -6,7 +6,7 @@ color: orange
 model: anthropic/claude-sonnet-5-5
 thinking: medium
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, model-provenance, cratis-rules, pi-context-budget, output-cap, observation-mask]
+extensions: [cratis-cli-guard, exact-model-guard, model-provenance, cratis-rules, pi-context-budget, output-cap, observation-mask]
 skills: false
 prompt_mode: replace
 ---

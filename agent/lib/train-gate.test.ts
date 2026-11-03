@@ -30,7 +30,7 @@ test('gate durations require positive finite numbers with units', () => {
 });
 
 test('recommendation considers only awaiting deliveries and includes the exact gate boundary', () => {
-  const gate = { gateSeconds: 600, gateSource: 'ledger', gateRuns: 9 };
+  const gate = { gateSeconds: 600, gateSource: 'ledger-sum', gateRuns: 9 };
   const item = { pr: 7, kind: 'planned', eta: '2026-10-23T12:10:00Z' };
   assert.equal(cutRecommendation([item], gate, NOW).recommendation, 'hold');
   assert.match(cutRecommendation([item], gate, NOW).recommendationText, /p90 from 9 runs/);
@@ -44,6 +44,13 @@ test('recommendation considers only awaiting deliveries and includes the exact g
     assert.equal(cutRecommendation([{ ...item, kind: 'folded', pending: [step], eta: '2026-10-23T11:00:00Z' }], gate, NOW).recommendation, 'cut');
   }
   assert.equal(cutRecommendation([item], { gateSeconds: null }, NOW).recommendation, 'unknown');
+});
+
+test('recommendation describes measured chain medians separately from per-kind p90', () => {
+  const item = { pr: 7, kind: 'planned', eta: NOW };
+  const text = cutRecommendation([item], { gateSeconds: 600, gateSource: 'ledger-chain', gateRuns: 3 }, NOW).recommendationText;
+  assert.match(text, /median of 3 measured gate chains/);
+  assert.doesNotMatch(text, /p90/);
 });
 
 async function fixture(t: any) {
@@ -85,7 +92,7 @@ test('ledger matches real common directories across checkouts, worktrees and sub
   records.push({ ...run(repo, 'build', 99999), startedAt: null });
   records.push({ ...run(repo, 'build', 99999), runS: -1 });
   await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), records.map(record => JSON.stringify(record)).join('\n') + '\n{partial\nnull\n');
-  assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree }), { gateSeconds: 390, gateSource: 'ledger', gateRuns: 12 });
+  assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree }), { gateSeconds: 210, gateSource: 'ledger-sum', gateRuns: 11 });
 });
 
 test('failed and timed-out completed runs count, but unstarted and non-gate phases do not', async t => {
@@ -93,7 +100,40 @@ test('failed and timed-out completed runs count, but unstarted and non-gate phas
   const records = ['failed', 'timeout'].map(outcome => ({ ...run(f.root), outcome, exit: 1 }));
   records.push({ ...run(f.root), startedAt: null }, run(f.root, 'ci', 99999));
   await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), records.map(record => JSON.stringify(record)).join('\n'));
-  assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree: f.root }), { gateSeconds: 60, gateSource: 'ledger', gateRuns: 2 });
+  assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree: f.root }), { gateSeconds: 60, gateSource: 'ledger-sum', gateRuns: 2 });
+});
+
+test('clean passing chains use median wall spans, split by head and gaps over 30 minutes', async t => {
+  const f = await fixture(t); git(f.root, 'init');
+  const records: any[] = [];
+  const add = (minute: number, seconds: number, head = 'a', extra = {}) => records.push({
+    ...run(f.root), head, dirty: 'clean',
+    startedAt: new Date(Date.parse(NOW) - 6 * 3600_000 + minute * 60_000).toISOString(),
+    endedAt: new Date(Date.parse(NOW) - 6 * 3600_000 + minute * 60_000 + seconds * 1000).toISOString(), ...extra,
+  });
+  add(0, 60); add(2, 60, 'a', { kind: 'test' }); // 180s
+  add(60, 300); // 300s: same head, gap > 30m
+  add(61, 600, 'b'); // 600s: different head, overlapping times
+  add(120, 900, 'c', { outcome: 'failed', exit: 1 });
+  add(140, 60, 'c'); // excluded together with failed predecessor
+  add(180, 9999, 'd', { dirty: 'dirty' });
+  add(200, 9999, 'e', { kind: 'integration' });
+  await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), records.reverse().map(record => JSON.stringify(record)).join('\n'));
+  assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree: f.root }), { gateSeconds: 300, gateSource: 'ledger-chain', gateRuns: 3 });
+});
+
+test('configured components restrict chain labels; fewer than three chains use the build/test fallback', async t => {
+  const f = await fixture(t); git(f.root, 'init');
+  const directory = join(f.root, '.pi', 'trains'); await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'config.json'), JSON.stringify({ gateComponents: { 'Test/Repo': [{ id: 'release', kind: 'build', label: 'tier1 release' }] } }));
+  const records = [0, 1, 2].flatMap(i => [
+    { ...run(f.root, 'build', 10), head: String(i), dirty: 'clean', label: 'TIER1 release', startedAt: '2026-10-23T11:59:50Z' },
+    { ...run(f.root, 'test', 500), head: String(i), dirty: 'clean', label: 'iteration' },
+  ]);
+  await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), records.map(record => JSON.stringify(record)).join('\n'));
+  assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree: f.root, repo: 'Test/Repo' }), { gateSeconds: 10, gateSource: 'ledger-chain', gateRuns: 3 });
+  await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), records.slice(0, 4).map(record => JSON.stringify(record)).join('\n'));
+  assert.deepEqual(await gateEstimate({ ...f.ctx }, f.api, { worktree: f.root, repo: 'Test/Repo' }), { gateSeconds: 510, gateSource: 'ledger-sum', gateRuns: 4 });
 });
 
 test('missing ledger is unknown; flag and manifest overrides need no history', async t => {
@@ -114,7 +154,7 @@ test('ledger files older than the window are not read, and one read serves every
   const f = await fixture(t); git(f.root, 'init');
   await writeFile(join(f.state, 'ledger', '2026-10-14.jsonl'), JSON.stringify(run(f.root, 'build', 99999)));
   await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), JSON.stringify(run(f.root, 'build', 60)));
-  assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree: f.root }), { gateSeconds: 60, gateSource: 'ledger', gateRuns: 1 });
+  assert.deepEqual(await gateEstimate(f.ctx, f.api, { worktree: f.root }), { gateSeconds: 60, gateSource: 'ledger-sum', gateRuns: 1 });
   await writeFile(join(f.state, 'ledger', '2026-10-23.jsonl'), JSON.stringify(run(f.root, 'build', 600)));
   assert.equal((await gateEstimate(f.ctx, f.api, { worktree: f.root })).gateSeconds, 60);
   let tick = 0;

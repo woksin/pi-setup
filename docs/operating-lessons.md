@@ -120,3 +120,31 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Cause:** planners writing about redaction put example credential shapes and pattern tables into briefs; the mask scans every tool output. The `path:line:` prefix plus `;` can form a connection-string look-alike.
 - **Rule:** before handing a brief that mentions secrets, tokens or redaction to an agent, run it through the mask's own scanner (`scan()` from `~/.pi/agent/lib/secret-mask.ts` with `{ diagnostics: true }`, which reports kind and line only) and hand out the masked text. Tell implementers to build secret-shaped fixtures from fragments at runtime. To judge a flag's provenance without recovering it, scan the source file alone: zero findings means the flag came from output formatting.
 - **Enforced:** practice; candidate for a pre-delegation check in the planner/brief tooling.
+
+## 2026-10-31
+
+### Install setup changes from the reviewed commit, not the working tree
+- **Symptom:** a live install of pi-phase copied uncommitted work in progress from a worktree and ran it for a few minutes before it was reinstalled from the commit.
+- **Cause:** copying files from the worktree path picks up whatever is being edited at that moment.
+- **Rule:** install with `git show <sha>:agent/<path>` into a temp file, then move it into place; record the installed checksums; back up the previous live files first.
+- **Enforced:** practice (install protocol in the #81 plan).
+
+### Subagents cannot run long gates
+- **Symptom:** implementer subagents could not finish whole-suite gates under load.
+- **Cause:** subagents have no `job_start`, and their foreground bash calls are capped at 600 s.
+- **Rule:** when a gate may exceed about 10 minutes, the parent session runs it with `job_start`; the subagent runs targeted checks and reports.
+- **Enforced:** rule (brief template) / practice.
+
+### Timing-based tests flake under host load
+- **Symptom:** pi-phase tests such as the RSS-cap, cross-process slot and lock-descriptor tests failed in full runs at a load average of about 100 on 12 cores, and passed when run alone.
+- **Cause:** tight wall-clock assertions.
+- **Rule:** rerun a timing failure alone once before attributing it; report it as load-flaky with the load average; do not loosen the gate silently.
+- **Enforced:** practice; candidate for scaling test timeouts by load.
+
+## 2026-11-02
+
+### Pattern kills terminate other sessions' builds
+- **Symptom:** a lane's `pkill -f 'MSBuild.dll.*nodeReuse'` cleanup killed other lanes' active builds with MSB4166.
+- **Cause:** process names and command-line patterns are shared across sessions on the same machine, not scoped to the lane that started them.
+- **Rule:** find the exact PIDs you started (`ps -o pid,ppid,pgid,command` filtered to your own process group or cwd, and `lsof -p PID`) and kill only those numeric PIDs, or let pi-phase clean up its owned process group. Never clean up by name or pattern.
+- **Enforced:** `agent/extensions/kill-guard.ts` blocks name kills and process-search kill pipelines/substitutions before bash executes; `/guards off kill` is the user's switch.

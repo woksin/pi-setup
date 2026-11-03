@@ -3,9 +3,47 @@ import { join } from 'node:path';
 import { TrainError } from './train-gh.mjs';
 import { trainHome } from './train-manifest.mjs';
 
-export async function shipConfig(ctx) {
-  try { return JSON.parse(await readFile(join(trainHome(ctx.env), 'config.json'), 'utf8')); }
+// Built-in Tier 1 component sets, derived from each repository's CI; the user's config.json wins per repository.
+const DEFAULTS = new URL('./train-gate-defaults.json', import.meta.url);
+
+async function readJson(file) {
+  try { return JSON.parse(await readFile(file, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+}
+
+export async function shipConfig(ctx) {
+  const defaults = await readJson(DEFAULTS);
+  const config = await readJson(join(trainHome(ctx.env), 'config.json'));
+  validateComponents(defaults);
+  validateComponents(config);
+  if (defaults.gateComponents) config.gateComponents = { ...defaults.gateComponents, ...config.gateComponents };
+  return config;
+}
+
+function validateComponent(component) {
+  if (!component || !['build', 'test'].includes(component.kind)) throw new TrainError('Tier 1 is non-integration; component kind must be build or test');
+  if (!nonemptyString(component.id) || typeof component.label !== 'string') {
+    throw new TrainError('gateComponents require a nonempty id and regex label');
+  }
+  try { new RegExp(component.label, 'i'); }
+  catch { throw new TrainError(`invalid gateComponents regex for ${component.id}`); }
+}
+
+function nonemptyString(value) { return typeof value === 'string' && Boolean(value.trim()); }
+function objectMap(value) { return Boolean(value) && !Array.isArray(value) && typeof value === 'object'; }
+
+function validateComponentList(components) {
+  if (!Array.isArray(components) || !components.length) throw new TrainError('gateComponents must contain nonempty component arrays');
+  components.forEach(validateComponent);
+  if (new Set(components.map(component => component.id)).size !== components.length) throw new TrainError('gateComponents ids must be unique');
+}
+
+function validateComponents(config) {
+  if (config.gateComponents === undefined) return;
+  if (!objectMap(config.gateComponents)) {
+    throw new TrainError('gateComponents must map repositories to component arrays');
+  }
+  Object.values(config.gateComponents).forEach(validateComponentList);
 }
 
 function parseLedgerLine(line) {
@@ -26,22 +64,39 @@ async function ledgerEntries(directory) {
 
 function validGateRecord(record, manifest) {
   return record.outcome === 'passed' && record.verified === true && record.head === manifest.head
-    && record.dirty === 'clean' && ['build', 'test'].includes(record.kind);
+    && record.dirty === 'clean' && ['build', 'test'].includes(record.kind)
+    && (record.profile ?? 'full') === 'full'; // records predating profiles were full; iterate is never evidence
 }
 
 function describeEvidence(record) {
   return `${record.kind}: ${record.label ?? ''} (${record.ts ?? ''})`;
 }
 
-export async function gateEvidence(ctx, manifest, config) {
+function componentEvidence(manifest, config, records) {
+  const matches = config.gateComponents[manifest.repo].map(component => ({ component, record: records.find(record =>
+    record.kind === component.kind && new RegExp(component.label, 'i').test(record.label ?? '')) }));
+  const missing = matches.filter(match => !match.record).map(match => match.component.id);
+  if (missing.length) throw new TrainError(`Tier 1 incomplete for ${manifest.head.slice(0, 7)}: missing ${missing.join(', ')}`);
+  return matches.map(({ component, record }) => `${component.id}: ${describeEvidence(record)}`).join('\n');
+}
+
+function unconfiguredEvidence(ctx, manifest, evidence, options) {
+  if (!options.allowUnconfiguredGate) {
+    throw new TrainError(`no gateComponents configured for ${manifest.repo}; add a Tier 1 component set to the train config or pass --allow-unconfigured-gate`);
+  }
+  ctx.err(`warning: --allow-unconfigured-gate: no gateComponents for ${manifest.repo}; accepting any verified clean build/test`);
+  if (evidence.length) return evidence.map(describeEvidence).join('\n');
+  throw new TrainError(`no verified Tier 1 for ${manifest.head.slice(0, 7)}`);
+}
+
+export async function gateEvidence(ctx, manifest, config, options = {}) {
+  validateComponents(config);
   const directory = join(ctx.env.HOME, '.pi', 'agent', 'pi-phase', 'state', 'ledger');
   const records = await ledgerEntries(directory);
   const evidence = records.filter(record => validGateRecord(record, manifest));
-  if (evidence.length) return evidence.map(describeEvidence).join('\n');
-  const message = `no verified Tier 1 for ${manifest.head.slice(0, 7)}`;
-  if (config.requireGate === true) throw new TrainError(message);
-  ctx.err(`warning: ${message}`);
-  return message;
+  const components = config.gateComponents?.[manifest.repo];
+  if (components) return componentEvidence(manifest, config, evidence);
+  return unconfiguredEvidence(ctx, manifest, evidence, options);
 }
 
 function pending(item) {

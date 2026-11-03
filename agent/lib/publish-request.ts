@@ -230,7 +230,10 @@ function addBody(request: RecordValue, plan: GhPlan): void {
 }
 function scalarOptions(request: RecordValue, plan: GhPlan): void {
 	for (const [key, flag] of Object.entries(scalarFlags)) {
-		if (own(request, key)) { plan.argv.push(`--${flag}=${request[key]}`); plan.outbound.push({ label: key, text: request[key] as string }); }
+		if (!own(request, key)) continue;
+		// gh spells the close reason "not planned" (with a space); the typed request uses "not-planned".
+		const value = key === "reason" && request[key] === "not-planned" ? "not planned" : request[key];
+		plan.argv.push(`--${flag}=${value}`); plan.outbound.push({ label: key, text: value as string });
 	}
 }
 function arrayOptions(request: RecordValue, plan: GhPlan): void {

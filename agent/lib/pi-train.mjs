@@ -22,7 +22,7 @@ export const HELP = `Usage: pi-train [--repo-dir path] [--dry-run] [--json] <com
   eta <PR#|branch> <when|clear> [--train branch]
   concurrency [--json]
   status [--all] [--train branch] [--json] [--gate duration]
-  ship [--train branch] [--label major|minor|patch|no-release] [--summary-file f] [--title text] [--allow-behind]
+  ship [--train branch] [--label major|minor|patch|no-release] [--summary-file f] [--title text] [--allow-behind] [--allow-unconfigured-gate]
   close [train-branch] [--shipped PR#] [--head sha] | [--abandoned]   (manifest only; works when the worktree is gone)
   hook install|uninstall
   guard --stdin [--push-url url]
@@ -42,7 +42,7 @@ Exit codes:
 See also: docs/reference.md, README.md`;
 
 const FLAGS = new Map(Object.entries({ '--dry-run': 'dryRun', '--json': 'json', '--all': 'all', '--allow-foreign': 'allowForeign',
-  '--adopt': 'adopt', '--allow-behind': 'allowBehind', '--stdin': 'stdin', '--abandoned': 'abandoned' }));
+  '--adopt': 'adopt', '--allow-behind': 'allowBehind', '--allow-unconfigured-gate': 'allowUnconfiguredGate', '--stdin': 'stdin', '--abandoned': 'abandoned' }));
 const VALUES = new Map(Object.entries({ '--repo-dir': 'repoDir', '--train': 'train', '--from': 'from', '--worktree': 'worktree',
   '--base': 'base', '--label': 'label', '--summary-file': 'summaryFile', '--title': 'title', '--push-url': 'pushUrl', '--eta': 'eta', '--gate': 'gate',
   '--shipped': 'shipped', '--head': 'head' }));
@@ -58,7 +58,7 @@ const OPTION_GROUPS = [
   { command: 'status', keys: ['gate'], message: '--gate is only valid for status' },
   { command: 'init', keys: ['from', 'worktree'], message: '--from/--worktree require init' },
   { command: 'init', keys: ['adopt', 'base'], message: '--adopt/--base require init' },
-  { command: 'ship', keys: ['label', 'summaryFile', 'title', 'allowBehind'], message: 'ship options require ship' },
+  { command: 'ship', keys: ['label', 'summaryFile', 'title', 'allowBehind', 'allowUnconfiguredGate'], message: 'ship options require ship' },
   { command: 'guard', keys: ['stdin', 'pushUrl'], message: '--stdin/--push-url require guard' },
   { command: 'close', keys: ['abandoned', 'shipped', 'head'], message: '--abandoned/--shipped/--head require close' },
 ];

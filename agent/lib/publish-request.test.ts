@@ -174,3 +174,10 @@ test("gist-edit plans exactly one single-valued gh operation (--add, --remove or
 	const edit = publishRequestSchema.oneOf.find(shape => shape.properties.kind.const === "gist-edit")! as any;
 	assert.equal(edit.allOf.at(-1).oneOf.length, 3);
 });
+
+test("issue-close maps the typed not-planned reason to gh's spelling", () => {
+	const plan = toGhPlan(validateRequest({ kind: "issue-close", ...target, reason: "not-planned" }));
+	assert.ok(plan.argv.includes("--reason=not planned"));
+	assert.ok(!plan.argv.includes("--reason=not-planned"));
+	assert.ok(toGhPlan(validateRequest({ kind: "issue-close", ...target, reason: "completed" })).argv.includes("--reason=completed"));
+});

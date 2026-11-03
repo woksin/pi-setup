@@ -89,10 +89,16 @@ const record = (res, opts, name) => {
   const expected = AGENT_MODELS[opts.agentType]
   const models = runtimeModels(p)
   const available = runtimeAvailable(p, models)
-  const ok = available && models.every(model => model === expected)
-  if (!available) runtimeProblems.push(`${name} (${opts.label}): no runtime model record`)
-  else if (!ok) runtimeProblems.push(`${name} (${opts.label}) ran on ${models.join(', ')}, not ${expected} (${classification(p)})`)
-  runtimeRuns.push({ ...runtimeDetails(p), label: opts.label, agentType: opts.agentType, expected, effective: models, ok })
+  // Transitional (pi-setup#87): a parent session started before model-provenance was installed stamps no record at all.
+  // An absent record is reported, not blocking; a present record that is unavailable, malformed or mismatched still blocks.
+  const absent = p === undefined || p === null
+  const ok = absent || (available && models.every(model => model === expected))
+  if (absent) runtimeRuns.push({ label: opts.label, agentType: opts.agentType, expected, effective: [], ok, provenance: 'unavailable (pre-update session)' })
+  else {
+    if (!available) runtimeProblems.push(`${name} (${opts.label}): no runtime model record`)
+    else if (!ok) runtimeProblems.push(`${name} (${opts.label}) ran on ${models.join(', ')}, not ${expected} (${classification(p)})`)
+    runtimeRuns.push({ ...runtimeDetails(p), label: opts.label, agentType: opts.agentType, expected, effective: models, ok })
+  }
 }
 const reviewAgent = async (prompt, opts, name) => {
   const res = await agent(prompt, opts)
@@ -125,8 +131,19 @@ const FINDINGS = {
         }, required: ['severity', 'blocking', 'location', 'problem', 'fix', 'verified'],
       },
     },
-  }, required: ['summary', 'findings'],
+    coverage: {
+      type: 'string', enum: ['complete', 'partial', 'none'],
+      description: 'complete only if you reviewed the whole requested change for your lens; partial or none if you ' +
+        'could not (no access, tool failure, scope unclear, declined); explain in coverageNote.',
+    },
+    coverageNote: { type: 'string' },
+  }, required: ['summary', 'findings', 'coverage'],
 }
+// A reviewer slot that did not fully review is never a pass, even with an empty findings list.
+const coverageProblem = (name, res) =>
+  res.coverage === 'complete'
+    ? null
+    : `${name} did not complete its review (coverage: ${res.coverage ?? 'missing'}${res.coverageNote ? `; ${String(res.coverageNote).slice(0, 200)}` : ''})`
 const VERDICTS = {
   type: 'object', properties: {
     verdicts: {
@@ -150,7 +167,7 @@ const context = input.context ? `\nIntent/spec:\n${input.context}` : ''
 const scope = since ? `\nFollow-up round ${round}: review ONLY git diff ${since}..HEAD and resolution of prior findings. Do not hunt for new defects in unchanged code except critical defects.` : ''
 const priorText = prior ? `\nEarlier findings/decisions (respect dismissals):\n${prior}` : ''
 const rubric = '\nOnly critical/major regressions, data loss, security holes, spec violations, broken builds/tests or out-of-scope behaviour changes block merge. Minor/nit items are advisory. Exclude pre-existing defects, unreachable hypothetical inputs, wording preferences and release notes/PR descriptions. Read actual code; do not guess. Remain read-only and obey execution budgets. Empty findings are valid.'
-const prompt = `Review ${target}.${context}${scope}${priorText}\nCheck correctness, regressions, security and missing/broken tests.${rubric}`
+const prompt = `Review ${target}.${context}${scope}${priorText}\nCheck correctness, regressions, security and missing/broken tests.${rubric} Set coverage honestly: complete only if you reviewed the whole requested change.`
 const securityPrompt =
   `Security review of ${target}.${context}${scope}${priorText}\n\n` +
   'You are the SECURITY lens. Ignore general correctness, style and performance; other reviewers cover those. ' +
@@ -182,7 +199,8 @@ const securityPrompt =
   'Deployment context: in Cratis repositories, assume the Cratis platform deployment (services behind Cratis AuthProxy, ' +
   'which strips client identity and tenant headers and injects verified ones). Rate a hole that AuthProxy fully ' +
   'neutralises as minor and say so; holes AuthProxy passes through (other headers, bodies, responses, authenticated ' +
-  'callers) keep their full severity. An empty findings list is a valid answer.'
+  'callers) keep their full severity. An empty findings list is a valid answer. ' +
+  'Set coverage honestly: complete only if you reviewed the whole requested change for the security lens.'
 const call = (side, text, schema, label, phaseName) => reviewAgent(text, {
   agentType: reviewers[side].agentType, effort: reviewers[side].effort,
   schema, label, phase: phaseName,
@@ -209,6 +227,10 @@ if (quick) {
   const all = res.findings.concat(sec.findings.map(f => ({ ...f, foundBy: `${reviewers[side].name} (security)` })))
   const blockers = all.filter(blocking)
   const incomplete = [...runtimeProblems]
+  for (const [slotName, slot] of [[reviewers[side].name, res], [`${reviewers[side].name} (security)`, sec]]) {
+    const cp = coverageProblem(slotName, slot)
+    if (cp) incomplete.push(cp)
+  }
   const passedQ = blockers.length === 0 && incomplete.length === 0
   return {
     mode: 'quick', round, passed: passedQ, complete: incomplete.length === 0, incomplete,
@@ -246,6 +268,8 @@ results.forEach((res, index) => {
   const by = lanes[index].name
   if (!res || res.failed) { incomplete.push(`${by} review failed`); return }
   summaries.push({ by, summary: res.summary })
+  const cp = coverageProblem(by, res)
+  if (cp) incomplete.push(cp)
   if (res.findings.some(blocking) && !res.verdicts) incomplete.push(`${by} verification failed`)
   res.findings.forEach((f, i) => {
     const item = { ...f, foundBy: by }

@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, watch, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ORIGINAL_ENTRY, restoreManualPin, restoreOriginal, type OriginalEntryData } from "./provider-fallback-state.ts";
-import fallbackExtension, { DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK, fallbackContextLimit, classifyError, equivalentOf, fallbackContextVeto, selectFallback } from "../extensions/provider-fallback.ts";
+import fallbackExtension, { DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK, fallbackContextLimit, classifyError, equivalentOf, fallbackContextVeto, pinnedProvider, selectFallback, sessionLineage, setProcessMainLineage } from "../extensions/provider-fallback.ts";
 
 const CONFIG = {
 	enabled: true,
@@ -96,6 +96,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
 	for (const shutdown of shutdowns.splice(0)) await shutdown();
+	setProcessMainLineage([]);
 	for (const [k, v] of [["PI_PROVIDER_FALLBACK_CONFIG", saved.c], ["PI_PROVIDER_FALLBACK_STATE", saved.s], ["PI_CONTEXT_BUDGET_CONFIG", saved.b], ["PI_CONTEXT_BUDGET_STATE_DIR", saved.bd]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
 });
 const writeConfig = (c: object) => writeFileSync(process.env.PI_PROVIDER_FALLBACK_CONFIG!, JSON.stringify(c));
@@ -711,4 +712,111 @@ test("restoreManualPin returns the pin only from the latest persisted entry", ()
 	assert.equal(restoreManualPin([entry({ originalRef: null })]), undefined);
 	assert.equal(restoreManualPin([{ type: "message" }]), undefined);
 	assert.equal(restoreOriginal([entry({ originalRef: "anthropic/a", until: 5 })])?.until, 5);
+});
+
+const PINNED = "0badc0de-0000-4000-8000-000000000001";
+
+test("selectFallback: a provider pin keeps only same-provider candidates", () => {
+	assert.deepEqual(selectFallback(CONFIG, "anthropic/a", undefined, none, "anthropic"), { blocked: [], chain: false });
+	assert.equal(selectFallback(CONFIG, "anthropic/c", undefined, none, "kimi").target, "kimi/k");
+	assert.equal(selectFallback(CONFIG, "anthropic/a", undefined, none, "openai").target, "openai/b");
+});
+
+test("sessionLineage and pinnedProvider: own id, spawner chain from headers or file names, prefix pins of 8+ chars", () => {
+	const headers: Record<string, { id?: string; parentSession?: string }> = { "/s/p.jsonl": { id: "parent-id", parentSession: "/s/2026_" + PINNED + ".jsonl" } };
+	const lineage = sessionLineage({ getSessionId: () => "child", getHeader: () => ({ id: "child", parentSession: "/s/p.jsonl" }) }, f => headers[f]);
+	assert.deepEqual(lineage, ["child", "parent-id", PINNED]);
+	assert.deepEqual(sessionLineage(undefined), []);
+	assert.equal(pinnedProvider({ providerPins: { [PINNED.slice(0, 8)]: "openai" } }, lineage), "openai");
+	assert.equal(pinnedProvider({ providerPins: { "01a1": "openai" } }, lineage), undefined); // prefix too short
+	assert.equal(pinnedProvider({}, lineage), undefined);
+});
+
+function pinnedSession(provider: string, header?: { parentSession?: string }) {
+	writeConfig({ ...CONFIG, providerPins: { [PINNED]: provider } });
+	const s = session();
+	s.ctx.sessionManager.getSessionId = () => (header ? "child-session" : PINNED);
+	s.ctx.sessionManager.getHeader = () => ({ id: "x", ...header });
+	return s;
+}
+
+test("pinned session: a limit records the mark but never switches provider; it waits instead", async () => {
+	const s = pinnedSession("anthropic");
+	await s.boundary("session_start");
+	await s.fire("429 rate_limit_error");
+	assert.equal(s.switched.length, 0);
+	assert.ok(marks()["anthropic/a"]);
+	assert.match(s.notices.at(-1)![0], /pinned to anthropic \(providerPins\), so it waits for the limit to clear/);
+	writeFileSync(stateFile, JSON.stringify({ "anthropic/a": { until: hour(), since: 0 } }));
+	await s.boundary("before_agent_start"); // no pre-emptive move either
+	assert.equal(s.switched.length, 0);
+});
+
+test("pinned session's subagent (header parentSession) inherits the pin", async () => {
+	const parent = join(stateFile, "..", `2026-11-01_${PINNED}.jsonl`);
+	writeFileSync(parent, JSON.stringify({ type: "session", id: PINNED }) + "\n");
+	const s = pinnedSession("anthropic", { parentSession: parent });
+	await s.boundary("session_start");
+	await s.fire("429 rate_limit_error");
+	assert.equal(s.switched.length, 0);
+});
+
+test("pin added after a fallback: the session is never restored to the other provider", async () => {
+	const s = pinnedSession("openai");
+	writeConfig(CONFIG);
+	await s.boundary("session_start");
+	await s.fire("429 rate_limit_error");
+	assert.deepEqual(s.switched, [B]);
+	writeConfig({ ...CONFIG, providerPins: { [PINNED]: "openai" } });
+	writeFileSync(stateFile, "{}");
+	await s.boundary("before_agent_start");
+	assert.deepEqual(s.switched, [B]);
+	assert.equal(s.ctx.model, B);
+});
+
+test("machine-local provider-pins.json beside the config pins a session too", async () => {
+	const s = session();
+	s.ctx.sessionManager.getSessionId = () => PINNED;
+	writeFileSync(join(process.env.PI_PROVIDER_FALLBACK_CONFIG!, "..", "provider-pins.json"), JSON.stringify({ [PINNED]: "anthropic" }));
+	await s.boundary("session_start");
+	await s.fire("429 rate_limit_error");
+	assert.equal(s.switched.length, 0);
+	assert.match(s.notices.at(-1)![0], /pinned to anthropic/);
+});
+
+test("an in-memory subagent (no parentSession) inherits the pin of the main session in its process", async () => {
+	writeConfig({ ...CONFIG, providerPins: { [PINNED]: "anthropic" } });
+	const main = session({ hasUI: true });
+	main.ctx.sessionManager.getSessionId = () => PINNED;
+	await main.boundary("session_start");
+	const child = session();
+	child.ctx.sessionManager.getSessionId = () => "in-memory-child";
+	await child.boundary("session_start");
+	await child.fire("429 rate_limit_error");
+	assert.equal(child.switched.length, 0);
+	setProcessMainLineage([]);
+	writeFileSync(stateFile, "{}");
+	const free = session();
+	await free.boundary("session_start");
+	await free.fire("429 rate_limit_error");
+	assert.deepEqual(free.switched, [B]);
+});
+
+test("sessionLineage ignores malformed header fields and stops on cycles", () => {
+	assert.deepEqual(sessionLineage({ getHeader: () => ({ id: 123 as any }) }), []);
+	const headers: Record<string, any> = { "/a": { id: "a1", parentSession: "/b" }, "/b": { id: "b1", parentSession: "/a" } };
+	assert.deepEqual(sessionLineage({ getSessionId: () => "me", getHeader: () => ({ parentSession: "/a" }) }, f => headers[f]), ["me", "a1", "b1"]);
+	assert.deepEqual(sessionLineage({ getSessionId: () => "me", getHeader: () => ({ parentSession: "/x" }) }, () => ({ id: "p", parentSession: 7 as any })), ["me", "p"]);
+});
+
+test("a headless root (-p/RPC, first session in the process) also passes its pin to in-memory subagents", async () => {
+	writeConfig({ ...CONFIG, providerPins: { [PINNED]: "anthropic" } });
+	const root = session();
+	root.ctx.sessionManager.getSessionId = () => PINNED;
+	await root.boundary("session_start");
+	const child = session();
+	child.ctx.sessionManager.getSessionId = () => "in-memory-child";
+	await child.boundary("session_start");
+	await child.fire("429 rate_limit_error");
+	assert.equal(child.switched.length, 0);
 });

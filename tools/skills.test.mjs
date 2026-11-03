@@ -146,7 +146,7 @@ async function runReview(args, { file = reviewFiles[0], override } = {}) {
     assert.ok(!prompt.includes("runtimeStamp"));
     assert.ok(!prompt.includes("model-provenance/tool-call/v1"));
     assert.ok(!JSON.stringify(opts.schema).includes("runtimeProvenance"));
-    const res = { summary: "ok", findings: [], verdicts: [], runtimeProvenance: provenance(models[opts.agentType], opts.label) };
+    const res = { summary: "ok", findings: [], coverage: "complete", verdicts: [], runtimeProvenance: provenance(models[opts.agentType], opts.label) };
     return override ? override(opts, res) : res;
   };
   const pipeline = async (items, ...stages) => Promise.all(items.map(async (item) => { let v = item; for (const s of stages) v = await s(v, item); return v; }));
@@ -209,7 +209,7 @@ test("runtime StructuredOutput preserves hook-injected provenance with every act
     const schemas = new Function(`${declarations.join(";\n")}; return { FINDINGS, VERDICTS };`)();
     for (const [name, schema] of Object.entries(schemas)) {
       const compiled = { schema, check: value => Check(schema, value) ? true : "schema mismatch" };
-      const input = name === "FINDINGS" ? { summary: "ok", findings: [] } : { verdicts: [] };
+      const input = name === "FINDINGS" ? { summary: "ok", findings: [], coverage: "complete" } : { verdicts: [] };
       assert.equal(compiled.check(input), true, "valid before the hook");
       const model = modelMap(file).reviewer;
       const [provider, id] = model.split("/");
@@ -246,7 +246,7 @@ test("review routing, runtime wrapper and schemas stay synchronized across all p
     assert.equal(wrapper(source), wrapper(reviewSource), `${file}: identical runtime wrapper`);
     assert.ok(!source.includes("additionalProperties"), `${file}: schemas must accept injected provenance`);
     assert.ok(!source.includes("review-v1:"), `${file}: no legacy cache prefix`);
-    if (source.includes("const cacheKey")) assert.match(source, /const cacheKey = 'review-v2-security:'/);
+    if (source.includes("const cacheKey")) assert.match(source, /const cacheKey = 'review-v3-coverage:'/);
   }
   for (const profile of ["balanced", "balanced-openai"]) assert.equal(loadReview(`agent/profiles/${profile}/workflows/review.js`), reviewSource);
 });
@@ -425,12 +425,48 @@ for (const file of reviewFiles) {
 
 test("review-v1 cache results cannot bypass runtime provenance enforcement", async () => {
   const { result } = await runReview(base);
-  assert.match(result.reviewCacheKey, /^review-v2-security:/);
-  const old = { ...result, reviewCacheKey: result.reviewCacheKey.replace("review-v2-security:", "review-v1:") };
+  assert.match(result.reviewCacheKey, /^review-v3-coverage:/);
+  const old = { ...result, reviewCacheKey: result.reviewCacheKey.replace("review-v3-coverage:", "review-v1:") };
   const run = await runReview({ ...base, cachedReview: old });
   assert.equal(run.calls, 3);
   assert.notEqual(run.result.cached, true);
 });
+
+test("a pre-coverage (review-v2) cached pass is not reused", async () => {
+  const { result } = await runReview(base);
+  const legacy = { ...result, reviewCacheKey: result.reviewCacheKey.replace("review-v3-coverage:", "review-v2-security:") };
+  for (const file of reviewFiles.filter(f => !f.includes("openai-only"))) {
+    const fresh = await runReview(base, { file });
+    if (!fresh.result.reviewCacheKey) continue;
+    const old = { ...fresh.result, reviewCacheKey: fresh.result.reviewCacheKey.replace("review-v3-coverage:", "review-v2-security:") };
+    const run = await runReview({ ...base, cachedReview: old }, { file });
+    assert.ok(run.calls > 0, file);
+    assert.notEqual(run.result.cached, true, file);
+  }
+  const run = await runReview({ ...base, cachedReview: legacy });
+  assert.ok(run.calls > 0);
+  assert.notEqual(run.result.cached, true);
+});
+
+// ---- a reviewer slot that did not fully review is never a pass ----
+const coverageCases = [{ coverage: "partial", coverageNote: "no repo access" }, { coverage: "none" }, { coverage: undefined }];
+for (const file of reviewFiles) {
+  test(`${file}: partial, none or missing coverage makes quick and full runs incomplete`, async () => {
+    for (const mode of [{ quick: true }, {}]) {
+      const ok = await runReview({ ...base, ...mode }, { file });
+      assert.equal(ok.result.passed, true, JSON.stringify(mode));
+      for (const slot of [opts => opts.label.startsWith("review:") && !securityLabel(opts), securityLabel]) {
+        for (const change of coverageCases) {
+          const run = await runReview({ ...base, ...mode }, { file, override: (opts, res) => (slot(opts) ? { ...res, ...change } : res) });
+          const label = `${JSON.stringify(mode)} ${JSON.stringify(change)}`;
+          assert.equal(run.result.passed, false, label);
+          assert.equal(run.result.complete, false, label);
+          assert.ok(run.result.incomplete.some(m => /did not complete its review/.test(m)), label);
+        }
+      }
+    }
+  });
+}
 
 test("fit preserves gate and coverage with nine blockers and six reviewer records", async () => {
   const run = await runReview(base, { override: (opts, res) => {

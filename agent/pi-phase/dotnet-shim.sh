@@ -24,13 +24,14 @@ subcommand=0
 subcommand_name=
 assemblies=no
 cap=yes
+explicit_arg=
 msbuild=yes
 shared=yes
 reuse=yes
 property_next=no
+# Shared compilation only: MSBuild node reuse stays off, because reused nodes outlive the phase.
 if [ "${PI_PHASE_SHARED_COMPILATION:-}" = 1 ]; then
     shared=no
-    reuse=no
 fi
 for arg do
     index=$((index + 1))
@@ -40,7 +41,7 @@ for arg do
         *.dll|*.exe) assemblies=yes ;;
     esac
     case $lower in
-        -m|-m:*|/m|/m:*|-maxcpucount*|/maxcpucount*|--maxcpucount*) cap=no ;;
+        -m|-m:*|/m|/m:*|-maxcpucount*|/maxcpucount*|--maxcpucount*) cap=no; explicit_arg=$lower ;;
     esac
     properties=
     if [ "$property_next" = yes ]; then properties=$lower; fi
@@ -76,6 +77,9 @@ if [ "$subcommand_name" = test ]; then
     fi
 fi
 if [ "$msbuild" = yes ] && [ "$subcommand" -gt 0 ]; then
+    # Observability only (#92): one silent, non-fatal line per MSBuild-bound call.
+    if [ "$cap" = yes ]; then mark="capped $PI_PHASE_MSBUILD_MAX_CPU"; else mark="explicit $explicit_arg"; fi
+    { printf '%s\n' "$mark" >>"$PI_PHASE_SHIM_DIR/calls"; } 2>/dev/null || :
     # The for-list is expanded before set replaces the positional parameters.
     index=0
     for arg do
