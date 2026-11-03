@@ -22,6 +22,22 @@ class FlushBuffer(io.StringIO):
         self.flushed.append(self.getvalue())
 
 
+PREREQUISITES = ('docker state', 'process snapshot', 'discovery', 'container mounts')
+
+
+def prerequisites_in_process(real_measure):
+    """Run the section prerequisites without a fork deadline; later sections keep the real watchdog.
+
+    A prerequisite that misses its small share of a sub-second budget falls back, which makes the
+    build step skip without a note and hides the watchdog this test is about."""
+    def measure(self, label, weight, operation, fallback):
+        if label not in PREREQUISITES:
+            return real_measure(self, label, weight, operation, fallback)
+        self.weight -= weight
+        return operation()
+    return measure
+
+
 class DryBudgetTests(unittest.TestCase):
     def test_default_unlimited_and_invalid_budget(self):
         self.assertEqual(cleanup.parse_args([]).budget, 60)
@@ -105,7 +121,8 @@ class DryBudgetTests(unittest.TestCase):
                 patch.object(cleanup, 'docker_running', return_value=False), \
                 patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
                 patch.object(cleanup, 'discover', return_value=[]), \
-                patch.object(cleanup, 'plan_build', side_effect=slow):
+                patch.object(cleanup, 'plan_build', side_effect=slow), \
+                patch.object(cleanup.DryBudget, 'measure', prerequisites_in_process(cleanup.DryBudget.measure)):
             before = time.monotonic()
             self.assertEqual(cleanup.main(['--roots', root, '--budget', '.6']), 0)
             self.assertLess(time.monotonic() - before, 1.8)
@@ -113,6 +130,7 @@ class DryBudgetTests(unittest.TestCase):
         headings = ['build', 'worktrees', 'docker', 'caches', 'bins', 'suggestions (not done)', 'summary']
         positions = [text.index('== ' + name + ' ==') for name in headings]
         self.assertEqual(positions, sorted(positions))
+        self.assertNotIn('snapshot unavailable', text)
         self.assertIn('build: not measured (budget)', text)
         for name in headings[:5]:
             self.assertTrue(any(('== ' + name + ' ==') in chunk and '== summary ==' not in chunk
