@@ -128,6 +128,81 @@ class DiskGrowthTests(unittest.TestCase):
         self.assertIn('probe timed out/partial', notice.read_text())
         self.assertIn('Likely writers (mocked):', notice.read_text())
 
+    def write_lease(self, name, **values):
+        state = self.agent / 'pi-phase/state'
+        state.mkdir(parents=True, exist_ok=True)
+        (state / f'{name}.lock').touch()
+        data = dict(token=name, pid=os.getpid(), kind='test', label=name,
+                    cwd=str(self.home / 'repo space'), started=880)
+        data.update(values)
+        path = state / f'{name}.json'
+        path.write_text(json.dumps(data))
+        return path
+
+    def test_running_leases_order_window_first_and_deduplicate_without_commands(self):
+        self.write_lease('heavy-0', token='shared', kind='build', label='older build', started=400)
+        self.write_lease('integration-0', token='shared', kind='build', label='older build', started=400)
+        self.write_lease('fast-0', label='recent tests')
+        self.write_lease('direct-boundary', label='boundary', started=820)
+        (self.agent / 'pi-phase/state/coordinator.lock').touch()
+        (self.agent / 'pi-phase/state/heavy-1.lock').touch()
+        (self.agent / 'pi-phase/state/host-sample.json').write_text('{}')
+        commands = Mock()
+        with patch.object(dg.time, 'time', return_value=1000):
+            lines = dg.phase_lines(commands, 180, str(self.home))
+        self.assertEqual(lines, ['- test recent tests cwd=~/repo space elapsed=120s',
+                                 '- test boundary cwd=~/repo space elapsed=180s',
+                                 '- build older build cwd=~/repo space elapsed=600s'])
+        commands.run.assert_not_called()
+
+    def test_dead_lease_pid_is_skipped_without_status_fallback(self):
+        self.write_lease('direct-dead', pid=123456)
+        commands = Mock()
+        with patch.object(dg.os, 'kill', side_effect=ProcessLookupError) as kill:
+            self.assertEqual(dg.phase_lines(commands, 180, str(self.home)), ['- none'])
+        kill.assert_called_once_with(123456, 0)
+        commands.run.assert_not_called()
+
+    def test_malformed_lease_files_are_skipped(self):
+        self.write_lease('direct-live')
+        self.write_lease('direct-bad-json').write_text('{')
+        self.write_lease('direct-not-object').write_text('[]')
+        for key, value in [('pid', -1), ('pid', True), ('started', '880'),
+                           ('started', float('nan')), ('cwd', None), ('label', '')]:
+            self.write_lease(f'direct-bad-{key}-{value}', **{key: value})
+        commands = Mock()
+        with patch.object(dg.time, 'time', return_value=1000), \
+                patch.object(dg.os, 'kill') as kill:
+            lines = dg.phase_lines(commands, 180, str(self.home))
+        self.assertEqual(lines, ['- test direct-live cwd=~/repo space elapsed=120s'])
+        kill.assert_called_once_with(os.getpid(), 0)
+        commands.run.assert_not_called()
+
+    def test_unreadable_lease_format_falls_back_to_status(self):
+        self.write_lease('direct-invalid').write_text('{"different": "format"}')
+        commands = Mock()
+        commands.run.return_value = ('pi-phase: test fallback pid=1 cwd=/tmp/repo '
+                                     'elapsed=10s running\n')
+        self.assertEqual(dg.phase_lines(commands, 180, str(self.home)),
+                         ['- test fallback cwd=/tmp/repo elapsed=10s'])
+        self.assertEqual(commands.run.call_args.args[0][-1], 'status')
+
+    def test_empty_lease_state_does_not_run_status(self):
+        (self.agent / 'pi-phase/state').mkdir(parents=True)
+        commands = Mock()
+        self.assertEqual(dg.phase_lines(commands, 180, str(self.home)), ['- none'])
+        commands.run.assert_not_called()
+
+    def test_running_lease_ten_entry_limit(self):
+        for age in range(600, 612):
+            self.write_lease(f'direct-{age}', started=1000 - age)
+        commands = Mock()
+        with patch.object(dg.time, 'time', return_value=1000):
+            lines = dg.phase_lines(commands, 180, str(self.home))
+        self.assertEqual(len(lines), 10)
+        self.assertEqual(lines[-1], '- test direct-609 cwd=~/repo space elapsed=609s')
+        commands.run.assert_not_called()
+
     def test_phase_attribution_orders_window_first_and_preserves_spaced_labels(self):
         output = ('pi-phase: build older build pid=1 cwd=/tmp/old elapsed=600s running policy=queued source=flag\n'
                   f'pi-phase: test recent tests pid=2 cwd={self.home}/repo space elapsed=120s running fast\n'
@@ -183,8 +258,9 @@ class DiskGrowthTests(unittest.TestCase):
         self.assertEqual(lookups, [['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'] for pid in range(1, 11)])
         self.assertIn('node ~/npm-cli.js install', lines[0])
         self.assertNotIn(str(self.home), '\n'.join(lines))
-        self.assertEqual(len(lines[0].split('elapsed=03:00 ', 1)[1].split(' cwd=')[0]), 120)
-        self.assertIn('... cwd=~/repo', lines[0])
+        self.assertTrue(lines[0].startswith('- pid=1 elapsed=03:00 cwd=~/repo node '))
+        self.assertEqual(len(lines[0].split('cwd=~/repo ', 1)[1]), 120)
+        self.assertTrue(lines[0].endswith('...'))
         self.assertEqual(len(lines), 10)
         self.assertIn('cwd=~/repo', lines[-1])
         self.assertEqual(dg.elapsed_seconds('2-01:02:03'), 176523)
@@ -216,7 +292,7 @@ class DiskGrowthTests(unittest.TestCase):
             args = f'git clone https://{userinfo}@example.com/repo'
             with self.subTest(userinfo=userinfo):
                 lines = dg.process_lines([(0, 123, '00:00', args)], commands, str(self.home))
-                self.assertEqual(lines, ['- pid=123 elapsed=00:00 git clone https://***@example.com/repo cwd=~/repo'])
+                self.assertEqual(lines, ['- pid=123 elapsed=00:00 cwd=~/repo git clone https://***@example.com/repo'])
         self.assertEqual(dg.short_text('git+ssh://reader:private-value@example.com/repo', str(self.home)),
                          'git+ssh://***@example.com/repo')
 
@@ -344,7 +420,7 @@ class DiskGrowthTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['timeout'], 1)
         with patch.object(dg.subprocess, 'run', side_effect=subprocess.TimeoutExpired('lsof', 1)):
             lines = dg.process_lines([(0, 123, '00:00', 'dotnet build')], dg.AttributionCommands(), str(self.home))
-        self.assertEqual(lines, ['- pid=123 elapsed=00:00 dotnet build cwd=unavailable: timed out'])
+        self.assertEqual(lines, ['- pid=123 elapsed=00:00 cwd=unavailable: timed out dotnet build'])
         with patch.object(dg.subprocess, 'run', return_value=Mock(returncode=0, stdout='malformed', stderr='')):
             lines = dg.attribution_lines({'baseline': {'ts': 0}, 'current': {'ts': 120}}, self.cfg)
         self.assertIn('- unavailable: no readable running phases in status', lines)

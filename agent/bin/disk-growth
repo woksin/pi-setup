@@ -221,21 +221,65 @@ def parse_phase(line):
     return head[1], head[2], fields['cwd'], int(fields['elapsed'][:-1])
 
 
-def phase_lines(commands, window, home):
+def lease_phases(home):
+    state = Path(home) / '.pi/agent/pi-phase/state'
+    paths = list(state.iterdir())
+    phases, seen = [], set()
+    readable = unreadable = False
+    now = time.time()
+    for path in paths:
+        if path.suffix != '.lock' or path.name == 'coordinator.lock':
+            continue
+        try:
+            data = json.loads(path.with_suffix('.json').read_text())
+            if (not isinstance(data, dict)
+                    or any(not isinstance(data.get(key), str) or not data[key]
+                           for key in ('kind', 'label', 'cwd'))
+                    or type(data.get('pid')) is not int or data['pid'] <= 0
+                    or number(data.get('started'), None) is None):
+                raise ValueError('unreadable lease metadata')
+        except FileNotFoundError:
+            continue  # Empty slots and leases removed during this snapshot are normal.
+        except (OSError, ValueError):
+            unreadable = True
+            continue
+        readable = True
+        try:
+            os.kill(data['pid'], 0)
+        except PermissionError:
+            pass  # The process exists, but belongs to another user.
+        except (OSError, OverflowError):
+            continue
+        token = str(data.get('token', path.stem))
+        if token not in seen:
+            seen.add(token)
+            age = max(0, int(now - data['started']))
+            phases.append((data['kind'], data['label'], data['cwd'], age))
+    if unreadable and not readable:
+        raise ValueError('no readable running lease metadata')
+    return phases
+
+
+def status_phases(commands, home):
     executable = Path(home) / '.pi/agent/bin/pi-phase'
     if not executable.is_file():
         executable = Path(__file__).resolve().with_name('pi-phase')
     output = commands.run([str(executable), 'status'], 10)
-    phases = []
-    for line in output.splitlines():
-        phase = parse_phase(line)
-        if phase:
-            kind, label, cwd, age = phase
-            phases.append((age > window, age,
-                           f'- {kind} {label} cwd={display_path(cwd, home)} elapsed={age}s'))
+    phases = [phase for line in output.splitlines() if (phase := parse_phase(line))]
     if not phases and 'pi-phase: no active phases' not in output:
         raise ValueError('no readable running phases in status')
-    return [line for _, _, line in sorted(phases)[:10]] or ['- none']
+    return phases
+
+
+def phase_lines(commands, window, home):
+    try:
+        phases = lease_phases(home)
+    except (OSError, ValueError):
+        phases = status_phases(commands, home)
+    ordered = [(age > window, age,
+                f'- {kind} {label} cwd={display_path(cwd, home)} elapsed={age}s')
+               for kind, label, cwd, age in phases]
+    return [line for _, _, line in sorted(ordered)[:10]] or ['- none']
 
 
 def elapsed_seconds(value):
@@ -306,7 +350,7 @@ def process_lines(processes, commands, home):
             cwd = display_path(paths[0], home)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             cwd = unavailable(error, home)
-        lines.append(f'- pid={pid} elapsed={elapsed} {short_text(args, home)} cwd={cwd}')
+        lines.append(f'- pid={pid} elapsed={elapsed} cwd={cwd} {short_text(args, home)}')
     return lines or ['- none']
 
 
@@ -352,8 +396,8 @@ def attribution_lines(info, cfg):
     commands = AttributionCommands()
     window = info['current']['ts'] - info['baseline']['ts']
     home = cfg['home']
-    # Cheapest and most telling first: one ps snapshot, then Docker, then pi-phase status
-    # (slowest under load), and per-process cwd lookups last with whatever budget remains.
+    # One ps snapshot, then Docker and lease reads (status only as a fallback),
+    # with per-process cwd lookups last using whatever command budget remains.
     recent = attribution_section('', lambda: [recent_processes(commands, window)], home)
     containers = attribution_section('Docker containers started within drop window (approximate uptime)',
                                      lambda: container_lines(commands, window, home), home)
