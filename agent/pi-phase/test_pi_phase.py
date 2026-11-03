@@ -843,9 +843,9 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual([r["outcome"] for r in records], ["passed", "failed", "timeout"])
         self.assertEqual([r["exit"] for r in records], [0, 9, 124])
         record = records[0]
-        self.assertEqual(set(record), {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
+        self.assertEqual(set(record) - {"envScrubbed"}, {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
-                                      "head", "dirty", "argvHash", "stack", "envHash", "profile", "verified", "fingerprint", "fast", "policy", "source",
+                                      "head", "dirty", "argvHash", "stack", "envHash", "envPolicy", "profile", "verified", "fingerprint", "fast", "policy", "source",
                                   "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis",
                                   "waitV", "waitBreakdown", "waitScans", "waitSamples",
                                   "host", "peakRssMb", "peakProcRssMb",

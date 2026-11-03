@@ -167,6 +167,52 @@ def env_hash():
     return hashlib.sha256(os.fsencode("\0".join(pairs))).hexdigest()
 
 
+BUILTIN_SCRUB_PREFIXES = ("STUDIO_CHRONICLE_",)  # never configurable away: invalid config still scrubs these
+SCRUB_PREFIX_SHAPE = re.compile(r"[A-Za-z0-9_]{3,64}")
+ACTIVE_SCRUB_PREFIXES = BUILTIN_SCRUB_PREFIXES
+ENV_WITHHELD = 0  # variables removed from this process so far; values are never recorded
+
+
+def configured_scrub_prefixes(configuration):
+    """Built-in prefixes plus any valid env_scrub.prefixes of config.local.json; any problem keeps only the built-ins."""
+    try:
+        extra = json.loads(Path(configuration).with_name("config.local.json").read_text()).get("env_scrub", {}).get("prefixes", [])
+        if not isinstance(extra, list) or not all(isinstance(x, str) and SCRUB_PREFIX_SHAPE.fullmatch(x) for x in extra):
+            return BUILTIN_SCRUB_PREFIXES
+    except (OSError, ValueError, AttributeError):
+        return BUILTIN_SCRUB_PREFIXES
+    return tuple(sorted({*BUILTIN_SCRUB_PREFIXES, *(x.upper() for x in extra)}))
+
+
+def filter_child_environment(env, prefixes=None):
+    """(env without every variable whose name starts with a scrub prefix, case-insensitively; withheld count)."""
+    upper = tuple(x.upper() for x in (prefixes or ACTIVE_SCRUB_PREFIXES))
+    kept = {name: value for name, value in env.items() if not name.upper().startswith(upper)}
+    return kept, len(env) - len(kept)
+
+
+def scrubbed_environment(env=None, **extra):
+    """Filtered copy of `env` (default os.environ) with literal `extra` assignments added after filtering."""
+    return {**filter_child_environment(os.environ if env is None else env)[0], **extra}
+
+
+def scrub_process_environment(configuration=None):
+    """Remove scrubbed variables from this process so every inherited launch, helpers included, is clean."""
+    global ACTIVE_SCRUB_PREFIXES, ENV_WITHHELD
+    if configuration is not None:
+        ACTIVE_SCRUB_PREFIXES = configured_scrub_prefixes(configuration)
+    kept, count = filter_child_environment(dict(os.environ))
+    for name in set(os.environ) - set(kept):
+        os.environ.pop(name, None)
+    ENV_WITHHELD += count
+    return ENV_WITHHELD
+
+
+def env_policy_fingerprint():
+    """Value-free identity of the active scrub policy (the sorted prefixes), for reuse keys."""
+    return hashlib.sha256("\0".join(sorted(ACTIVE_SCRUB_PREFIXES)).encode()).hexdigest()
+
+
 def untracked_state(cwd, paths, max_files, max_bytes):
     """Frame sorted paths and content digests; called in a deadline-bounded subprocess."""
     if len(paths) > max_files:
@@ -197,7 +243,7 @@ def git_state(cwd, timeout=None):
     head = dirty = None
     if cwd is None:
         return head, dirty
-    environment = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    environment = scrubbed_environment(GIT_OPTIONAL_LOCKS="0")
     deadline = time.monotonic() + timeout if timeout is not None else None
 
     def budget(default):
@@ -521,6 +567,7 @@ class PhaseLedger:
                            stack=getattr(args, "stack", None) or command_stack(command),
                            queuedAt=utc_stamp(), startedAt=None, endedAt=None, waitS=0, runS=0,
                            exit=None, outcome="rejected", head=None, dirty=None, verified=False, envHash=env_hash(),
+                           envPolicy=env_policy_fingerprint(),
                            profile=getattr(args, "profile", None) or "full",
                            argvHash=hashlib.sha256(os.fsencode("\0".join(command))).hexdigest(),
                            fingerprint=test_fingerprint(cwd, command) if cwd is not None else None)
@@ -554,7 +601,8 @@ class PhaseLedger:
         if self.snapshot_ready and self.record["kind"] != "ci":
             try:
                 key = gate_key(self.record["cwd"], self.command, self.record["kind"], self.record["head"],
-                               self.record["dirty"], self.record["stack"], self.record["envHash"],
+                               self.record["dirty"], self.record["stack"],
+                               digest(self.record["envHash"], self.record["envPolicy"]),
                                getattr(self.args, "profile", None) or "full")
             except Exception:
                 key = None  # Optional metadata; a failure only disables deduplication.
@@ -597,7 +645,7 @@ class PhaseLedger:
                      and r.get("kind") == self.record["kind"]), None)
 
     def matches_state(self, record):
-        keys = ("cwd", "kind", "argvHash", "head", "dirty", "stack", "envHash")
+        keys = ("cwd", "kind", "argvHash", "head", "dirty", "stack", "envHash", "envPolicy")
         # Records predating profiles were full; iterate and full results never satisfy each other.
         if (record.get("profile") or "full") != self.record["profile"]:
             return False
@@ -1202,7 +1250,7 @@ def config(path, *, notes=None):
         warn(f"invalid config.json ({exc}); using defaults")
         data = {}
     data = local_config(path, data, warn)
-    for key in data.keys() - defaults.keys():
+    for key in data.keys() - defaults.keys() - {"env_scrub"}:  # env_scrub is read by configured_scrub_prefixes
         warn(f"unknown config key {key}; ignored")
     values = defaults.copy()
     for key, default in configure_policy(defaults, values, data, warn).items():
@@ -2140,7 +2188,7 @@ def shim_environment(directory, cap):
     shim.write_bytes((ROOT / "dotnet-shim.sh").read_bytes())
     shim.chmod(0o700)
     (directory / "test-runner.py").write_bytes((ROOT / "dotnet-test-runner.py").read_bytes())
-    env = os.environ.copy()
+    env = scrubbed_environment()
     original_path = os.environ.get("PATH", os.defpath)
     inherited_shim = env.get("PI_PHASE_SHIM_DIR")
     if inherited_shim:
@@ -2189,7 +2237,7 @@ def repository_layout(cwd):
         lines = subprocess.run(["git", "--no-optional-locks", "rev-parse", "--path-format=absolute",
                                 "--git-common-dir", "--show-toplevel"], cwd=cwd, capture_output=True,
                                text=True, check=True, timeout=1,
-                               env=dict(os.environ, GIT_OPTIONAL_LOCKS="0")).stdout.splitlines()
+                               env=scrubbed_environment(GIT_OPTIONAL_LOCKS="0")).stdout.splitlines()
         common, top = os.path.realpath(lines[0]), os.path.realpath(lines[1])
         if Path(common).name == ".git":
             common = str(Path(common).parent)
@@ -2887,7 +2935,7 @@ def worktree_root(cwd):
     for _ in range(2):
         try:
             result = subprocess.run(["git", "--no-optional-locks", "rev-parse", "--show-toplevel"],
-                                    cwd=cwd, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"),
+                                    cwd=cwd, env=scrubbed_environment(GIT_OPTIONAL_LOCKS="0"),
                                     capture_output=True, text=True, timeout=3)
             return os.path.realpath(result.stdout.strip() if result.returncode == 0 else cwd)
         except (OSError, subprocess.TimeoutExpired):
@@ -3001,7 +3049,7 @@ def nested_holder(state, root):
 
 
 def holder_environment(state, root, held, token, environment, holder=None):
-    environment = dict(os.environ if environment is None else environment)
+    environment = scrubbed_environment(environment)
     for name in (HOLDER_ENV, HOLDER_ROOT_ENV, HOLDER_SLOTS_ENV, HOLDER_STATE_ENV, "PI_PHASE_WORKTREE_HELD"):
         environment.pop(name, None)
     if holder or held:
@@ -4380,6 +4428,9 @@ def run(args, state, configuration, output=None):
             raise ValueError("ci requires --repo, --pr, and --commit (explicit watcher identity)")
     elif any((args.repo, args.pr, args.commit)):
         raise ValueError("--repo/--pr/--commit only apply to ci")
+    withheld = scrub_process_environment()
+    if withheld:
+        note(f"withheld {withheld} environment variable(s) (prefix {','.join(ACTIVE_SCRUB_PREFIXES)})")
     phase_cwd = os.getcwd()
     command = args.command
     if command and command[0] == "--":
@@ -4399,7 +4450,7 @@ def run(args, state, configuration, output=None):
         if not 1 <= args.vstest_hang_minutes <= 60:
             raise ValueError("vstest-hang-minutes must be 1-60")
         root = subprocess.run(["git", "--no-optional-locks", "rev-parse", "--show-toplevel"], capture_output=True,
-                              env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"), text=True, check=True).stdout.strip()
+                              env=scrubbed_environment(GIT_OPTIONAL_LOCKS="0"), text=True, check=True).stdout.strip()
         results = Path(root) / ".ai-work" / "pi-phase" / uuid.uuid4().hex
         results.mkdir(parents=True)
         command += ["--blame-hang", "--blame-hang-timeout", f"{args.vstest_hang_minutes}m",
@@ -4601,12 +4652,12 @@ def run(args, state, configuration, output=None):
             else:
                 note(f"msbuild cap -m:{cap} (msbuild_max_cpu)")
         if options["phase_nice"] and args.kind in ("build", "test", "integration"):
-            child_env = dict(os.environ if child_env is None else child_env, **{NICE_ENV: str(options["phase_nice"])})
+            child_env = scrubbed_environment(child_env, **{NICE_ENV: str(options["phase_nice"])})
             note(f"nice {options['phase_nice']} (phase_nice)")
         if options["cold_worktree_hint"] and warm is False and linked_worktree(os.getcwd()):
             note("cold worktree (no obj within depth 3); consider reusing a warm lane worktree")
         if args.kind in ("build", "test", "integration"):
-            child_env = dict(os.environ if child_env is None else child_env)
+            child_env = scrubbed_environment(child_env)
             child_env.setdefault("DOTNET_CLI_USE_MSBUILD_SERVER", "0")
             child_env.setdefault("MSBUILDDISABLENODEREUSE", "1")
             compiler_id = shared_compilation_id(child_env, token)
@@ -4620,6 +4671,10 @@ def run(args, state, configuration, output=None):
             launcher = [sys.executable, str(Path(__file__).resolve()), "_launch", str(read_gate), "--", *command]
             output_options = {} if output is None else {"stdout": output, "stderr": subprocess.STDOUT}
             operation = "Popen"
+            child_env, late = filter_child_environment(os.environ if child_env is None else child_env)  # the choke point
+            withheld += late
+            if ledger and withheld:
+                ledger.record["envScrubbed"] = withheld
             child_cpu_before = resource.getrusage(resource.RUSAGE_CHILDREN)
             proc = subprocess.Popen(launcher, pass_fds=[read_gate], close_fds=True,
                                     start_new_session=True, env=child_env, **output_options)
@@ -4888,6 +4943,7 @@ def main(argv=None, *, state=None, configuration=None):
             if ledger:
                 ledger.finish(state, exc.code)
         raise
+    scrub_process_environment(Path(configuration) if configuration is not None else CONFIG)
     if args.action == "_launch":
         command = args.command[1:] if args.command and args.command[0] == "--" else args.command
         return launch(args.gate, command)
