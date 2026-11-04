@@ -79,8 +79,17 @@ mark="${lane}-inbox.marker"
 start=$(mktemp "${TMPDIR:-/tmp}/inbox-${lane}.XXXXXX") || { printf 'inbox-watch: cannot create temp file\n' >&2; exit 2; }
 listing="${start}.list"
 trap 'rm -f -- "$start" "$listing"' EXIT
+# The marker is the scan start moved back 2 s. find compares timestamps at a coarser
+# granularity than writes happen, so a file written in the same second as the
+# previous scan was missed. A file in that overlap may be reported twice (harmless).
+set_mark() {
+    local t
+    t=$(stat -f %m "$start" 2>/dev/null || stat -c %Y "$start") || return 1
+    t=$(( t - 2 ))
+    touch -t "$(date -r "$t" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$t" +%Y%m%d%H%M.%S)" "$mark"
+}
 if [[ ! -e $mark ]]; then
-    touch -r "$start" "$mark" || { printf 'inbox-watch: cannot create marker\n' >&2; exit 2; }
+    set_mark || { printf 'inbox-watch: cannot create marker\n' >&2; exit 2; }
     exit 1
 fi
 args=(. -maxdepth 1 -type f -name '*.md')
@@ -111,6 +120,8 @@ parse() {
     fi
     for (( i = 0; i < k; i++ )); do left+="-${t[i]}"; done
     for (( i = k + 1; i < ${#t[@]}; i++ )); do
+        # "cc" (SENDER-to-A-cc-B-topic) continues the recipient list.
+        [[ ${t[i]} == cc ]] && continue
         is_id "${t[i]}" || break
         right+="-${t[i]}"
     done
@@ -140,7 +151,7 @@ while IFS= read -r path; do
     found=1
 done < "$listing"
 if (( found )); then
-    touch -r "$start" "$mark" || { printf 'inbox-watch: cannot update marker\n' >&2; exit 2; }
+    set_mark || { printf 'inbox-watch: cannot update marker\n' >&2; exit 2; }
     exit 0
 fi
 exit 1
