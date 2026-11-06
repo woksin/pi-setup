@@ -1,6 +1,7 @@
 """Specs for agent/bin/inbox-watch recipient matching."""
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -152,6 +153,99 @@ class InboxWatchSpecs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as inbox:
             r = subprocess.run(["bash", str(SCRIPT), "--alias", "bad name", "L1"], env={**os.environ, "INBOX_DIR": inbox}, capture_output=True, text=True)
             self.assertEqual(r.returncode, 2)
+
+
+class InboxBaselineSpecs(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.inbox = self.root / "inbox"
+        self.inbox.mkdir()
+        self.env = {**os.environ, "INBOX_DIR": str(self.inbox)}
+
+    def poll(self, *args):
+        result = subprocess.run(["bash", str(SCRIPT), *(args or ("L1",))],
+                                env=self.env, capture_output=True, text=True)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        names = set(result.stdout.splitlines())
+        self.assertEqual(result.returncode, 0 if names else 1, result.stderr)
+        return names
+
+    def old_message(self, name="L2-to-L1-old.md"):
+        path = self.inbox / name
+        path.write_text("x\n")
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        return path
+
+    def intercept(self, command, body):
+        """Inject a concurrent write at a deterministic scan boundary, without sleeps."""
+        bindir = self.root / "bin"
+        bindir.mkdir()
+        self.env["REAL_COMMAND"] = shutil.which(command)
+        wrapper = bindir / command
+        wrapper.write_text("#!/usr/bin/env bash\n" + body)
+        wrapper.chmod(0o755)
+        self.env["PATH"] = str(bindir) + os.pathsep + self.env["PATH"]
+
+    def test_first_arm_silently_baselines_recent_and_old_messages(self):
+        old = self.old_message()
+        recent = self.inbox / "L2-to-L1-recent.md"
+        recent.write_text("recent\n")
+        self.assertEqual(self.poll(), set())
+        self.assertEqual(self.poll(), set())
+        self.assertEqual(set(json.loads((self.inbox / "L1-inbox.marker").read_text())),
+                         {old.name, recent.name})
+
+    def test_initial_old_then_new_and_edit_inside_overlap_are_delivered(self):
+        old = self.old_message()
+        original = old.stat()
+        self.assertEqual(self.poll(), set())
+        new = self.inbox / "L2-to-L1-new.md"
+        new.write_text("new\n")
+        # Exercise the overlap explicitly without depending on scheduler speed.
+        overlap = int(new.stat().st_ctime) - 2
+        os.utime(self.inbox / "L1-inbox.marker", (overlap, overlap))
+        self.assertEqual(self.poll(), {new.name})
+        old.write_text("y\n")  # same size, with the original old mtime restored
+        os.utime(old, ns=(original.st_atime_ns, original.st_mtime_ns))
+        self.assertIn(old.name, self.poll())
+
+    def test_initial_old_file_renamed_back_into_inbox_is_delivered(self):
+        old = self.old_message()
+        self.assertEqual(self.poll(), set())
+        outside = self.root / "moved.md"
+        old.rename(outside)
+        outside.rename(old)
+        self.assertEqual(self.poll(), {old.name})
+
+    def test_write_during_first_arm_is_not_baselined(self):
+        self.intercept("python3", '''if [[ ${2:-} == record ]]; then
+    printf 'concurrent\\n' > "$INBOX_DIR/L2-to-L1-concurrent.md"
+fi
+exec "$REAL_COMMAND" "$@"
+''')
+        self.assertEqual(self.poll(), set())
+        self.assertEqual(self.poll(), {"L2-to-L1-concurrent.md"})
+
+    def test_write_after_scan_listing_remains_new_on_next_poll(self):
+        self.assertEqual(self.poll(), set())
+        (self.inbox / "L2-to-L1-trigger.md").write_text("trigger\n")
+        self.intercept("find", '''"$REAL_COMMAND" "$@" || exit $?
+printf 'concurrent\\n' > "$INBOX_DIR/L2-to-L1-concurrent.md"
+''')
+        self.assertEqual(self.poll(), {"L2-to-L1-trigger.md"})
+        self.assertIn("L2-to-L1-concurrent.md", self.poll())
+
+    def test_legacy_empty_marker_and_alias_cc_still_deliver(self):
+        marker = self.inbox / "L1-inbox.marker"
+        marker.touch()
+        old = time.time() - 3600
+        os.utime(marker, (old, old))
+        name = "L2-to-L0-cc-R-AI-topic.md"
+        (self.inbox / name).write_text("alias cc\n")
+        self.assertEqual(self.poll("--alias", "R-AI", "L1"), {name})
 
 
 if __name__ == "__main__":

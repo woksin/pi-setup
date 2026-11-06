@@ -11,6 +11,7 @@
 # Aliases: --alias NAME (repeatable) or INBOX_ALIASES=R-AI,R-Studio.
 # INBOX_DIR overrides user.json's orchMessagesDir, then ~/.pi/agent/inbox.
 # Marker advances to scan START only after output, so concurrent edits stay new.
+# Its JSON content baselines initial files; unchanged initial files stay silent.
 set -eu
 case "${1:-}" in -h|--help)
     cat <<'HELP'
@@ -88,8 +89,50 @@ set_mark() {
     t=$(( t - 2 ))
     touch -t "$(date -r "$t" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$t" +%Y%m%d%H%M.%S)" "$mark"
 }
+# Keep only the initial snapshot, not a growing history. Timestamp overlap still
+# handles later writes/renames; exact stat fingerprints exempt unchanged initial
+# files from that overlap. Empty markers from earlier versions remain supported.
+initial_files() {
+    python3 - "$1" "$mark" "$start" "$listing" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+mode, marker, start, listing = sys.argv[1:]
+
+
+def fingerprint(path):
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size]
+
+
+if mode == "record":
+    cutoff = Path(start).stat().st_mtime_ns
+    baseline = {}
+    for path in Path(".").glob("*.md"):
+        try:
+            stamp = fingerprint(path)
+        except FileNotFoundError:
+            continue
+        # A write during first-arm scanning must remain eligible on the next poll.
+        if path.is_file() and stamp[2] <= cutoff:
+            baseline[path.name] = stamp
+    Path(marker).write_text(json.dumps(baseline))
+else:
+    baseline = json.loads(Path(marker).read_text() or "{}")
+    candidates = []
+    for name in Path(listing).read_text().splitlines():
+        try:
+            stamp = fingerprint(Path(name))
+        except FileNotFoundError:
+            continue
+        if baseline.get(Path(name).name) != stamp:
+            candidates.append(name)
+    Path(listing).write_text("".join(name + "\n" for name in candidates))
+PY
+}
 if [[ ! -e $mark ]]; then
-    set_mark || { printf 'inbox-watch: cannot create marker\n' >&2; exit 2; }
+    initial_files record && set_mark || { printf 'inbox-watch: cannot create marker\n' >&2; exit 2; }
     exit 1
 fi
 args=(. -maxdepth 1 -type f -name '*.md')
@@ -98,6 +141,7 @@ if [[ -e $mark ]]; then
     args+=(-newercm "$mark")
 fi
 find "${args[@]}" -print > "$listing" || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
+initial_files filter || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
 me=("$lane" ${aliases[@]+"${aliases[@]}"})
 # has LIST ID: LIST is "-a-b-c-"; ID may itself contain dashes (R-AI).
 has() { [[ $1 == *"-$2-"* ]]; }

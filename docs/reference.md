@@ -88,6 +88,8 @@ Lanes are several coordinated sessions. See [Lanes](../README.md#parallel-sessio
 | `lane-status` | Records whether a lane is working, waiting or closed. | `lane-status --help` | [source](../agent/bin/lane-status) |
 | `session-watchdog` | Notify-only detector for stuck pi sessions. Never kills anything. | `session-watchdog --help` | [source](../agent/bin/session-watchdog) |
 
+`inbox-watch` first arms silently: its existing `<lane>-inbox.marker` stores JSON stat fingerprints of files already present, while its mtime remains the scan watermark. Unchanged initial files stay silent even inside the two-second overlap; later edits and old-mtime renames remain eligible. Files changed during first-arm scanning are not baselined. The snapshot does not grow on later polls, and legacy empty markers still work. The overlap can report a later message twice to avoid losing same-second concurrent writes. Aliases, cc recipients and active watch re-arming are unchanged; do not edit marker contents or timestamps manually.
+
 ## Machine health and cleanup
 
 | Tool | Purpose | Help | Source |
