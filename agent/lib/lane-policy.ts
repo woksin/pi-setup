@@ -105,7 +105,7 @@ function canonical(path: string): string {
 }
 const CRITICAL_SOURCES = ["guards.json", "lib/guards.ts", "extensions/guards.ts", "lib/lane-policy.ts", "extensions/lane-policy.ts",
 	"lib/candidate-guard.ts", "extensions/train-guard.ts", "lib/publisher.ts", "lib/publish-request.ts", "lib/publish-scan.ts",
-	"lib/publish-guard.ts", "lib/secret-mask.ts", "extensions/publish.ts", "extensions/publish-guard.ts", "bin/pi-publish",
+	"lib/publish-guard.ts", "lib/shell-invocations.ts", "lib/secret-mask.ts", "extensions/publish.ts", "extensions/publish-guard.ts", "bin/pi-publish",
 	// publish-guard.ts imports its shell tokenizer from wait-guard, which loads guards.ts and orchestration.ts.
 	"extensions/wait-guard.ts", "lib/orchestration.ts"];
 function criticalPaths(): string[] {

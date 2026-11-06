@@ -26,6 +26,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { isIP } from "node:net";
+import { shellGuard } from "./shell-invocations.ts";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isGuardOff } from "./guards.ts";
@@ -539,22 +540,24 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 		},
 		async toolCall(event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext) {
 			try {
-				if (event.toolName !== "bash") return;
-				const config = active(ctx);
-				if (!config?.blockCommands) return;
-				const matched = commandRule(String(event.input.command ?? ""));
-				if (!matched) return;
-				if (deps.cratisSecrets(ctx.cwd, String(event.input.command ?? ""))) { deps.decision("secrets", "stand-down:cratis-hook", matched.name); return; }
-				if (deps.guardOff()) { deps.decision("secrets", "allow:guard-off", matched.name); return; }
-				const reason = blockReason(matched);
-				if (deps.orchestrated(ctx.cwd) || !ctx.hasUI) {
-					deps.decision("secrets", "deny", matched.name);
-					return { block: true as const, reason };
-				}
-				const { choice } = await deps.select(ctx.ui, "secrets", reason, [RUN_ANYWAY, "Block"], "deny", { cwd: ctx.cwd });
-				const allow = choice === RUN_ANYWAY;
-				deps.decision("secrets", allow ? "allow" : "deny", matched.name);
-				return allow ? undefined : { block: true as const, reason };
+				return await shellGuard(async (event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext, executionCwd: string) => {
+					if (event.toolName !== "bash") return;
+					const config = active(ctx);
+					if (!config?.blockCommands) return;
+					const matched = commandRule(String(event.input.command ?? ""));
+					if (!matched) return;
+					if (deps.cratisSecrets(executionCwd, String(event.input.command ?? ""))) { deps.decision("secrets", "stand-down:cratis-hook", matched.name); return; }
+					if (deps.guardOff()) { deps.decision("secrets", "allow:guard-off", matched.name); return; }
+					const reason = blockReason(matched);
+					if (deps.orchestrated(ctx.cwd) || !ctx.hasUI) {
+						deps.decision("secrets", "deny", matched.name);
+						return { block: true as const, reason };
+					}
+					const { choice } = await deps.select(ctx.ui, "secrets", reason, [RUN_ANYWAY, "Block"], "deny", { cwd: ctx.cwd });
+					const allow = choice === RUN_ANYWAY;
+					deps.decision("secrets", allow ? "allow" : "deny", matched.name);
+					return allow ? undefined : { block: true as const, reason };
+				}, (_event, ctx) => !!active(ctx)?.blockCommands && !deps.guardOff())(event, ctx);
 			} catch {
 				deps.error("tool-call-failed");
 				return undefined;

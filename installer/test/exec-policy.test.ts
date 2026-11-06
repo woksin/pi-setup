@@ -29,7 +29,7 @@ test("agent execution policy has one canonical rule and no duplicated scheduler 
       }
     }
   }
-  assert.equal(checked, 32);
+  assert.equal(checked, 36);
   const shared = readFileSync(join(REPO, "agent/AGENTS.subagent.md"), "utf8");
   assert.doesNotMatch(shared, forbidden);
   assert.equal(shared.split("## Execution budgets and verification\n\n")[1].split("\n\n## ")[0], canonical);

@@ -39,7 +39,7 @@ test("removing a recorded pin then rerunning leaves it removed", async () => {
   const ctx = testCtx(home, { which: () => "/stub" });
   assert.equal(await main([...args, "--skip-npm"], ctx), 0);
   const data = JSON.parse(readFileSync(path, "utf8"));
-  data.packages = data.packages.filter((p: string) => p !== "npm:@woksin/pi-orch@0.1.1");
+  data.packages = data.packages.filter((p: string) => p !== "npm:@woksin/pi-orch@0.2.0");
   put(path, JSON.stringify(data));
   assert.equal(await main([...args, "--skip-npm"], ctx), 0);
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), data);
@@ -57,11 +57,11 @@ for (const op of [
   const removed = { packages: ["npm:user-choice@1"] };
   pinPackages(removed, pi);
   assert.ok(!removed.packages.some(p => p.includes("pi-orch")));
-  assert.ok(removed.packages.includes("npm:@woksin/pi-jobs@0.3.1"), "new packages are still adopted");
+  assert.ok(removed.packages.includes("npm:@woksin/pi-jobs@0.4.0"), "new packages are still adopted");
   const present = { packages: ["npm:user-choice@1", "npm:@woksin/pi-orch@0.1.0", "npm:other@2"] };
   const ops = pinPackages(present, pi);
-  assert.equal(present.packages[1], "npm:@woksin/pi-orch@0.1.1");
-  assert.deepEqual(ops.find(o => o.op === "array-replace"), { op: "array-replace", key: "packages", before: "npm:@woksin/pi-orch@0.1.0", after: "npm:@woksin/pi-orch@0.1.1" });
+  assert.equal(present.packages[1], "npm:@woksin/pi-orch@0.2.0");
+  assert.deepEqual(ops.find(o => o.op === "array-replace"), { op: "array-replace", key: "packages", before: "npm:@woksin/pi-orch@0.1.0", after: "npm:@woksin/pi-orch@0.2.0" });
 });
 
 for (const code of [0, 1]) test(`npm exit ${code} preserves unrelated manifest entries and saves only successful selected pins`, async () => {
@@ -118,7 +118,7 @@ test("doctor reports exact version drift, both PATH entries, prerequisites and o
   const ctx = testCtx(home, { which: () => undefined, env: { PATH: "", SHELL: "/bin/zsh" } });
   const checks = localChecks(ctx, { providers: {}, catalog: null, summary: true }).checks;
   for (const p of PINNED_PACKAGES) assert.equal(checks.find(c => c.id === `package:${p.name}`)?.status, "fail");
-  assert.match(checks.find(c => c.id === "package:@woksin/pi-jobs")!.detail, /installed 0.1.0, expected 0.3.1/);
+  assert.match(checks.find(c => c.id === "package:@woksin/pi-jobs")!.detail, /installed 0.1.0, expected 0.4.0/);
   assert.match(checks.find(c => c.id === "path")!.detail, /~\/.local\/bin, ~\/.pi\/agent\/bin/);
   assert.equal(checks.find(c => c.id === "path:orch-poll")?.status, "warn");
   for (const tool of ["gh", "jq", "rg", "fd"]) {

@@ -10,7 +10,9 @@ export async function nudge(id: string, text: string, opts: Record<string, strin
   if (!text || text.length > 2000) throw new UsageError("nudge text must be between 1 and 2000 characters");
   const target = laneTarget(id, c, root, ctx);
   const refuse = (why: string) => { ctx.err(`NOT SENT: ${why}`); return 3; };
-  if (parseStatus(await backendFor(c, ctx, root).status(target.id)).kind === "closed") return refuse(`${target.id} is closed`);
+  const kind = parseStatus(await backendFor(c, ctx, root).status(target.id)).kind;
+  if (kind === "closed") return refuse(`${target.id} is closed`);
+  if (kind === "parked") return refuse(`${target.id} is parked; explicitly set working before nudging`);
   const pid = await piIn(target.cwd, ctx);
   if (!pid) return refuse(`no pi running in ${target.cwd}`);
   const tty = await ttyOf(ctx, pid);

@@ -66,8 +66,8 @@ test("tool_call blocks before bash execution and /guards off kill is the user's 
 	const event = { toolName: "bash", input: { command: blocked[0] } };
 	assert.equal(handler(event).block, true);
 	assert.equal(handler({ ...event, toolName: "read" }), undefined);
-	assert.equal(handler({ toolName: "bash", input: {} }), undefined);
-	assert.equal(handler({ toolName: "bash", input: { command: 123 } }), undefined);
+	assert.equal(handler({ toolName: "bash", input: {} }).block, true);
+	assert.equal(handler({ toolName: "bash", input: { command: 123 } }).block, true);
 	assert.equal(handler({ toolName: "bash", input: { command: "kill 1234" } }), undefined);
 	let command: any;
 	guardsExtension({ registerCommand: (_: string, spec: any) => { command = spec; },

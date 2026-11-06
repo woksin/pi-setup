@@ -44,7 +44,7 @@ test("send validates input, warns on unknown recipient and reads text, file and 
 });
 test("start handles print fallback, duplicate cwd, missing inputs and terminal failure", async () => {
   const { ctx, home, lines, errors } = fixture(); await main(["init", home, "--terminal", "print"], ctx);
-  assert.equal(await main(["start", "coordinator"], ctx), 0); assert.match(lines.at(-1)!, /^cd .*PI_ORCH_ID=L0.*pi-session.*@/);
+  assert.equal(await main(["start", "coordinator"], ctx), 0); assert.match(lines.at(-1)!, /^cd .*PI_ORCH_ID=L0.*'run' 'L0'/);
   assert.ok(errors.some((s) => /not found/.test(s)));
   assert.equal(lines.filter((s) => s.startsWith("MCP preapproval is off;")).length, 1);
   assert.equal(await main(["start", "L9"], ctx), 1);
@@ -53,7 +53,7 @@ test("start handles print fallback, duplicate cwd, missing inputs and terminal f
   ctx.run = async () => ({ code: 1, stdout: "", stderr: "fail", timedOut: false }); delete ctx.readCwd;
   assert.equal(await main(["start", "coordinator", "--terminal", "iterm"], ctx), 1); assert.equal(errors.at(-1), "pi not found");
   ctx.which = (name) => name === "pi" ? "/stub/pi" : undefined;
-  assert.equal(await main(["start", "coordinator", "--terminal", "iterm"], ctx), 1); assert.match(lines.at(-1)!, /\/stub\/pi/);
+  assert.equal(await main(["start", "coordinator", "--terminal", "iterm"], ctx), 1); assert.match(lines.at(-1)!, /'run' 'L0'/);
   const c = loadConfig(home); c.coordinator.prompt = "missing"; saveConfig(home, c);
   assert.equal(await main(["start", "coordinator"], ctx), 1);
 });

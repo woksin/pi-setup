@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: c2b2a245351773ff984d6afd07f49c22cdb757ebcb4b81b07199539a02e82d63
+// pi-setup-source-sha256: f0861221857bb6bc89cd999b5b3e9796ce1f1e7ab805c3f9817ba9d0290fae9e
 
 // src/lanes/cli.ts
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 import { realpathSync as realpathSync3 } from "node:fs";
 
 // src/lanes/ctx.ts
@@ -64,6 +64,7 @@ function realLanesCtx() {
   const home = homedir();
   return {
     sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
+    launcher: [process.execPath, dir.endsWith("/src/lanes") ? join2(dir, "cli.ts") : join2(dir, "lanes.mjs")],
     env: process.env,
     platform: process.platform,
     home,
@@ -159,7 +160,7 @@ function defaults(root, home, reposRoot) {
     worktreesDir: "${reposRoot}/.worktrees",
     baseBranch: "origin/main",
     repos: {},
-    coordinator: { id: "L0", cwd: "${root}", prompt: "prompts/coordinator.md", maxRunning: 8 },
+    coordinator: { id: "L0", cwd: "${root}", prompt: "prompts/coordinator.md", maxRunning: 6 },
     messages: { dir: "messages", broadcast: "ALL", retention: { mode: "archive", maxAgeDays: 14, archiveDir: "archive", archiveMaxAgeDays: null, keepUnread: true, auto: true } },
     terminal: { backend: "auto" },
     launch: { wrapper: "pi-session", preapproveMcp: false, unsetEnv: ["PI_MCP_CONFIG_MODE"] },
@@ -208,6 +209,7 @@ function validate(value, root = process.cwd(), home = homedir2()) {
   require2(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !["ALL", c.messages.broadcast].includes(c.coordinator.id), "coordinator.id");
   require2(text2(c.coordinator.cwd), "coordinator.cwd");
   require2(text2(c.coordinator.prompt), "coordinator.prompt");
+  if (c.coordinator.maxRunning === void 0) c.coordinator.maxRunning = 6;
   require2(Number.isInteger(c.coordinator.maxRunning) && c.coordinator.maxRunning > 0, "coordinator.maxRunning");
   require2(c.terminal && BACKENDS.includes(c.terminal.backend), "terminal.backend");
   require2(c.launch && text2(c.launch.wrapper), "launch.wrapper");
@@ -483,12 +485,12 @@ function mergedAtHead(prs, head) {
   return void 0;
 }
 async function gitEvidence(ctx, lane, cwd) {
-  const run = (args) => ctx.run("git", ["--no-optional-locks", "-C", cwd, ...args], { timeoutMs: 4e3 });
-  const head = await run(["rev-parse", "HEAD"]);
-  const status2 = await run(["status", "--porcelain=v1", "--untracked-files=all", "-z"]);
+  const run2 = (args) => ctx.run("git", ["--no-optional-locks", "-C", cwd, ...args], { timeoutMs: 4e3 });
+  const head = await run2(["rev-parse", "HEAD"]);
+  const status2 = await run2(["status", "--porcelain=v1", "--untracked-files=all", "-z"]);
   if (!validHead(head) || !succeeded(status2)) return { error: "git HEAD/status unknown" };
-  const ahead = await run(["rev-list", "HEAD", "--not", "--remotes"]);
-  const diff = await run(["diff", "--binary", "HEAD"]);
+  const ahead = await run2(["rev-list", "HEAD", "--not", "--remotes"]);
+  const diff = await run2(["diff", "--binary", "HEAD"]);
   if (!succeeded(ahead) || !succeeded(diff)) return { error: "git unpushed/tree evidence unknown" };
   const unpushed = commitList(ahead.stdout);
   const paths = changedPaths(status2.stdout);
@@ -595,18 +597,18 @@ function parseSample(line) {
   if (!match) throw new Error("process descendants malformed");
   return { pid: Number(match[1]), ppid: Number(match[2]), cpuSeconds: cpuTime(match[3]), command: match[4] };
 }
-function descendants(pid, inventory2) {
+function descendants(pid, inventory3) {
   const owned2 = /* @__PURE__ */ new Set([pid]);
   let changed = true;
   while (changed) {
     changed = false;
-    for (const row of inventory2) {
+    for (const row of inventory3) {
       if (!owned2.has(row.ppid) || owned2.has(row.pid)) continue;
       owned2.add(row.pid);
       changed = true;
     }
   }
-  return inventory2.filter((row) => row.pid !== pid && owned2.has(row.pid));
+  return inventory3.filter((row) => row.pid !== pid && owned2.has(row.pid));
 }
 async function ownedPhase(cwd, ctx) {
   const phase = ctx.which("pi-phase");
@@ -905,9 +907,9 @@ function sameProcess(value, s, ctx) {
   return !value.cwd || absolute(ctx, value.cwd) === s.cwd;
 }
 function leaseFor(s, ctx) {
-  const leases = jsonFiles(join7(ctx.piAgentDir, "issue-work/sessions")).filter((l) => l.cwd && sameProcess(l, s, ctx));
-  if (!leases.length) return void 0;
-  const good = leases.filter((l) => l.procStart === s.procStart);
+  const leases2 = jsonFiles(join7(ctx.piAgentDir, "issue-work/sessions")).filter((l) => l.cwd && sameProcess(l, s, ctx));
+  if (!leases2.length) return void 0;
+  const good = leases2.filter((l) => l.procStart === s.procStart);
   if (good.length !== 1) throw new Error("lease/process start mismatch");
   return good[0];
 }
@@ -924,10 +926,10 @@ function checkHeartbeat(beat, s, ctx) {
   if (ctx.now().getTime() - s.lastWrite >= 6e5) throw new Error("signals disagree: heartbeat working versus session write");
   s.keeps.push("heartbeat working");
 }
-function fileFor(identity, dir) {
-  if (identity?.sessionFile) return identity.sessionFile;
-  if (!identity?.sessionId) return void 0;
-  const names = readdirSync2(dir).filter((n) => n.endsWith(".jsonl") && n.includes(identity.sessionId));
+function fileFor(identity2, dir) {
+  if (identity2?.sessionFile) return identity2.sessionFile;
+  if (!identity2?.sessionId) return void 0;
+  const names = readdirSync2(dir).filter((n) => n.endsWith(".jsonl") && n.includes(identity2.sessionId));
   return names.length === 1 ? join7(dir, names[0]) : void 0;
 }
 function checkFile(s, dir, ctx) {
@@ -938,9 +940,9 @@ function checkFile(s, dir, ctx) {
 }
 async function resolveSession(s, ctx) {
   const dir = sessionDirFor(s.cwd, ctx.piAgentDir);
-  const { identity, beat } = sessionIdentity(s, ctx, dir);
-  s.sessionId = identity?.sessionId;
-  s.sessionFile = fileFor(identity, dir);
+  const { identity: identity2, beat } = sessionIdentity(s, ctx, dir);
+  s.sessionId = identity2?.sessionId;
+  s.sessionFile = fileFor(identity2, dir);
   checkFile(s, dir, ctx);
   checkHeartbeat(beat, s, ctx);
   await sessionWork(s, ctx);
@@ -958,10 +960,10 @@ function sessionIdentity(s, ctx, dir) {
 }
 function resolveAdoptSession(s, ctx) {
   const dir = sessionDirFor(s.cwd, ctx.piAgentDir);
-  const { identity } = sessionIdentity(s, ctx, dir);
-  if (identity) {
-    s.sessionId = identity.sessionId;
-    s.sessionFile = fileFor(identity, dir);
+  const { identity: identity2 } = sessionIdentity(s, ctx, dir);
+  if (identity2) {
+    s.sessionId = identity2.sessionId;
+    s.sessionFile = fileFor(identity2, dir);
   } else {
     s.sessionFile = newestSession(dir);
     s.sessionId = sessionHeader(s.sessionFile, s.cwd, ctx);
@@ -995,14 +997,14 @@ import { join as join8 } from "node:path";
 
 // src/lanes/status-line.ts
 function parseStatus(line = "") {
-  const match = /^(waiting-on|barred-by) "(.*)" until (\S+)$/.exec(line);
+  const match = /^(waiting-on|barred-by|parked) "(.*)" until (\S+)$/.exec(line);
   if (match) return { kind: match[1], until: Date.parse(match[3]) };
   if (/^closed\b/.test(line)) return { kind: "closed" };
   return { kind: /^working\b/.test(line) ? "working" : "other" };
 }
 function suppressed(line, now) {
   const status2 = parseStatus(line);
-  return (status2.kind === "waiting-on" || status2.kind === "barred-by") && (status2.until ?? 0) > now.getTime();
+  return status2.kind === "parked" || (status2.kind === "waiting-on" || status2.kind === "barred-by") && (status2.until ?? 0) > now.getTime();
 }
 var clean = (text2) => text2.replace(/"/g, "'").replace(/\s+/g, " ").trim();
 function closedLine(to, reason, now) {
@@ -1565,6 +1567,7 @@ import { createHash as createHash4 } from "node:crypto";
 
 // src/lanes/terminal.ts
 import { join as join17 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 var shellQuote = (s) => `'${s.replace(/'/g, "'\\''")}'`;
 var appleScriptString = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r");
 function detectBackend(configured, ctx) {
@@ -1575,10 +1578,12 @@ function detectBackend(configured, ctx) {
   if (ctx.platform === "darwin" && ctx.env.TERM_PROGRAM === "Apple_Terminal") return "terminal-app";
   return "print";
 }
-function launchCommand(c, root, cwd, id, prompt, wrapper, messages2) {
+function launchCommand(c, root, cwd, id, _prompt, _wrapper, messages2, launcher = [process.execPath, fileURLToPath2(new URL("./cli.ts", import.meta.url))], opts = {}) {
   const unset = c.launch.unsetEnv.map((name) => `-u ${name}`).join(" ");
-  const exe = /^[A-Za-z0-9_/-]+$/.test(wrapper) ? wrapper : shellQuote(wrapper);
-  return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages2)} LANE_STATUS_DIR=${shellQuote(join17(messages2, "status"))} ${exe} ${shellQuote(`@${prompt}`)}`;
+  const args = [...launcher, "--dir", root, "run", id];
+  if (opts["from-handoff"]) args.push("--from-handoff", opts["from-handoff"]);
+  if (opts["handoff-digest"]) args.push("--handoff-digest", opts["handoff-digest"]);
+  return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages2)} LANE_STATUS_DIR=${shellQuote(join17(messages2, "status"))} ${args.map(shellQuote).join(" ")}`;
 }
 function terminalBackend(name) {
   if (!BACKENDS.includes(name) || name === "auto") throw new UsageError("invalid terminal.backend");
@@ -2829,8 +2834,9 @@ function needsOrchestrator(plan, opts) {
 }
 
 // src/lanes/commands/resume.ts
-import { join as join32, resolve as resolve9 } from "node:path";
-import { existsSync as existsSync12, statSync as statSync8 } from "node:fs";
+import { createHash as createHash5 } from "node:crypto";
+import { join as join34, resolve as resolve9 } from "node:path";
+import { existsSync as existsSync13, statSync as statSync9 } from "node:fs";
 
 // src/lanes/commands/start.ts
 import { existsSync as existsSync11, statSync as statSync7 } from "node:fs";
@@ -3073,11 +3079,308 @@ async function start(id, opts, c, root, ctx) {
       ctx.err(`warning: message prune failed: ${e.message.replace(/\s+/g, " ")}`);
     }
   }
-  const command = launchCommand(c, root, cwd, coordinator ? c.coordinator.id : id, prompt, wrapper, expand(c.messages.dir, c, root, ctx.home));
+  const command = launchCommand(c, root, cwd, coordinator ? c.coordinator.id : id, prompt, wrapper, expand(c.messages.dir, c, root, ctx.home), ctx.launcher, opts);
   return terminalBackend(backend).start(ctx, { id: coordinator ? c.coordinator.id : id, cwd, command });
 }
 function rejectRetired(id, c) {
   if (c.lanes.find((l) => l.id === id)?.retired) throw new Error(`lane ${id} is retired; add a fresh lane instead`);
+}
+
+// src/lanes/commands/run.ts
+import { spawn as spawn2 } from "node:child_process";
+import { constants as constants2 } from "node:os";
+import { existsSync as existsSync12, statSync as statSync8 } from "node:fs";
+import { join as join33 } from "node:path";
+
+// src/lanes/admission.ts
+import { lstatSync as lstatSync5, mkdirSync as mkdirSync10, readFileSync as readFileSync15, readdirSync as readdirSync11, renameSync as renameSync5, rmdirSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync8 } from "node:fs";
+import { basename as basename5, join as join32 } from "node:path";
+import { randomUUID as randomUUID4 } from "node:crypto";
+var pause = (ms) => new Promise((done) => setTimeout(done, ms));
+async function bounded(work) {
+  let timer;
+  try {
+    return await Promise.race([work, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("admission inventory timed out")), 5e3);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function inventory2(ctx) {
+  const rows = await bounded(ctx.admissionInventory ? ctx.admissionInventory() : nativeInventory(ctx));
+  if (!Array.isArray(rows) || rows.length > 2e4 || rows.some((r) => !Number.isSafeInteger(r.pid) || r.pid < 1 || !Number.isSafeInteger(r.ppid) || r.ppid < 0 || typeof r.start !== "string" || !r.start.trim() || typeof r.pi !== "boolean" || r.pi && !r.cwd) || new Set(rows.map((r) => r.pid)).size !== rows.length) {
+    throw new Error("admission inventory malformed or identity unavailable");
+  }
+  return rows;
+}
+async function nativeInventory(ctx) {
+  const result2 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4e3 });
+  if (result2.code !== 0 || result2.timedOut || !result2.stdout.trim()) throw new Error("admission inventory unavailable");
+  const rows = [];
+  for (const line of result2.stdout.trim().split("\n")) {
+    const m = /^(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.+)$/.exec(line.trim());
+    if (!m) throw new Error("admission inventory malformed");
+    const row = { pid: Number(m[1]), ppid: Number(m[2]), start: m[3].replace(/\s+/g, " "), pi: basename5(m[4]) === "pi" };
+    if (row.pi) {
+      if (ctx.readCwd) row.cwd = await ctx.readCwd(row.pid);
+      else {
+        const cwd = ctx.platform === "darwin" ? await ctx.run("lsof", ["-a", "-p", String(row.pid), "-d", "cwd", "-Fn"], { timeoutMs: 4e3 }) : await ctx.run("readlink", [`/proc/${row.pid}/cwd`], { timeoutMs: 4e3 });
+        if (cwd.code !== 0 || cwd.timedOut) throw new Error(`admission cwd unavailable for ${row.pid}`);
+        row.cwd = ctx.platform === "darwin" ? cwd.stdout.split("\n").find((s) => s.startsWith("n"))?.slice(1) : cwd.stdout.trim();
+      }
+      if (row.cwd) row.cwd = ctx.realpath(row.cwd);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+function privateDir(path) {
+  mkdirSync10(path, { recursive: true, mode: 448 });
+  const stat2 = lstatSync5(path);
+  if (!stat2.isDirectory() || (stat2.mode & 63) !== 0) throw new Error("admission directory must be private and not a symlink");
+}
+async function locked(dir, work) {
+  privateDir(dir);
+  const lock = join32(dir, "lock");
+  const deadline = Date.now() + 2e3;
+  for (; ; ) {
+    try {
+      mkdirSync10(lock, { mode: 448 });
+      break;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      if (Date.now() >= deadline) throw new Error("admission lock busy/uncertain; retry after inspecting its controller (no age-based removal)");
+      await pause(20);
+    }
+  }
+  try {
+    return await work();
+  } finally {
+    rmdirSync(lock);
+  }
+}
+function identity(value) {
+  return value && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.start === "string" && value.start.length > 0;
+}
+function readLease(file) {
+  if (!lstatSync5(file).isFile()) throw new Error("admission lease is not a regular file");
+  const v = JSON.parse(readFileSync15(file, "utf8"));
+  if (v?.version !== 1 || !identity(v.owner) || v.child !== void 0 && !identity(v.child) || v.priorPi !== void 0 && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)) || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some((s) => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
+  return v;
+}
+function store(file, lease) {
+  const temp = `${file}.${randomUUID4()}.tmp`;
+  writeFileSync8(temp, JSON.stringify(lease), { mode: 384, flag: "wx" });
+  renameSync5(temp, file);
+}
+function alive2(id, rows) {
+  const row = rows.find((r) => r.pid === id.pid);
+  if (row && row.start !== id.start) throw new Error(`admission identity uncertain: pid ${id.pid} reused`);
+  return Boolean(row);
+}
+function below2(row, owner, rows) {
+  const seen = /* @__PURE__ */ new Set();
+  let at = row;
+  while (at && !seen.has(at.pid)) {
+    if (at.pid === owner.pid) return at.start === owner.start;
+    seen.add(at.pid);
+    at = rows.find((r) => r.pid === at.ppid);
+  }
+  return false;
+}
+function uncertainPi(lease, all, rows) {
+  return rows.filter((r) => r.pi).some((pi) => {
+    if (pi.cwd === lease.cwd || below2(pi, lease.owner, rows)) return true;
+    if (lease.priorPi?.some((prior) => prior.pid === pi.pid && prior.start === pi.start)) return false;
+    return !all.some((other) => other.token !== lease.token && [other.owner, other.child].some((id) => id && alive2(id, rows) && below2(pi, id, rows)));
+  });
+}
+function registry2(dir) {
+  return readdirSync11(dir).filter((n) => n.endsWith(".json")).map((n) => {
+    const file = join32(dir, n);
+    return { file, lease: readLease(file) };
+  });
+}
+function leases(dir, rows) {
+  const entries = registry2(dir);
+  const all = entries.map((e) => e.lease);
+  return entries.flatMap(({ file, lease }) => {
+    if (alive2(lease.owner, rows)) {
+      if (lease.child) alive2(lease.child, rows);
+      return [lease];
+    }
+    if (!lease.child) throw new Error("admission lease uncertain: dead owner with unrecorded child");
+    if (alive2(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
+    unlinkSync4(file);
+    return [];
+  });
+}
+async function admit(ctx, request2, beforeLaunch) {
+  const dir = join32(ctx.piAgentDir, "lanes-admission");
+  const lease = await locked(dir, async () => {
+    const rows = await inventory2(ctx);
+    const owner = rows.find((r) => r.pid === process.pid);
+    if (!owner) throw new Error("admission controller identity unavailable");
+    const active = leases(dir, rows);
+    const pis = rows.filter((r) => r.pi);
+    const covered = /* @__PURE__ */ new Set();
+    for (const l of active) {
+      const child = pis.find((p) => !covered.has(p.pid) && below2(p, l.child ?? l.owner, rows));
+      if (child) covered.add(child.pid);
+    }
+    const extra = pis.filter((p) => !covered.has(p.pid));
+    const workers = active.filter((l) => l.pool === "worker").length + extra.length;
+    const orchestrators = active.filter((l) => l.pool === "orchestration").length;
+    const local = active.filter((l) => l.root === request2.root && l.pool === "worker").length + extra.filter((p) => (request2.localCwds ?? [request2.cwd]).includes(p.cwd)).length;
+    const counts = `workers=${workers}/6 orchestrators=${orchestrators}/2 local=${local}/${Math.min(request2.localLimit, 6)}`;
+    if (active.some((l) => l.cwd === request2.cwd) || pis.some((p) => p.cwd === request2.cwd)) throw new Error(`already running in ${request2.cwd}; ${counts}`);
+    if (request2.pool === "worker" ? workers >= 6 || local >= Math.min(request2.localLimit, 6) : orchestrators >= 2) throw new Error(`admission refused: ${counts}`);
+    const value = {
+      version: 1,
+      token: randomUUID4(),
+      owner: { pid: owner.pid, start: owner.start },
+      root: request2.root,
+      cwd: request2.cwd,
+      id: request2.id,
+      pool: request2.pool,
+      priorPi: pis.map((p) => ({ pid: p.pid, start: p.start }))
+    };
+    const file2 = join32(dir, `${value.token}.json`);
+    store(file2, value);
+    try {
+      await beforeLaunch?.();
+    } catch (e) {
+      unlinkSync4(file2);
+      throw e;
+    }
+    return value;
+  });
+  const file = join32(dir, `${lease.token}.json`);
+  return {
+    async child(pid) {
+      return locked(dir, async () => {
+        const row = (await inventory2(ctx)).find((r) => r.pid === pid);
+        if (!row || row.ppid !== process.pid) throw new Error("admission child identity unavailable; lease retained");
+        lease.child = { pid, start: row.start };
+        store(file, lease);
+        return lease.child;
+      });
+    },
+    async release() {
+      await locked(dir, async () => {
+        const current = readLease(file);
+        if (current.token !== lease.token || current.owner.pid !== process.pid || current.owner.start !== lease.owner.start) throw new Error("admission lease ownership changed");
+        const rows = await inventory2(ctx);
+        if (lease.child && alive2(lease.child, rows) || uncertainPi(lease, registry2(dir).map((e) => e.lease), rows)) throw new Error("admission child cleanup uncertain; lease retained");
+        unlinkSync4(file);
+      });
+    }
+  };
+}
+
+// src/lanes/commands/run.ts
+function nativeSpawn(exe, args, options) {
+  const child = spawn2(exe, args, { ...options, stdio: "inherit", shell: false });
+  const done = new Promise((resolve11, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => resolve11({ code, signal }));
+  });
+  return { pid: child.pid ?? 0, done, signal: (signal) => {
+    child.kill(signal);
+  } };
+}
+async function run(id, opts, c, root, ctx, beforeLaunch) {
+  const target = laneTarget(id, c, root, ctx);
+  if (target.lane?.retired) throw new Error(`lane ${id} is retired; add a fresh lane instead`);
+  if (!opts["from-handoff"] && parseStatus(await backendFor(c, ctx, root).status(target.id)).kind === "closed") throw new Error(`lane ${id} is closed`);
+  const prompt = expand(target.coordinator ? c.coordinator.prompt : target.lane.prompt, c, root, ctx.home);
+  if (!existsSync12(target.cwd) || !statSync8(target.cwd).isDirectory()) throw new Error(`cwd not found: ${target.cwd}`);
+  if (!existsSync12(prompt) || !statSync8(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
+  let wrapper = ctx.which(c.launch.wrapper);
+  if (!wrapper) {
+    wrapper = ctx.which("pi");
+    if (!wrapper) throw new Error("pi not found");
+    ctx.err("pi-session not found; starting pi directly (no relaunch after a context handoff)");
+  }
+  if (!target.coordinator || !c.launch.preapproveMcp) await preapprove(ctx, target.cwd, c.launch.preapproveMcp);
+  const lease = await admit(ctx, {
+    root: ctx.realpath(root),
+    cwd: ctx.realpath(target.cwd),
+    id: target.id,
+    pool: target.coordinator || ["repo-orch", "sub-orch"].includes(target.lane?.role ?? "") ? "orchestration" : "worker",
+    localLimit: c.coordinator.maxRunning,
+    localCwds: c.lanes.filter((l) => !l.retired && !["repo-orch", "sub-orch"].includes(l.role ?? "")).map((l) => laneDir(l, c, root, ctx)).filter(existsSync12).map((p) => ctx.realpath(p))
+  }, beforeLaunch);
+  const env = { ...ctx.env };
+  for (const name of c.launch.unsetEnv) delete env[name];
+  const messages2 = expand(c.messages.dir, c, root, ctx.home);
+  Object.assign(env, { PI_ORCH_ID: target.id, LANES_DIR: root, INBOX_DIR: messages2, LANE_STATUS_DIR: join33(messages2, "status") });
+  let child;
+  try {
+    child = (ctx.spawnInherited ?? nativeSpawn)(wrapper, [`@${prompt}`], { cwd: target.cwd, env });
+  } catch (e) {
+    await lease.release();
+    throw e;
+  }
+  let settled = false;
+  const outcome = child.done.then((value) => {
+    settled = true;
+    return { value };
+  }, (error) => {
+    settled = true;
+    return { error };
+  });
+  let verified;
+  const identity2 = new Promise((resolve11) => {
+    verified = resolve11;
+  });
+  const handlers = /* @__PURE__ */ new Map();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    const handler = () => {
+      void identity2.then(async (start2) => {
+        if (settled) return;
+        if (start2) {
+          const rows = await inventory2(ctx);
+          if (settled) return;
+          const row = rows.find((r) => r.pid === child.pid);
+          if (row?.start === start2) {
+            child.signal(signal);
+            return;
+          }
+        }
+        ctx.err("admission cancellation identity uncertain; child not signalled, lease retained until confirmed exit");
+      }).catch((e) => ctx.err(e.message));
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  let result2;
+  try {
+    try {
+      verified((await lease.child(child.pid)).start);
+    } catch (e) {
+      verified(void 0);
+      ctx.err(e.message);
+    }
+    const completed = await outcome;
+    if ("error" in completed) throw completed.error;
+    result2 = completed.value;
+  } finally {
+    settled = true;
+    verified(void 0);
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+    try {
+      await lease.release();
+    } catch (e) {
+      ctx.err(e.message);
+    }
+  }
+  if (result2.signal) {
+    if (!ctx.spawnInherited) process.kill(process.pid, result2.signal);
+    return 128 + (constants2.signals[result2.signal] ?? 0);
+  }
+  return result2.code ?? 1;
 }
 
 // src/lanes/commands/resume.ts
@@ -3085,11 +3388,26 @@ async function startCommand(id, opts, env) {
   if (opts["from-handoff"]) return fromHandoff({ id, opts }, env);
   return start(id, opts, env.c, env.root, env.ctx);
 }
+async function runCommand(id, opts, env) {
+  if (!opts["from-handoff"]) {
+    if (opts["handoff-digest"]) throw new UsageError("--handoff-digest requires --from-handoff");
+    return run(id, opts, env.c, env.root, env.ctx);
+  }
+  if (opts["handoff-digest"] && handoffDigest(id, env.ctx.realpath(filePath(opts["from-handoff"], env)), env) !== opts["handoff-digest"]) throw new Error("handoff launch changed; request a fresh start/resume");
+  const prepared = await prepareHandoff({ id, opts }, env);
+  if (opts["handoff-digest"] && opts["handoff-digest"] !== prepared.digest) throw new Error("handoff launch changed; request a fresh start/resume");
+  return run(id, prepared.opts, prepared.next, env.root, env.ctx, async () => {
+    await verifyWorktree(prepared.snapshot, env);
+    const current = { ...env, c: loadConfig(env.root) };
+    if (handoffDigest(id, prepared.path, current) !== prepared.digest) throw new Error("handoff launch changed; request a fresh start/resume");
+    saveConfig(env.root, prepared.next);
+  });
+}
 async function resume(args, opts, env) {
   return fromHandoff({ id: args[0], opts: { ...opts, "from-handoff": args[0] } }, env);
 }
 function filePath(value, env) {
-  return env.c.lanes.some((lane) => lane.id === value) ? join32(env.root, ".state/handoffs", `${value}.md`) : resolve9(env.ctx.cwd, value);
+  return env.c.lanes.some((lane) => lane.id === value) ? join34(env.root, ".state/handoffs", `${value}.md`) : resolve9(env.ctx.cwd, value);
 }
 function sourceLane(snapshot, env) {
   const { c, ctx, root } = env;
@@ -3149,31 +3467,42 @@ async function warnDirtyDrift(snapshot, env) {
     env.ctx.err(`Warning: could not compare handoff dirty paths/digest: ${e.message}; continuing`);
   }
 }
-async function fromHandoff(input, env) {
+function handoffDigest(id, path, { c, root, ctx }, file = readContext(path)) {
+  return createHash5("sha256").update(JSON.stringify({
+    id,
+    root: ctx.realpath(root),
+    c,
+    path: ctx.realpath(path),
+    handoff: file.digest,
+    cwd: ctx.realpath(file.snapshot.worktree)
+  })).digest("hex");
+}
+async function prepareHandoff(input, env) {
   const { c, root, ctx } = env;
-  const path = filePath(input.opts["from-handoff"], env);
-  const file = readContext(path);
+  const requested = filePath(input.opts["from-handoff"], env);
+  const file = readContext(requested);
+  const path = ctx.realpath(requested);
+  const digest = handoffDigest(input.id, path, env, file);
   const source = sourceLane(file.snapshot, env);
   await verifyWorktree(file.snapshot, env);
   const restored = restoreLane({ id: input.id, path, source }, env);
   const lanes = c.lanes.filter((lane) => lane.id !== input.id).concat(restored);
   const next = { ...c, lanes };
   validate(next, root, ctx.home);
-  const opts = { ...input.opts };
-  delete opts["from-handoff"];
-  const code = await start(input.id, opts, next, root, ctx);
-  if (code === 0) {
-    saveConfig(root, next);
-    c.lanes = lanes;
-  }
-  return code;
+  if (handoffDigest(input.id, path, env) !== digest) throw new Error("handoff launch changed; request a fresh start/resume");
+  const opts = { ...input.opts, "from-handoff": path, "handoff-digest": digest };
+  return { next, opts, path, digest, snapshot: file.snapshot };
+}
+async function fromHandoff(input, env) {
+  const prepared = await prepareHandoff(input, env);
+  return start(input.id, prepared.opts, prepared.next, env.root, env.ctx);
 }
 function requireWorktree(path) {
-  if (!existsSync12(path) || !statSync8(path).isDirectory()) throw new Error("handoff worktree missing");
+  if (!existsSync13(path) || !statSync9(path).isDirectory()) throw new Error("handoff worktree missing");
 }
 
 // src/lanes/commands/send.ts
-import { readFileSync as readFileSync15 } from "node:fs";
+import { readFileSync as readFileSync16 } from "node:fs";
 import { resolve as resolve10 } from "node:path";
 async function send(args, opts, c, root, ctx) {
   let [to, topic, file] = args;
@@ -3185,7 +3514,7 @@ async function send(args, opts, c, root, ctx) {
   if (opts.m !== void 0 && file !== void 0) throw new UsageError("choose a file or -m, not both");
   const known = [c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.flatMap((l) => [l.id, l.group])];
   if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
-  const body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync15(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+  const body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync16(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
   if (!body.trim()) throw new UsageError("empty message body");
   to = route({ to, from, direct: opts.direct }, c, ctx);
   ctx.out((await backendFor(c, ctx, root).send({ from, to, topic, body })).path);
@@ -3234,7 +3563,9 @@ async function nudge(id, text2, opts, c, root, ctx) {
     ctx.err(`NOT SENT: ${why}`);
     return 3;
   };
-  if (parseStatus(await backendFor(c, ctx, root).status(target.id)).kind === "closed") return refuse(`${target.id} is closed`);
+  const kind = parseStatus(await backendFor(c, ctx, root).status(target.id)).kind;
+  if (kind === "closed") return refuse(`${target.id} is closed`);
+  if (kind === "parked") return refuse(`${target.id} is parked; explicitly set working before nudging`);
   const pid = await piIn(target.cwd, ctx);
   if (!pid) return refuse(`no pi running in ${target.cwd}`);
   const tty = await ttyOf(ctx, pid);
@@ -3251,12 +3582,12 @@ async function nudge(id, text2, opts, c, root, ctx) {
 }
 
 // src/lanes/commands/resume-check.ts
-import { existsSync as existsSync13, readFileSync as readFileSync16, statSync as statSync10 } from "node:fs";
-import { join as join34 } from "node:path";
+import { existsSync as existsSync14, readFileSync as readFileSync17, statSync as statSync11 } from "node:fs";
+import { join as join36 } from "node:path";
 
 // src/lanes/joblogs.ts
-import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync11, statSync as statSync9 } from "node:fs";
-import { join as join33 } from "node:path";
+import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync12, statSync as statSync10 } from "node:fs";
+import { join as join35 } from "node:path";
 function parseWatches(text2) {
   return text2.split(/\r?\n/).flatMap((line) => {
     const [tag, label, until2, interval, ...check] = line.split("|");
@@ -3281,17 +3612,17 @@ function liveWatch(jobs, watch2, now) {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   for (const date of [now, yesterday]) {
-    const dir = join33(jobs, day(date));
+    const dir = join35(jobs, day(date));
     let names;
     try {
-      names = readdirSync11(dir);
+      names = readdirSync12(dir);
     } catch (e) {
       if (e.code === "ENOENT") continue;
       throw e;
     }
     for (const name of names.filter((n) => n.endsWith(".log"))) {
-      const path = join33(dir, name);
-      const stat2 = statSync9(path);
+      const path = join35(dir, name);
+      const stat2 = statSync10(path);
       if (!stat2.isFile() || !chunk(path, Math.min(4096, stat2.size), 0).split("\n")[0].includes(watch2.check)) continue;
       const tail = chunk(path, Math.min(65536, stat2.size), Math.max(0, stat2.size - 65536));
       const last = tail.split("\n").filter((s) => /^--- check .* exit \d+ ---$/.test(s)).at(-1);
@@ -3324,12 +3655,12 @@ async function resumeCheck(c, root, ctx) {
   const now = ctx.now();
   let bad = false;
   ctx.out(`date: ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`);
-  const watches = join34(root, "coordinator/WATCHES.md");
-  if (!existsSync13(watches)) {
+  const watches = join36(root, "coordinator/WATCHES.md");
+  if (!existsSync14(watches)) {
     ctx.out("MISSING coordinator/WATCHES.md");
     bad = true;
-  } else for (const w of parseWatches(readFileSync16(watches, "utf8"))) {
-    if (liveWatch(join34(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
+  } else for (const w of parseWatches(readFileSync17(watches, "utf8"))) {
+    if (liveWatch(join36(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
     else {
       ctx.out(`MISSING watch: ${w.label} -> job_watch until=${w.until} interval=${w.interval} check from coordinator/WATCHES.md`);
       bad = true;
@@ -3345,20 +3676,20 @@ async function resumeCheck(c, root, ctx) {
     if (old.length) bad = true;
     else ctx.out("OK      inbox: no unread backlog");
   }
-  const path = join34(root, "coordinator/NOW.md");
-  if (!existsSync13(path)) {
+  const path = join36(root, "coordinator/NOW.md");
+  if (!existsSync14(path)) {
     ctx.out("MISSING coordinator/NOW.md");
     bad = true;
   } else {
-    await livePrs(readFileSync16(path, "utf8"), ctx);
-    const age = Math.floor((now.getTime() - statSync10(path).mtimeMs) / 6e4);
+    await livePrs(readFileSync17(path, "utf8"), ctx);
+    const age = Math.floor((now.getTime() - statSync11(path).mtimeMs) / 6e4);
     if (age > 90) {
       ctx.out(`STALE   NOW.md not updated for ${age} min`);
       bad = true;
     }
   }
-  const questions = join34(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
-  if (existsSync13(questions)) {
+  const questions = join36(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
+  if (existsSync14(questions)) {
     const r = await ctx.run(process.execPath, [questions, "list", "--all"], { timeoutMs: 15e3 });
     for (const line of r.stdout.split("\n").filter((s) => /^Q-\d+/.test(s))) ctx.out(`OPEN    ${line}`);
   }
@@ -3366,8 +3697,8 @@ async function resumeCheck(c, root, ctx) {
 }
 
 // src/lanes/commands/green-prs.ts
-import { existsSync as existsSync14, mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync8 } from "node:fs";
-import { join as join35 } from "node:path";
+import { existsSync as existsSync15, mkdirSync as mkdirSync11, readFileSync as readFileSync18, writeFileSync as writeFileSync9 } from "node:fs";
+import { join as join37 } from "node:path";
 
 // src/lanes/stale-check.ts
 var completedCheck = (check) => check.status === "completed" && ["success", "skipped", "neutral"].includes(check.conclusion);
@@ -3468,23 +3799,23 @@ async function greenPrs(opts, c, root, ctx) {
     }
   }
   refs.sort();
-  const ack = join35(root, ".state/green-ack");
+  const ack = join37(root, ".state/green-ack");
   if (opts.ack) {
-    mkdirSync10(join35(root, ".state"), { recursive: true });
-    writeFileSync8(ack, refs.length ? `${refs.join("\n")}
+    mkdirSync11(join37(root, ".state"), { recursive: true });
+    writeFileSync9(ack, refs.length ? `${refs.join("\n")}
 ` : "");
     ctx.out(`acked ${refs.length}`);
     return 0;
   }
-  const previous = opts.new && existsSync14(ack) ? readFileSync17(ack, "utf8").split(/\r?\n/) : [];
+  const previous = opts.new && existsSync15(ack) ? readFileSync18(ack, "utf8").split(/\r?\n/) : [];
   const output = opts.new ? refs.filter((r) => !previous.includes(r)) : refs;
   if (output.length) ctx.out(await annotatedRefs(output, details, ctx));
   return opts.new && !output.length ? 1 : 0;
 }
 
 // src/lanes/commands/close.ts
-import { existsSync as existsSync15 } from "node:fs";
-import { basename as basename5, dirname as dirname8 } from "node:path";
+import { existsSync as existsSync16 } from "node:fs";
+import { basename as basename6, dirname as dirname8 } from "node:path";
 function closeBody(id, to, reason, unread2) {
   const body = [
     `Lane ${id} is closed.${to ? ` Reassigned to ${to}.` : ""}${reason ? ` Reason: ${clean(reason)}` : ""}`,
@@ -3499,7 +3830,7 @@ function closeBody(id, to, reason, unread2) {
 `;
 }
 async function quit(id, pid, cwd, c, root, ctx) {
-  const busy = (await descendants2(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename5(cmd.split(/\s+/)[0])));
+  const busy = (await descendants2(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename6(cmd.split(/\s+/)[0])));
   if (busy.length) {
     ctx.err(`REFUSED: busy children: ${busy.join(" ")}`);
     return false;
@@ -3518,7 +3849,7 @@ async function quit(id, pid, cwd, c, root, ctx) {
   return false;
 }
 async function removalHint(cwd, ctx) {
-  if (!existsSync15(cwd)) return "worktree already removed; no removal hint";
+  if (!existsSync16(cwd)) return "worktree already removed; no removal hint";
   const common = await ctx.run("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 });
   if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
   const clone = shellQuote(dirname8(common.stdout.trim()));
@@ -3544,7 +3875,7 @@ async function close(id, opts, c, root, ctx) {
   const hint = await removalHint(target.cwd, ctx);
   const backend = backendFor(c, ctx, root);
   const unread2 = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
-  const pid = existsSync15(target.cwd) ? await piIn(target.cwd, ctx) : void 0;
+  const pid = existsSync16(target.cwd) ? await piIn(target.cwd, ctx) : void 0;
   if (pid && opts.quit && !await quit(id, pid, target.cwd, c, root, ctx)) return 1;
   if (pid && !opts.quit) ctx.err(`${id} is still running; type /quit in its session or use --quit`);
   const at = ctx.now();
@@ -3559,7 +3890,7 @@ async function close(id, opts, c, root, ctx) {
 }
 
 // src/lanes/commands/status.ts
-import { existsSync as existsSync16 } from "node:fs";
+import { existsSync as existsSync17 } from "node:fs";
 async function status(c, root, ctx, all = false) {
   const backend = backendFor(c, ctx, root);
   const processes = await runningPi(ctx);
@@ -3621,7 +3952,7 @@ function showClosed(c, ctx) {
 }
 function findPid(cwd, processes, ctx) {
   let pid = "missing";
-  if (existsSync16(cwd)) {
+  if (existsSync17(cwd)) {
     try {
       pid = String(processes.find((p) => p.cwd === ctx.realpath(cwd))?.pid || "-");
     } catch {
@@ -3649,6 +3980,7 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
     [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
   start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
+  run <ID>|coordinator [--from-handoff ID|file]
   resume <ID> [--terminal backend]
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
   status [--all]
@@ -3693,6 +4025,7 @@ var OPTIONS = {
     "orchestrator-id",
     "no-orchestrator"
   ],
+  run: ["from-handoff", "handoff-digest"],
   start: ["terminal", "from-handoff"],
   resume: ["terminal"],
   send: ["m", "from", "direct"],
@@ -3778,6 +4111,7 @@ function validateInvocation({ command, positional, opts }) {
     adopt: [0, 0],
     init: [0, 1],
     add: [1, 1],
+    run: [1, 1],
     start: [1, 1],
     resume: [1, 1],
     send: [2, 3],
@@ -3808,6 +4142,7 @@ async function dispatch(input, env) {
   const handlers = {
     add: () => add(args[0], opts, c, root, ctx),
     start: () => startCommand(args[0], opts, env),
+    run: () => runCommand(args[0], opts, env),
     resume: () => resume(args, opts, env),
     messages: () => messagesPrune(opts, c, root, ctx),
     send: () => send(args, opts, c, root, ctx),
@@ -3885,7 +4220,7 @@ function appendPositional({ argv, index }, positional) {
 }
 
 // src/lanes/cli.ts
-if (process.argv[1] && realpathSync3(process.argv[1]) === fileURLToPath2(import.meta.url)) {
+if (process.argv[1] && realpathSync3(process.argv[1]) === fileURLToPath3(import.meta.url)) {
   process.exitCode = await main(process.argv.slice(2), realLanesCtx());
 }
 export {

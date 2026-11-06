@@ -34,13 +34,15 @@ test("the chooser takes the highest rank whose requirements are ready", () => {
   assert.deepEqual([none.name, none.provisional], ["balanced", true]);
   assert.match(none.reason, /rerun \.\/install\.sh --profile auto/);
   assert.deepEqual([pick("anthropic").name, pick("anthropic").provisional], ["balanced-anthropic", false]);
-  assert.match(pick("anthropic", "openai-codex").reason, /Kimi roles \(ops, scout\) fall back to GPT/);
+  assert.match(pick("anthropic", "openai-codex").reason, /balanced keeps its configured model routing/);
 });
 
 test("the Kimi note appears only when the profile uses Kimi and Kimi is missing", () => {
   const balanced = profiles.find((p) => p.name === "balanced");
-  assert.match(kimiNote(balanced, new Set(["anthropic"])) ?? "", /Kimi roles fall back to GPT/);
-  assert.equal(kimiNote(balanced, new Set(["kimi-coding"])), undefined);
+  const kimi = profiles.find((p) => p.name === "kimi-heavy");
+  assert.equal(kimiNote(balanced, new Set(["anthropic"])), undefined);
+  assert.match(kimiNote(kimi, new Set(["anthropic"])) ?? "", /Kimi roles fall back to GPT/);
+  assert.equal(kimiNote(kimi, new Set(["kimi-coding"])), undefined);
   assert.equal(kimiNote(profiles.find((p) => p.name === "openai-only"), new Set()), undefined);
 });
 
@@ -75,7 +77,7 @@ test("profile summaries are plain words within 90 characters", () => {
 test("profileOption lists needs and optional providers and disables profiles with missing logins", () => {
   const ready = new Set(["anthropic", "openai-codex"]);
   const balanced = profileOption(byName("balanced"), ready, true);
-  assert.equal(balanced.label, "balanced (recommended) · Needs: Claude, ChatGPT; optional: Kimi");
+  assert.equal(balanced.label, "balanced (recommended) · Needs: Claude, ChatGPT");
   assert.equal(balanced.disabled, false);
   const kimi = profileOption(byName("kimi-heavy"), ready, false);
   assert.deepEqual([kimi.disabled, kimi.hint], [true, "needs Kimi login"]);

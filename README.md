@@ -137,14 +137,15 @@ A rerun with nothing to change ends with "Everything is up to date." Non-interac
 | Profile | Required logins/subscriptions | Optional provider |
 | --- | --- | --- |
 | `openai-only` | ChatGPT (`openai-codex`) | — |
-| `balanced` | Claude (`anthropic`) + ChatGPT | Kimi (`kimi-coding`), otherwise ops/scout fall back to GPT |
+| `balanced` | Claude (`anthropic`) + ChatGPT | — (Haiku ops/scout) |
+| `lean` (opt-in) | Claude + ChatGPT | — (Sonnet planning/workers, Haiku evidence, Opus orchestration/review, Sol implementation) |
 | `balanced-anthropic` | Claude | — (Claude only, every role) |
-| `balanced-openai` | Claude + ChatGPT | Kimi, otherwise GPT fallback |
+| `balanced-openai` | Claude + ChatGPT | — (Haiku ops/scout) |
 | `anthropic-heavy` | Claude + ChatGPT | — |
 | `openai-heavy` | Claude + ChatGPT | — |
 | `kimi-heavy` | Claude + ChatGPT + Kimi | — |
 
-`auto` chooses the highest-ranked profile whose required logins are ready: `balanced` with Claude + ChatGPT (with or without Kimi), `balanced-anthropic` with Claude alone, `openai-only` with ChatGPT alone. No matching profile (for example Kimi-only, or no logins yet) gives provisional `balanced` and asks for the missing logins. It does **not** automatically prefer `kimi-heavy`; select that explicitly. A normal rerun keeps the active profile; `--profile auto` recomputes it.
+`auto` chooses the highest-ranked profile whose required logins are ready: `balanced` with Claude + ChatGPT (with or without Kimi), `balanced-anthropic` with Claude alone, `openai-only` with ChatGPT alone. No matching profile (for example Kimi-only, or no logins yet) gives provisional `balanced` and asks for the missing logins. It does **not** automatically prefer `lean` or `kimi-heavy`; select either explicitly. Use `pi-profile use lean` to opt in; `pi-profile use balanced` returns to the default. `lean` ranks below `balanced` and does not change automatic selection. A normal rerun keeps the active profile; `--profile auto` recomputes it.
 
 `pi-questions` is deliberately **bundled** in `agent/local-packages/pi-questions`, installed into `~/.pi/agent/local-packages/pi-questions` and registered as `./local-packages/pi-questions`. It needs no separate publication, npm install or private clone.
 

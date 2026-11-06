@@ -686,8 +686,8 @@ async function retired(f: ReturnType<typeof fixture>) {
 test("round 2: reap-resume round trip launches the handoff in the preserved worktree", async () => {
   const f = fixture(); await retired(f); f.ctx.env.TMUX = undefined;
   assert.equal(await f.invoke("resume", "L1"), 0);
-  const launch = f.out.at(-1)!; assert.ok(launch.includes(`@${join(f.root, ".state/handoffs/L1.md")}`)); assert.ok(launch.includes(f.cwd));
-  assert.equal(loadRetired(f), false);
+  const launch = f.out.at(-1)!; assert.ok(launch.includes(`'--from-handoff' '${join(f.root, ".state/handoffs/L1.md")}'`)); assert.ok(launch.includes(f.cwd));
+  assert.equal(loadRetired(f), true);
   assert.equal(await f.invoke("start", "L1", "--from-handoff", join(f.root, ".state/handoffs/L1.md")), 0);
 });
 test("review 4: closure appends audit, STATE and paused claims and notifies the parent", async () => {
@@ -746,7 +746,8 @@ test("review 2: a validated handoff cannot be replaced just before quit", async 
 test("round 2: start NEW from a handoff and refuse a missing file or changed HEAD", async () => {
   const f = fixture(); await retired(f); f.ctx.env.TMUX = undefined;
   assert.equal(await f.invoke("start", "L2", "--terminal", "print", "--from-handoff", "L1"), 0);
-  assert.ok(f.out.at(-1)!.includes(`@${join(f.root, ".state/handoffs/L1.md")}`));
+  assert.ok(f.out.at(-1)!.includes(`'--from-handoff' '${join(f.root, ".state/handoffs/L1.md")}'`));
+  assert.equal(JSON.parse(readFileSync(join(f.root, "lanes.json"), "utf8")).lanes.some((l: { id: string }) => l.id === "L2"), false);
   assert.ok(f.out.at(-1)!.includes("PI_ORCH_ID=L2")); assert.ok(f.out.at(-1)!.includes(f.cwd));
   const g = fixture(); assert.equal(await g.invoke("resume", "L1", "--terminal", "print"), 1);
   ownContext(g, { head: "b".repeat(40) });
@@ -804,7 +805,7 @@ for (const drift of ["paths", "digest"]) test(`round 2: resume warns and continu
   f.ctx.env.TMUX = undefined;
   assert.equal(await f.invoke("resume", "L1"), 0);
   assert.match(f.err.join("\n"), new RegExp(`warn.*dirty.*${drift}`, "i"));
-  assert.ok(f.out.at(-1)!.includes(`@${join(f.root, ".state/handoffs/L1.md")}`));
+  assert.ok(f.out.at(-1)!.includes(`'--from-handoff' '${join(f.root, ".state/handoffs/L1.md")}'`));
   assert.ok(f.out.at(-1)!.includes(f.cwd)); assert.equal(readFileSync(path, "utf8"), "changed");
 });
 test("round 2: claim pause failure after exit is audited without leaving a half retirement", async () => {

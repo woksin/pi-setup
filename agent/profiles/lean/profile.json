@@ -1,0 +1,12 @@
+{
+  "summary": "Opt-in lean: Sonnet workers, Haiku evidence, Opus review, Sol implementation.",
+  "requires": [
+    "anthropic",
+    "openai-codex"
+  ],
+  "uses": [
+    "anthropic",
+    "openai-codex"
+  ],
+  "rank": 90
+}

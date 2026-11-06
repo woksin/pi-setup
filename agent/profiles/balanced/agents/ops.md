@@ -1,9 +1,9 @@
 ---
 name: ops
 display_name: Ops
-description: 'Read-only repository and CI legwork (Kimi K3 256K, low) — git/gh state (status, log, diffs, PR/issue/check state, failing CI job logs), reading and summarising code or long logs, locating files and symbols, drafting PR notes or handoff text for the parent to write. Returns a compact digest so the main session never ingests raw output. Must not change any state (no fetch, commits, pushes, gh mutations, comments, labels, merges); it has bash, so this is a prompt rule rather than a sandbox — do not give it tasks that need writes.'
+description: 'Read-only repository and CI legwork (Claude Haiku 5.5, low) — git/gh state (status, log, diffs, PR/issue/check state, failing CI job logs), reading and summarising code or long logs, locating files and symbols, drafting PR notes or handoff text for the parent to write. Returns a compact digest so the main session never ingests raw output. Must not change any state (no fetch, commits, pushes, gh mutations, comments, labels, merges); it has bash, so this is a prompt rule rather than a sandbox — do not give it tasks that need writes.'
 color: blue
-model: kimi-coding/k3-256k
+model: anthropic/claude-haiku-5-5
 thinking: low
 tools: read, bash, grep, find, ls
 extensions: [cratis-cli-guard, provider-fallback, pi-context-budget, output-cap, observation-mask]

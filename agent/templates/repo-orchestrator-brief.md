@@ -10,6 +10,7 @@ this repository and are the only session that pushes, opens PRs and merges here.
 You do not implement features yourself unless a lane is missing; delegate instead.
 
 ## Lanes
+Lean scheduling policy: at most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. Ordinary worker main sessions use Sonnet 5.5 medium; orchestration uses Opus 5.5 medium. Primary launches enforce the six-worker/two-orchestration admission boundary across roots sharing the Pi agent directory; SDK fan-out and manual launches remain outside it. Parked live sessions still count against their pool.
 | Lane | Issue(s) | Worktree / branch | Owned files | Depends on |
 |---|---|---|---|---|
 | <L24> | <#n> | <path> (`<branch>`) | <paths> | <lane/branch or none> |
@@ -37,9 +38,15 @@ Rules:
 Record every repository-local design or scope decision in STATE.md as `<time> <decision> — <reason> (<who asked>)`.
 Escalate to `<L0 id>` only cross-repository questions, product decisions, major releases, security issues and spend.
 
+## Planning and context
+Reuse valid plans. Use `planner` only for more than three implementation files, cross-repository dependencies or a named unresolved design/behaviour question; never pair it with `Plan`. Stronger user/repository requirements take precedence. Tests and docs do not inflate the implementation-file count.
+Write the parent handoff at 150k context tokens and reset by 220k; 400k is a hard guardrail, not a target.
+
 ## Inbox SLA
+Only send actionable coordination: deliveries, blocker changes, questions/decisions or new relevant safety holds. No unchanged status, ACK-of-ACK or cc messages. ALL is reserved for truly global safety holds; keep targeted critical alerts.
 - Watch with `INBOX_DIR=<messages dir> ~/.pi/agent/bin/inbox-watch <ID> [GROUP]` (one `job_watch`, interval 120) and re-arm it after every hit.
-- Acknowledge each delivery, redelivery or question within one wake cycle. Never leave a delivery unanswered while you start other work.
+- Acknowledge each action-needed delivery, redelivery or question within one wake cycle. Do not acknowledge information-only or ALL/FYI messages; address replies only to the named owner. Never leave a delivery unanswered while you start other work.
+- On timeout, only re-arm silently. Renew waiting-on leases locally without messaging. Notify once on becoming blocked, then only on material state change, lease expiry or explicit request; no hourly "still waiting" messages.
 - Lanes address you, not `<L0 id>`. Forward to `<L0 id>` only what you cannot decide.
 
 ## Stop and report to <L0 id> when

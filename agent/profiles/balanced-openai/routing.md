@@ -1,6 +1,6 @@
 ## Model routing
 
-Active profile: **balanced-openai** (`~/.pi/agent/bin/pi-profile`). Balanced routing with spare OpenAI weekly capacity spent where GPT is strongest, one thinking level above `balanced`: Sol for test-gated and security-related implementation, Cratis CLI diagnosis and reviewing Claude-written work; Astra for hard reasoning and the GPT side of full reviews. Claude keeps orchestration, planning, writing, mechanical edits, cleanup and behaviour-preserving changes, where its scope discipline is the evidence. Switch back to `balanced` when OpenAI usage runs low. Haiku 5.5 is used for repository exploration; Kimi K3 for web-source gathering.
+Active profile: **balanced-openai** (`~/.pi/agent/bin/pi-profile`). Balanced routing with spare OpenAI weekly capacity spent where GPT is strongest, one thinking level above `balanced`: Sol for test-gated and security-related implementation, Cratis CLI diagnosis and reviewing Claude-written work; Astra for hard reasoning and the GPT side of full reviews. Claude keeps orchestration, planning, writing, mechanical edits, cleanup and behaviour-preserving changes, where its scope discipline is the evidence. Switch back to `balanced` when OpenAI usage runs low. Haiku 5.5 gathers bounded repository, operational and web evidence; escalate ambiguous reasoning to Sonnet/Opus.
 
 Delegate by agent type; each type pins its own model and thinking level. Never pass a `model` override to `Agent`.
 
@@ -9,7 +9,6 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - GPT-6.1 Sol high is the default for bounded, test-gated implementation: it reached the correctness ceiling on VulcanBench from high upward at low cost. It has weak scope discipline, so every brief must state scope, files, checks and stop conditions; unrelated failures are reported, not fixed.
 - Sonnet 5.5 low/medium had zero regressions across 100 real changes; use `careful-implementer` when preserving existing behaviour, UI or user-facing text matters, or tests are weak.
 - Opus 5.5 is the main orchestrator and judgement model; Opus/Fable lead source synthesis evidence, while Astra leads science and harder cross-file review evidence.
-- Kimi K3 is configured as `kimi-coding`. Use K3 256K for exploration and research capacity; verify its claims, and keep final decisions with Claude/OpenAI until local evaluations justify more.
 
 ### Agent routing
 - `careful-implementer`: Claude Sonnet 5.5, medium
@@ -22,12 +21,12 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `grunt`: Claude Sonnet 5.5, low
 - `implementer`: GPT-6.1 Sol, xhigh
 - `opus-implementer`: Claude Opus 5.5, medium
-- `ops`: Kimi K3 256K, low
+- `ops`: Claude Haiku 5.5, low
 - `Plan`: Claude Opus 5.5, high
 - `planner`: Claude Opus 5.5, high
 - `prose-editor`: Claude Sonnet 5.5, low
 - `reviewer`: Claude Opus 5.5, medium
-- `scout`: Kimi K3 256K, high
+- `scout`: Claude Haiku 5.5, medium
 - `second-opinion`: GPT-6 Astra, xhigh
 - `sol-reviewer`: GPT-6.1 Sol, xhigh
 
@@ -36,12 +35,12 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 - Main session: Opus 5.5 medium by default (OpenAI-heavy: GPT-6.1 Sol high). Raise to high only for difficult design/debugging, then lower it.
 - `implementer` for clear, testable work; `careful-implementer` for behaviour-preserving changes; `opus-implementer` only when the brief names the hard reason (the unresolved design question or hard-bug judgement). Default scoped changes (a named file set and check) to `careful-implementer`. Every brief names the build configuration to verify (e.g. Release, warnings as errors).
-- Plan, then implement: once a request is decided to become an issue/task, run `planner` (high) to write `<repo>/.ai-work/<task>/plan.md`; read it, resolve BLOCKING questions, then hand the plan to the cheaper implementer it recommends. Skip the planner for trivial or mechanical changes (a known one-file edit, renames, bumps). After accepting the plan, pass a 1–3 sentence approach summary as `issue_work update plan=...` (or on claim). The planner is read-only apart from that one file.
+- Plan, then implement: only when more than three implementation files, cross-repository dependencies or a named unresolved design/behaviour question warrant it, run `planner` to write `<repo>/.ai-work/<task>/plan.md`; read it, resolve BLOCKING questions, then hand the plan to the cheaper implementer it recommends. Reuse a still-valid plan; never pair `planner` with `Plan`. Stronger user/repository planning requirements take precedence. After accepting the plan, pass a 1–3 sentence approach summary as `issue_work update plan=...` (or on claim). The planner is read-only apart from that one file.
 - `cleanup-steward` performs post-work inventory and only explicitly authorised, safety-checked cleanup.
 - Cross-provider review: `reviewer` reviews GPT-written work; `sol-reviewer` (xhigh) reviews Claude-written work. Follow "Review loops" in the global rules (blocking-only gate, delta rounds, cap of 3). Before merge run the `review` workflow (Opus + GPT-6 Astra: high review, xhigh verification, in this profile) and always pass `author`; pass `deep: true` (Astra reviews at xhigh too) for security-sensitive, algorithmic/concurrency or large cross-cutting changes.
 - OpenAI capacity is plentiful in this profile: use `second-opinion` (Astra xhigh) freely for hard reasoning, contested designs, stuck bugs and as a second review of important Claude-written plans. Route clear, well-tested changes to `implementer` (Sol xhigh); keep `careful-implementer` (Sonnet) for changes where tests are weak or existing behaviour, UI or user-facing text must be preserved — its regression record is the evidence there, not cost.
-- Start a fresh parent session from a short `.ai-work/` handoff around ~600k tokens (hard ceiling 800k; see "Orchestrator context" in the global rules).
-- The main session plans, briefs and decides; it does not do the reading. Delegate to Kimi (pilot, re-evaluated with `~/.ai-work/pi-usage-eval/analyze.py`):
+- Write a short `.ai-work/` handoff at 150k tokens; start a fresh parent session by 220k (hard guardrail 400k; see "Orchestrator context" in the global rules).
+- The main session plans, briefs and decides; it does not do the reading. Delegate bounded evidence gathering to Haiku; escalate ambiguous reasoning to Sonnet/Opus:
   - `ops` — git/gh/CI state, failing-job logs, PR/issue reads, long-log triage, reading and summarising code, drafting PR notes or handoffs. Use it whenever the answer would take more than about three git/gh/cat/grep calls or produce more than ~100 lines of output.
   - `Explore` — locating code and symbols; `scout` — multi-source web research.
   - `grunt` stays for mechanical edits.

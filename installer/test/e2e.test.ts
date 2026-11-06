@@ -32,7 +32,7 @@ describe("install (e2e)", () => {
     assert.ok(readdirSync(join(box.home, ".agents/skills")).includes("github-issue-hygiene"));
     const npm = stubLog(box).filter((l) => l.startsWith("npm install"));
     assert.equal(npm.length, 1);
-    assert.match(npm[0], /^npm install @woksin\/pi-jobs@0\.3\.1 @woksin\/pi-context-budget@0\.5\.0 @woksin\/pi-recover@0\.1\.1 @woksin\/pi-orch@0\.1\.1 --save-exact --legacy-peer-deps --no-audit --no-fund --loglevel=error cwd=/);
+    assert.match(npm[0], /^npm install @woksin\/pi-jobs@0\.4\.0 @woksin\/pi-context-budget@0\.5\.0 @woksin\/pi-recover@0\.1\.1 @woksin\/pi-orch@0\.2\.0 --save-exact --legacy-peer-deps --no-audit --no-fund --loglevel=error cwd=/);
     assert.equal(realpathSync(npm[0].split("cwd=")[1]), realpathSync(piPath(box, "npm")));
     const checks = stubLog(box).filter((l) => l.startsWith("pi auth check"));
     assert.equal(checks.length, 3);
@@ -151,10 +151,13 @@ describe("install (e2e)", () => {
     assert.deepEqual(profileCalls(box), []);
   });
 
-  test("Kimi missing is said once in the summary", () => {
+  test("Kimi missing is only reported for profiles that use Kimi", () => {
     const box = fresh();
     const run = install(box, ARGS(box), { ready: "anthropic,openai-codex" });
-    assert.equal(run.stdout.split("\n").filter((l) => /Kimi roles fall back to GPT/.test(l)).length, 1, run.stdout);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.doesNotMatch(run.stdout, /Kimi roles fall back to GPT/);
+    const kimi = install(box, [...ARGS(box), "--profile", "kimi-heavy"], { ready: "anthropic,openai-codex" });
+    assert.equal(kimi.stdout.split("\n").filter((l) => /Kimi roles fall back to GPT/.test(l)).length, 1, kimi.stdout);
   });
 
   test("an unknown --profile fails before any write", () => {

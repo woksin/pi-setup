@@ -38,6 +38,15 @@ function fixture() {
   return { home, root, c, ctx, out, err, calls, cwd, messages, now, session, result, setRunning: (v: boolean) => running = v, setForeground: (v: boolean) => foreground = v, setBusy: (v: string) => busy = v,
     invoke: (...args: string[]) => main(["--dir", root, ...args], ctx) };
 }
+for (const offset of [-1, 1]) test(`parked status with ${offset < 0 ? "expired" : "future"} timestamp suppresses idle checks and nudges`, async () => {
+  const f = fixture(); f.session(120); const dir = join(f.messages, "status"); mkdirSync(dir);
+  const status = join(dir, "L1.status"); writeFileSync(status, `parked "watch" until ${new Date(f.now.getTime() + offset * 3600000).toISOString()}`);
+  assert.equal(await f.invoke("idle-check"), 1); assert.deepEqual(f.out, []);
+  f.calls.splice(0); assert.equal(await f.invoke("nudge", "L1", "do not wake"), 3);
+  assert.match(f.err.at(-1)!, /parked/); assert.deepEqual(f.calls, []);
+  writeFileSync(status, "working task=explicit-unpark since=2026-01-01T00:00:00Z");
+  assert.equal(await f.invoke("idle-check"), 0); assert.match(f.out.at(-1)!, /silent: L1:120m/);
+});
 test("status parsing suppresses only future waiting/barred status", () => {
   const now = new Date("2026-01-02T12:00:00Z");
   for (const kind of ["waiting-on", "barred-by"]) {

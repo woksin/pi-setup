@@ -1,6 +1,6 @@
 /** Dormant until an operator enrolls a repository. No policy mutation tools are registered. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resolve } from "node:path";
+import { shellGuard } from "../lib/shell-invocations.ts";
 import { isGuardOff } from "../lib/guards.ts";
 import { ACTIONS, acknowledge, assessCommand, assessPublication, identity, isSetupWriter, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyStore, savePolicy, tamperReason, type Context } from "../lib/lane-policy.ts";
 
@@ -46,19 +46,11 @@ function toolReason(name: string, value: unknown, actor: Context, depth = 0): st
 	}
 	if (name === "bash") return typeof input.command === "string" ? assessCommand(input.command, actor) : "Lane policy: missing bash command.";
 	if (["read", "grep", "find", "ls"].includes(name)) return;
-	const execution = typeof input.cwd === "string" ? { ...actor, cwd: resolve(actor.cwd, input.cwd) } : actor;
-	if (name === "job_start" || name === "job_watch") {
-		for (const command of [input.command, input.check]) if (typeof command === "string") {
-			const reason = assessCommand(command, execution);
-			if (reason) return reason;
-		}
-		return;
-	}
 	// Delegation is allowed; child publication is checked under the child's real session ID.
 	// MCP capability names/server metadata identify GitHub writes, not all opaque tools.
 	const tool = [name, input.toolName, input.tool, input.name].filter(x => typeof x === "string").join(" ");
 	const server = typeof input.serverName === "string" ? input.serverName : typeof input.server === "string" ? input.server : "";
-	return mcpReason(execution, tool, server, JSON.stringify(input));
+	return mcpReason(actor, tool, server, JSON.stringify(input));
 }
 
 export default function (pi: ExtensionAPI) {
@@ -110,12 +102,14 @@ export default function (pi: ExtensionAPI) {
 		const summary = refresh(ctx);
 		if (summary) return { systemPrompt: `${event.systemPrompt}\n\n${clean(summary)}` };
 	});
-	pi.on("tool_call", (event, ctx) => {
+	pi.on("tool_call", shellGuard((event, ctx, executionCwd) => {
 		refresh(ctx);
 		if (isGuardOff("lane-policy")) return;
-		const reason = publicationToolReason(event.toolName, event.input, context(ctx));
+		// Context.cwd here is the parser's target; authority is the original session ID/name.
+		const actor = context(ctx);
+		const reason = publicationToolReason(event.toolName, event.input, event.toolName === "bash" ? { ...actor, cwd: executionCwd } : actor);
 		if (reason) return { block: true, reason };
-	});
+	}, () => !isGuardOff("lane-policy")));
 	pi.on("user_bash", (event, ctx) => {
 		if (isGuardOff("lane-policy")) return;
 		const reason = assessCommand(event.command, context(ctx));

@@ -122,7 +122,7 @@ test("routing fixtures are well formed, reference owned skills and cover each sk
 
 // ---- review workflow cache and runtime provenance (no reviewer or model runs) ----
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-const reviewFiles = ["agent/workflows/review.js", ...["anthropic-heavy", "balanced", "balanced-anthropic", "balanced-openai", "kimi-heavy", "openai-heavy", "openai-only"].map(name => `agent/profiles/${name}/workflows/review.js`)];
+const reviewFiles = ["agent/workflows/review.js", ...["anthropic-heavy", "balanced", "balanced-anthropic", "balanced-openai", "kimi-heavy", "lean", "openai-heavy", "openai-only"].map(name => `agent/profiles/${name}/workflows/review.js`)];
 function loadReview(file = reviewFiles[0]) {
   return readFileSync(join(REPO, file), "utf8").replace(/export const meta = \{[\s\S]*?\n\}\n/, "");
 }
@@ -248,7 +248,7 @@ test("review routing, runtime wrapper and schemas stay synchronized across all p
     assert.ok(!source.includes("review-v1:"), `${file}: no legacy cache prefix`);
     if (source.includes("const cacheKey")) assert.match(source, /const cacheKey = 'review-v3-coverage:'/);
   }
-  for (const profile of ["balanced", "balanced-openai"]) assert.equal(loadReview(`agent/profiles/${profile}/workflows/review.js`), reviewSource);
+  for (const profile of ["balanced", "balanced-openai", "lean"]) assert.equal(loadReview(`agent/profiles/${profile}/workflows/review.js`), reviewSource);
 });
 
 const blockingClaim = index => ({ severity: "major", blocking: true, location: `src/a.ts:${index + 1}`,
