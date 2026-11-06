@@ -1,6 +1,7 @@
 """pi-profile routing: active-profile-only splice of the managed routing block."""
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,24 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual((self.root / "profiles/ACTIVE").read_text(), "p\n")
         self.assertEqual((self.profile / "routing.md").read_bytes(), b"new routing\r\nline 2\n")
         self.assertEqual([p.name for p in self.root.iterdir() if p.name.startswith(".AGENTS")], [])
+
+    def test_lean_opt_in_and_return_to_balanced_in_isolated_home(self):
+        source = TOOL.parents[1] / "profiles"
+        (self.root / "workflows").mkdir()
+        for name in ("balanced", "lean"):
+            shutil.copytree(source / name, self.root / "profiles" / name)
+        (self.root / "profiles/ACTIVE").unlink()
+        for name in ("balanced", "lean", "balanced"):
+            with self.subTest(profile=name):
+                result = self.run_tool("use", name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((self.root / "profiles/ACTIVE").read_text(), name + "\n")
+                status = self.run_tool()
+                self.assertEqual(status.returncode, 0, status.stderr)
+                self.assertIn("live files match profile", status.stdout)
+                self.assertEqual((self.root / "workflows/review.js").read_bytes(),
+                                 (source / name / "workflows/review.js").read_bytes())
+        self.assertNotIn("kimi-coding", (self.root / "agents/ops.md").read_text())
 
     def test_already_equal_is_a_noop(self):
         self.assertEqual(self.run_tool("routing").returncode, 0)

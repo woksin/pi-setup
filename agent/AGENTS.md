@@ -58,9 +58,10 @@ Answer these with the setup's tools, not hand-rolled `gh`/`ls`/`grep` loops:
 - Brief every implementation agent from `~/.pi/agent/templates/brief.md`, copied to `<repo>/.ai-work/<task>/brief.md`: goal, worktree, owned files, the exact gate command, a "Done =" checklist, stop conditions and the report format. A brief without an exact gate command and a done condition is incomplete. When the repository has an open candidate, the gate is the targeted checks plus delivery (`pi-train fold <branch>`), not Tier 1.
 - Merge `origin/main` into the branch before launching an implementer and again before the final review, rather than respawning agents after conflicts.
 - One writer per branch or worktree at a time. Parallel agents are for independent branches or read-only questions.
+- Lean scheduling policy: at most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. Ordinary worker main sessions use Sonnet 5.5 medium; orchestration uses Opus 5.5 medium. This is coordinator policy, not runtime admission enforcement; admission and parking come later.
 - To continue an interrupted agent, `resume` it rather than spawning a fresh one that re-reads everything.
-- For non-trivial issues, the brief comes from a `planner` run: `planner` writes `<repo>/.ai-work/<task>/plan.md` (a filled brief plus a step plan and decisions); the main session reviews it and passes it to the implementer as the brief. After accepting the plan, pass a 1–3 sentence approach summary as `issue_work update plan=...` (or on claim).
-- Skip the planner when the change is trivial or mechanical; write the brief directly.
+- Use `planner` only for more than three implementation files, cross-repository dependencies or a named unresolved design/behaviour question; stronger user/repository requirements take precedence. For those issues, the brief comes from a `planner` run: `planner` writes `<repo>/.ai-work/<task>/plan.md` (a filled brief plus a step plan and decisions); the main session reviews it and passes it to the implementer as the brief. After accepting the plan, pass a 1–3 sentence approach summary as `issue_work update plan=...` (or on claim).
+- Otherwise write the brief directly. Tests and docs do not inflate the implementation-file count. Reuse a still-valid plan; never pair `planner` with `Plan` for the same work.
 - Re-plan instead of iterating when an implementer reports that the plan does not fit the code.
 
 ## Review loops
@@ -89,11 +90,13 @@ The `review` workflow gates only on **blocking** findings: critical or major iss
 - Do not fetch a subagent result twice. A completion notification is enough unless its preview is truncated and you need the rest; never `cat` subagent output files.
 - To pass a subagent answer to another agent, take the final text from `get_subagent_result` and write it to a task file under `.ai-work/`; never forward or read the raw task output file.
 - After `/reload`: background jobs and watches survive (same ids) but subagents do not. Run `/jobs`, read the pi-recover reload notice, re-arm only what is missing, and re-spawn a lost subagent only if its output file shows unfinished work. Do not `/reload` while subagents you need are running.
+- Only send actionable coordination: deliveries, blocker changes, questions/decisions or new relevant safety holds. No unchanged status, ACK-of-ACK or cc messages. ALL is reserved for truly global safety holds; keep targeted critical alerts.
+- Coordination messages: address action-needed reports to the named owner/parent only. Acknowledge deliveries and questions, not information-only or ALL/FYI messages. Timeout-only wakes re-arm silently; local waiting-on lease renewals do not send messages. Notify once on blocking, then only on material change, lease expiry or explicit request; no hourly "still waiting" messages.
 - Lane inbox watches: use `~/.pi/agent/bin/inbox-watch <lane> [GROUP]` with one `job_watch` (`until=success`, interval 120); set INBOX_DIR for the project. It reports new/edited inbound files only; do not build `ls|grep` watches. Re-arm the watch on every wake, before anything else; the `inbox-rearm` extension blocks the turn with the exact call when a finished inbox watch has no replacement.
 - After provider limits lift, `/provider-restore` (this session) or `provider-restore --all-sessions` (every running session) switches fallback sessions back to their original model. Never edit the limits file or switch terminals by hand.
 - **Record lessons.** When you hit a systemic problem (a failure mode that will recur for other sessions), append an entry to `docs/operating-lessons.md` in the setup repository (symptom, cause, rule, where it is enforced), or send it to the coordinator who owns that file. Turn the rule into tooling or an `AGENTS.md` rule where possible.
 - Keep raw output out of the main session. Cap your own commands (`| tail -n 40` only for display, never for gate evidence). Delegate digests of logs, diffs, CI failures and PR/issue state to `ops`.
-- The context budget is enforced by the `context-budget` extension (main sessions: notice at 300k, handoff at 400k, hard limit 600k; subagents about half). When it asks for a handoff, call `context_handoff` at the next safe point: verified facts (HEAD SHA, "review passed at <sha>", CI run ids, PR/issue states) separate from plans, decisions, the user's constraints verbatim, the next step and the files to read first. The extension then resets the context in place and the session continues on its own, with the same jobs, watches, subagents and issue claims. Do not stop, ask for a new session, or argue with the block; only the user switches it off. Keep `.ai-work/<task>/STATE.md` current for long-running coordination (facts and evidence, decisions, unresolved questions, owners, merge/dependency order). Before handoff, reconcile it with live state; include a watch-action table (job/run ID, immutable target, completion action, cancellation), exact next commands, and verbatim user asks/constraints. List every needed state/brief/protocol file in `files_to_read`, not just STATE.md. After reset, re-verify mutable facts before acting; never treat a plan or old watch result as current evidence.
+- The context budget is enforced by the `context-budget` extension (main sessions: write the handoff at 150k, reset by 220k, hard guardrail 400k; subagent budgets are unchanged). When it asks for a handoff, call `context_handoff` at the next safe point: verified facts (HEAD SHA, "review passed at <sha>", CI run ids, PR/issue states) separate from plans, decisions, the user's constraints verbatim, the next step and the files to read first. The extension then resets the context in place and the session continues on its own, with the same jobs, watches, subagents and issue claims. Do not stop, ask for a new session, or argue with the block; only the user switches it off. Keep `.ai-work/<task>/STATE.md` current for long-running coordination (facts and evidence, decisions, unresolved questions, owners, merge/dependency order). Before handoff, reconcile it with live state; include a watch-action table (job/run ID, immutable target, completion action, cancellation), exact next commands, and verbatim user asks/constraints. List every needed state/brief/protocol file in `files_to_read`, not just STATE.md. After reset, re-verify mutable facts before acting; never treat a plan or old watch result as current evidence.
 
 <!-- pi-setup:codescene:start -->
 ## CodeScene Code Health
@@ -112,7 +115,7 @@ The `codescene` MCP server (`mcp__codescene`) and the CodeScene skills in `~/.ag
 <!-- pi-profile:routing:start (managed by ~/.pi/agent/bin/pi-profile; edit profiles/<name>/routing.md instead) -->
 ## Model routing
 
-Active profile: **balanced** (`~/.pi/agent/bin/pi-profile`). Default profile. Uses each provider where the evidence is strongest. Claude is the constrained quota (Oct 3–17: Anthropic usage-limit hits every day, about 3,000 in total; OpenAI 39), so low-risk roles run on GPT and `provider-fallback` moves a session to GPT when Claude hits its limit. Further role moves wait for measured quality evidence. Haiku 5.5 is used for repository exploration; Kimi K3 for web-source gathering.
+Active profile: **balanced** (`~/.pi/agent/bin/pi-profile`). Default profile. Uses each provider where the evidence is strongest. Claude is the constrained quota (Oct 3–17: Anthropic usage-limit hits every day, about 3,000 in total; OpenAI 39), so low-risk roles run on GPT and `provider-fallback` moves a session to GPT when Claude hits its limit. Further role moves wait for measured quality evidence. Haiku 5.5 gathers bounded repository, operational and web evidence; escalate ambiguous reasoning to Sonnet/Opus.
 
 Delegate by agent type; each type pins its own model and thinking level. Never pass a `model` override to `Agent`.
 
@@ -121,7 +124,6 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - GPT-6.1 Sol high is the default for bounded, test-gated implementation: it reached the correctness ceiling on VulcanBench from high upward at low cost. It has weak scope discipline, so every brief must state scope, files, checks and stop conditions; unrelated failures are reported, not fixed.
 - Sonnet 5.5 low/medium had zero regressions across 100 real changes; use `careful-implementer` when preserving existing behaviour, UI or user-facing text matters, or tests are weak.
 - Opus 5.5 is the main orchestrator and judgement model; Opus/Fable lead source synthesis evidence, while Astra leads science and harder cross-file review evidence.
-- Kimi K3 is configured as `kimi-coding`. Use K3 256K for exploration and research capacity; verify its claims, and keep final decisions with Claude/OpenAI until local evaluations justify more.
 
 ### Agent routing
 - `careful-implementer`: Claude Sonnet 5.5, medium
@@ -134,12 +136,12 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `grunt`: Claude Sonnet 5.5, low
 - `implementer`: GPT-6.1 Sol, high
 - `opus-implementer`: Claude Opus 5.5, medium
-- `ops`: Kimi K3 256K, low
+- `ops`: Claude Haiku 5.5, low
 - `Plan`: Claude Opus 5.5, medium
 - `planner`: Claude Opus 5.5, high
 - `prose-editor`: Claude Sonnet 5.5, low
 - `reviewer`: Claude Opus 5.5, medium
-- `scout`: Kimi K3 256K, high
+- `scout`: Claude Haiku 5.5, medium
 - `second-opinion`: GPT-6 Astra, high
 - `sol-reviewer`: GPT-6.1 Sol, high
 - `slice-implementer`: Claude Haiku 5.5, medium (single approved event-model slice or Screenplay MCP edit; validation required)
@@ -149,13 +151,13 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 
 - Main session: Opus 5.5 medium by default (OpenAI-heavy: GPT-6.1 Sol high). Raise to high only for difficult design/debugging, then lower it.
 - `slice-implementer` for one already-designed event-model slice or Screenplay MCP change with an exact validation gate; `implementer` for clear, testable work; `careful-implementer` for behaviour-preserving changes; `opus-implementer` only when the brief names the hard reason (the unresolved design question or hard-bug judgement). Default scoped changes (a named file set and check) to `careful-implementer`. Every brief names the build configuration to verify (e.g. Release, warnings as errors).
-- Plan, then implement: once a request is decided to become an issue/task, run `planner` (high) to write `<repo>/.ai-work/<task>/plan.md`; read it, resolve BLOCKING questions, then hand the plan to the cheaper implementer it recommends. Skip the planner for trivial or mechanical changes (a known one-file edit, renames, bumps). After accepting the plan, pass a 1–3 sentence approach summary as `issue_work update plan=...` (or on claim). The planner is read-only apart from that one file.
+- Plan, then implement: only when more than three implementation files, cross-repository dependencies or a named unresolved design/behaviour question warrant it, run `planner` to write `<repo>/.ai-work/<task>/plan.md`; read it, resolve BLOCKING questions, then hand the plan to the cheaper implementer it recommends. Reuse a still-valid plan; never pair `planner` with `Plan`. Stronger user/repository planning requirements take precedence. After accepting the plan, pass a 1–3 sentence approach summary as `issue_work update plan=...` (or on claim). The planner is read-only apart from that one file.
 - `cleanup-steward` performs post-work inventory and only explicitly authorised, safety-checked cleanup.
 - Cross-provider review: `reviewer` reviews GPT-written work; `sol-reviewer` reviews Claude-written work. Follow "Review loops" in the global rules (blocking-only gate, delta rounds, cap of 3). Before merge, per the review-log policy (items certified, train glue/delta only), run the `review` workflow (Opus + Sol) and always pass `author` (`gpt` when `implementer` wrote it, so Astra rather than Sol verifies Opus's findings); pass `deep: true` (Astra instead of Sol) only for security-sensitive, data-loss/migration, algorithmic/concurrency changes or a disputed blocker, as set out in the "Review loops" budget. Run the review (first whole review, delta or glue) in parallel with the gate, not after it.
 - Claude is the constrained quota: prefer `implementer` over `opus-implementer` unless you can name the open design question, and do not raise Claude agents above medium without a named reason. `second-opinion` (Astra) stays for named hard reasoning, not routine review; never raise Astra above high.
 - GPT capacity is available: use `implementer` for bounded, test-gated implementation and `sol-reviewer` (high) for bounded correctness diagnosis. Keep `deep: true` and review rounds within the Review loops budget; reuse `cachedReview` only for an eligible unchanged committed pass. No blanket xhigh escalation.
 - Context size is enforced by the `context-budget` extension (see "Orchestrator context" in the global rules): hand off with `context_handoff` when asked and keep working.
-- The main session plans, briefs and decides. Delegate collection and extraction to `ops` (Kimi pilot, re-evaluated with `~/.ai-work/pi-usage-eval/analyze.py`); route substantive bounded correctness and root-cause diagnosis to `sol-reviewer` (high), with named files, evidence, checks and stop conditions:
+- The main session plans, briefs and decides. Delegate collection and extraction to `ops` (Haiku for bounded evidence gathering; escalate ambiguous reasoning to Sonnet/Opus); route substantive bounded correctness and root-cause diagnosis to `sol-reviewer` (high), with named files, evidence, checks and stop conditions:
   - `ops` — collect git/gh/CI state, extract failing-job logs and PR/issue content, summarise logs/code, and draft PR notes or handoffs. Use it for collection/extraction that would take more than about three git/gh/cat/grep calls or produce more than ~100 lines of output. It does not adjudicate root cause or correctness, or certify review.
   - `Explore` — locating code and symbols; `scout` — multi-source web research.
   - `grunt` stays for mechanical edits.
@@ -222,7 +224,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 ## Blocked lanes
 
 - When blocked, run `lane-status set <LANE> waiting-on "<dep>" --until +60m` (or `barred-by "<order>"`); `lane-status clear <LANE>` when unblocked. Nudgers skip a lane while `lane-status suppressed <LANE>` exits 0.
-- While blocked, use watch timeouts of at most 60 min and post "still waiting on <dep>" to the coordinator at each timeout.
+- While blocked, re-arm watches silently on timeout. Renew the waiting-on lease locally without messaging. Notify the owner once on becoming blocked, then notify the coordinator only on a material state change, lease expiry or explicit request. Do not send hourly "still waiting" messages.
 - Close a lane with `lane-status close <LANE> --reassign-to <LANE2> --reason "..."` (posts ALL-lane-closed and lists its unread inbox), never by hand.
 - Live sessions, their state and lane status: `~/.pi/agent/session-watchdog/board.md`.
 

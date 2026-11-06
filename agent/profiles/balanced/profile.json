@@ -1,13 +1,12 @@
 {
-  "summary": "Recommended. Claude leads and reviews, ChatGPT does most coding, Kimi helps with research.",
+  "summary": "Recommended. Claude leads, reviews and researches; ChatGPT does most coding.",
   "requires": [
     "anthropic",
     "openai-codex"
   ],
   "uses": [
     "anthropic",
-    "openai-codex",
-    "kimi-coding"
+    "openai-codex"
   ],
   "rank": 100
 }

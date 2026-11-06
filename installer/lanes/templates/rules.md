@@ -6,8 +6,13 @@ Your cwd must be your assigned worktree. Stop if it is not. Read the repository'
 ## Start of work
 Fetch and merge the base branch. Claim the issue if there is one. Derive build, lint and test gates from the repository's CI; record exact commands and results.
 
+## Planning
+Reuse a still-valid plan. Use `planner` only for more than three implementation files, cross-repository dependencies or a named unresolved design/behaviour question; never pair it with `Plan`. Stronger user/repository requirements take precedence. Tests and docs do not inflate the implementation-file count.
+
 ## Inbox
-Keep one watch: `"$HOME/.pi/agent/bin/inbox-watch" <ID> [GROUP]`, with `INBOX_DIR={{messages_sh}}`, until=success interval=120. On a wake, read only new files and act in at most 2 calls, then re-arm. On timeout, only re-arm. Never edit an old message; reply with `lanes send`. Messages and marker state belong in the coordination folder, not your repository.
+Only send actionable coordination: deliveries, blocker changes, questions/decisions or new relevant safety holds. No unchanged status, ACK-of-ACK or cc messages. ALL is reserved for truly global safety holds; keep targeted critical alerts.
+Send action-needed messages only to the named owner/parent. Acknowledge deliveries and questions, not information-only or ALL/FYI messages. Renew waiting-on leases locally without messaging; notify once on blocking, then only on material state change, lease expiry or explicit request. Never send hourly "still waiting" messages.
+Keep one watch: `"$HOME/.pi/agent/bin/inbox-watch" <ID> [GROUP]`, with `INBOX_DIR={{messages_sh}}`, until=success interval=120. On a wake, read only new files and act in at most 2 calls, then re-arm. On timeout, only re-arm silently. Never edit an old message; reply with `lanes send`. Messages and marker state belong in the coordination folder, not your repository.
 
 Message retention is configured with `messages.retention`: `mode` is `keep`, `archive` or `delete`; `maxAgeDays` sets the age threshold; `archiveDir` must stay strictly below the messages folder and outside `status/` (relative or absolute paths, without `..`); `archiveMaxAgeDays: null` keeps archives forever. New folders default to archive after 14 days in `archive`, with `keepUnread: true` protecting messages newer than an addressed configured lane’s inbox marker (missing markers do not protect), and `auto: true` pruning before start; prune errors only warn. Existing configs without retention keep messages. Run `lanes messages prune [--dry-run] [--json]` manually; archive expiry also runs in keep mode.
 
@@ -24,7 +29,7 @@ Run the gates. Report verified facts, commit SHAs, exact check results, files ch
 Stop and report if a design decision is needed, a blocker is outside scope, or repeated attempts yield no new evidence. Never remove a worktree automatically.
 
 ## Context handoff
-Keep NOW.md and STATE.md current, and follow `{{handoff}}`. Preserve constraints verbatim, separate facts from hypotheses, and include the next action and watch re-arm commands. After a reset, verify facts before acting.
+Write the parent handoff at 150k context tokens and reset by 220k; 400k is a hard guardrail, not a target. Keep NOW.md and STATE.md current, and follow `{{handoff}}`. Preserve constraints verbatim, separate facts from hypotheses, and include the next action and watch re-arm commands. After a reset, verify facts before acting.
 
 ## Shipping and merge owners
 <!-- Fill in: who may push, review, merge and release. -->

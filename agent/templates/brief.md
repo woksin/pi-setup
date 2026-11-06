@@ -3,6 +3,12 @@
 Copy to `<repo>/.ai-work/<task>/brief.md`, fill every section, and pass the agent only:
 "Read and follow <absolute path to this brief>." plus anything run-specific.
 
+## Planning and coordination
+Reuse a still-valid plan. Run `planner` only for more than three implementation files, cross-repository dependencies or a named unresolved design/behaviour question; never pair it with `Plan`. Stronger user/repository requirements take precedence. Tests and docs do not inflate the implementation-file count.
+Only send actionable coordination: deliveries, blocker changes, questions/decisions or new relevant safety holds. No unchanged status, ACK-of-ACK or cc messages. ALL is reserved for truly global safety holds; keep targeted critical alerts.
+Send action-needed reports only to the named owner/parent. Acknowledge deliveries and questions, not information-only or ALL/FYI messages. Timeouts only re-arm watches silently; renew waiting-on leases locally. Notify once on blocking, then only on material change, lease expiry or explicit request; no hourly "still waiting" messages.
+Write the parent handoff at 150k context tokens and reset by 220k; 400k is a hard guardrail, not a target.
+
 ## Goal
 <What must be true when you are done, in 1–3 sentences. Link the issue.>
 

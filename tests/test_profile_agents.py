@@ -52,5 +52,59 @@ class AnthropicOnlyProfiles(unittest.TestCase):
                 self.assertEqual(expected - have, set(), f"{name} lacks agents")
 
 
+class LeanProfile(unittest.TestCase):
+    def test_lean_is_complete_opt_in_and_kimi_free(self):
+        profiles = ROOT / "agent/profiles"
+        balanced = json.loads((profiles / "balanced/profile.json").read_text())
+        lean = json.loads((profiles / "lean/profile.json").read_text())
+        self.assertLess(lean["rank"], balanced["rank"])
+        self.assertEqual(lean["requires"], balanced["requires"])
+        self.assertEqual(lean["uses"], ["anthropic", "openai-codex"])
+        for area, pattern in (("agents", "*.md"), ("workflows", "*.js")):
+            self.assertEqual(
+                {p.name for p in (profiles / "lean" / area).glob(pattern)},
+                {p.name for p in (profiles / "balanced" / area).glob(pattern)})
+        for path in (profiles / "lean").rglob("*"):
+            if path.is_file():
+                with self.subTest(file=path.name):
+                    self.assertNotIn("kimi-coding", path.read_text())
+        self.assertEqual((profiles / "lean/workflows/review.js").read_bytes(),
+                         (ROOT / "agent/workflows/review.js").read_bytes())
+
+    def test_roles_and_independent_review_are_pinned(self):
+        expected = {
+            "planner": ("anthropic/claude-sonnet-5-5", "medium"),
+            "Plan": ("anthropic/claude-sonnet-5-5", "medium"),
+            "general-purpose": ("anthropic/claude-sonnet-5-5", "medium"),
+            "ops": ("anthropic/claude-haiku-5-5", "low"),
+            "scout": ("anthropic/claude-haiku-5-5", "medium"),
+            "Explore": ("anthropic/claude-haiku-5-5", "low"),
+            "implementer": ("openai-codex/gpt-6.1-sol", "high"),
+            "reviewer": ("anthropic/claude-opus-5-5", "medium"),
+        }
+        for name, (model, thinking) in expected.items():
+            with self.subTest(agent=name):
+                text = (ROOT / f"agent/profiles/lean/agents/{name}.md").read_text()
+                self.assertIn(f"\nmodel: {model}\n", text)
+                self.assertIn(f"\nthinking: {thinking}\n", text)
+        for prefix in ("agent/agents", "agent/profiles/balanced/agents",
+                       "agent/profiles/balanced-openai/agents"):
+            for name in ("ops", "scout"):
+                text = (ROOT / prefix / f"{name}.md").read_text()
+                self.assertIn("\nmodel: anthropic/claude-haiku-5-5\n", text)
+                self.assertNotIn("kimi-coding", text)
+
+    def test_context_and_fallback_config(self):
+        config = json.loads((ROOT / "agent/context-budget.json").read_text())
+        self.assertEqual(config, {"mode": "enforce", "main": {
+            "soft": 150000, "handoff": 220000, "hard": 400000, "minProgress": 50000}})
+        fallback = json.loads((ROOT / "agent/provider-fallback.json").read_text())
+        self.assertNotIn("kimi", json.dumps(fallback))
+        self.assertEqual(fallback["pairs"], [
+            ["anthropic/claude-opus-5-5", "openai-codex/gpt-6.1-sol"],
+            ["anthropic/claude-sonnet-5-5", "openai-codex/gpt-6.1-sol"],
+            ["anthropic/claude-haiku-5-5", "openai-codex/gpt-6-luna"]])
+
+
 if __name__ == "__main__":
     unittest.main()
