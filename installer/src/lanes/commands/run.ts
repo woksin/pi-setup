@@ -43,26 +43,36 @@ export async function run(id: string, opts: Record<string, string>, c: Config, r
   try { child = (ctx.spawnInherited ?? nativeSpawn)(wrapper, [`@${prompt}`], { cwd: target.cwd, env }); }
   catch (e) { await lease.release(); throw e; }
   // Attach rejection handling before probing identity (a failed executable may exit immediately).
-  const outcome = child.done.then(value => ({ value }), error => ({ error }));
-  let childStart: string | undefined;
+  let settled = false;
+  const outcome = child.done.then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
+  let verified!: (start: string | undefined) => void;
+  // A signal received while lease.child is probing waits for that exact verification.
+  // Failed verification resolves undefined: a later inventory cannot invent an identity.
+  const identity = new Promise<string | undefined>(resolve => { verified = resolve; });
   const handlers = new Map<NodeJS.Signals, () => void>();
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-    const handler = () => { void inventory(ctx).then(rows => {
-      const row = rows.find(r => r.pid === child.pid);
-      if (childStart && row?.start === childStart) child.signal(signal);
-      else ctx.err("admission cancellation identity uncertain; child not signalled, lease retained until confirmed exit");
+    const handler = () => { void identity.then(async start => {
+      if (settled) return;
+      if (start) {
+        const rows = await inventory(ctx);
+        if (settled) return;
+        const row = rows.find(r => r.pid === child.pid);
+        if (row?.start === start) { child.signal(signal); return; }
+      }
+      ctx.err("admission cancellation identity uncertain; child not signalled, lease retained until confirmed exit");
     }).catch(e => ctx.err((e as Error).message)); };
     handlers.set(signal, handler); process.on(signal, handler);
   }
   let result: { code: number | null; signal: NodeJS.Signals | null };
   try {
     try {
-      childStart = (await lease.child(child.pid)).start;
-    } catch (e) { ctx.err((e as Error).message); }
-    const settled = await outcome;
-    if ("error" in settled) throw settled.error;
-    result = settled.value;
+      verified((await lease.child(child.pid)).start);
+    } catch (e) { verified(undefined); ctx.err((e as Error).message); }
+    const completed = await outcome;
+    if ("error" in completed) throw completed.error;
+    result = completed.value;
   } finally {
+    settled = true; verified(undefined);
     for (const [signal, handler] of handlers) process.off(signal, handler);
     try { await lease.release(); } catch (e) { ctx.err((e as Error).message); }
   }

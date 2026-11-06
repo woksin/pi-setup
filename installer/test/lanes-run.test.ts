@@ -36,6 +36,91 @@ test("run holds lease through wrapper relaunch, forwards verified cancellation, 
   rows.splice(1); finish({ code: 17, signal: null }); assert.equal(await running, 17);
   assert.deepEqual(readdirSync(join(ctx.piAgentDir, "lanes-admission")), []);
 });
+function deferred<T>() {
+  let resolve!: (value: T) => void; let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const turn = () => new Promise<void>(resolve => setImmediate(resolve));
+function cancellationFixture() {
+  const rows: AdmissionProcess[] = [{ pid: process.pid, ppid: 1, start: "owner", pi: false }];
+  const identity = deferred<AdmissionProcess[]>(); const probing = deferred<void>();
+  const exited = deferred<{ code: number | null; signal: NodeJS.Signals | null }>();
+  let calls = 0; const signals: NodeJS.Signals[] = []; const errors: string[] = [];
+  const current = () => rows.map(row => ({ ...row }));
+  let inspect: () => Promise<AdmissionProcess[]> = async () => current();
+  const listeners = ["SIGINT", "SIGTERM", "SIGHUP"].map(signal => process.listenerCount(signal));
+  const ctx = laneCtx({ which: () => "/fake/pi-session", err: text => errors.push(text),
+    admissionInventory: async () => { if (++calls === 2) { probing.resolve(); return identity.promise; } return inspect(); },
+    spawnInherited: () => { rows.push({ pid: 20, ppid: process.pid, start: "wrapper", pi: false });
+      return { pid: 20, done: exited.promise, signal: signal => { signals.push(signal); } }; } });
+  const c = defaults(ctx.home, ctx.home); mkdirSync(join(ctx.home, "prompts")); writeFileSync(join(ctx.home, c.coordinator.prompt), "test");
+  const running = run("coordinator", {}, c, ctx.home, ctx);
+  return { rows, identity, probing, exited, signals, errors, ctx, current, running, calls: () => calls,
+    inspect: (probe: () => Promise<AdmissionProcess[]>) => { inspect = probe; },
+    async finish(rejection?: RegExp) {
+      inspect = async () => current(); identity.resolve(current()); rows.splice(1); exited.resolve({ code: 0, signal: null });
+      if (rejection) await assert.rejects(running, rejection); else await running;
+      assert.deepEqual(["SIGINT", "SIGTERM", "SIGHUP"].map(signal => process.listenerCount(signal)), listeners);
+    } };
+}
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) test(`run queues cancellation until delayed lease child identity is verified: ${signal}`, async t => {
+  const f = cancellationFixture();
+  try {
+    await f.probing.promise; process.emit(signal); await turn();
+    t.diagnostic(`inventory calls while lease.child is delayed: ${f.calls()}`);
+    assert.deepEqual(f.signals, []);
+    f.identity.resolve(f.current()); await turn();
+    assert.deepEqual(f.signals, [signal]); assert.equal(f.calls(), 3);
+  } finally { await f.finish(); }
+});
+test("all cancellation signals queued during identity capture are preserved", async () => {
+  const f = cancellationFixture(); const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+  try {
+    await f.probing.promise; for (const signal of signals) process.emit(signal);
+    assert.deepEqual(f.signals, []); f.identity.resolve(f.current()); await turn();
+    assert.deepEqual(f.signals, signals);
+  } finally { await f.finish(); }
+});
+for (const state of ["reused", "missing", "failed inventory"] as const) test(`queued cancellation refuses ${state} after identity capture`, async () => {
+  const f = cancellationFixture();
+  try {
+    await f.probing.promise; const captured = f.current(); process.emit("SIGTERM"); await turn();
+    if (state === "reused") f.rows[1].start = "different-process";
+    if (state === "missing") f.rows.splice(1);
+    if (state === "failed inventory") f.inspect(async () => { throw new Error("cancellation inventory failed"); });
+    f.identity.resolve(captured); await turn();
+    assert.deepEqual(f.signals, []); assert.match(f.errors.join("\n"), /identity uncertain|cancellation inventory failed/);
+    assert.equal(readdirSync(join(f.ctx.piAgentDir, "lanes-admission")).filter(n => n.endsWith(".json")).length, 1);
+  } finally { await f.finish(); }
+});
+test("failed lease child probe never substitutes a later inventory for verified identity", async () => {
+  const f = cancellationFixture();
+  try {
+    await f.probing.promise; process.emit("SIGTERM"); f.identity.reject(new Error("child probe failed")); await turn();
+    process.emit("SIGINT"); await turn();
+    assert.deepEqual(f.signals, []); assert.equal(f.calls(), 2);
+    assert.match(f.errors.join("\n"), /child probe failed/); assert.match(f.errors.join("\n"), /identity uncertain/);
+  } finally { await f.finish(); }
+});
+for (const state of ["exited", "failed"] as const) test(`queued cancellation does not signal a child ${state} during identity capture`, async () => {
+  const f = cancellationFixture(); const rejection = state === "failed" ? /spawn failed/ : undefined;
+  const result = rejection ? assert.rejects(f.running, rejection) : f.running;
+  try {
+    await f.probing.promise; const captured = f.current(); process.emit("SIGHUP"); f.rows.splice(1);
+    if (state === "failed") f.exited.reject(new Error("spawn failed")); else f.exited.resolve({ code: 0, signal: null });
+    await turn(); f.identity.resolve(captured); await result; await turn(); assert.deepEqual(f.signals, []);
+  } finally { await f.finish(rejection); }
+});
+test("late cancellation inventory cannot signal after child exit and handler removal", async () => {
+  const f = cancellationFixture(); const delayed = deferred<AdmissionProcess[]>(); const checking = deferred<void>();
+  try {
+    await f.probing.promise; f.identity.resolve(f.current()); await turn(); const captured = f.current();
+    f.inspect(async () => { checking.resolve(); return delayed.promise; }); process.emit("SIGTERM"); await checking.promise;
+    f.inspect(async () => f.current()); f.rows.splice(1); f.exited.resolve({ code: 0, signal: null });
+    assert.equal(await f.running, 0); delayed.resolve(captured); await turn(); assert.deepEqual(f.signals, []);
+  } finally { delayed.resolve(f.current()); await f.finish(); }
+});
 test("missing legacy local limit defaults safely, role values remain validated; parked never auto-expires", () => {
   const ctx = laneCtx(); const c = defaults(ctx.home, ctx.home); assert.equal(c.coordinator.maxRunning, 6);
   delete (c.coordinator as any).maxRunning; validate(c, ctx.home); assert.equal(c.coordinator.maxRunning, 6);
