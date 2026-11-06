@@ -28,7 +28,7 @@ export async function start(id: string, opts: Record<string, string>, c: Config,
     try { prune(c, root, ctx); }
     catch (e) { ctx.err(`warning: message prune failed: ${(e as Error).message.replace(/\s+/g, " ")}`); }
   }
-  const command = launchCommand(c, root, cwd, coordinator ? c.coordinator.id : id, prompt, wrapper, expand(c.messages.dir, c, root, ctx.home));
+  const command = launchCommand(c, root, cwd, coordinator ? c.coordinator.id : id, prompt, wrapper, expand(c.messages.dir, c, root, ctx.home), ctx.launcher, opts);
   return terminalBackend(backend).start(ctx, { id: coordinator ? c.coordinator.id : id, cwd, command });
 }
 

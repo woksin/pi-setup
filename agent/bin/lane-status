@@ -3,6 +3,7 @@
 
 Files: $LANE_STATUS_DIR (default $INBOX_DIR/status when INBOX_DIR is set, else ~/.pi/agent/lane-status/),
 one `<LANE>.status` per lane, a single line:
+  parked "<dependency / owner>" until <ISO>  (assessment only; explicit working unparks)
   working since <ISO>
   waiting-on "<dep>" until <ISO>        barred-by "<order>" until <ISO>
   closed reassigned-to <LANE2> at <ISO> [reason "<text>"]
@@ -10,7 +11,7 @@ one `<LANE>.status` per lane, a single line:
 Commands:
   set LANE waiting-on "<dep>" --until <ISO|+90m>    (also barred-by "<order>"; `set LANE working`)
   clear LANE | get LANE | list
-  suppressed LANE   exit 0 if a waiting-on/barred-by line has until in the future (nudgers skip), else exit 1
+  suppressed LANE   exit 0 for parked (even after assessment), or if a waiting-on/barred-by line has until in the future (nudgers skip), else exit 1
                     (prints "expired" when such a line has expired)
   close LANE --reassign-to LANE2 [--reason "..."]   status `closed` + ALL-lane-closed-<LANE>-<HHMM>.md in INBOX_DIR
                     listing LANE's unread inbox files (*-to-<LANE>-* newer than <LANE>-inbox.marker, see inbox-watch).
@@ -21,7 +22,7 @@ import argparse, os, re, sys, tempfile, time
 from datetime import datetime, timezone
 
 LANE_RE = re.compile(r"^[A-Z][A-Z0-9-]{0,15}$")
-LINE_RE = re.compile(r'^(waiting-on|barred-by) "(.*)" until (\S+)$')
+LINE_RE = re.compile(r'^(waiting-on|barred-by|parked) "(.*)" until (\S+)$')
 
 
 class Err(Exception):
@@ -98,12 +99,12 @@ def blocked_until(line):
 
 def is_active(line, now):
     u = blocked_until(line)
-    return u is not None and u > now
+    return bool(line and line.startswith('parked "')) or (u is not None and u > now)
 
 
 def is_expired(line, now):
     u = blocked_until(line)
-    return u is not None and u <= now
+    return not bool(line and line.startswith('parked "')) and u is not None and u <= now
 
 
 def clean(s):
@@ -237,7 +238,7 @@ def build_parser():
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("set", help="set a lane status")
     s.add_argument("lane")
-    s.add_argument("kind", choices=["waiting-on", "barred-by", "working"])
+    s.add_argument("kind", choices=["waiting-on", "barred-by", "parked", "working"])
     s.add_argument("dep", nargs="?")
     s.add_argument("--until")
     s.set_defaults(fn=cmd_set)

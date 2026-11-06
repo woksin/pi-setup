@@ -26,7 +26,9 @@ test("all terminal backends quote shell and AppleScript without executing a term
   const c = defaults(ctx.home, ctx.home); const cwd = `/tmp/a 'and "b`;
   const cmd = launchCommand(c, ctx.home, cwd, "L1", "/tmp/prompt", "pi-session", ctx.home);
   assert.ok(cmd.startsWith(`cd ${shellQuote(cwd)} && env -u PI_MCP_CONFIG_MODE PI_ORCH_ID=L1`));
-  assert.ok(cmd.endsWith("pi-session '@/tmp/prompt'"));
+  assert.ok(cmd.endsWith(`${shellQuote("--dir")} ${shellQuote(ctx.home)} ${shellQuote("run")} ${shellQuote("L1")}`));
+  assert.ok(!cmd.includes("pi-session"));
+  assert.ok(cmd.includes("cli.ts"));
   assert.equal(await terminalBackend("print").start(ctx, { id: "L1", cwd, command: cmd }), 0); assert.deepEqual(lines, [cmd]); assert.equal(calls.length, 0);
   for (const backend of ["terminal-app", "iterm", "tmux"]) assert.equal(await terminalBackend(backend).start(ctx, { id: "L1", cwd, command: cmd }), 0);
   assert.equal(calls[0][0], "osascript"); assert.ok(calls[0][1].join(" ").includes(appleScriptString(cmd)));

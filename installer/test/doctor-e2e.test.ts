@@ -54,8 +54,19 @@ test("green doctor via shim and node: under 10 seconds, JSON and read-only HOME"
   assert.deepEqual(snapshot(box.home, true), before);
 });
 
-test("no Kimi login warns honestly about ops/scout and parent-model risk", () => {
+test("balanced is healthy without Kimi; an explicit missing Kimi pin warns", () => {
   const { box, options } = ready();
+  const healthy = install(box, ["doctor"], { ...options, ready: "anthropic,openai-codex" });
+  assert.equal(healthy.status, 0, healthy.stdout + healthy.stderr);
+  assert.doesNotMatch(healthy.stdout, /⚠.*Kimi|parent model/);
+  for (const name of ["ops", "scout"]) {
+    const path = piPath(box, `agents/${name}.md`);
+    writeFileSync(path, readFileSync(path, "utf8").replace(/^model:.*$/m, "model: kimi-coding/k3-256k"));
+  }
+  const fallbackPath = piPath(box, "provider-fallback.json");
+  const fallback = JSON.parse(readFileSync(fallbackPath, "utf8"));
+  fallback.chains["kimi-coding/k3-256k"] = ["openai-codex/gpt-6.1-sol"];
+  writeFileSync(fallbackPath, JSON.stringify(fallback));
   const run = install(box, ["doctor"], { ...options, ready: "anthropic,openai-codex" });
   assert.equal(run.status, 1, run.stdout + run.stderr);
   assert.match(run.stdout, /⚠.*ops.*scout.*kimi-coding\/k3-256k.*parent model/);

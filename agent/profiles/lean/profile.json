@@ -1,5 +1,5 @@
 {
-  "summary": "Opt-in lean routing. Sonnet plans and runs ordinary workers, Haiku gathers evidence, Opus orchestrates and reviews; Sol implements with independent review.",
+  "summary": "Opt-in lean: Sonnet workers, Haiku evidence, Opus review, Sol implementation.",
   "requires": [
     "anthropic",
     "openai-codex"

@@ -39,7 +39,7 @@ test("built lanes bundle coordinates two real locked worktrees without starting 
     invoke("add", "L2", "--repo", "example/beta", "--goal", "Fix the thing");
     const started = invoke("start", "coordinator");
     assert.equal(started.stdout.trim().split("\n").filter((s) => s.startsWith("cd ")).length, 1);
-    assert.match(started.stdout, /PI_ORCH_ID=L0.*@/);
+    assert.match(started.stdout, /PI_ORCH_ID=L0.*'run' 'L0'/);
     invoke("send", "L1", "hello-world", "-m", "hi", "--from", "L0");
     const status = invoke("status");
     for (const id of ["L0", "L1", "L2"]) assert.match(status.stdout, new RegExp(`^${id}\\s`, "m"));

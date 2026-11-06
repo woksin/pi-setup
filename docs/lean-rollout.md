@@ -2,19 +2,27 @@
 
 ## Source-first delivery
 
-This delivery changes source/configuration and policy only. It does not activate the installed setup, enforce session admission, park lanes, add persistent subscriptions or change the handoff/fallback engines. Keep existing active inbox watches armed and re-arm on wakes and resets; timeout-only wakes are silent.
+This delivery changes source/configuration, primary-launch admission and explicit parking only. It does not activate the installed setup, park existing lanes, add persistent subscriptions or change the fallback engine. Handoff restoration now persists only at the validated, admitted actual launch, never in the terminal-request parent. Keep existing active inbox watches armed and re-arm on wakes and resets; timeout-only wakes are silent. Cancel a watch only as part of explicit parking with a handoff.
 
 `balanced` remains the automatic default with Claude and ChatGPT. `lean` is opt-in, ranks below `balanced`, requires both providers and uses no Kimi. The optional public `kimi-heavy` profile remains available but is not selected by lean. Default/shared and balanced-openai ops/scout also use Haiku; Claude/OpenAI controlled fallback and restoration remain enabled.
 
 ## Routing and scheduling policy
 
 - Ordinary worker main sessions: Sonnet 5.5 medium. Orchestration: Opus 5.5 medium.
-- At most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. Coordinators enforce this policy manually; source/runtime admission enforcement and parking are a later delivery. Do not cancel inbox watches as a substitute for parking.
+- At most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. The primary launcher enforces separate non-borrowing pools across roots sharing one Pi agent directory. Coordinators must still budget SDK fan-out cooperatively; SDK agents, prompts in existing sessions and arbitrary hand-started processes are outside this interception boundary. Do not cancel inbox watches as a substitute for explicit parking.
 - Lean planner, Plan and general-purpose: Sonnet medium; ops: Haiku low; scout: Haiku medium with its existing research tools. Ambiguous reasoning goes to Sonnet/Opus, not more Haiku fan-out.
 - Sol high implementation, Sonnet medium careful implementation, Opus medium review, Sol high review and existing narrowly scoped Astra roles are unchanged. The full review workflow is an unchanged copy, including independent provider verification, security coverage (also for config/tests/docs), review caps and Astra verification semantics. There is no diff-size security exemption.
 - Use a planner only for more than three implementation files, a cross-repository dependency or a named unresolved design/behaviour question. Tests and docs do not inflate the count. Otherwise the main session writes the standard brief. Reuse valid plans; never pair Plan and planner. Stronger user/repository requirements take precedence.
 
 Only send actionable coordination: deliveries, blocker changes, questions/decisions or new relevant safety holds. Address the owner/parent, not cc recipients. Acknowledge actionable deliveries/questions, not information-only messages or acknowledgements. No unchanged status or hourly waiting messages. Renew waiting-on leases locally; notify once on blocking, then on material change, lease expiry or explicit request. ALL is reserved for truly global safety holds; preserve targeted critical alerts. Existing watches remain in use; this policy does not claim durable subscriptions exist.
+
+## Runtime admission and parking
+
+All start/resume and terminal backends print or invoke `lanes --dir ROOT run ID`. Printing or opening an unused tab reserves nothing. Execution reloads validated configuration and atomically admits just before spawning the configured wrapper with inherited stdio; the lease spans wrapper relaunches. `coordinator.maxRunning` defaults to six and is the local worker limit, capped at six even for legacy larger values. Only the coordinator and validated repo-orch/sub-orch roles use the two orchestration slots. Observed unmanaged Pi and extra Pi descendants count conservatively as workers. Over-budget existing work is not killed.
+
+Leases and a bounded exclusive lock live under `PI_CODING_AGENT_DIR/lanes-admission` (default `~/.pi/agent`). Different agent directories are separate registries. Unknown inventories, reused identities, malformed state and uncertain cleanup refuse/retain rather than guessing. A crashed controller can leave a pending lease or lock that requires operator inspection; never clear it by age alone. No live installation or activation is part of this delivery.
+
+To park: write a compact handoff naming owner/dependency/assessment, set `lane-status set ID parked "dependency / owner" --until +90m`, cancel the inbox watch and obsolete waits, then settle without replacement. The timestamp is an assessment for the coordinator, not an automatic wake. Idle-check/nudge and inbox recovery suppress parked lanes until explicit `lane-status set ID working` (or closed). A live parked primary still consumes admission; do not reap/close to manufacture capacity. Finite waiting-on/barred-by behavior is unchanged.
 
 ## Activation after review
 

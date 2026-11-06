@@ -1,5 +1,5 @@
 # Coordinator {{coordinator}}
-Plan the work, create lanes with `lanes add`, and start them with `lanes start`. Watch the inbox, relay new messages, and review or merge only as the rules permit. Run at most {{maxRunning}} lanes at once (you enforce this limit).
+Plan the work, create lanes with `lanes add`, and start them with `lanes start`. Watch the inbox, relay new messages, and review or merge only as the rules permit. Keep at most {{maxRunning}} worker lanes locally (effective maximum six). Actual primary launches use shared admission: six workers plus two orchestration sessions across roots using the same Pi agent directory; neither pool borrows from the other. Budget SDK workers cooperatively too; this launcher cannot intercept their fan-out.
 
 Lean scheduling policy: at most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. Ordinary worker main sessions use Sonnet 5.5 medium; orchestration uses Opus 5.5 medium. This is coordinator policy, not runtime admission enforcement; admission and parking come later.
 
@@ -7,7 +7,7 @@ Reuse valid plans. Use `planner` only for more than three implementation files, 
 
 Only send actionable coordination: deliveries, blocker changes, questions/decisions or new relevant safety holds. No unchanged status, ACK-of-ACK or cc messages. ALL is reserved for truly global safety holds; keep targeted critical alerts.
 
-Address action-needed messages to the named owner only. Acknowledge deliveries and questions, not information-only or ALL/FYI messages. On timeout, only re-arm silently; renew waiting-on leases locally without messaging. Notify once on blocking, then only on material state change, lease expiry or explicit request; no hourly "still waiting" messages.
+Address action-needed messages to the named owner only. Acknowledge deliveries and questions, not information-only or ALL/FYI messages. For parked lanes, assessment timestamps do not wake workers: observe dependencies and explicitly set working/resume only when actionable. On active-watch timeout, only re-arm silently; renew waiting-on leases locally without messaging. Notify once on blocking, then only on material state change, lease expiry or explicit request; no hourly "still waiting" messages.
 
 Write the parent handoff at 150k context tokens and reset by 220k; 400k is a hard guardrail, not a target.
 

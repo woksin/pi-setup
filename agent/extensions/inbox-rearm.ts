@@ -1,4 +1,7 @@
 /** Re-arm reminder via public session entries; never reaches into pi-jobs' private manager. */
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type Params = { check: string; intervalSeconds: number; timeoutSeconds: number; until?: string; cwd?: string; label?: string; checkTimeoutSeconds?: number };
@@ -72,11 +75,32 @@ export function lostInboxWatch(entries: readonly any[], lane: string): { id: str
 	if (input) return { id: last.id, params: input };
 }
 
+export function parkedStatus(lane: string, env: NodeJS.ProcessEnv = process.env): "parked" | "invalid" | undefined {
+	const dir = env.LANE_STATUS_DIR || (env.INBOX_DIR ? join(env.INBOX_DIR, "status")
+		: join(homedir(), ".pi/agent/lane-status"));
+	try {
+		const line = readFileSync(join(dir, `${lane}.status`), "utf8").trim();
+		if (/^(working|closed) since \S+$/.test(line)) return;
+		const m = /^(waiting-on|barred-by|parked) "[^"]*" until (\S+)$/.exec(line);
+		if (!m || !Number.isFinite(Date.parse(m[2]))) return "invalid";
+		return m[1] === "parked" ? "parked" : undefined;
+	} catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? undefined : "invalid"; }
+}
+
 export default function inboxRearm(pi: ExtensionAPI): void {
 	const reminded = new Set<string>();
+	let statusDiagnostic = false;
 	pi.on("agent_before_settle", async (event, ctx) => {
-		const lane = process.env.PI_LANE_ID || ctx.sessionManager.getSessionName?.();
+		const lane = process.env.PI_LANE_ID || process.env.PI_ORCH_ID || ctx.sessionManager.getSessionName?.();
 		if (!lane || !/^[A-Z][A-Za-z0-9_-]{0,31}$/.test(lane)) return;
+		const status = parkedStatus(lane);
+		if (status) {
+			if (status === "invalid" && !statusDiagnostic) {
+				statusDiagnostic = true;
+				ctx.ui?.notify(`Cannot read a valid status for ${lane}; inspect lane-status before explicitly resuming inbox recovery.`, "warning");
+			}
+			return;
+		}
 		const lost = lostInboxWatch([...ctx.sessionManager.getBranch(), ...event.entries], lane);
 		if (!lost || reminded.has(lost.id)) return;
 		reminded.add(lost.id); // One continuation per completion: no retry loop if starting a watch is denied.

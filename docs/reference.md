@@ -1,5 +1,16 @@
 # Tool reference
 
+## Primary admission and parking
+
+All `lanes start`/`resume` terminal commands converge on `lanes --dir ROOT run ID|coordinator`; printing reserves nothing until executed. Admission spans wrapper relaunch and confirmed child exit. Across roots sharing `PI_CODING_AGENT_DIR` (default `~/.pi/agent`), pools are six workers plus two orchestration primaries, with no borrowing. Only the configured coordinator and validated repo-orch/sub-orch roles use orchestration. `coordinator.maxRunning` defaults to six and limits local workers to `min(configured, 6)`. Unmanaged Pi and extra Pi children count conservatively as workers. Existing over-budget work is not killed. SDK fan-out, prompts in existing sessions and arbitrary later manual launches are not intercepted; budget them cooperatively.
+
+Handoff start/resume requests validate and print/open a launch command without restoring configuration. Its digest binds the handoff bytes, canonical paths, target ID and validated config. Only the admitted `run` revalidates HEAD/worktree and saves restoration before spawning; changed or foreign targets are refused. A child failure leaves that explicit restoration persisted for inspection/retry, not silently rolled back.
+
+Private versioned leases and a bounded lock live under the shared agent directory's `lanes-admission/`. Unknown probes, malformed state and reused/uncertain identities refuse admission or retain cleanup state. Inspect crashed-controller locks and pending leases manually; age alone never proves death. Distinct agent directories do not share a registry.
+
+`lane-status set ID parked "dependency / owner" --until +90m` suppresses indefinitely: `until` is coordinator assessment, not a wake. First write a compact owner/dependency/assessment handoff, cancel the inbox watch and obsolete waits, then settle without replacement. Explicit `lane-status set ID working` restores active behavior; closed also supersedes parked. Idle-check/nudge skip parked lanes and inbox recovery never manufactures their renewal turns. Active finite waiting-on/barred-by semantics are unchanged. Live parked primaries still occupy admission; never reap/close to create capacity.
+
+
 Every command-line tool pi-setup ships, grouped by what you use it for. Run `<tool> --help` for the full options and examples; this page does not copy flag lists. Read-only means the tool changes nothing on its own.
 
 New here? Start with [Getting started](getting-started.md) and [Daily workflow](daily-workflow.md).

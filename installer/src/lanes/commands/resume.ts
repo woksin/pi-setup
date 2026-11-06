@@ -1,17 +1,37 @@
+import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { laneDir, effectiveParent, saveConfig, validate, UsageError, type Lane } from "../config.ts";
+import { laneDir, effectiveParent, loadConfig, saveConfig, validate, UsageError, type Lane } from "../config.ts";
 import { validNewId as validId } from "../names.ts";
-import { readContext, type Snapshot } from "../reap/context-format.ts";
+import { readContext, type ContextFile, type Snapshot } from "../reap/context-format.ts";
 import type { CommandEnv } from "../reap/signals.ts";
 import { changedPaths, treeDigest } from "../reap/tree.ts";
 import { requireProbe } from "../reap/process.ts";
 import { start } from "./start.ts";
+import { run } from "./run.ts";
 
 type Options = Record<string, string>;
 export async function startCommand(id: string, opts: Options, env: CommandEnv): Promise<number> {
   if (opts["from-handoff"]) return fromHandoff({ id, opts }, env);
   return start(id, opts, env.c, env.root, env.ctx);
+}
+/** Actual launch is the sole writer: previews never restore or save configuration. */
+export async function runCommand(id: string, opts: Options, env: CommandEnv): Promise<number> {
+  if (!opts["from-handoff"]) {
+    if (opts["handoff-digest"]) throw new UsageError("--handoff-digest requires --from-handoff");
+    return run(id, opts, env.c, env.root, env.ctx);
+  }
+  if (opts["handoff-digest"] && handoffDigest(id, env.ctx.realpath(filePath(opts["from-handoff"], env)), env) !== opts["handoff-digest"]) throw new Error("handoff launch changed; request a fresh start/resume");
+  const prepared = await prepareHandoff({ id, opts }, env);
+  if (opts["handoff-digest"] && opts["handoff-digest"] !== prepared.digest) throw new Error("handoff launch changed; request a fresh start/resume");
+  return run(id, prepared.opts, prepared.next, env.root, env.ctx, async () => {
+    // Admission serializes restorations across roots/controllers. Recheck after its probes,
+    // before the synchronous compare/save, so a delayed command cannot overwrite newer config.
+    await verifyWorktree(prepared.snapshot, env);
+    const current = { ...env, c: loadConfig(env.root) };
+    if (handoffDigest(id, prepared.path, current) !== prepared.digest) throw new Error("handoff launch changed; request a fresh start/resume");
+    saveConfig(env.root, prepared.next);
+  });
 }
 export async function resume(args: string[], opts: Options, env: CommandEnv): Promise<number> {
   return fromHandoff({ id: args[0], opts: { ...opts, "from-handoff": args[0] } }, env);
@@ -75,17 +95,26 @@ async function warnDirtyDrift(snapshot: Snapshot, env: CommandEnv): Promise<void
     env.ctx.err(`Warning: could not compare handoff dirty paths/digest: ${(e as Error).message}; continuing`);
   }
 }
-async function fromHandoff(input: { id: string; opts: Options }, env: CommandEnv): Promise<number> {
+function handoffDigest(id: string, path: string, { c, root, ctx }: CommandEnv, file: ContextFile = readContext(path)): string {
+  return createHash("sha256").update(JSON.stringify({ id, root: ctx.realpath(root), c,
+    path: ctx.realpath(path), handoff: file.digest, cwd: ctx.realpath(file.snapshot.worktree) })).digest("hex");
+}
+async function prepareHandoff(input: { id: string; opts: Options }, env: CommandEnv) {
   const { c, root, ctx } = env;
-  const path = filePath(input.opts["from-handoff"], env); const file = readContext(path);
+  const requested = filePath(input.opts["from-handoff"], env); const file = readContext(requested);
+  const path = ctx.realpath(requested);
+  const digest = handoffDigest(input.id, path, env, file);
   const source = sourceLane(file.snapshot, env); await verifyWorktree(file.snapshot, env);
   const restored = restoreLane({ id: input.id, path, source }, env);
   const lanes = c.lanes.filter(lane => lane.id !== input.id).concat(restored); const next = { ...c, lanes };
   validate(next, root, ctx.home);
-  const opts = { ...input.opts }; delete opts["from-handoff"];
-  const code = await start(input.id, opts, next, root, ctx);
-  if (code === 0) { saveConfig(root, next); c.lanes = lanes; }
-  return code;
+  if (handoffDigest(input.id, path, env) !== digest) throw new Error("handoff launch changed; request a fresh start/resume");
+  const opts = { ...input.opts, "from-handoff": path, "handoff-digest": digest };
+  return { next, opts, path, digest, snapshot: file.snapshot };
+}
+async function fromHandoff(input: { id: string; opts: Options }, env: CommandEnv): Promise<number> {
+  const prepared = await prepareHandoff(input, env);
+  return start(input.id, prepared.opts, prepared.next, env.root, env.ctx);
 }
 
 function requireWorktree(path: string): void {

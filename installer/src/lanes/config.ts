@@ -34,7 +34,7 @@ export function defaults(root: string, home: string, reposRoot?: string): Config
   return {
     idle: { minutes: 75 }, github: { repos: [], author: "@me", excludeLabels: [] },
     version: 1, reposRoot: reposRoot || dirname(root), worktreesDir: "${reposRoot}/.worktrees", baseBranch: "origin/main", repos: {},
-    coordinator: { id: "L0", cwd: "${root}", prompt: "prompts/coordinator.md", maxRunning: 8 },
+    coordinator: { id: "L0", cwd: "${root}", prompt: "prompts/coordinator.md", maxRunning: 6 },
     messages: { dir: "messages", broadcast: "ALL", retention: { mode: "archive", maxAgeDays: 14, archiveDir: "archive", archiveMaxAgeDays: null, keepUnread: true, auto: true } }, terminal: { backend: "auto" },
     launch: { wrapper: "pi-session", preapproveMcp: false, unsetEnv: ["PI_MCP_CONFIG_MODE"] }, lanes: [],
   };
@@ -74,6 +74,7 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
   }
   require(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !["ALL", c.messages.broadcast].includes(c.coordinator.id), "coordinator.id");
   require(text(c.coordinator.cwd), "coordinator.cwd"); require(text(c.coordinator.prompt), "coordinator.prompt");
+  if (c.coordinator.maxRunning === undefined) c.coordinator.maxRunning = 6;
   require(Number.isInteger(c.coordinator.maxRunning) && c.coordinator.maxRunning > 0, "coordinator.maxRunning");
   require(c.terminal && BACKENDS.includes(c.terminal.backend), "terminal.backend");
   require(c.launch && text(c.launch.wrapper), "launch.wrapper");

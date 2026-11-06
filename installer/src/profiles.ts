@@ -60,7 +60,7 @@ export function reasonFor(ready: Set<string>, name: string): string {
   const gpt = ready.has("openai-codex");
   const kimi = ready.has("kimi-coding");
   if (claude && gpt && kimi) return "you have Claude, ChatGPT and Kimi: each role goes where it is strongest";
-  if (claude && gpt) return "you have Claude and ChatGPT; Kimi roles (ops, scout) fall back to GPT via provider-fallback";
+  if (claude && gpt) return `you have Claude and ChatGPT; ${name} keeps its configured model routing`;
   if (gpt && !claude) return `only ChatGPT is logged in: ${name} keeps every role on GPT`;
   if (claude) return `only Claude is logged in: ${name} keeps every role on Claude`;
   return "log in with /login in pi, then rerun ./install.sh --profile auto";

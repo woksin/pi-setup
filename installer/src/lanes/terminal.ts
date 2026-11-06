@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BACKENDS, UsageError, type Config } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
 
@@ -12,10 +13,12 @@ export function detectBackend(configured: string, ctx: Pick<LanesCtx, "env" | "p
   if (ctx.platform === "darwin" && ctx.env.TERM_PROGRAM === "Apple_Terminal") return "terminal-app";
   return "print";
 }
-export function launchCommand(c: Config, root: string, cwd: string, id: string, prompt: string, wrapper: string, messages: string): string {
+export function launchCommand(c: Config, root: string, cwd: string, id: string, _prompt: string, _wrapper: string, messages: string, launcher = [process.execPath, fileURLToPath(new URL("./cli.ts", import.meta.url))], opts: Record<string, string> = {}): string {
   const unset = c.launch.unsetEnv.map((name) => `-u ${name}`).join(" ");
-  const exe = /^[A-Za-z0-9_/-]+$/.test(wrapper) ? wrapper : shellQuote(wrapper);
-  return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages)} LANE_STATUS_DIR=${shellQuote(join(messages, "status"))} ${exe} ${shellQuote(`@${prompt}`)}`;
+  const args = [...launcher, "--dir", root, "run", id];
+  if (opts["from-handoff"]) args.push("--from-handoff", opts["from-handoff"]);
+  if (opts["handoff-digest"]) args.push("--handoff-digest", opts["handoff-digest"]);
+  return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages)} LANE_STATUS_DIR=${shellQuote(join(messages, "status"))} ${args.map(shellQuote).join(" ")}`;
 }
 interface Launch { id: string; cwd: string; command: string }
 export interface TerminalBackend {
