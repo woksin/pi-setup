@@ -5,6 +5,7 @@
  * must not be read through bash. Disable via /guards off subagent-results.
  * State follows delivered custom messages, not the earlier completion event.
  */
+import { shellGuard } from "../lib/shell-invocations.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import { realpathSync } from "node:fs";
@@ -147,7 +148,7 @@ export default function (pi: ExtensionAPI) {
     const id = details?.id;
     if (id) tracker.alias(id, event.input.name);
   });
-  pi.on("tool_call", (event, ctx) => {
+  pi.on("tool_call", shellGuard((event, ctx) => {
     const input = event.input as { agent_id?: string; verbose?: boolean; command?: string; resume?: string };
     if (event.toolName === "Agent" && typeof input.resume === "string") tracker.restarted(input.resume);
     let reason: string | undefined;
@@ -158,5 +159,5 @@ export default function (pi: ExtensionAPI) {
     }
     if (reason && !isGuardOff("subagent-results")) return { block: true, reason };
     return undefined;
-  });
+  }, () => !isGuardOff("subagent-results")));
 }

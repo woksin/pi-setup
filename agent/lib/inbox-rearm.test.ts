@@ -26,6 +26,14 @@ const subscriptionEvent = (job = subscription(), event = "match", sequence = 1) 
 	}] },
 });
 
+test("status timestamps and full records must be valid before inbox recovery", () => {
+	const dir = mkdtempSync(join(tmpdir(), "inbox-status-validation-"));
+	for (const line of ["working since nonsense", "closed since nonsense", "working since 2026-01-01T00:00:00Z\ntrailing", 'parked "dependency" until 2026-02-30T00:00:00Z']) {
+		writeFileSync(join(dir, "L1.status"), line);
+		assert.equal(parkedStatus("L1", { LANE_STATUS_DIR: dir }), "invalid", line);
+	}
+});
+
 test("subscription results, lists, output and repeated matches suppress stale watch recovery across reload", () => {
 	const old = [...start(), finish()];
 	for (const tool of ["job_subscribe", "job_list", "job_output", "job_kill"]) {

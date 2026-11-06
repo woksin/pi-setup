@@ -1,5 +1,5 @@
 /** Re-arm reminder via public session entries; never reaches into pi-jobs' private manager. */
-import { readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -118,16 +118,35 @@ export function lostInboxWatch(entries: readonly any[], lane: string): { id: str
 	return lostWatch(history, currentJobs(history));
 }
 
+function validStatusTime(value: string): boolean {
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return false;
+	const time = Date.parse(value);
+	return Number.isFinite(time) && new Date(time).toISOString() === value.replace(/Z$/, value.includes(".") ? "Z" : ".000Z");
+}
+
 export function parkedStatus(lane: string, env: NodeJS.ProcessEnv = process.env): "parked" | "invalid" | undefined {
+	if (!/^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(lane)) return "invalid";
 	const dir = env.LANE_STATUS_DIR || (env.INBOX_DIR ? join(env.INBOX_DIR, "status")
 		: join(homedir(), ".pi/agent/lane-status"));
+	let fd: number | undefined;
 	try {
-		const line = readFileSync(join(dir, `${lane}.status`), "utf8").trim();
-		if (/^(working|closed) since \S+$/.test(line)) return;
+		fd = openSync(join(dir, `${lane}.status`), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+		const stat = fstatSync(fd);
+		if (!stat.isFile() || stat.size > 4096) return "invalid";
+		const buffer = Buffer.alloc(4097);
+		let size = 0, count: number;
+		do { count = readSync(fd, buffer, size, buffer.length - size, size); size += count; } while (count && size < buffer.length);
+		if (size > 4096) return "invalid";
+		const line = buffer.toString("utf8", 0, size).replace(/\n$/, "");
+		if (/[\r\n]/.test(line)) return "invalid";
+		const ordinary = /^(?:working|closed) since (\S+)$/.exec(line)
+			?? /^closed(?: reassigned-to [A-Za-z][A-Za-z0-9_-]*)? at (\S+)(?: reason "[^"\r\n]*")?$/.exec(line);
+		if (ordinary) return validStatusTime(ordinary[1]) ? undefined : "invalid";
 		const m = /^(waiting-on|barred-by|parked) "[^"]*" until (\S+)$/.exec(line);
-		if (!m || !Number.isFinite(Date.parse(m[2]))) return "invalid";
+		if (!m || !validStatusTime(m[2])) return "invalid";
 		return m[1] === "parked" ? "parked" : undefined;
 	} catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? undefined : "invalid"; }
+	finally { if (fd !== undefined) closeSync(fd); }
 }
 
 export default function inboxRearm(pi: ExtensionAPI): void {

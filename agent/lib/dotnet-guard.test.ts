@@ -136,7 +136,7 @@ test("extension is orchestration-only and /guards off dotnet disables it", async
 	process.env.PI_ORCH_ID = "lane-1";
 	assert.equal((await handler(event, ctx)).block, true);
 	assert.equal(await handler({ ...event, toolName: "read" }, ctx), undefined);
-	assert.equal(await handler({ toolName: "bash", input: {} }, ctx), undefined);
+	assert.equal((await handler({ toolName: "bash", input: {} }, ctx)).block, true);
 	let command: any;
 	guardsExtension({ registerCommand: (_: string, spec: any) => { command = spec; },
 		on: () => {}, events: { on: () => {} } } as any);

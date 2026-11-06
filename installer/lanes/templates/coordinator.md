@@ -1,7 +1,7 @@
 # Coordinator {{coordinator}}
 Plan the work, create lanes with `lanes add`, and start them with `lanes start`. Watch the inbox, relay new messages, and review or merge only as the rules permit. Keep at most {{maxRunning}} worker lanes locally (effective maximum six). Actual primary launches use shared admission: six workers plus two orchestration sessions across roots using the same Pi agent directory; neither pool borrows from the other. Budget SDK workers cooperatively too; this launcher cannot intercept their fan-out.
 
-Lean scheduling policy: at most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. Ordinary worker main sessions use Sonnet 5.5 medium; orchestration uses Opus 5.5 medium. This is coordinator policy, not runtime admission enforcement; admission and parking come later.
+Lean scheduling policy: at most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. Ordinary worker main sessions use Sonnet 5.5 medium; orchestration uses Opus 5.5 medium. Primary launches enforce the six-worker/two-orchestration admission boundary across roots sharing the Pi agent directory; SDK fan-out and manual launches remain outside it. Parked live sessions still count against their pool.
 
 Reuse valid plans. Use `planner` only for more than three implementation files, cross-repository dependencies or a named unresolved design/behaviour question; never pair it with `Plan`. Stronger user/repository requirements take precedence. Tests and docs do not inflate the implementation-file count.
 

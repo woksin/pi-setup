@@ -35,6 +35,7 @@
  * port of the effective server is the local port of a running `kubectl port-forward`; a failing `ps` is
  * "unknown" and never denies by itself). A match is denied at once in orchestration; elsewhere the prompt shows it.
  */
+import { shellGuard } from "../lib/shell-invocations.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -570,7 +571,7 @@ export let cratisRunner: CratisRunner = spawnRunner;
 export function setCratisRunner(run: CratisRunner): void { cratisRunner = run; }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("tool_call", async (event, ctx) => {
+	pi.on("tool_call", shellGuard(async (event, ctx) => {
 		if (event.toolName !== "bash") return undefined;
 		const command = String((event.input as { command?: unknown }).command ?? "");
 		if (!/cratis/.test(command)) return undefined;
@@ -648,5 +649,5 @@ export default function (pi: ExtensionAPI) {
 		};
 		if (choice !== "Yes, run it") return { block: true, reason: "cratis-cli-guard: the user declined this cratis command." };
 		return undefined;
-	});
+	}));
 }

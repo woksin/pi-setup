@@ -1,6 +1,7 @@
 /** Dormant until an operator enrolls a repository. No policy mutation tools are registered. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
+import { shellGuard } from "../lib/shell-invocations.ts";
 import { isGuardOff } from "../lib/guards.ts";
 import { ACTIONS, acknowledge, assessCommand, assessPublication, identity, isSetupWriter, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyStore, savePolicy, tamperReason, type Context } from "../lib/lane-policy.ts";
 
@@ -110,12 +111,12 @@ export default function (pi: ExtensionAPI) {
 		const summary = refresh(ctx);
 		if (summary) return { systemPrompt: `${event.systemPrompt}\n\n${clean(summary)}` };
 	});
-	pi.on("tool_call", (event, ctx) => {
+	pi.on("tool_call", shellGuard((event, ctx) => {
 		refresh(ctx);
 		if (isGuardOff("lane-policy")) return;
 		const reason = publicationToolReason(event.toolName, event.input, context(ctx));
 		if (reason) return { block: true, reason };
-	});
+	}, () => !isGuardOff("lane-policy")));
 	pi.on("user_bash", (event, ctx) => {
 		if (isGuardOff("lane-policy")) return;
 		const reason = assessCommand(event.command, context(ctx));

@@ -1,8 +1,9 @@
 /** Cooperative executable-position checks only. Never reads payloads or expands opaque execution. */
+import { shellInvocations } from "./shell-invocations.ts";
 import { basename } from "node:path";
 import { simpleCommands } from "../extensions/wait-guard.ts";
 
-export type PublicationCode = "gh-publication" | "http-publication" | "unsupported-env";
+export type PublicationCode = "gh-publication" | "http-publication" | "unsupported-env" | "malformed-execution";
 export const PUBLICATION_REASON = "publish guard: use the publish tool for GitHub text. It scans the exact captured payload before sending. Rewrite refused text; do not evade checks. Only the user may disable this guard with /guards off publish.";
 type Word = string;
 type Words = Word[];
@@ -167,26 +168,13 @@ export function publicationGuard(command: string): PublicationCode | undefined {
 		if (code) return code;
 	}
 }
-function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
-function nestedTool(child: unknown, depth: number): PublicationCode | undefined {
-	if (!record(child) || typeof child.recipient_name !== "string") return;
-	return publicationInput(child.recipient_name.replace(/^functions\./, ""), child.parameters, depth + 1);
-}
-function nestedPublication(children: unknown, depth: number): PublicationCode | undefined {
-	if (!Array.isArray(children)) return;
-	for (const child of children) {
-		const code = nestedTool(child, depth);
-		if (code) return code;
-	}
-}
 /** Matches the host's explicit job and nested-tool shapes, without searching arbitrary string fields. */
 export function publicationInput(name: string, value: unknown, depth = 0): PublicationCode | undefined {
-	if (depth > 4 || !record(value)) return;
-	if (name === "multi_tool_use.parallel") return nestedPublication(value.tool_uses, depth);
-	if (!["bash", "job_start", "job_watch"].includes(name)) return;
-	for (const key of ["command", "check"]) {
-		if (typeof value[key] !== "string") continue;
-		const code = publicationGuard(value[key]);
+	const normalized = shellInvocations(name, value, process.cwd(), depth);
+	if (normalized.error) return "malformed-execution";
+	for (const call of normalized.calls) {
+		if (call.command === undefined) continue;
+		const code = publicationGuard(call.command);
 		if (code) return code;
 	}
 }

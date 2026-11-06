@@ -1,3 +1,4 @@
+import { shellGuard } from "../lib/shell-invocations.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
@@ -38,7 +39,7 @@ function notify(ctx: ExtensionContext, message: string, type: "info" | "error") 
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("tool_call", async (event, ctx) => {
+	pi.on("tool_call", shellGuard(async (event, ctx) => {
 		const input = event.input as { command?: unknown; path?: unknown };
 		if (referencesGrantFile(event.toolName, input)) return {
 			block: true, reason: "grants are created only via user approval (/phase-priority)",
@@ -90,7 +91,7 @@ export default function (pi: ExtensionAPI) {
 			return { block: true, reason: `Cannot grant high priority: ${(error as Error).message}` };
 		}
 		return undefined;
-	});
+	}));
 	pi.registerCommand("phase-priority", {
 		description: "Queue priority approval: status | allow [minutes] | allow-once | revoke | orchestrator on|off",
 		handler: async (args, ctx) => {

@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { shellGuard } from '../lib/shell-invocations.ts';
 import { isGuardOff } from '../lib/guards.ts';
 import { trainPushDecision } from '../lib/train-guard.ts';
 import { prCreateDecision, publicationDecision, gateRunNotice } from '../lib/candidate-guard.ts';
@@ -57,7 +58,7 @@ function callHandler(warnings: Map<string, string>) {
 
 export default function (pi: ExtensionAPI) {
   const warnings = new Map<string, string>();
-  pi.on('tool_call', callHandler(warnings));
+  pi.on('tool_call', shellGuard(callHandler(warnings), () => !isGuardOff('trains')));
   pi.on('tool_result', async event => {
     const warning = warnings.get(event.toolCallId);
     warnings.delete(event.toolCallId);
