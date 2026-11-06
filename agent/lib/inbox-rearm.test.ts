@@ -13,6 +13,96 @@ const start = (id = "j1", input = params): any[] => [
 ];
 const finish = (status = "matched", id = "j1", check = params.check) => ({ type: "custom_message", customType: "pi-jobs", details: { completions: [{ job: { id, kind: "watch", command: check, status } }] } });
 
+const subscription = (status = "running", overrides = {}) => ({
+	id: "s1", kind: "subscription", command: "./check-inbox", status, lane: "L1", inboxDir: "/tmp/inbox",
+	cwd: "/tmp/lane", logPath: "/tmp/s1.log", startedAt: 2000, timeoutSeconds: 3600, intervalSeconds: 120,
+	checkTimeoutSeconds: 30, statusPath: "/tmp/inbox/status/L1.status", deadline: 3602000, matchSequence: 0, checks: 0,
+	...overrides,
+});
+const result = (toolName: string, details: any) => message({ role: "toolResult", toolName, details });
+const subscriptionEvent = (job = subscription(), event = "match", sequence = 1) => ({
+	type: "custom_message", customType: "pi-jobs", details: { deliveryId: `d${sequence}`, completions: [{
+		completionId: `c${sequence}`, part: 0, job, event, sequence, capture: { bytes: 12, truncated: false },
+	}] },
+});
+
+test("subscription results, lists, output and repeated matches suppress stale watch recovery across reload", () => {
+	const old = [...start(), finish()];
+	for (const tool of ["job_subscribe", "job_list", "job_output", "job_kill"]) {
+		const job = subscription();
+		const entries = [...old, result(tool, tool === "job_list" ? { jobs: [job] } : job)];
+		assert.equal(lostInboxWatch(entries, "L1"), undefined);
+		assert.equal(lostInboxWatch(JSON.parse(JSON.stringify([...entries, subscriptionEvent(), subscriptionEvent(subscription(), "match", 2)])), "L1"), undefined);
+	}
+	assert.equal(lostInboxWatch([...old, subscriptionEvent()], "L1"), undefined);
+});
+
+test("terminal or killed subscription supersedes old watches, but not newer ordinary watches", () => {
+	for (const status of ["failed", "timed_out", "killed", "succeeded"]) {
+		const entries = [...start(), finish(), result("job_subscribe", subscription()),
+			result(status === "killed" ? "job_kill" : "job_output", subscription(status))];
+		assert.equal(lostInboxWatch(entries, "L1"), undefined);
+		assert.equal(lostInboxWatch([...entries, subscriptionEvent()], "L1"), undefined); // Replayed stale running snapshot.
+		assert.deepEqual(lostInboxWatch([...entries, ...start("j2"), finish("matched", "j2")], "L1"), { id: "j2", params });
+		assert.equal(lostInboxWatch([...entries, ...start("j2"), subscriptionEvent(subscription(status), "terminal")], "L1"), undefined);
+	}
+	assert.equal(lostInboxWatch([...start(), result("job_subscribe", subscription("failed"))], "L1"), undefined);
+});
+
+test("snapshot creation order, not delayed observations, decides whether an ordinary watch is newer", () => {
+	const entries = [...start(), finish(), result("job_subscribe", subscription()), ...start("j2"), finish("matched", "j2"),
+		result("job_list", { jobs: [
+			{ id: "j2", kind: "watch", command: params.check, status: "matched", startedAt: 3000 },
+			subscription("failed"), subscription("running", { id: "older-sub", startedAt: 1000 }),
+		] })];
+	assert.deepEqual(lostInboxWatch(entries, "L1"), { id: "j2", params });
+	assert.equal(lostInboxWatch([...entries, result("job_output", { id: "j2", kind: "watch", command: params.check, status: "matched", startedAt: 1000 })], "L1"), undefined);
+});
+
+test("unrelated lanes and malformed subscription records do not suppress ordinary recovery", () => {
+	for (const job of [subscription("running", { lane: "L2" }), subscription("running", { inboxDir: null }),
+		subscription("running", { inboxDir: "relative" }), subscription("unknown"), subscription("running", { id: 7 }),
+		subscription("running", { startedAt: null }), { kind: "subscription", lane: "L1" }]) {
+		assert.deepEqual(lostInboxWatch([...start(), finish(), result("job_subscribe", job)], "L1"), { id: "j1", params });
+	}
+	for (const overrides of [{ event: "unknown" }, { event: "terminal" }, { sequence: -1 }, { part: null },
+		{ completionId: null }, { capture: { bytes: "payload", truncated: false } }, { capture: null }]) {
+		const entry = subscriptionEvent(); Object.assign(entry.details.completions[0], overrides);
+		assert.deepEqual(lostInboxWatch([...start(), finish(), entry], "L1"), { id: "j1", params });
+	}
+	assert.deepEqual(lostInboxWatch([...start(), finish(), subscriptionEvent(subscription("running", { lane: "L2" })),
+		{ type: "custom_message", customType: "pi-jobs-subscription-error", details: { job: subscription("failed", { lane: "L2" }) } }], "L1"), { id: "j1", params });
+	assert.deepEqual(lostInboxWatch([...start(), finish(), result("unrelated", subscription()),
+		result("job_list", { jobs: {} }), { type: "custom_message", customType: "pi-jobs", details: { completions: {} } }], "L1"), { id: "j1", params });
+});
+
+test("subscription failure and expiry diagnose once without waking; kills and matches stay quiet", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "inbox-subscription-"));
+	const oldLane = process.env.PI_LANE_ID; const oldStatus = process.env.LANE_STATUS_DIR;
+	process.env.PI_LANE_ID = "L1"; process.env.LANE_STATUS_DIR = dir;
+	try {
+		for (const status of ["running", "failed", "timed_out", "killed"]) {
+			let settle: any; const notices: string[] = [];
+			inboxRearm({ on: (_: string, fn: any) => { settle = fn; } } as any);
+			const entries = [...start(), finish(), result("job_subscribe", subscription()),
+				subscriptionEvent(subscription(status), status === "running" ? "match" : "terminal")];
+			const ctx = { sessionManager: { getBranch: () => JSON.parse(JSON.stringify(entries)) }, ui: { notify(text: string) { notices.push(text); } } };
+			assert.equal(await settle({ entries: [] }, ctx), undefined);
+			assert.equal(await settle({ entries }, ctx), undefined);
+			assert.equal(notices.length, ["failed", "timed_out"].includes(status) ? 1 : 0);
+			assert.ok(notices.every(text => !text.includes("job_watch(")));
+		}
+		let settle: any; const notices: string[] = [];
+		inboxRearm({ on: (_: string, fn: any) => { settle = fn; } } as any);
+		const entries = [...start(), finish(), { type: "custom_message", customType: "pi-jobs-subscription-error", details: { job: subscription("failed") } }];
+		assert.equal(await settle({ entries: [] }, { sessionManager: { getBranch: () => entries }, ui: { notify(text: string) { notices.push(text); } } }), undefined);
+		assert.equal(notices.length, 0); // Already diagnosed publicly by pi-jobs, including after reload.
+	} finally {
+		if (oldLane === undefined) delete process.env.PI_LANE_ID; else process.env.PI_LANE_ID = oldLane;
+		if (oldStatus === undefined) delete process.env.LANE_STATUS_DIR; else process.env.LANE_STATUS_DIR = oldStatus;
+	}
+});
+
 test("completed inbox watch supplies its exact call, but unrelated, running and explicitly killed watches do not", () => {
 	for (const status of ["matched", "succeeded", "failed", "timed_out"]) {
 		assert.deepEqual(lostInboxWatch([...start(), finish(status)], "L1"), { id: "j1", params });
