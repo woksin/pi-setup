@@ -8,13 +8,85 @@ import { pathToFileURL } from "node:url";
 const required = (name: string) => { const value = process.env[name]; assert.ok(value, `${name} must explicitly name its source checkout`); return resolve(value); };
 const setup = required("PI_USAGE_SETUP_SOURCE"), jobs = required("PI_USAGE_JOBS_SOURCE"), orch = required("PI_USAGE_ORCH_SOURCE");
 const load = (root: string, file: string) => import(pathToFileURL(join(root, file)).href);
-const [{ shellInvocations }, other, { parkedStatus }, { parking }, { laneStatus }, { createJobsExtension }, { default: killGuard }, { busFixture, nativeBusFixture }] = await Promise.all([
+const [{ shellInvocations, shellGuard }, other, { parkedStatus }, { parking }, { laneStatus }, { createJobsExtension }, { default: killGuard }, { busFixture, nativeBusFixture }] = await Promise.all([
 	load(setup, "agent/lib/shell-invocations.ts"), load(orch, "src/lib/shell-invocations.ts"), load(setup, "agent/extensions/inbox-rearm.ts"),
 	load(orch, "src/lib/poller.ts"), load(jobs, "src/subscription.ts"), load(jobs, "src/extension.ts"), load(setup, "agent/extensions/kill-guard.ts"), load(orch, "test/bus-harness.ts"),
 ]);
 const output = join(setup, ".ai-work/usage-reduction"); mkdirSync(output, { recursive: true });
 const fixture = () => { const root = mkdtempSync(join(output, "security-fixture-")), inbox = join(root, "inbox"), status = join(root, "status"); mkdirSync(inbox); mkdirSync(status); return { root, inbox, status, file: join(status, "L1.status"), env: { ...process.env, INBOX_DIR: inbox, LANE_STATUS_DIR: status } }; };
 const forms = (command: string) => [["bash", { command }], ["job_start", { command }], ["job_watch", { check: command }], ["job_subscribe", { check: command }]] as const;
+
+test("native bash ignores hostile extra cwd and still checks protected train in session repo", async () => {
+	const f = fixture();
+	const git = (...args: string[]) => { const result = spawnSync("git", ["-C", f.root, ...args], { encoding: "utf8", timeout: 3000 }); assert.equal(result.status, 0, result.stderr); };
+	git("init", "-b", "fix/protected"); git("remote", "add", "origin", "https://github.com/fake/Test.git");
+	const trains = join(f.root, "trains", "fake__Test"); mkdirSync(trains, { recursive: true });
+	writeFileSync(join(trains, "train.json"), JSON.stringify({ v: 1, repo: "fake/Test", train: "train/test", state: "open", items: [{ branch: "fix/protected", kind: "folded" }] }));
+	const previous = process.env.PI_TRAIN_DIR; process.env.PI_TRAIN_DIR = join(f.root, "trains");
+	let executed = 0;
+	const { default: trainGuard } = await load(setup, "agent/extensions/train-guard.ts");
+	const h = await nativeBusFixture({ root: f.root, withoutBus: true, extensions: [trainGuard], bashOperations: { async exec() { executed++; return { exitCode: 0 }; } }, toolCall: { name: "bash", arguments: { command: "git push origin fix/protected", cwd: join(f.root, "outside") } } });
+	try {
+		// Do not let the orchestration role guard mask the independent train decision.
+		await h.session.prompt("fixture train guard request");
+		const result = h.session.messages.find((m: any) => m.role === "toolResult" && m.toolName === "bash");
+		assert.ok(result?.isError); assert.match(JSON.stringify(result), /train/i); assert.equal(executed, 0);
+	} finally { await h.shutdown(); if (previous === undefined) delete process.env.PI_TRAIN_DIR; else process.env.PI_TRAIN_DIR = previous; }
+});
+
+for (const name of ["job_start", "job_watch", "job_subscribe"]) for (const scope of ["outside", "excluded"]) test(`native assigned no-env authority survives ${name} ${scope} cwd`, async () => {
+	const f = fixture(), cwd = scope === "outside" ? f.root + "-outside" : join(f.root, "excluded"), sentinel = join(cwd, "SENTINEL"); mkdirSync(cwd, { recursive: true });
+	let manager: any;
+	const command = `false && git -C '${f.root}' push; touch '${sentinel}'`;
+	const h = await nativeBusFixture({ root: f.root, assigned: true, excludes: [join(f.root, "excluded")], extensions: [createJobsExtension({ subscriptions: true, env: f.env, logRoot: join(f.root, "logs"), onManager: (m: any) => { manager = m; } })], toolCall: { name, arguments: { [name === "job_start" ? "command" : "check"]: command, cwd, ...(name === "job_subscribe" ? { lane: "L1", inboxDir: f.inbox } : {}), ...(name !== "job_start" ? { intervalSeconds: 10 } : {}), timeoutSeconds: 30 } } });
+	try {
+		await h.session.prompt("fixture assigned lane request");
+		const result = h.session.messages.find((m: any) => m.role === "toolResult" && m.toolName === name);
+		assert.ok(result?.isError, JSON.stringify(result)); assert.match(JSON.stringify(result), /deliver to R-Test/);
+		assert.equal(manager.list().length, 0); assert.equal(existsSync(sentinel), false);
+	} finally { await h.shutdown(); }
+});
+
+for (const name of ["job_start", "job_watch", "job_subscribe"]) test(`native legitimate ${name} relative cwd executes without adopting its authority`, async () => {
+	const f = fixture(), target = join(f.root, "excluded"); mkdirSync(target);
+	let manager: any;
+	const h = await nativeBusFixture({ root: f.root, assigned: true, excludes: [target], extensions: [createJobsExtension({ subscriptions: true, env: f.env, logRoot: join(f.root, "logs"), onManager: (m: any) => { manager = m; } })], toolCall: { name, arguments: { [name === "job_start" ? "command" : "check"]: "printf ok", cwd: "excluded", ...(name === "job_subscribe" ? { lane: "L1", inboxDir: f.inbox } : {}), ...(name !== "job_start" ? { intervalSeconds: 10 } : {}), timeoutSeconds: 30 } } });
+	try {
+		await h.session.prompt("fixture legitimate read check");
+		const result = h.session.messages.find((m: any) => m.role === "toolResult" && m.toolName === name);
+		assert.equal(result?.isError, false, JSON.stringify(result)); assert.equal(result.details.cwd, target); assert.equal(manager.list().length, 1);
+	} finally { await h.shutdown(); }
+});
+
+for (const name of ["job_start", "job_watch", "job_subscribe"]) test(`native ${name} train parser uses genuine relative execution cwd`, async () => {
+	const f = fixture(), target = join(f.root, "checkout"); mkdirSync(target);
+	for (const args of [["init", "-b", "fix/protected"], ["remote", "add", "origin", "https://github.com/fake/Test.git"]]) { const result = spawnSync("git", ["-C", target, ...args], { encoding: "utf8", timeout: 3000 }); assert.equal(result.status, 0, result.stderr); }
+	const trains = join(f.root, "trains", "fake__Test"); mkdirSync(trains, { recursive: true });
+	writeFileSync(join(trains, "train.json"), JSON.stringify({ v: 1, repo: "fake/Test", train: "train/test", state: "open", items: [{ branch: "fix/protected", kind: "folded" }] }));
+	const previous = process.env.PI_TRAIN_DIR; process.env.PI_TRAIN_DIR = join(f.root, "trains");
+	const { default: trainGuard } = await load(setup, "agent/extensions/train-guard.ts"); let manager: any;
+	const h = await nativeBusFixture({ root: f.root, withoutBus: true, extensions: [trainGuard, createJobsExtension({ subscriptions: true, env: f.env, logRoot: join(f.root, "logs"), onManager: (m: any) => { manager = m; } })], toolCall: { name, arguments: { [name === "job_start" ? "command" : "check"]: "false && git push origin fix/protected; printf ok", cwd: "checkout", ...(name === "job_subscribe" ? { lane: "L1", inboxDir: f.inbox } : {}), ...(name !== "job_start" ? { intervalSeconds: 10 } : {}), timeoutSeconds: 30 } } });
+	try {
+		await h.session.prompt("fixture target train request");
+		const result = h.session.messages.find((m: any) => m.role === "toolResult" && m.toolName === name);
+		assert.ok(result?.isError, JSON.stringify(result)); assert.match(JSON.stringify(result), /folded\/planned/); assert.equal(manager.list().length, 0);
+	} finally { await h.shutdown(); if (previous === undefined) delete process.env.PI_TRAIN_DIR; else process.env.PI_TRAIN_DIR = previous; }
+});
+
+test("native bash executes in session cwd even with unsupported extra cwd", async () => {
+	const f = fixture(), seen: string[] = [];
+	const h = await nativeBusFixture({ root: f.root, withoutBus: true, bashOperations: { async exec(_command: string, cwd: string) { seen.push(cwd); return { exitCode: 0 }; } }, toolCall: { name: "bash", arguments: { command: "printf ok", cwd: "/forged" } } });
+	try { await h.session.prompt("fixture read check"); assert.deepEqual(seen, [f.root]); }
+	finally { await h.shutdown(); }
+});
+
+test("wrappers cannot fabricate cwd and original context object/methods remain authoritative", async () => {
+	class Context { cwd = "/session"; get identity() { return this; } method() { assert.equal(this, ctx); } }
+	const ctx = new Context(), seen: unknown[] = [];
+	const guard = shellGuard((_event: any, actual: any, target: string) => { assert.equal(actual, ctx); actual.method(); assert.equal(actual.identity, ctx); seen.push(target); });
+	await guard({ toolName: "multi_tool_use.parallel", input: { cwd: "/forged", tool_uses: [{ recipient_name: "bash", parameters: { command: "printf ok", cwd: "/forged" } }, { recipient_name: "job_subscribe", parameters: { check: "printf ok", cwd: "child" } }] } }, ctx);
+	assert.deepEqual(seen, ["/session", "/session/child"]);
+});
 
 test("separate packages have identical execution normalization contracts", () => {
 	const inputs: [string, unknown][] = [...forms("git push"), ["unknown", { command: "git push" }], ["multi_tool_use", { tool_uses: [{ recipient_name: "functions.job_subscribe", parameters: { check: "printf ok", cwd: "child" } }], cwd: "parent" }]];

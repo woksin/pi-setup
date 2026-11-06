@@ -540,13 +540,13 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 		},
 		async toolCall(event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext) {
 			try {
-				return await shellGuard(async (event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext) => {
+				return await shellGuard(async (event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext, executionCwd: string) => {
 					if (event.toolName !== "bash") return;
 					const config = active(ctx);
 					if (!config?.blockCommands) return;
 					const matched = commandRule(String(event.input.command ?? ""));
 					if (!matched) return;
-					if (deps.cratisSecrets(ctx.cwd, String(event.input.command ?? ""))) { deps.decision("secrets", "stand-down:cratis-hook", matched.name); return; }
+					if (deps.cratisSecrets(executionCwd, String(event.input.command ?? ""))) { deps.decision("secrets", "stand-down:cratis-hook", matched.name); return; }
 					if (deps.guardOff()) { deps.decision("secrets", "allow:guard-off", matched.name); return; }
 					const reason = blockReason(matched);
 					if (deps.orchestrated(ctx.cwd) || !ctx.hasUI) {

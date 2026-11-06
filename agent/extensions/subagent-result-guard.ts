@@ -148,13 +148,13 @@ export default function (pi: ExtensionAPI) {
     const id = details?.id;
     if (id) tracker.alias(id, event.input.name);
   });
-  pi.on("tool_call", shellGuard((event, ctx) => {
+  pi.on("tool_call", shellGuard((event, ctx, executionCwd) => {
     const input = event.input as { agent_id?: string; verbose?: boolean; command?: string; resume?: string };
     if (event.toolName === "Agent" && typeof input.resume === "string") tracker.restarted(input.resume);
     let reason: string | undefined;
     if (event.toolName === "get_subagent_result" && typeof input.agent_id === "string") {
       reason = tracker.fetch(input.agent_id, input.verbose === true);
-    } else if (event.toolName === "bash" && typeof input.command === "string" && readsTaskOutput(input.command, ctx.cwd)) {
+    } else if (event.toolName === "bash" && typeof input.command === "string" && readsTaskOutput(input.command, executionCwd)) {
       reason = OUTPUT_HELP;
     }
     if (reason && !isGuardOff("subagent-results")) return { block: true, reason };

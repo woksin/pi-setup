@@ -5,8 +5,8 @@ import { trainPushDecision } from '../lib/train-guard.ts';
 import { prCreateDecision, publicationDecision, gateRunNotice } from '../lib/candidate-guard.ts';
 import { isOrchestrated, orchLog } from '../lib/orchestration.ts';
 
-async function pushDecision(command: string, ctx: ExtensionContext) {
-  const result = await trainPushDecision(command, ctx.cwd);
+async function pushDecision(command: string, ctx: ExtensionContext, executionCwd: string) {
+  const result = await trainPushDecision(command, executionCwd);
   if (ctx.hasUI) for (const notice of result.notices) ctx.ui.notify(notice, 'warning');
   if (result.reason) return { block: true as const, reason: result.reason };
 }
@@ -22,10 +22,10 @@ function remember(warnings: Map<string, string>, id: string, notice: string, ctx
   if (ctx.hasUI) ctx.ui.notify(notice, 'warning');
 }
 
-async function candidateDecision(command: string, ctx: ExtensionContext, id: string, warnings: Map<string, string>) {
+async function candidateDecision(command: string, ctx: ExtensionContext, id: string, warnings: Map<string, string>, executionCwd: string) {
   const orchestrated = isOrchestrated(process.env, ctx.cwd);
-  const result = await prCreateDecision(command, ctx.cwd, process.env, undefined, orchestrated);
-  const notice = result.warn ?? await gateRunNotice(command, ctx.cwd);
+  const result = await prCreateDecision(command, executionCwd, process.env, undefined, orchestrated);
+  const notice = result.warn ?? await gateRunNotice(command, executionCwd);
   logDecision(result, orchestrated, notice);
   if (result.block) return { block: true as const, reason: result.block };
   if (notice) remember(warnings, id, notice, ctx);
@@ -40,18 +40,18 @@ async function typedCandidate(input: unknown, ctx: ExtensionContext, id: string,
 }
 
 function callHandler(warnings: Map<string, string>) {
-  return async (event: { toolName: string; input: unknown; toolCallId: string }, ctx: ExtensionContext) => {
+  return async (event: { toolName: string; input: unknown; toolCallId: string }, ctx: ExtensionContext, executionCwd: string) => {
     if (isGuardOff('trains')) return;
     if (event.toolName === 'publish') return typedCandidate(event.input, ctx, event.toolCallId, warnings);
     if (event.toolName !== 'bash') return;
     const command = (event.input as { command?: unknown }).command;
     if (typeof command !== 'string') return;
     if (command.includes('push')) {
-      const blocked = await pushDecision(command, ctx);
+      const blocked = await pushDecision(command, ctx, executionCwd);
       if (blocked) return blocked;
     }
     if (/\bgh\b[\s\S]*\bpr\b[\s\S]*\bcreate\b|pi-phase|pi-publish/.test(command)) {
-      return candidateDecision(command, ctx, event.toolCallId, warnings);
+      return candidateDecision(command, ctx, event.toolCallId, warnings, executionCwd);
     }
   };
 }

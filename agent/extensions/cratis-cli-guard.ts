@@ -571,7 +571,7 @@ export let cratisRunner: CratisRunner = spawnRunner;
 export function setCratisRunner(run: CratisRunner): void { cratisRunner = run; }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("tool_call", shellGuard(async (event, ctx) => {
+	pi.on("tool_call", shellGuard(async (event, ctx, executionCwd) => {
 		if (event.toolName !== "bash") return undefined;
 		const command = String((event.input as { command?: unknown }).command ?? "");
 		if (!/cratis/.test(command)) return undefined;
@@ -591,7 +591,7 @@ export default function (pi: ExtensionAPI) {
 		if (cratisActive) {
 			// Chronicle mutations belong to cratis-guard-store-mutations.sh: stand down only where it really blocks them.
 			const covered = risky.filter(i => i.path.startsWith("chronicle"));
-			const verdict = covered.length > 0 ? cratisVerdict("store-mutations", ctx.cwd, command, cratis) : "none";
+			const verdict = covered.length > 0 ? cratisVerdict("store-mutations", executionCwd, command, cratis) : "none";
 			if (verdict !== "none") risky = risky.filter(i => !covered.includes(i));
 			if (verdict === "switch") {
 				// A human lifted the Cratis block; the production check is the part Cratis does not have.
