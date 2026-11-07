@@ -224,7 +224,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 ## Blocked lanes
 
 - When blocked, run `lane-status set <LANE> waiting-on "<dep>" --until +60m` (or `barred-by "<order>"`); `lane-status clear <LANE>` when unblocked. Nudgers skip a lane while `lane-status suppressed <LANE>` exits 0.
-- While blocked, re-arm watches silently on timeout. Renew the waiting-on lease locally without messaging. Notify the owner once on becoming blocked, then notify the coordinator only on a material state change, lease expiry or explicit request. Do not send hourly "still waiting" messages.
+- While blocked, re-arm watches silently on timeout. A `job_watch` with `quietTimeouts` re-arms itself; keep `quietTimeouts` × `timeoutSeconds` within the waiting-on lease (60 min) so the lease is still renewed. Renew the waiting-on lease locally without messaging. Notify the owner once on becoming blocked, then notify the coordinator only on a material state change, lease expiry or explicit request. Do not send hourly "still waiting" messages.
 - Close a lane with `lane-status close <LANE> --reassign-to <LANE2> --reason "..."` (posts ALL-lane-closed and lists its unread inbox), never by hand.
 - Live sessions, their state and lane status: `~/.pi/agent/session-watchdog/board.md`.
 
@@ -301,7 +301,7 @@ Runners are a shared, saturated resource. Agents may cancel GitHub Actions runs 
 
 CI runs take 10–60 minutes, and longer where self-hosted runners queue. Waiting must cost neither session time nor tokens:
 
-- After a push, start **one** background watch on an immutable target: `job_start` with `gh run watch <run-id> --exit-status` (or `gh pr checks <n> --repo <owner/repo> --watch --fail-fast --interval 60`), `timeoutSeconds` sized for the repo's CI (up to 7200), or `job_watch` re-running one check. Never re-check status by hand in between; the wait-guard blocks the same status query a third time within 15 minutes.
+- After a push, start **one** background watch on an immutable target: `job_start` with `gh run watch <run-id> --exit-status` (or `gh pr checks <n> --repo <owner/repo> --watch --fail-fast --interval 60`), `timeoutSeconds` sized for the repo's CI (up to 7200), or `job_watch` re-running one check. When an empty timeout needs no action, give the `job_watch` `quietTimeouts: N`: it re-arms silently and wakes you only on a match, an inconclusive check or after N empty periods (at most 24 h in total). Never re-check status by hand in between; the wait-guard blocks the same status query a third time within 15 minutes.
 - Watch facts, not prose: never grep cumulative `messages/` or logs for release/PR markers. After dispatch, capture and verify the intended workflow run ID (`gh run list --workflow X --commit <full headSha> --json databaseId,headSha,event,status`); disambiguate concurrent dispatches, never filter by a time window. Watch that ID.
 - For releases, use `job_watch` on this exact check: `gh api repos/<o>/<r>/releases --paginate --jq '.[]|select(.draft|not).body' | grep -qF '(#<n>)'`; aggregated releases can target a later commit. For merge turns, require predecessor PRs to be `MERGED` (`gh pr view N --json state,mergedAt`) and no non-completed runs of the repo's publish workflow.
 - **Flaky tests never hang a release.** Within about 15 minutes, classify a CI failure from one `--log-failed` read and the test's history on main: real or flaky. "Flaky" needs the independent root-cause validation from "Questions for the user"; an unknown failure is real and a blocker.

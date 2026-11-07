@@ -618,7 +618,8 @@ class PhaseLedger:
             return None, None  # Unreadable history must not prevent execution.
         self.records = records
         matches = [r for r in reversed(records) if self.matches_state(r)]
-        passed = next((r for r in matches if r["outcome"] == "passed" and r.get("label") == self.record["label"]), None)
+        passed = next((r for r in matches if r["outcome"] == "passed" and
+                       (self.record["kind"] in ("build", "test") or r.get("label") == self.record["label"])), None)
         failed = next((r for r in matches if repeat_failure(r)), None)
         return passed, failed
 
@@ -4525,7 +4526,8 @@ def run(args, state, configuration, output=None):
                     and (args.kind != "integration" or options["skip_passed_integration"])):
                 if passed:
                     note(f"skipped: this exact state already passed at {passed['ts']} "
-                         f"(kind={args.kind} label={args.label} head={passed['head'][:7]} "
+                         f"(kind={args.kind} label={passed['label']}"
+                         f"{' (label differs)' if passed['label'] != args.label else ''} head={passed['head'][:7]} "
                          f"run={passed['runS']:g}s); pass --rerun to run again")
                     ledger.outcome("skipped")
                     return 0

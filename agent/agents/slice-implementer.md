@@ -5,7 +5,7 @@ description: Implementation worker (Claude Haiku 5.5, medium) for one already-de
 color: cyan
 model: anthropic/claude-haiku-5-5
 thinking: medium
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: append
 ---

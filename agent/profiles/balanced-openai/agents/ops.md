@@ -6,7 +6,7 @@ color: blue
 model: anthropic/claude-haiku-5-5
 thinking: low
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: replace
 ---

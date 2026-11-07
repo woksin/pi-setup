@@ -120,6 +120,13 @@ const compactRuntimeRuns = (res, oversized) => {
 }
 // End runtime recording.
 
+const COVERAGE = 'Set coverage honestly: complete = every file and section of the requested scope was examined for your lens, ' +
+  'even if some verification (browser run, build, test run, network lookup) could not be run; ' +
+  'partial = some file, hunk or section in scope was NOT examined, or (security lens) a required security check could not be performed; ' +
+  'none = nothing examined. Anything that could not be run goes in coverageNote as UNRUN: <check>: <reason>.'
+const coverageNotesFor = (by, res) => res.coverage === 'complete' && res.coverageNote?.trim()
+  ? [`${by}: ${res.coverageNote.trim().slice(0, 200)}`] : []
+
 const FINDINGS = {
   type: 'object',
   properties: {
@@ -136,8 +143,7 @@ const FINDINGS = {
     },
     coverage: {
       type: 'string', enum: ['complete', 'partial', 'none'],
-      description: 'complete only if you reviewed the whole requested change for your lens; partial or none if you ' +
-        'could not (no access, tool failure, scope unclear, declined); explain in coverageNote.',
+      description: COVERAGE,
     },
     coverageNote: { type: 'string' },
   }, required: ['summary', 'findings', 'coverage'],
@@ -170,7 +176,7 @@ const context = input.context ? `\nIntent/spec:\n${input.context}` : ''
 const scope = since ? `\nFollow-up round ${round}: review ONLY git diff ${since}..HEAD and resolution of prior findings. Do not hunt for new defects in unchanged code except critical defects.` : ''
 const priorText = prior ? `\nEarlier findings/decisions (respect dismissals):\n${prior}` : ''
 const rubric = '\nOnly critical/major regressions, data loss, security holes, spec violations, broken builds/tests or out-of-scope behaviour changes block merge. Minor/nit items are advisory. Exclude pre-existing defects, unreachable hypothetical inputs, wording preferences and release notes/PR descriptions. Read actual code; do not guess. Remain read-only and obey execution budgets. Empty findings are valid.'
-const prompt = `Review ${target}.${context}${scope}${priorText}\nCheck correctness, regressions, security and missing/broken tests.${rubric} Set coverage honestly: complete only if you reviewed the whole requested change.`
+const prompt = `Review ${target}.${context}${scope}${priorText}\nCheck correctness, regressions, security and missing/broken tests.${rubric} ${COVERAGE}`
 const securityPrompt =
   `Security review of ${target}.${context}${scope}${priorText}\n\n` +
   'You are the SECURITY lens. Ignore general correctness, style and performance; other reviewers cover those. ' +
@@ -203,7 +209,8 @@ const securityPrompt =
   'which strips client identity and tenant headers and injects verified ones). Rate a hole that AuthProxy fully ' +
   'neutralises as minor and say so; holes AuthProxy passes through (other headers, bodies, responses, authenticated ' +
   'callers) keep their full severity. An empty findings list is a valid answer. ' +
-  'Set coverage honestly: complete only if you reviewed the whole requested change for the security lens.'
+  COVERAGE + ' Required security checks are the trust-boundary read of every touched path and the hostile-case spec check ' +
+  'listed above, plus any checks the target/brief names as required (secret scan, dependency audit). Unrunnable other checks stay notes.'
 const call = (side, text, schema, label, phaseName) => reviewAgent(text, {
   agentType: reviewers[side].agentType, effort: reviewers[side].effort,
   schema, label, phase: phaseName,
@@ -237,6 +244,7 @@ if (quick) {
   const passedQ = blockers.length === 0 && incomplete.length === 0
   return {
     mode: 'quick', round, passed: passedQ, complete: incomplete.length === 0, incomplete,
+    coverageNotes: [...coverageNotesFor(reviewers[side].name, res), ...coverageNotesFor(`${reviewers[side].name} (security)`, sec)],
     reviewers: runtimeReviewers(), reviewedBy: reviewers[side].name,
     diversity: 'OpenAI-only cross-model', summary: res.summary, securitySummary: sec.summary,
     blockingCount: blockers.length, blocking: blockers, preExistingSecurity: preExisting(all),
@@ -265,7 +273,7 @@ const results = await pipeline(lanes,
     return { lane, side, ...res, verdicts: verified ? verified.verdicts : null }
   },
 )
-const confirmed = [], unverified = [], advisory = [], rejected = [], incomplete = [], summaries = []
+const confirmed = [], unverified = [], advisory = [], rejected = [], incomplete = [], summaries = [], coverageNotes = []
 results.forEach((res, index) => {
   const side = lanes[index].side
   const by = lanes[index].name
@@ -273,6 +281,7 @@ results.forEach((res, index) => {
   summaries.push({ by, summary: res.summary })
   const cp = coverageProblem(by, res)
   if (cp) incomplete.push(cp)
+  coverageNotes.push(...coverageNotesFor(by, res))
   if (res.findings.some(blocking) && !res.verdicts) incomplete.push(`${by} verification failed`)
   res.findings.forEach((f, i) => {
     const item = { ...f, foundBy: by }
@@ -292,7 +301,7 @@ const passed = !incomplete.length && !confirmed.length && !unverified.length
 log(`${confirmed.length} blocking, ${unverified.length} unverified, ${advisory.length} advisory — ${passed ? 'PASSED' : 'NOT PASSED'}`)
 return {
   mode: deep ? 'deep' : 'full', diversity: 'OpenAI-only cross-model', round, target, passed,
-  complete: incomplete.length === 0, incomplete, summaries, reviewers: runtimeReviewers(),
+  complete: incomplete.length === 0, incomplete, coverageNotes, summaries, reviewers: runtimeReviewers(),
   blockingCount: confirmed.length, unverifiedCount: unverified.length,
   blocking: confirmed, unverified, advisory: advisory.map(advisoryText), preExistingSecurity: preExisting(advisory),
   rejectedCount: rejected.length, rejected: rejected.map(f => `${f.location}: ${f.reason}`), next: runtimeProblems.length ? runtimeNext : next(passed),

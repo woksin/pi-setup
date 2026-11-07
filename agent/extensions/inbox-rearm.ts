@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-type Params = { check: string; intervalSeconds: number; timeoutSeconds: number; until?: string; cwd?: string; label?: string; checkTimeoutSeconds?: number };
+type Params = { check: string; intervalSeconds: number; timeoutSeconds: number; until?: string; cwd?: string; label?: string; checkTimeoutSeconds?: number; quietTimeouts?: number };
 type Watch = { id: string; kind: string; command: string; status: string; startedAt?: number; lane?: string; inboxDir?: string };
 
 function inboxCheck(check: unknown, lane: string): check is string {
