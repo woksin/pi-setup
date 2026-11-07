@@ -97,6 +97,28 @@ test("file reference exemptions never apply to dotted properties or non-line val
 	]) assert.ok(scan(source).count > 0, source);
 });
 
+test("line references never exempt a following credential", () => {
+	const literal = "Ab12Cd34Ef56Gh78";
+	const live = "sk-" + "live-" + "a1".repeat(16);
+	const aws = "AK" + "IA" + "Z1".repeat(8);
+	for (const [source, value] of [
+		[`config.json: 12 ${live}`, live],
+		[`secrets.yaml:3 ${live}`, live],
+		[`token.json:4 ${aws}`, aws],
+		...[" ", ":", "`", ")", "]", ".", "–"].flatMap(separator => [
+			[`secret.json: "12345${separator}${literal}"`, literal],
+			[`secret.json: "12345:67-89${separator}${literal}"`, literal],
+			[`token.json:12345${separator}${aws}`, aws],
+		]),
+		...[":", "`", ")", "]", ".", "–"].map(separator => [`secret.json:12345${separator}${literal}`, literal]),
+	]) {
+		assert.ok(scan(`ClientSecret = "${value}"`).count > 0, value);
+		const result = scan(source);
+		assert.ok(result.count > 0, source);
+		assert.ok(!result.text.includes(value), source);
+	}
+});
+
 test("named credential metadata survives tool-result aggregation without exposing fixture values", () => {
 	const f = fixture();
 	const value = "Ab12Cd34Ef56Gh78";
