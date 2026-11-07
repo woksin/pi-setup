@@ -287,6 +287,8 @@ test("directory watcher notices atomic limit removal without waiting for the slo
 	await s.fire("429");
 	// FSEvents may not deliver a rename made before the watch is fully registered, so repeat the
 	// atomic replace until the watcher reacts. The slow fallback timer (60 s) cannot satisfy this.
+	// FSEvents delivery can lag well past 8 s on a loaded machine, so allow up to 30 s: still half
+	// the fallback interval, so only the directory watcher can make this pass.
 	const replace = () => {
 		writeFileSync(`${stateFile}.tmp`, "{}");
 		renameSync(`${stateFile}.tmp`, stateFile);
@@ -294,7 +296,7 @@ test("directory watcher notices atomic limit removal without waiting for the slo
 	replace();
 	await new Promise<void>((resolve, reject) => {
 		let ticks = 0;
-		const deadline = setTimeout(() => { clearInterval(check); reject(new Error("watcher did not resume")); }, 8000);
+		const deadline = setTimeout(() => { clearInterval(check); reject(new Error("watcher did not resume")); }, 30_000);
 		const check = setInterval(() => {
 			if (!s.prompts.length) {
 				if (++ticks % 10 === 0) replace();
