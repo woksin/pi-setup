@@ -166,7 +166,7 @@ class InboxBaselineSpecs(unittest.TestCase):
 
     def poll(self, *args):
         result = subprocess.run(["bash", str(SCRIPT), *(args or ("L1",))],
-                                env=self.env, capture_output=True, text=True)
+                                env=self.env, capture_output=True, text=True, timeout=10)
         self.assertIn(result.returncode, (0, 1), result.stderr)
         names = set(result.stdout.splitlines())
         self.assertEqual(result.returncode, 0 if names else 1, result.stderr)
@@ -188,6 +188,30 @@ class InboxBaselineSpecs(unittest.TestCase):
         wrapper.write_text("#!/usr/bin/env bash\n" + body)
         wrapper.chmod(0o755)
         self.env["PATH"] = str(bindir) + os.pathsep + self.env["PATH"]
+
+    def test_invalid_markers_are_ignored_without_waiting(self):
+        message = self.old_message()
+        marker = self.inbox / "L1-inbox.marker"
+        for kind in ("fifo", "symlink", "dangling", "oversized", "list", "bad_stamp", "malformed"):
+            with self.subTest(kind=kind):
+                if marker.exists() or marker.is_symlink():
+                    marker.unlink()
+                if kind == "fifo":
+                    os.mkfifo(marker)
+                elif kind in ("symlink", "dangling"):
+                    target = self.root / kind
+                    if kind == "symlink":
+                        stamp = message.stat()
+                        target.write_text(json.dumps({message.name: [stamp.st_dev, stamp.st_ino, stamp.st_ctime_ns, stamp.st_mtime_ns, stamp.st_size]}))
+                    marker.symlink_to(target)
+                elif kind == "oversized":
+                    marker.write_text(" " * (2 * 1024 * 1024 + 1))
+                else:
+                    marker.write_text({"list": "[]", "bad_stamp": '{"x.md": [true, 2, 3, 4, 5]}', "malformed": "{"}[kind])
+                if kind != "dangling":
+                    old = time.time() - 7200
+                    os.utime(marker, (old, old))
+                self.assertEqual(self.poll(), {message.name})
 
     def test_first_arm_silently_baselines_recent_and_old_messages(self):
         old = self.old_message()

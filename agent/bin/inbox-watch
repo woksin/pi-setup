@@ -95,6 +95,8 @@ set_mark() {
 initial_files() {
     python3 - "$1" "$mark" "$start" "$listing" <<'PY'
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -104,6 +106,32 @@ mode, marker, start, listing = sys.argv[1:]
 def fingerprint(path):
     stat = path.stat()
     return [stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size]
+
+
+def read_baseline():
+    limit = 2 * 1024 * 1024
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+                return {}
+            data = source.read(limit + 1)
+        if len(data) > limit:
+            return {}
+        baseline = json.loads(data or b"{}")
+        if not isinstance(baseline, dict):
+            return {}
+        for name, stamp in baseline.items():
+            if not isinstance(name, str) or not name.endswith(".md") or "/" in name:
+                return {}
+            if not isinstance(stamp, list) or len(stamp) != 5:
+                return {}
+            if any(type(value) is not int or value < 0 for value in stamp):
+                return {}
+        return baseline
+    except (OSError, ValueError, RecursionError):
+        return {}
 
 
 if mode == "record":
@@ -119,7 +147,7 @@ if mode == "record":
             baseline[path.name] = stamp
     Path(marker).write_text(json.dumps(baseline))
 else:
-    baseline = json.loads(Path(marker).read_text() or "{}")
+    baseline = read_baseline()
     candidates = []
     for name in Path(listing).read_text().splitlines():
         try:
@@ -131,7 +159,7 @@ else:
     Path(listing).write_text("".join(name + "\n" for name in candidates))
 PY
 }
-if [[ ! -e $mark ]]; then
+if [[ ! -e $mark && ! -L $mark ]]; then
     initial_files record && set_mark || { printf 'inbox-watch: cannot create marker\n' >&2; exit 2; }
     exit 1
 fi

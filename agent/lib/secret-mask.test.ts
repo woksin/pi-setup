@@ -615,16 +615,38 @@ test("headless redaction still logs without notifying", () => {
 	assert.equal(f.records.length, 2);
 	assert.equal(f.notices.length, 0);
 });
-test("oversized parts are skipped/logged once but other parts are still redacted", () => {
+test("oversized parts are withheld/logged once but other parts are still redacted", () => {
 	const f = fixture();
 	const huge = "x".repeat(MAX_BYTES + 1);
 	for (let i = 0; i < 2; i++) {
 		const result = f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: huge }, { type: "text", text: `sk-ant-${a}` }] }, f.ctx)!;
-		assert.equal(result.content[0].text, huge);
+		assert.match(result.content[0].text!, /^\[REDACTED:oversized-text\]/);
 		assert.match(result.content[1].text!, /REDACTED/);
 	}
 	assert.deepEqual(f.errors, ["part-over-2MiB-skipped"]);
 });
+test("oversized text with credentials is withheld in scan, input and result paths", () => {
+	const token = `sk-ant-${a}`;
+	for (const offset of [0, MAX_BYTES - Math.floor(token.length / 2), MAX_BYTES + 32]) {
+		const source = "x".repeat(offset) + "\n" + token + "\n" + "x".repeat(MAX_BYTES + 64 - offset);
+		const f = fixture();
+		for (const options of [{}, { diagnostics: true }, { mode: "outbound" as const }]) {
+			const result = scan(source, [".*"], options);
+			assert.equal(result.count, 1);
+			assert.ok(!result.text.includes(token));
+			assert.match(result.text, /request smaller parts/);
+		}
+		const input = f.handlers.input({ text: source }, f.ctx)!;
+		assert.equal(input.action, "transform");
+		assert.ok(!input.text.includes(token));
+		const output = f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: source }] }, f.ctx)!;
+		assert.ok(!output.content[0].text!.includes(token));
+		assert.match(output.content[0].text!, /^\[REDACTED:oversized-text\]/);
+	}
+	assert.equal(scan("x".repeat(MAX_BYTES)).skipped, false);
+	assert.equal(scan("😀".repeat(MAX_BYTES / 4 + 1)).count, 1);
+});
+
 test("config flags are independent; enabled false and excluded scope disable all hooks", async () => {
 	for (const config of [{ enabled: false }, { scope: "off" as const }, { scope: "subagents" as const }]) {
 		const f = fixture({ config });
