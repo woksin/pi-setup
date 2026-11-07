@@ -686,9 +686,32 @@ class PhaseTests(unittest.TestCase):
         total = next(r for r in json.loads(stdout.getvalue())["rows"] if r["day"] == "total")
         self.assertEqual((total["skipped"], total["failures"], total["started"]), (1, 0, 1))
 
+    def test_different_label_skips_build_and_test(self):
+        for kind in ("build", "test"):
+            with self.subTest(kind=kind):
+                self.passed_state(label="previous", kind=kind)
+                code, output, register = self.repeat_state(kind=kind)
+                self.assertEqual(code, 0)
+                register.assert_not_called()
+                self.assertIn(f"kind={kind} label=previous (label differs)", output)
+                record = self.ledger_records()[-1]
+                self.assertEqual(record["label"], "repeat")
+                self.assertEqual(record["outcome"], "skipped")
+                self.assertEqual((record["waitS"], record["runS"]), (0, 0))
+
+    def test_different_label_never_skips_integration_or_ci(self):
+        self.configure(skip_passed_integration=True)
+        for kind in ("integration", "ci"):
+            with self.subTest(kind=kind):
+                self.passed_state(label="previous", kind=kind)
+                code, _, register = self.repeat_state(kind=kind)
+                self.assertEqual(code, 125)
+                register.assert_called_once()
+
     def test_passed_state_differences_never_skip(self):
         for key, value in [("head", "b" * 40), ("dirty", "changed"), ("dirty", None),
-                           ("label", "different"), ("argvHash", "different"),
+                           ("envHash", "different"), ("envPolicy", "different"),
+                           ("profile", "iterate"), ("argvHash", "different"),
                            ("cwd", "/different"), ("kind", "build"), ("stack", "node"),
                            ("outcome", "skipped"),
                            ("ts", (datetime.now(timezone.utc) - timedelta(days=15)).isoformat())]:
@@ -1535,7 +1558,7 @@ class PhaseTests(unittest.TestCase):
                 self.assertIn("nice 7 (phase_nice)", out)
                 self.assertIn(f"prio={max(base, 7)} env=False", out)
         self.configure(container_test_detection="off")
-        code, out = self.done(self.run_phase(kind="build", label="nice-off", command=probe))
+        code, out = self.done(self.run_phase(kind="build", label="nice-off", command=probe, extra=("--rerun",)))
         self.assertEqual(code, 0, out)
         self.assertNotIn("phase_nice", out)
         self.assertIn(f"prio={base} env=False", out)

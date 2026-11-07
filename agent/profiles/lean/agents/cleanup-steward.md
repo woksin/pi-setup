@@ -5,7 +5,7 @@ description: Post-work cleanup operator. Inventories task outputs, worktrees, br
 color: yellow
 model: openai-codex/gpt-6.1-sol
 thinking: medium
-extensions: [provider-fallback, ai-work-lifecycle, issue-work, pi-context-budget, output-cap, observation-mask]
+extensions: [provider-fallback, ai-work-lifecycle, issue-work, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: true
 prompt_mode: append
 ---

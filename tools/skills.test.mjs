@@ -12,6 +12,19 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SKILLS = join(REPO, "skills");
 
+test("every output-cap agent also loads subagent-cache immediately after it", () => {
+  const roots = [join(REPO, "agent/agents"), ...readdirSync(join(REPO, "agent/profiles"))
+    .map((name) => join(REPO, "agent/profiles", name, "agents")).filter(existsSync)];
+  let checked = 0;
+  for (const root of roots) for (const name of readdirSync(root).filter((n) => n.endsWith(".md"))) {
+    const line = readFileSync(join(root, name), "utf8").match(/^extensions:.*$/m)?.[0] ?? "";
+    if (!line.includes("output-cap")) continue;
+    checked++;
+    assert.match(line, /output-cap, subagent-cache[,\]]/, join(root, name));
+  }
+  assert.ok(checked > 0);
+});
+
 // Same lookup order as agent/bin/pi-setup-tests. A missing package is a setup failure, never a skip.
 function findPiModules() {
   const candidates = [join(REPO, "agent/npm/node_modules"), join(REPO, "agent/node_modules"), join(homedir(), ".pi/agent/npm/node_modules")];
@@ -206,7 +219,9 @@ test("runtime StructuredOutput preserves hook-injected provenance with every act
   for (const file of reviewFiles) {
     const declarations = [...loadReview(file).matchAll(/const (FINDINGS|VERDICTS) = (\{[\s\S]*?\n\})/g)].map(match => match[0]);
     assert.equal(declarations.length, 2, file);
-    const schemas = new Function(`${declarations.join(";\n")}; return { FINDINGS, VERDICTS };`)();
+    const coverage = loadReview(file).match(/const COVERAGE = [\s\S]*?(?=\nconst coverageNotesFor)/)?.[0];
+    assert.ok(coverage, file);
+    const schemas = new Function(`${coverage};\n${declarations.join(";\n")}; return { FINDINGS, VERDICTS };`)();
     for (const [name, schema] of Object.entries(schemas)) {
       const compiled = { schema, check: value => Check(schema, value) ? true : "schema mismatch" };
       const input = name === "FINDINGS" ? { summary: "ok", findings: [], coverage: "complete" } : { verdicts: [] };
@@ -488,6 +503,32 @@ test("a pre-coverage (review-v2) cached pass is not reused", async () => {
 });
 
 // ---- a reviewer slot that did not fully review is never a pass ----
+for (const file of reviewFiles) {
+  test(`${file}: coverage describes examined scope and complete unrun checks are notes`, async () => {
+    const source = loadReview(file);
+    assert.match(source, /every file and section of the requested scope was examined/);
+    assert.match(source, /some file, hunk or section in scope was NOT examined/);
+    assert.match(source, /UNRUN: <check>: <reason>/);
+    assert.match(source, /trust-boundary read of every touched path/);
+    assert.match(source, /hostile-case spec check/);
+    assert.match(source, /target\/brief names as required/);
+    for (const mode of [{ quick: true }, {}]) {
+      const run = await runReview({ ...base, ...mode }, { file, override: (opts, res) => {
+        if (opts.label.startsWith("review:")) {
+          assert.match(opts.schema.properties.coverage.description, /even if some verification/);
+          res.coverageNote = "UNRUN: browser: unavailable " + "detail ".repeat(200);
+        }
+        return res;
+      } });
+      assert.equal(run.result.passed, true);
+      assert.deepEqual(run.result.incomplete, []);
+      assert.ok(run.result.coverageNotes.length >= 2);
+      assert.ok(run.result.coverageNotes.every(n => n.includes("UNRUN: browser: unavailable") && n.length < 260));
+      assert.ok(JSON.stringify(run.result).length < 3600);
+    }
+  });
+}
+
 const coverageCases = [{ coverage: "partial", coverageNote: "no repo access" }, { coverage: "none" }, { coverage: undefined }];
 for (const file of reviewFiles) {
   test(`${file}: partial, none or missing coverage makes quick and full runs incomplete`, async () => {

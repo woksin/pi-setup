@@ -5,7 +5,7 @@ description: Implementation worker (GPT-6.1 Sol, high) for well-specified coding
 color: blue
 model: openai-codex/gpt-6.1-sol
 thinking: high
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, observation-mask, pi-mcp-adapter]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, subagent-cache, observation-mask, pi-mcp-adapter]
 skills: false
 prompt_mode: replace
 ---
