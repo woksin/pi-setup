@@ -38,7 +38,7 @@
  *   deep?:    boolean  — full mode with GPT-6 Astra instead of GPT-6.1 Sol on the GPT side (default false).
  *                        Security-sensitive, algorithmic or large cross-cutting changes only.
  *   since?:   string   — follow-up round (requires prior and round): commit SHA the previous review saw.
- *                        Only after a whole-change review in the same mode. Reviewers then look only at
+ *                        Only after a whole-change review (same mode, or full after a deep round). Reviewers look only at
  *                        `git diff <since>..HEAD` (the fixes) and whether `prior` findings are resolved.
  *   prior?:   string   — the previous round's blocking findings (and any you dismissed, with the reason),
  *                        so reviewers check those instead of hunting for new edge cases in unchanged code.
@@ -120,7 +120,7 @@ const prior = text(input.prior) ? input.prior.trim() : null
 if (!(Number.isInteger(input.round) && input.round >= 1)) problems.push('round is required and must be a positive integer (1 for the first whole-change review).')
 const round = input.round
 if (since && !prior) problems.push('since needs prior: pass the previous round\'s blocking findings and any dismissed findings with the reason.')
-if ((since || prior) && round === 1) problems.push('Follow-up reviews (since/prior) require round 2 or later, after a whole-change review in the same mode.')
+if ((since || prior) && round === 1) problems.push('Follow-up reviews (since/prior) require round 2 or later, after a whole-change review.')
 if (round > 3 && input.force !== true) problems.push(`Round ${round} refused: the review cap is 3. Make a structural fix or ask the user; only then pass force: true.`)
 if (input.headSha !== undefined && !sha(input.headSha)) problems.push('headSha must be the full current HEAD SHA when supplied (workflow scripts cannot read git or files).')
 if (input.baseSha !== undefined && !sha(input.baseSha)) problems.push('baseSha must be the full base commit SHA, not a moving ref.')
