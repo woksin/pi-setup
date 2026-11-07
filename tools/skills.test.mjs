@@ -219,7 +219,9 @@ test("runtime StructuredOutput preserves hook-injected provenance with every act
   for (const file of reviewFiles) {
     const declarations = [...loadReview(file).matchAll(/const (FINDINGS|VERDICTS) = (\{[\s\S]*?\n\})/g)].map(match => match[0]);
     assert.equal(declarations.length, 2, file);
-    const schemas = new Function(`${declarations.join(";\n")}; return { FINDINGS, VERDICTS };`)();
+    const coverage = loadReview(file).match(/const COVERAGE = [\s\S]*?(?=\nconst coverageNotesFor)/)?.[0];
+    assert.ok(coverage, file);
+    const schemas = new Function(`${coverage};\n${declarations.join(";\n")}; return { FINDINGS, VERDICTS };`)();
     for (const [name, schema] of Object.entries(schemas)) {
       const compiled = { schema, check: value => Check(schema, value) ? true : "schema mismatch" };
       const input = name === "FINDINGS" ? { summary: "ok", findings: [], coverage: "complete" } : { verdicts: [] };
@@ -501,6 +503,32 @@ test("a pre-coverage (review-v2) cached pass is not reused", async () => {
 });
 
 // ---- a reviewer slot that did not fully review is never a pass ----
+for (const file of reviewFiles) {
+  test(`${file}: coverage describes examined scope and complete unrun checks are notes`, async () => {
+    const source = loadReview(file);
+    assert.match(source, /every file and section of the requested scope was examined/);
+    assert.match(source, /some file, hunk or section in scope was NOT examined/);
+    assert.match(source, /UNRUN: <check>: <reason>/);
+    assert.match(source, /trust-boundary read of every touched path/);
+    assert.match(source, /hostile-case spec check/);
+    assert.match(source, /target\/brief names as required/);
+    for (const mode of [{ quick: true }, {}]) {
+      const run = await runReview({ ...base, ...mode }, { file, override: (opts, res) => {
+        if (opts.label.startsWith("review:")) {
+          assert.match(opts.schema.properties.coverage.description, /even if some verification/);
+          res.coverageNote = "UNRUN: browser: unavailable " + "detail ".repeat(200);
+        }
+        return res;
+      } });
+      assert.equal(run.result.passed, true);
+      assert.deepEqual(run.result.incomplete, []);
+      assert.ok(run.result.coverageNotes.length >= 2);
+      assert.ok(run.result.coverageNotes.every(n => n.includes("UNRUN: browser: unavailable") && n.length < 260));
+      assert.ok(JSON.stringify(run.result).length < 3600);
+    }
+  });
+}
+
 const coverageCases = [{ coverage: "partial", coverageNote: "no repo access" }, { coverage: "none" }, { coverage: undefined }];
 for (const file of reviewFiles) {
   test(`${file}: partial, none or missing coverage makes quick and full runs incomplete`, async () => {

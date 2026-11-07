@@ -270,6 +270,13 @@ if (!quick && !since && !prior && input.headSha && input.baseSha && cached?.revi
     reviewers: runtimeReviewers(), next: runtimeNext }
 }
 
+const COVERAGE = 'Set coverage honestly: complete = every file and section of the requested scope was examined for your lens, ' +
+  'even if some verification (browser run, build, test run, network lookup) could not be run; ' +
+  'partial = some file, hunk or section in scope was NOT examined, or (security lens) a required security check could not be performed; ' +
+  'none = nothing examined. Anything that could not be run goes in coverageNote as UNRUN: <check>: <reason>.'
+const coverageNotesFor = (by, res) => res.coverage === 'complete' && res.coverageNote?.trim()
+  ? [`${by}: ${clip(res.coverageNote.trim(), 200)}`] : []
+
 const FINDINGS = {
   type: 'object',
   properties: {
@@ -296,8 +303,7 @@ const FINDINGS = {
     coverage: {
       type: 'string',
       enum: ['complete', 'partial', 'none'],
-      description: 'complete only if you reviewed the whole requested change for your lens; partial or none if you ' +
-        'could not (no access, tool failure, scope unclear, declined); explain in coverageNote.',
+      description: COVERAGE,
     },
     coverageNote: { type: 'string' },
   },
@@ -373,7 +379,7 @@ const reviewPrompt =
   'Look for correctness problems, regressions, behaviour changed outside the requested scope, ' +
   'missing or broken tests and security issues. Read the actual code; do not guess. ' +
   'Report only real problems — an empty findings list is a valid answer. ' +
-  'Set coverage honestly: complete only if you reviewed the whole requested change.' + RUBRIC
+  COVERAGE + RUBRIC
 
 const securityPrompt =
   `Security review of ${target}.${context}${scope}${priorText}\n\n` +
@@ -407,7 +413,8 @@ const securityPrompt =
   'which strips client identity and tenant headers and injects verified ones). Rate a hole that AuthProxy fully ' +
   'neutralises as minor and say so; holes AuthProxy passes through (other headers, bodies, responses, authenticated ' +
   'callers) keep their full severity. An empty findings list is a valid answer. ' +
-  'Set coverage honestly: complete only if you reviewed the whole requested change for the security lens.'
+  COVERAGE + ' Required security checks are the trust-boundary read of every touched path and the hostile-case spec check ' +
+  'listed above, plus any checks the target/brief names as required (secret scan, dependency audit). Unrunnable other checks stay notes.'
 
 const isBlocking = f => f.blocking === true && (f.severity === 'critical' || f.severity === 'major')
 const clip = (t, n) => (typeof t === 'string' && t.length > n ? t.slice(0, n) + '…' : t)
@@ -422,9 +429,11 @@ const full = f => ({
 // Keep the serialized result under the parent notification limit (~4000 chars) without ever dropping
 // gate status or the count of blockers: shrink detail step by step, then fall back to one-liners and counts.
 const fit = (res, budget = 3600) => {
+  if (!res.coverageNotes?.length) delete res.coverageNotes
   const size = () => JSON.stringify(res).length
   if (size() <= budget) return res
   trimRuntimeDetails(res)
+  if (res.coverageNotes) res.coverageNotes = res.coverageNotes.map(n => clip(n, 160))
   res.advisory = res.advisory ? res.advisory.slice(0, 3).concat(res.advisory.length > 3 ? [`…${res.advisory.length - 3} more`] : []) : res.advisory
   if (res.summaries) res.summaries = res.summaries.map(s => ({ by: s.by, summary: clip(s.summary, 150) }))
   if (size() <= budget) return res
@@ -475,6 +484,7 @@ if (quick) {
   const passedQ = blocking.length === 0 && incomplete.length === 0
   return fit({
     mode: 'quick', round, passed: passedQ, complete: incomplete.length === 0, incomplete,
+    coverageNotes: [...coverageNotesFor(r.name, res), ...coverageNotesFor(`${r.name} (security)`, sec)],
     reviewers: runtimeReviewers(), reviewedBy: r.name, blockingCount: blocking.length,
     summary: clip(res.summary, 400), securitySummary: clip(sec.summary, 300),
     blocking: blocking.map(full), preExistingSecurity: preExisting(all), advisory: advisoryList(all.filter(f => !isBlocking(f))),
@@ -530,6 +540,7 @@ const rejected = []
 const unverified = []
 const advisory = []
 const summaries = []
+const coverageNotes = []
 const incomplete = []
 
 // A pipeline item that threw comes back as null; treat it as a failed review, never skip it.
@@ -547,6 +558,7 @@ for (const r of results.filter(Boolean)) {
   }
   const cp = coverageProblem(by, r)
   if (cp) incomplete.push(cp)
+  coverageNotes.push(...coverageNotesFor(by, r))
   if (r.findings.some(isBlocking) && !r.verdicts) incomplete.push(`verification of ${by}'s findings failed`)
   summaries.push({ by, summary: clip(r.summary, 400) })
   const checker = verifierFor(r.side).name
@@ -578,6 +590,7 @@ const verdict = fit({
   passed,
   complete,
   incomplete,
+  coverageNotes,
   reviewers: runtimeReviewers(), runtimeCallCount: runtimeRuns.length,
   blockingCount: confirmed.length,
   unverifiedCount: unverified.length,
