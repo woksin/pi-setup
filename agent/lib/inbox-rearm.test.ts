@@ -26,6 +26,11 @@ const subscriptionEvent = (job = subscription(), event = "match", sequence = 1) 
 	}] },
 });
 
+test("re-arm call keeps quietTimeouts from the recorded watch call", () => {
+	const quiet = { ...params, timeoutSeconds: 900, quietTimeouts: 4 };
+	assert.deepEqual(lostInboxWatch([...start("j1", quiet), finish("timed_out")], "L1"), { id: "j1", params: quiet });
+});
+
 test("status timestamps and full records must be valid before inbox recovery", () => {
 	const dir = mkdtempSync(join(tmpdir(), "inbox-status-validation-"));
 	for (const line of ["working since nonsense", "closed since nonsense", "working since 2026-01-01T00:00:00Z\ntrailing", 'parked "dependency" until 2026-02-30T00:00:00Z']) {
