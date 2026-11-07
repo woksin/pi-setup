@@ -51,6 +51,8 @@ export const DEFAULTS: Config = {
 };
 export const MAX_BYTES = 2 * 1024 * 1024;
 export const INPUT_NOTICE = "secret-mask: a credential was removed from your message before it was stored. Rotate it.";
+const WITHHELD_KIND = "withheld:oversized";
+const WITHHELD_NOTICE = "[secret-mask] Text withheld: oversized (exceeds the 2 MiB secret-scan limit); request smaller parts.";
 export const RUN_ANYWAY = "Run anyway (output will still be redacted)";
 
 export function parseConfig(raw: unknown): Config {
@@ -420,7 +422,10 @@ function outboundMarkers(text: string, mode: ScanOptions["mode"]): Candidate[] {
 export function scan(text: string, allowlist: readonly string[] = [], options: ScanOptions = {}): Scan {
 	const result: Scan = { text, kinds: [], count: 0, skipped: false };
 	if (options.diagnostics) result.findings = [];
-	if (Buffer.byteLength(text, "utf8") > MAX_BYTES) return { ...result, skipped: true };
+	// Context-sensitive sections can exceed any fixed chunk overlap; withhold the whole part.
+	if (Buffer.byteLength(text, "utf8") > MAX_BYTES) return {
+		...result, text: WITHHELD_NOTICE, kinds: [WITHHELD_KIND], skipped: true,
+	};
 	const out = outboundMarkers(text, options.mode);
 	const protectedSpans = options.mode === "outbound" ? []
 		: [...text.matchAll(/\[REDACTED:[A-Za-z0-9-]{1,64}\]/g)].map(m => ({ start: m.index, end: m.index + m[0].length }));
@@ -496,7 +501,7 @@ interface Dependencies {
 	orchestrated: (cwd: string) => boolean;
 	cratisRunner: CratisRunner;
 	tools?: ToolLister;
-	cratisSecrets: (cwd: string, command: string) => boolean;
+	cratisSecrets: (cwd: string, command: string) => boolean | ReturnType<typeof cratisVerdict>;
 	select: typeof guardSelect;
 	decision: typeof orchLog;
 	record: typeof logRedaction;
@@ -510,7 +515,7 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 		guardOff: () => isGuardOff("secrets"),
 		orchestrated: cwd => isOrchestrated(process.env, cwd),
 		cratisRunner: spawnRunner,
-		cratisSecrets: (cwd, command) => cratisVerdict("secrets", cwd, command, { run: overrides.cratisRunner ?? spawnRunner, tools: overrides.tools }) !== "none",
+		cratisSecrets: (cwd, command) => cratisVerdict("secrets", cwd, command, { run: overrides.cratisRunner ?? spawnRunner, tools: overrides.tools }),
 		select: guardSelect, decision: orchLog, record: logRedaction,
 		error: event => logError("secret-mask", event, "Secret masking could not complete; no credential values logged"),
 		role: session => roles.role(session), ...overrides,
@@ -539,6 +544,7 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 			roles.start(ctx.sessionManager.getSessionId(), event.reason);
 		},
 		async toolCall(event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext) {
+			const envelopeToolName = event.toolName;
 			try {
 				return await shellGuard(async (event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext, executionCwd: string) => {
 					if (event.toolName !== "bash") return;
@@ -546,7 +552,15 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 					if (!config?.blockCommands) return;
 					const matched = commandRule(String(event.input.command ?? ""));
 					if (!matched) return;
-					if (deps.cratisSecrets(executionCwd, String(event.input.command ?? ""))) { deps.decision("secrets", "stand-down:cratis-hook", matched.name); return; }
+					const verdict = deps.cratisSecrets(executionCwd, String(event.input.command ?? ""));
+					if (verdict && verdict !== "none") {
+						if ((verdict === true || verdict === "blocked") && envelopeToolName !== "bash") {
+							deps.decision("secrets", "deny", matched.name);
+							return { block: true as const, reason: blockReason(matched) };
+						}
+						deps.decision("secrets", "stand-down:cratis-hook", matched.name);
+						return;
+					}
 					if (deps.guardOff()) { deps.decision("secrets", "allow:guard-off", matched.name); return; }
 					const reason = blockReason(matched);
 					if (deps.orchestrated(ctx.cwd) || !ctx.hasUI) {
@@ -566,7 +580,7 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 		toolResult<T extends { type: string; text?: string }>(event: { toolName: string; content: T[]; input?: Record<string, unknown>; details?: unknown; isError?: boolean }, ctx: ExtensionContext) {
 			const config = active(ctx);
 			if (!config?.redactResults) return;
-			let count = 0, lineBase = 0;
+			let count = 0, lineBase = 0, withheld = false;
 			const findings: Finding[] = [];
 			const kinds = new Set<string>();
 			function addFindings(result: Scan, original: string): void {
@@ -582,13 +596,17 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 				const result = inspect(part.text, config, true);
 				addFindings(result, part.text);
 				count += result.count;
+				withheld ||= result.skipped;
 				for (const kind of result.kinds) kinds.add(kind);
-				return result.count ? { ...part, text: result.text } : part;
+				return result.count || result.skipped ? { ...part, text: result.text } : part;
 			});
-			if (!count) return;
-			const notice = resultNotice({ count, kinds: [...kinds], findings }, event, { sensitive: pathSensitive, fallback: summary, cwd: ctx.cwd });
-			const last = content.findLastIndex(part => part.type === "text");
-			content[last] = { ...content[last], text: content[last].text + "\n" + notice };
+			if (!count && !withheld) return;
+			let notice = WITHHELD_NOTICE;
+			if (count) {
+				notice = resultNotice({ count, kinds: [...kinds].filter(kind => kind !== WITHHELD_KIND), findings }, event, { sensitive: pathSensitive, fallback: summary, cwd: ctx.cwd });
+				const last = content.findLastIndex(part => part.type === "text");
+				content[last] = { ...content[last], text: content[last].text + "\n" + notice };
+			}
 			report(ctx, event.toolName, [...kinds], count, notice);
 			return { content };
 		},
@@ -596,8 +614,8 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 			const config = active(ctx);
 			if (!config?.redactInput) return;
 			const result = inspect(event.text, config);
-			if (!result.count) return;
-			report(ctx, "input", result.kinds, result.count, INPUT_NOTICE);
+			if (!result.count && !result.skipped) return;
+			report(ctx, "input", result.kinds, result.count, result.skipped ? WITHHELD_NOTICE : INPUT_NOTICE);
 			return { action: "transform" as const, text: result.text };
 		},
 	};

@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SCRIPT = Path(os.environ.get("INBOX_WATCH", Path(__file__).resolve().parent.parent / "agent/bin/inbox-watch"))
@@ -164,9 +165,12 @@ class InboxBaselineSpecs(unittest.TestCase):
         self.inbox.mkdir()
         self.env = {**os.environ, "INBOX_DIR": str(self.inbox)}
 
+    def run_watch(self, *args):
+        return subprocess.run(["bash", str(SCRIPT), *(args or ("L1",))],
+                              env=self.env, capture_output=True, text=True, timeout=10)
+
     def poll(self, *args):
-        result = subprocess.run(["bash", str(SCRIPT), *(args or ("L1",))],
-                                env=self.env, capture_output=True, text=True)
+        result = self.run_watch(*args)
         self.assertIn(result.returncode, (0, 1), result.stderr)
         names = set(result.stdout.splitlines())
         self.assertEqual(result.returncode, 0 if names else 1, result.stderr)
@@ -188,6 +192,130 @@ class InboxBaselineSpecs(unittest.TestCase):
         wrapper.write_text("#!/usr/bin/env bash\n" + body)
         wrapper.chmod(0o755)
         self.env["PATH"] = str(bindir) + os.pathsep + self.env["PATH"]
+
+    def test_invalid_markers_are_ignored_without_waiting(self):
+        message = self.old_message()
+        marker = self.inbox / "L1-inbox.marker"
+        for kind in ("oversized", "list", "bad_stamp", "malformed"):
+            with self.subTest(kind=kind):
+                if marker.exists():
+                    marker.unlink()
+                if kind == "oversized":
+                    marker.write_text(" " * (2 * 1024 * 1024 + 1))
+                else:
+                    marker.write_text({"list": "[]", "bad_stamp": '{"x.md": [true, 2, 3, 4, 5]}', "malformed": "{"}[kind])
+                old = time.time() - 7200
+                os.utime(marker, (old, old))
+                self.assertEqual(self.poll(), {message.name})
+
+    def marker_target(self, name, kind):
+        target = self.root / name
+        if kind == "symlink":
+            target.write_text("unchanged\n")
+            old = time.time() - 3600
+            os.utime(target, (old, old))
+            return target, target.stat().st_mtime_ns
+        return target, None
+
+    def assert_marker_target_unchanged(self, target, timestamp):
+        if timestamp is None:
+            self.assertFalse(target.exists())
+        else:
+            self.assertEqual(target.read_text(), "unchanged\n")
+            self.assertEqual(target.stat().st_mtime_ns, timestamp)
+
+    def assert_regular_marker(self, marker):
+        self.assertFalse(marker.is_symlink())
+        self.assertTrue(marker.is_file())
+        self.assertIsInstance(json.loads(marker.read_text()), dict)
+        self.assertEqual(list(self.inbox.glob("L1-inbox.marker.tmp.*")), [])
+
+    def test_nonregular_markers_are_recovered_before_poll(self):
+        message = self.old_message()
+        marker = self.inbox / "L1-inbox.marker"
+        for kind in ("fifo", "symlink", "dangling", "directory"):
+            with self.subTest(kind=kind):
+                if marker.exists() or marker.is_symlink():
+                    marker.unlink()
+                target, timestamp = self.marker_target(kind, kind)
+                if kind == "fifo":
+                    os.mkfifo(marker)
+                elif kind == "directory":
+                    marker.mkdir()
+                else:
+                    marker.symlink_to(target)
+                before = marker.lstat()
+                backups = set(self.inbox.glob("L1-inbox.marker.invalid.*"))
+                result = self.run_watch()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(message.name, result.stdout.splitlines())
+                self.assertIn("warning: invalid marker moved to", result.stderr)
+                self.assert_regular_marker(marker)
+                moved = set(self.inbox.glob("L1-inbox.marker.invalid.*")) - backups
+                self.assertEqual(len(moved), 1)
+                self.assertEqual(next(iter(moved)).lstat().st_ino, before.st_ino)
+                self.assert_marker_target_unchanged(target, timestamp)
+                new = self.inbox / f"L2-to-L1-{kind}.md"
+                new.write_text("new\n")
+                self.assertIn(new.name, self.poll())
+
+    def test_nonregular_markers_are_recovered_before_set(self):
+        self.intercept("python3", '''"$REAL_COMMAND" "$@" || exit $?
+if [[ ${2:-} == ${REPLACE_PHASE:-none} ]]; then
+    rm -f -- "$INBOX_DIR/L1-inbox.marker"
+    if [[ $REPLACE_KIND == fifo ]]; then
+        mkfifo "$INBOX_DIR/L1-inbox.marker"
+    else
+        ln -s "$REPLACE_TARGET" "$INBOX_DIR/L1-inbox.marker"
+    fi
+fi
+''')
+        marker = self.inbox / "L1-inbox.marker"
+        for phase in ("record", "filter"):
+            for kind in ("fifo", "symlink", "dangling"):
+                with self.subTest(phase=phase, kind=kind):
+                    if marker.exists() or marker.is_symlink():
+                        marker.unlink()
+                    self.env.pop("REPLACE_PHASE", None)
+                    if phase == "filter":
+                        self.assertEqual(self.poll(), set())
+                        (self.inbox / f"L2-to-L1-{kind}.md").write_text("new\n")
+                    target, timestamp = self.marker_target(f"{phase}-{kind}", kind)
+                    self.env.update(REPLACE_PHASE=phase, REPLACE_KIND=kind, REPLACE_TARGET=str(target))
+                    result = self.run_watch()
+                    self.assertEqual(result.returncode, 1 if phase == "record" else 0, result.stderr)
+                    self.assertIn("warning: invalid marker moved to", result.stderr)
+                    if phase == "filter":
+                        self.assertIn(f"L2-to-L1-{kind}.md", result.stdout.splitlines())
+                    self.assert_regular_marker(marker)
+                    self.assertTrue(list(self.inbox.glob("L1-inbox.marker.invalid.*")))
+                    self.assert_marker_target_unchanged(target, timestamp)
+
+    def test_concurrent_first_arm_runs_both_complete_with_a_regular_marker(self):
+        message = self.old_message()
+        sync = self.root / "sync"
+        sync.mkdir()
+        self.env["SYNC_DIR"] = str(sync)
+        self.intercept("python3", '''if [[ ${2:-} == record ]]; then
+    touch "$SYNC_DIR/$$.ready"
+    for (( i=0; i<500; i++ )); do
+        ready=("$SYNC_DIR/"*.ready)
+        if (( ${#ready[@]} == 2 )); then break; fi
+        sleep 0.01
+    done
+    (( ${#ready[@]} == 2 )) || exit 2
+fi
+exec "$REAL_COMMAND" "$@"
+''')
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: self.run_watch(), range(2)))
+        for result in results:
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, "")
+        marker = self.inbox / "L1-inbox.marker"
+        self.assert_regular_marker(marker)
+        self.assertEqual(set(json.loads(marker.read_text())), {message.name})
+        self.assertEqual(self.poll(), set())
 
     def test_first_arm_silently_baselines_recent_and_old_messages(self):
         old = self.old_message()

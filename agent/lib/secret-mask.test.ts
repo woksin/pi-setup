@@ -9,6 +9,7 @@ import type { CratisRunner, ToolLister } from "./cratis-hooks-detect.ts";
 import { cratisRepo, loaded, notLoaded } from "./cratis-hooks-detect.test.ts";
 import extension from "../extensions/secret-mask.ts";
 import { renderDiagnostics } from "./secret-mask-diagnostics.ts";
+import { capResult } from "./output-cap.ts";
 import {
 	commandRule, createHandlers, DEFAULTS, INPUT_NOTICE, loadConfig, logRedaction,
 	MAX_BYTES, parseConfig, RUN_ANYWAY, scan, summary, isSecretKey,
@@ -615,16 +616,58 @@ test("headless redaction still logs without notifying", () => {
 	assert.equal(f.records.length, 2);
 	assert.equal(f.notices.length, 0);
 });
-test("oversized parts are skipped/logged once but other parts are still redacted", () => {
+test("oversized parts are withheld/logged once but other parts are still redacted", () => {
 	const f = fixture();
 	const huge = "x".repeat(MAX_BYTES + 1);
 	for (let i = 0; i < 2; i++) {
 		const result = f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: huge }, { type: "text", text: `sk-ant-${a}` }] }, f.ctx)!;
-		assert.equal(result.content[0].text, huge);
+		assert.match(result.content[0].text!, /Text withheld: oversized/);
 		assert.match(result.content[1].text!, /REDACTED/);
+		assert.match(result.content[1].text!, /1 value\(s\) redacted/);
+		assert.ok(!result.content[1].text!.includes("withheld:oversized"));
 	}
 	assert.deepEqual(f.errors, ["part-over-2MiB-skipped"]);
 });
+test("oversized text with credentials is withheld in scan, input and result paths", () => {
+	const token = `sk-ant-${a}`;
+	for (const offset of [0, MAX_BYTES - Math.floor(token.length / 2), MAX_BYTES + 32]) {
+		const source = "x".repeat(offset) + "\n" + token + "\n" + "x".repeat(MAX_BYTES + 64 - offset);
+		const f = fixture();
+		for (const options of [{}, { diagnostics: true }, { mode: "outbound" as const }]) {
+			const result = scan(source, [".*"], options);
+			assert.equal(result.count, 0);
+			assert.deepEqual(result.kinds, ["withheld:oversized"]);
+			assert.equal(result.skipped, true);
+			assert.ok(!result.text.includes(token));
+			assert.match(result.text, /request smaller parts/);
+		}
+		const input = f.handlers.input({ text: source }, f.ctx)!;
+		assert.equal(input.action, "transform");
+		assert.ok(!input.text.includes(token));
+		const output = f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: source }] }, f.ctx)!;
+		assert.ok(!output.content[0].text!.includes(token));
+		assert.match(output.content[0].text!, /Text withheld: oversized/);
+	}
+	assert.equal(scan("x".repeat(MAX_BYTES)).skipped, false);
+	assert.equal(scan("😀".repeat(MAX_BYTES / 4 + 1)).skipped, true);
+});
+test("oversized plain text is withheld without reporting a credential", () => temporary(directory => {
+	const source = "x".repeat(MAX_BYTES + 1);
+	const f = fixture();
+	const input = f.handlers.input({ text: source }, f.ctx)!;
+	const output = f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: source }] }, f.ctx)!;
+	const capped = capResult({ toolName: "read", toolCallId: "oversized", input: {}, content: [{ type: "text", text: source }] }, 12000, [directory], { ...DEFAULTS })!;
+	for (const text of [input.text, output.content[0].text!, capped[0].text, readFileSync(join(directory, "oversized.txt"), "utf8"), ...f.notices.map(notice => String(notice[0]))]) {
+		assert.doesNotMatch(text, /rotate|credential|redacted/i);
+		assert.ok(!text.includes("x".repeat(100)));
+		assert.match(text, /withheld: oversized|Output omitted/);
+	}
+	assert.deepEqual(f.records, [
+		["test-session", "input", ["withheld:oversized"], 0],
+		["test-session", "bash", ["withheld:oversized"], 0],
+	]);
+}));
+
 test("config flags are independent; enabled false and excluded scope disable all hooks", async () => {
 	for (const config of [{ enabled: false }, { scope: "off" as const }, { scope: "subagents" as const }]) {
 		const f = fixture({ config });
