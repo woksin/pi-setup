@@ -12,7 +12,7 @@ export const meta = {
 // args: target (required), context, author (sol/astra; legacy gpt/claude accepted),
 // quick, deep, since, prior, round (1..3), force. Quick mode requires author;
 // legacy gpt/claude authors use Astra. Full mode always uses both models.
-// Delta reviews require an earlier whole-change review in the same mode and prior findings.
+// Delta reviews require an earlier whole-change review (same mode, or full after a deep round) and prior findings.
 // Security lens (every mode): one extra reviewer from the model that did NOT write the work (same choice as quick
 // mode: author astra -> Sol, otherwise Astra) reviews only trust boundaries (caller-controlled input, authn/authz,
 // tenancy, secure defaults, fail-closed, host parity, injection, secrets). It returns nothing when the change touches

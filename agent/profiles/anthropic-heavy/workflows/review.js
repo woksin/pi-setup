@@ -36,7 +36,7 @@
  *   deep?:    boolean  — full mode with GPT-6 Astra instead of GPT-6.1 Sol on the GPT side (default false).
  *                        Security-sensitive, algorithmic or large cross-cutting changes only.
  *   since?:   string   — follow-up round (requires prior and round): commit SHA the previous review saw.
- *                        Only after a whole-change review in the same mode. Reviewers then look only at
+ *                        Only after a whole-change review (same mode, or full after a deep round). Reviewers look only at
  *                        `git diff <since>..HEAD` (the fixes) and whether `prior` findings are resolved.
  *   prior?:   string   — the previous round's blocking findings (and any you dismissed, with the reason),
  *                        so reviewers check those instead of hunting for new edge cases in unchanged code.
