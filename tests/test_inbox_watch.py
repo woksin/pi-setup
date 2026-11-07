@@ -164,9 +164,12 @@ class InboxBaselineSpecs(unittest.TestCase):
         self.inbox.mkdir()
         self.env = {**os.environ, "INBOX_DIR": str(self.inbox)}
 
+    def run_watch(self, *args):
+        return subprocess.run(["bash", str(SCRIPT), *(args or ("L1",))],
+                              env=self.env, capture_output=True, text=True, timeout=10)
+
     def poll(self, *args):
-        result = subprocess.run(["bash", str(SCRIPT), *(args or ("L1",))],
-                                env=self.env, capture_output=True, text=True, timeout=10)
+        result = self.run_watch(*args)
         self.assertIn(result.returncode, (0, 1), result.stderr)
         names = set(result.stdout.splitlines())
         self.assertEqual(result.returncode, 0 if names else 1, result.stderr)
@@ -192,26 +195,79 @@ class InboxBaselineSpecs(unittest.TestCase):
     def test_invalid_markers_are_ignored_without_waiting(self):
         message = self.old_message()
         marker = self.inbox / "L1-inbox.marker"
-        for kind in ("fifo", "symlink", "dangling", "oversized", "list", "bad_stamp", "malformed"):
+        for kind in ("oversized", "list", "bad_stamp", "malformed"):
             with self.subTest(kind=kind):
-                if marker.exists() or marker.is_symlink():
+                if marker.exists():
                     marker.unlink()
-                if kind == "fifo":
-                    os.mkfifo(marker)
-                elif kind in ("symlink", "dangling"):
-                    target = self.root / kind
-                    if kind == "symlink":
-                        stamp = message.stat()
-                        target.write_text(json.dumps({message.name: [stamp.st_dev, stamp.st_ino, stamp.st_ctime_ns, stamp.st_mtime_ns, stamp.st_size]}))
-                    marker.symlink_to(target)
-                elif kind == "oversized":
+                if kind == "oversized":
                     marker.write_text(" " * (2 * 1024 * 1024 + 1))
                 else:
                     marker.write_text({"list": "[]", "bad_stamp": '{"x.md": [true, 2, 3, 4, 5]}', "malformed": "{"}[kind])
-                if kind != "dangling":
-                    old = time.time() - 7200
-                    os.utime(marker, (old, old))
+                old = time.time() - 7200
+                os.utime(marker, (old, old))
                 self.assertEqual(self.poll(), {message.name})
+
+    def marker_target(self, name, kind):
+        target = self.root / name
+        if kind == "symlink":
+            target.write_text("unchanged\n")
+            old = time.time() - 3600
+            os.utime(target, (old, old))
+            return target, target.stat().st_mtime_ns
+        return target, None
+
+    def assert_marker_target_unchanged(self, target, timestamp):
+        if timestamp is None:
+            self.assertFalse(target.exists())
+        else:
+            self.assertEqual(target.read_text(), "unchanged\n")
+            self.assertEqual(target.stat().st_mtime_ns, timestamp)
+
+    def test_nonregular_markers_are_refused_before_poll(self):
+        self.old_message()
+        marker = self.inbox / "L1-inbox.marker"
+        for kind in ("fifo", "symlink", "dangling"):
+            with self.subTest(kind=kind):
+                if marker.exists() or marker.is_symlink():
+                    marker.unlink()
+                target, timestamp = self.marker_target(kind, kind)
+                if kind == "fifo":
+                    os.mkfifo(marker)
+                else:
+                    marker.symlink_to(target)
+                before = marker.lstat()
+                result = self.run_watch()
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(marker.lstat().st_ino, before.st_ino)
+                self.assertEqual(marker.lstat().st_mtime_ns, before.st_mtime_ns)
+                self.assert_marker_target_unchanged(target, timestamp)
+
+    def test_nonregular_markers_are_refused_before_set(self):
+        self.intercept("python3", '''"$REAL_COMMAND" "$@" || exit $?
+if [[ ${2:-} == ${REPLACE_PHASE:-none} ]]; then
+    rm -f -- "$INBOX_DIR/L1-inbox.marker"
+    if [[ $REPLACE_KIND == fifo ]]; then
+        mkfifo "$INBOX_DIR/L1-inbox.marker"
+    else
+        ln -s "$REPLACE_TARGET" "$INBOX_DIR/L1-inbox.marker"
+    fi
+fi
+''')
+        marker = self.inbox / "L1-inbox.marker"
+        for phase in ("record", "filter"):
+            for kind in ("fifo", "symlink", "dangling"):
+                with self.subTest(phase=phase, kind=kind):
+                    if marker.exists() or marker.is_symlink():
+                        marker.unlink()
+                    self.env.pop("REPLACE_PHASE", None)
+                    if phase == "filter":
+                        self.assertEqual(self.poll(), set())
+                        (self.inbox / f"L2-to-L1-{kind}.md").write_text("new\n")
+                    target, timestamp = self.marker_target(f"{phase}-{kind}", kind)
+                    self.env.update(REPLACE_PHASE=phase, REPLACE_KIND=kind, REPLACE_TARGET=str(target))
+                    result = self.run_watch()
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assert_marker_target_unchanged(target, timestamp)
 
     def test_first_arm_silently_baselines_recent_and_old_messages(self):
         old = self.old_message()

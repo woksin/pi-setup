@@ -51,6 +51,8 @@ export const DEFAULTS: Config = {
 };
 export const MAX_BYTES = 2 * 1024 * 1024;
 export const INPUT_NOTICE = "secret-mask: a credential was removed from your message before it was stored. Rotate it.";
+const WITHHELD_KIND = "withheld:oversized";
+const WITHHELD_NOTICE = "[secret-mask] Text withheld: oversized (exceeds the 2 MiB secret-scan limit); request smaller parts.";
 export const RUN_ANYWAY = "Run anyway (output will still be redacted)";
 
 export function parseConfig(raw: unknown): Config {
@@ -422,8 +424,7 @@ export function scan(text: string, allowlist: readonly string[] = [], options: S
 	if (options.diagnostics) result.findings = [];
 	// Context-sensitive sections can exceed any fixed chunk overlap; withhold the whole part.
 	if (Buffer.byteLength(text, "utf8") > MAX_BYTES) return {
-		...result, text: "[REDACTED:oversized-text] Text exceeds the 2 MiB secret-scan limit; request smaller parts.",
-		kinds: ["oversized-text"], count: 1, skipped: true,
+		...result, text: WITHHELD_NOTICE, kinds: [WITHHELD_KIND], skipped: true,
 	};
 	const out = outboundMarkers(text, options.mode);
 	const protectedSpans = options.mode === "outbound" ? []
@@ -578,7 +579,7 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 		toolResult<T extends { type: string; text?: string }>(event: { toolName: string; content: T[]; input?: Record<string, unknown>; details?: unknown; isError?: boolean }, ctx: ExtensionContext) {
 			const config = active(ctx);
 			if (!config?.redactResults) return;
-			let count = 0, lineBase = 0;
+			let count = 0, lineBase = 0, withheld = false;
 			const findings: Finding[] = [];
 			const kinds = new Set<string>();
 			function addFindings(result: Scan, original: string): void {
@@ -594,13 +595,17 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 				const result = inspect(part.text, config, true);
 				addFindings(result, part.text);
 				count += result.count;
+				withheld ||= result.skipped;
 				for (const kind of result.kinds) kinds.add(kind);
-				return result.count ? { ...part, text: result.text } : part;
+				return result.count || result.skipped ? { ...part, text: result.text } : part;
 			});
-			if (!count) return;
-			const notice = resultNotice({ count, kinds: [...kinds], findings }, event, { sensitive: pathSensitive, fallback: summary, cwd: ctx.cwd });
-			const last = content.findLastIndex(part => part.type === "text");
-			content[last] = { ...content[last], text: content[last].text + "\n" + notice };
+			if (!count && !withheld) return;
+			let notice = WITHHELD_NOTICE;
+			if (count) {
+				notice = resultNotice({ count, kinds: [...kinds].filter(kind => kind !== WITHHELD_KIND), findings }, event, { sensitive: pathSensitive, fallback: summary, cwd: ctx.cwd });
+				const last = content.findLastIndex(part => part.type === "text");
+				content[last] = { ...content[last], text: content[last].text + "\n" + notice };
+			}
 			report(ctx, event.toolName, [...kinds], count, notice);
 			return { content };
 		},
@@ -608,8 +613,8 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 			const config = active(ctx);
 			if (!config?.redactInput) return;
 			const result = inspect(event.text, config);
-			if (!result.count) return;
-			report(ctx, "input", result.kinds, result.count, INPUT_NOTICE);
+			if (!result.count && !result.skipped) return;
+			report(ctx, "input", result.kinds, result.count, result.skipped ? WITHHELD_NOTICE : INPUT_NOTICE);
 			return { action: "transform" as const, text: result.text };
 		},
 	};

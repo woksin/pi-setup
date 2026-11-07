@@ -80,14 +80,11 @@ mark="${lane}-inbox.marker"
 start=$(mktemp "${TMPDIR:-/tmp}/inbox-${lane}.XXXXXX") || { printf 'inbox-watch: cannot create temp file\n' >&2; exit 2; }
 listing="${start}.list"
 trap 'rm -f -- "$start" "$listing"' EXIT
-# The marker is the scan start moved back 2 s. find compares timestamps at a coarser
-# granularity than writes happen, so a file written in the same second as the
+# The marker is the scan start moved back 2 s. Its timestamp has coarser
+# granularity than writes, so a file written in the same second as the
 # previous scan was missed. A file in that overlap may be reported twice (harmless).
 set_mark() {
-    local t
-    t=$(stat -f %m "$start" 2>/dev/null || stat -c %Y "$start") || return 1
-    t=$(( t - 2 ))
-    touch -t "$(date -r "$t" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$t" +%Y%m%d%H%M.%S)" "$mark"
+    initial_files set
 }
 # Keep only the initial snapshot, not a growing history. Timestamp overlap still
 # handles later writes/renames; exact stat fingerprints exempt unchanged initial
@@ -108,15 +105,21 @@ def fingerprint(path):
     return [stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size]
 
 
-def read_baseline():
+def open_marker():
+    fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    source = os.fdopen(fd, "rb")
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        source.close()
+        raise OSError("marker must be a regular file")
+    return source
+
+
+def read_baseline(source):
     limit = 2 * 1024 * 1024
     try:
-        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as source:
-            info = os.fstat(source.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
-                return {}
-            data = source.read(limit + 1)
+        if os.fstat(source.fileno()).st_size > limit:
+            return {}
+        data = source.read(limit + 1)
         if len(data) > limit:
             return {}
         baseline = json.loads(data or b"{}")
@@ -145,16 +148,24 @@ if mode == "record":
         # A write during first-arm scanning must remain eligible on the next poll.
         if path.is_file() and stamp[2] <= cutoff:
             baseline[path.name] = stamp
-    Path(marker).write_text(json.dumps(baseline))
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+    with os.fdopen(fd, "w") as target:
+        json.dump(baseline, target)
+elif mode == "set":
+    with open_marker() as source:
+        cutoff = (Path(start).stat().st_mtime_ns // 1_000_000_000 - 2) * 1_000_000_000
+        os.utime(source.fileno(), ns=(cutoff, cutoff))
 else:
-    baseline = read_baseline()
+    with open_marker() as source:
+        marker_time = os.fstat(source.fileno()).st_mtime_ns
+        baseline = read_baseline(source)
     candidates = []
     for name in Path(listing).read_text().splitlines():
         try:
             stamp = fingerprint(Path(name))
         except FileNotFoundError:
             continue
-        if baseline.get(Path(name).name) != stamp:
+        if stamp[2] > marker_time and baseline.get(Path(name).name) != stamp:
             candidates.append(name)
     Path(listing).write_text("".join(name + "\n" for name in candidates))
 PY
@@ -164,10 +175,7 @@ if [[ ! -e $mark && ! -L $mark ]]; then
     exit 1
 fi
 args=(. -maxdepth 1 -type f -name '*.md')
-if [[ -e $mark ]]; then
-    # -newercm: file ctime vs marker mtime (= scan start). A file moved into the inbox keeps its old mtime but gets a new ctime.
-    args+=(-newercm "$mark")
-fi
+# The filter compares file ctime with the marker mtime obtained from a no-follow descriptor.
 find "${args[@]}" -print > "$listing" || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
 initial_files filter || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
 me=("$lane" ${aliases[@]+"${aliases[@]}"})
