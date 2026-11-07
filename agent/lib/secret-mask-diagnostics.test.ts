@@ -115,7 +115,7 @@ test("named credential notices use fixed vocabulary and read-only sanitized spec
 });
 
 test("spec hints inspect only sanitized paths and never disclose hidden path segments", () => {
-	const result = scan("ClientSecret = 'Ab12Cd34Ef56Gh78'", [], { diagnostics: true });
+	const result = scan("ClientSecret = '" + "Ab12Cd34" + "Ef56Gh78'", [], { diagnostics: true });
 	const token = "ghp_" + "a".repeat(36);
 	const options = { sensitive, fallback: () => "fallback" };
 	const notice = resultNotice(result, { toolName: "read", input: { path: `/repo/tests/${token}/Fixture.cs` } }, options);
