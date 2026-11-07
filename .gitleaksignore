@@ -5,3 +5,11 @@ c83da9eedda145db3763a800aabfa5048c811a3c:tests/test_sync_publish.py:generic-api-
 e791c9bd60288f2eb0aeec0915231e1474fe0848:agent/lib/secret-mask-outbound.test.ts:generic-api-key:77
 # Fake Authorization header fixture for the short_text redaction test (e05fd96); not a credential.
 e05fd96f968e34b2d2c40cbaf6dad20a176b3228:tests/test_disk_growth.py:curl-auth-header:258
+# Synthetic secret-mask fixtures in 97baf85 (10 findings, 7 unique fingerprints); not credentials.
+97baf8590c42b3b18685616c4d2160f9a11ce3bc:agent/lib/secret-mask-diagnostics.test.ts:generic-api-key:118
+97baf8590c42b3b18685616c4d2160f9a11ce3bc:agent/lib/secret-mask.test.ts:generic-api-key:43
+97baf8590c42b3b18685616c4d2160f9a11ce3bc:agent/lib/secret-mask.test.ts:generic-api-key:51
+97baf8590c42b3b18685616c4d2160f9a11ce3bc:agent/lib/secret-mask.test.ts:generic-api-key:74
+97baf8590c42b3b18685616c4d2160f9a11ce3bc:agent/lib/secret-mask.test.ts:generic-api-key:75
+97baf8590c42b3b18685616c4d2160f9a11ce3bc:agent/lib/secret-mask.test.ts:generic-api-key:94
+97baf8590c42b3b18685616c4d2160f9a11ce3bc:agent/lib/secret-mask.test.ts:generic-api-key:95

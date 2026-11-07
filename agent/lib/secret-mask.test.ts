@@ -19,13 +19,115 @@ test("diagnostic scan keeps legacy shape and reports only selected start lines",
 	assert.deepEqual(scan("plain"), { text: "plain", kinds: [], count: 0, skipped: false });
 	const source = "earlier extension header\r\n😀\npassword: 'Syn7hetic!one'\npassword: 'Syn8hetic!two'";
 	const result = scan(source, [], { diagnostics: true });
-	assert.deepEqual(result.findings, [{ kind: "connection-string", line: 3 }, { kind: "connection-string", line: 4 }]);
+	assert.deepEqual(result.findings, [{ kind: "connection-string", line: 3, via: "field" }, { kind: "connection-string", line: 4, via: "field" }]);
 	assert.deepEqual(Object.keys(result), ["text", "kinds", "count", "skipped", "findings"]);
 	assert.deepEqual(scan(source, ["^Syn"], { diagnostics: true }).findings, []);
 	assert.deepEqual(scan("x".repeat(MAX_BYTES + 1), [], { diagnostics: true }).findings, []);
 	const many = scan(Array.from({ length: 30 }, () => "password: 'Syn7hetic!one'").join("\n"), [], { diagnostics: true });
 	assert.equal(many.count, 30);
 	assert.equal(many.findings!.length, 20);
+});
+
+test("public HTTPS endpoint shapes are not credentials under endpoint-named fields", () => {
+	const url = "https://idp.example.test/login/oauth/access_token";
+	for (const source of [
+		`public const string TokenEndpoint = "${url}";`,
+		`public const string TokenUrl = "${url}";`,
+		`"TokenUri": "${url}"`, `token_endpoint: ${url}`,
+		`TOKEN_ENDPOINT=${url}`, `TOKEN_URL: ${url}`, `["TOKEN_URI=${url}"]`,
+		`TokenEndpoint = "https://example.com:8443/token/"`,
+	]) {
+		assert.equal(scan(source).text, source, source);
+		assert.equal(scan(source).count, 0, source);
+	}
+	const query = `TokenEndpoint = "${url}?access_token=${"Ab12Cd" + "34Ef56"}"`;
+	assert.equal(scan(query).text, 'TokenEndpoint = "[REDACTED:connection-string]"');
+});
+
+test("endpoint exemptions fail closed on credential-bearing or opaque URL shapes", () => {
+	const base = "https://example.com/login/oauth/access_token";
+	const value = "Ab12Cd" + "34Ef56";
+	for (const url of [
+		... ["client_secret", "access_token", "sig", "password"].map(key => `${base}?${key}=${value}`),
+		`${base}#access_token=${value}`, `${base};password=${value}`,
+		"https://user:Pw0rd!synthetic@example.com/login/oauth/access_token",
+		base.replace("https:", "http:"), base.replace("https:", "ftp:"),
+		"https://example.com/hooks/Ab12Cd34Ef56Gh78Ij90",
+		"https://example.com/hooks/AbCdEfGhIjKlMnOpQrSt",
+		"https://example.com/common/oauth2/v2.0/token",
+		"https://example.com/login/%74oken", `${base},Ab12Cd34Ef56`,
+		`${base}\\Ab12Cd34Ef56`,
+	]) {
+		for (const source of [`TokenEndpoint = "${url}"`, `TOKEN_ENDPOINT=${url}`, `TOKEN_ENDPOINT='${url}'`]) {
+			const result = scan(source);
+			assert.ok(result.count > 0, source);
+			assert.ok(result.kinds.includes("connection-string"), source);
+			assert.ok(!result.text.includes("Pw0rd!synthetic"), source);
+		}
+	}
+});
+
+test("endpoint exemptions never apply to other credential or connection fields", () => {
+	for (const field of ["Password", "ClientSecret", "Token", "AccessToken", "ApiKey", "ConnectionString", "TokenEndpointSecret"]) {
+		assert.equal(scan(`${field} = "https://example.com/login/oauth/access_token"`).text,
+			`${field} = "[REDACTED:connection-string]"`);
+	}
+	assert.equal(scan("access_token = " + "Ab12Cd" + "34Ef56").text, "access_token = [REDACTED:connection-string]");
+	assert.equal(scan('public const string ClientSecret = "' + "Ab12Cd34" + 'Ef56Gh78";').text,
+		'public const string ClientSecret = "[REDACTED:connection-string]";');
+});
+
+test("source file line references are not named credentials", () => {
+	for (const source of [
+		"secret-mask.ts:161", "token-store.ts:42-50", "`secret-mask.ts:302` `connectionCandidate`",
+		"password-policy.cs:12:5", "`secret-mask.ts:161-166`", "token-store.ts:12345–12349",
+		"password-policy.cs:1234:5678",
+		... ["ts", "tsx", "js", "mjs", "cjs", "cs", "py", "go", "rs", "java", "kt", "rb", "sh", "md", "json", "yaml", "yml", "toml"]
+			.map(ext => `secret-file.${ext}:12345-12349`),
+	]) {
+		assert.equal(scan(source).text, source, source);
+		assert.equal(scan(source).count, 0, source);
+	}
+});
+
+test("file reference exemptions never apply to dotted properties or non-line values", () => {
+	for (const source of [
+		"db.password=" + "hunter2" + "xyz77Q", "app.secret: " + "AbC123" + "xYz789", "secret.json:" + "4f9a8b" + "7c6d5e",
+		"password.txt=" + "Sup3r" + "S3cret!", "secret.json: " + "AbC123" + "xYz789",
+		"secret.json: " + "AK" + "IA" + "Z1".repeat(8),
+	]) assert.ok(scan(source).count > 0, source);
+});
+
+test("line references never exempt a following credential", () => {
+	const literal = "Ab12Cd34Ef56Gh78";
+	const live = "sk-" + "live-" + "a1".repeat(16);
+	const aws = "AK" + "IA" + "Z1".repeat(8);
+	for (const [source, value] of [
+		[`config.json: 12 ${live}`, live],
+		[`secrets.yaml:3 ${live}`, live],
+		[`token.json:4 ${aws}`, aws],
+		...[" ", ":", "`", ")", "]", ".", "–"].flatMap(separator => [
+			[`secret.json: "12345${separator}${literal}"`, literal],
+			[`secret.json: "12345:67-89${separator}${literal}"`, literal],
+			[`token.json:12345${separator}${aws}`, aws],
+		]),
+		...[":", "`", ")", "]", ".", "–"].map(separator => [`secret.json:12345${separator}${literal}`, literal]),
+	]) {
+		assert.ok(scan(`ClientSecret = "${value}"`).count > 0, value);
+		const result = scan(source);
+		assert.ok(result.count > 0, source);
+		assert.ok(!result.text.includes(value), source);
+	}
+});
+
+test("named credential metadata survives tool-result aggregation without exposing fixture values", () => {
+	const f = fixture();
+	const value = "Ab12Cd34Ef56Gh78";
+	const result = f.handlers.toolResult({ toolName: "read", input: { path: "/repo/Foo.Integration.Specs/given/Fixture.cs" },
+		content: [{ type: "text", text: `public const string ClientSecret = "${value}";` }] }, f.ctx)!;
+	assert.match(result.content[0].text!, /connection-string at output line 1 \(provenance unknown\) \(named credential field\)/);
+	assert.match(result.content[0].text!, /Requested path looks like test\/spec code/);
+	assert.ok(!result.content[0].text!.includes(value));
 });
 
 test("outbound mode refuses caller-written markers without changing default masking", () => {
@@ -377,7 +479,7 @@ for (const [input, value] of [
 	assert.equal(scan(expected).count, 0);
 	const f = fixture();
 	assert.equal(f.handlers.toolResult({ toolName: "bash", content: [{ type: "text", text: input }] }, f.ctx)!.content[0].text,
-		expected + "\n" + renderDiagnostics(1, [{ kind: "connection-string", line: input.slice(0, input.indexOf(value)).split("\n").length }]));
+		expected + "\n" + renderDiagnostics(1, [{ kind: "connection-string", line: input.slice(0, input.indexOf(value)).split("\n").length, via: "field" }]));
 });
 for (const input of [
 	"PASSWORD=changeme", "password = getPassword()", "secret = secretValue", "API_KEY=abc",
