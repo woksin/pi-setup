@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, normalize, resolve } from "node:path";
 
-export interface Finding { kind: string; line: number }
+export interface Finding { kind: string; line: number; via?: "field" }
 export const MAX_FINDINGS = 20;
 const OMIT_PATH = "[path omitted]";
 const OMIT_SEGMENT = "[omitted]";
@@ -69,11 +69,13 @@ export function sanitizeRequestedPath(value: unknown, sensitive: Sensitive, cwd?
 }
 
 function validFinding(finding: Finding): boolean {
-	return KINDS.has(finding.kind) && Number.isSafeInteger(finding.line) && finding.line > 0;
+	return KINDS.has(finding.kind) && Number.isSafeInteger(finding.line) && finding.line > 0
+		&& (finding.via === undefined || finding.via === "field");
 }
 
 function location(finding: Finding, stage: string): string {
-	return `${finding.kind} at output line ${finding.line}${stage} (provenance unknown)`;
+	const via = finding.kind === "connection-string" && finding.via === "field" ? " (named credential field)" : "";
+	return `${finding.kind} at output line ${finding.line}${stage} (provenance unknown)${via}`;
 }
 
 /** Fixed vocabulary and bounded records only; no arbitrary output metadata. */
@@ -96,6 +98,9 @@ export function resultNotice(
 		const notice = renderDiagnostics(result.count, result.findings ?? [], options.beforeCap);
 		if (event.toolName !== "read") return notice;
 		const path = sanitizeRequestedPath(event.input?.path, options.sensitive, options.cwd);
-		return path === undefined ? notice : `${notice} Read request: ${path} (requested path only; content provenance unknown).`;
+		if (path === undefined) return notice;
+		const specPath = /(?:^|\/)(?:[^/]+\.(?:Specs|Tests)|specs|tests|__tests__|fixtures|given)(?:\/|$)/.test(path);
+		const hint = specPath ? " Requested path looks like test/spec code (path only; this does not show the value is harmless; rotate if it is real)." : "";
+		return `${notice} Read request: ${path} (requested path only; content provenance unknown).${hint}`;
 	} catch { return options.fallback(result.count, result.kinds); }
 }

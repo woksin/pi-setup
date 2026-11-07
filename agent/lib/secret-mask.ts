@@ -143,7 +143,7 @@ export function blockReason(matched: Rule): string {
 	return `secret-mask: ${matched.name} prints credentials. ${matched.alternative}`;
 }
 
-interface Candidate { start: number; end: number; kind: string }
+interface Candidate { start: number; end: number; kind: string; via?: "field" }
 export interface Scan { text: string; kinds: string[]; count: number; skipped: boolean; findings?: Finding[] }
 const TOKEN_PATTERNS: [string, RegExp][] = [
 	["anthropic-key", /\bsk-ant-[A-Za-z0-9_-]{20,}/g],
@@ -160,10 +160,14 @@ const TOKEN_PATTERNS: [string, RegExp][] = [
 
 const SECTION_LIMIT = 65536;
 
+function keySegments(name: string): string {
+	return name.replace(/([A-Z])([A-Z][a-z])/g, "$1_$2")
+		.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[^A-Za-z0-9]+/g, "_").toLowerCase();
+}
+
 /** Split camelCase/acronyms before matching whole underscore/word segments, never BYPASS. */
 export function isSecretKey(name: string): boolean {
-	const segments = name.replace(/([A-Z])([A-Z][a-z])/g, "$1_$2")
-		.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[^A-Za-z0-9]+/g, "_").toLowerCase();
+	const segments = keySegments(name);
 	if (/(?:_(?:count|limit|type|name|ttl|length)|hash|policy)$/.test(segments)) return false;
 	return /password|passwd/i.test(name) || /(?:^|_)(?:password|passwd|pass|pwd|secret|token|api_?key|access_?key|secret_?key|client_?secret|private_?key|credentials?|connection_?string|account_?key|shared_?access_?key|shared_?access_?signature|sas|sig)(?:_|$)/.test(segments);
 }
@@ -302,8 +306,24 @@ function connectionField(name: string): boolean {
 	return /connection|(?:url|uri)$|^mongo/.test(normalized);
 }
 
+function publicEndpoint(field: string, value: string): boolean {
+	return /(?:^|_)(?:endpoint|url|uri)$/.test(keySegments(field))
+		&& /^https:\/\/[a-z0-9.-]+(?::\d{1,5})?(?:\/[a-z][a-z_.-]{0,31}){1,6}\/?$/.test(value);
+}
+
+function sourceLineReference(field: string, value: string): boolean {
+	return /\.(?:ts|tsx|js|mjs|cjs|cs|py|go|rs|java|kt|rb|sh|md|json|yaml|yml|toml)$/.test(field)
+		&& /^\d+(?::\d+)?(?:[-–]\d+)?(?=$|[^\w])/.test(value);
+}
+
 function connectionCandidate(text: string, field: string, [start, end]: [number, number], out: Candidate[]): void {
-	if (!connectionField(field) || !loopbackConnection(text, start, end)) out.push({ start, end, kind: "connection-string" });
+	const value = text.slice(start, end);
+	if (sourceLineReference(field, value)) return;
+	// Bare captures may stop before a credential-bearing suffix. Never exempt only its public prefix.
+	if (!/[,;&\[\]{}()<>\\|`]/.test(text[end] ?? "") && publicEndpoint(field, value)) return;
+	const connection = connectionField(field);
+	if (connection && loopbackConnection(text, start, end)) return;
+	out.push({ start, end, kind: "connection-string", ...(!connection ? { via: "field" as const } : {}) });
 }
 
 function connections(text: string, out: Candidate[]): void {
@@ -462,7 +482,7 @@ export function scan(text: string, allowlist: readonly string[] = [], options: S
 		if (allowed.some(pattern => pattern.test(value))) continue;
 		if (result.findings && result.findings.length < MAX_FINDINGS) {
 			for (; lineCursor < candidate.start; lineCursor++) if (text[lineCursor] === "\n") line++;
-			result.findings.push({ kind: candidate.kind, line });
+			result.findings.push({ kind: candidate.kind, line, ...(candidate.via ? { via: candidate.via } : {}) });
 		}
 		const marker = `[REDACTED:${candidate.kind}]`;
 		// Existing markers inside a large section must not exempt its OTHER raw values.
@@ -585,7 +605,7 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 			const kinds = new Set<string>();
 			function addFindings(result: Scan, original: string): void {
 				for (const finding of result.findings ?? []) {
-					if (findings.length < MAX_FINDINGS) findings.push({ kind: finding.kind, line: lineBase + finding.line });
+					if (findings.length < MAX_FINDINGS) findings.push({ kind: finding.kind, line: lineBase + finding.line, ...(finding.via ? { via: finding.via } : {}) });
 				}
 				// Text parts are conceptually joined with one LF, ignoring non-text parts.
 				for (const char of original) if (char === "\n") lineBase++;
