@@ -544,8 +544,9 @@ export function createHandlers(overrides: Partial<Dependencies> = {}) {
 			roles.start(ctx.sessionManager.getSessionId(), event.reason);
 		},
 		async toolCall(event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext) {
+			const envelopeToolName = event.toolName;
 			try {
-				return await shellGuard(async (event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext, executionCwd: string, envelopeToolName: string) => {
+				return await shellGuard(async (event: { toolName: string; input: Record<string, unknown> }, ctx: ExtensionContext, executionCwd: string) => {
 					if (event.toolName !== "bash") return;
 					const config = active(ctx);
 					if (!config?.blockCommands) return;

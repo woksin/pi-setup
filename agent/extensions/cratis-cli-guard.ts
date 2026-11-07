@@ -571,7 +571,7 @@ export let cratisRunner: CratisRunner = spawnRunner;
 export function setCratisRunner(run: CratisRunner): void { cratisRunner = run; }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("tool_call", shellGuard(async (event, ctx, executionCwd, envelopeToolName) => {
+	const guard = (envelopeToolName: string) => shellGuard(async (event, ctx, executionCwd) => {
 		if (event.toolName !== "bash") return undefined;
 		const command = String((event.input as { command?: unknown }).command ?? "");
 		if (!/cratis/.test(command)) return undefined;
@@ -653,5 +653,6 @@ export default function (pi: ExtensionAPI) {
 		};
 		if (choice !== "Yes, run it") return { block: true, reason: "cratis-cli-guard: the user declined this cratis command." };
 		return undefined;
-	}));
+	});
+	pi.on("tool_call", (event, ctx) => guard(event.toolName)(event, ctx));
 }

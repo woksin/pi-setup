@@ -72,7 +72,9 @@ test("loaded Cratis hooks retain execution-envelope coverage", async () => {
 			for (const [handler, command] of [[mutation, "cratis chronicle replay"], [secrets.toolCall, "printenv"]] as const) {
 				for (const event of coveredEnvelopes(command)) {
 					let executions = 0;
-					const verdict = await handler(event, { ...context, cwd: repo.root });
+					const verdict = await handler({ ...event, input: { ...event.input,
+						toolName: "job_start", envelopeToolName: "bash",
+					} }, { ...context, cwd: repo.root });
 					if (!verdict?.block) executions++;
 					assert.equal(executions, event.toolName === "bash" ? 1 : 0, event.toolName);
 				}

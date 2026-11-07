@@ -39,17 +39,17 @@ export function shellInvocations(name: string, input: unknown, cwd: string, dept
 	return executionInvocations(name, input, cwd, depth, field);
 }
 
-/** Session authority stays intact; internal arguments retain execution cwd and the original envelope tool. */
-export function shellGuard(handler: (event: any, ctx: any, executionCwd: string, envelopeToolName: string) => any, enabled: (event: any, ctx: any) => boolean = () => true) {
+/** Session authority stays intact; only the internal third argument names the execution target. */
+export function shellGuard(handler: (event: any, ctx: any, executionCwd: string) => any, enabled: (event: any, ctx: any) => boolean = () => true) {
 	return (event: any, ctx: any) => {
-		if (!enabled(event, ctx)) return handler(event, ctx, ctx?.cwd ?? process.cwd(), event.toolName);
+		if (!enabled(event, ctx)) return handler(event, ctx, ctx?.cwd ?? process.cwd());
 		const normalized = shellInvocations(event.toolName, event.input, ctx?.cwd ?? process.cwd());
 		if (normalized.error) return { block: true, reason: normalized.error };
 		const run = (index: number): any => {
 			const call = normalized.calls[index];
 			if (!call) return;
 			const next = { ...event, toolName: call.command === undefined ? call.name : "bash", input: call.command === undefined ? call.input : { ...(call.input as object), command: call.command } };
-			const result = handler(next, ctx, call.cwd, event.toolName);
+			const result = handler(next, ctx, call.cwd);
 			const proceed = (verdict: any) => verdict?.block ? verdict : run(index + 1);
 			return isPromise(result) ? result.then(proceed) : proceed(result);
 		};
