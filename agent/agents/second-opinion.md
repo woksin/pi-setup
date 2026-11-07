@@ -6,7 +6,7 @@ color: purple
 model: openai-codex/gpt-6-astra
 thinking: high
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, exact-model-guard, model-provenance, pi-context-budget, output-cap, observation-mask]
+extensions: [cratis-cli-guard, exact-model-guard, model-provenance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: replace
 ---

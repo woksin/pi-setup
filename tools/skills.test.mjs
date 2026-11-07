@@ -12,6 +12,19 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SKILLS = join(REPO, "skills");
 
+test("every output-cap agent also loads subagent-cache immediately after it", () => {
+  const roots = [join(REPO, "agent/agents"), ...readdirSync(join(REPO, "agent/profiles"))
+    .map((name) => join(REPO, "agent/profiles", name, "agents")).filter(existsSync)];
+  let checked = 0;
+  for (const root of roots) for (const name of readdirSync(root).filter((n) => n.endsWith(".md"))) {
+    const line = readFileSync(join(root, name), "utf8").match(/^extensions:.*$/m)?.[0] ?? "";
+    if (!line.includes("output-cap")) continue;
+    checked++;
+    assert.match(line, /output-cap, subagent-cache[,\]]/, join(root, name));
+  }
+  assert.ok(checked > 0);
+});
+
 // Same lookup order as agent/bin/pi-setup-tests. A missing package is a setup failure, never a skip.
 function findPiModules() {
   const candidates = [join(REPO, "agent/npm/node_modules"), join(REPO, "agent/node_modules"), join(homedir(), ".pi/agent/npm/node_modules")];

@@ -2,7 +2,7 @@
 name: planner
 description: "Planner (GPT-6 Astra, high) for turning a decided issue/request into a detailed, implementer-ready plan file: researches the code, chooses the approach, names files, steps, gate command, done checklist, risks and stop conditions. Use before implementer/careful-implementer for any non-trivial change; skip for mechanical edits."
 tools: read, bash, grep, find, ls, write
-extensions: [cratis-cli-guard, provider-fallback, issue-work, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, issue-work, output-cap, subagent-cache, observation-mask]
 model: openai-codex/gpt-6-astra
 thinking: high
 ---

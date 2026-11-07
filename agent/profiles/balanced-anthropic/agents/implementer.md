@@ -5,7 +5,7 @@ description: Implementation worker (Claude Sonnet 5.5, medium) for well-specifie
 color: blue
 model: anthropic/claude-sonnet-5-5
 thinking: medium
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, observation-mask, pi-mcp-adapter, pi-browser-use]
+extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, subagent-cache, observation-mask, pi-mcp-adapter, pi-browser-use]
 skills: false
 prompt_mode: replace
 ---

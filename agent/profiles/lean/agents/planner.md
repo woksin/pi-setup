@@ -2,7 +2,7 @@
 name: planner
 description: "Planner (Claude Sonnet 5.5, medium) for turning a decided issue/request into a detailed, implementer-ready plan file: researches the code, chooses the approach, names files, steps, gate command, done checklist, risks and stop conditions. Use for more than three implementation files, cross-repository dependencies or a named unresolved design/behaviour question; reuse valid plans and do not pair with Plan. Stronger user/repository planning requirements still apply."
 tools: read, bash, grep, find, ls, write
-extensions: [cratis-cli-guard, provider-fallback, issue-work, pi-context-budget, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, issue-work, pi-context-budget, output-cap, subagent-cache, observation-mask]
 model: anthropic/claude-sonnet-5-5
 thinking: medium
 ---

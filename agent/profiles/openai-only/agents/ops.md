@@ -6,7 +6,7 @@ color: blue
 model: openai-codex/gpt-6.1-terra
 thinking: low
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, output-cap, observation-mask]
+extensions: [cratis-cli-guard, provider-fallback, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: replace
 ---
