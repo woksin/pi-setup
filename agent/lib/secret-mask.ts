@@ -313,7 +313,7 @@ function publicEndpoint(field: string, value: string): boolean {
 
 function sourceLineReference(field: string, value: string): boolean {
 	return /\.(?:ts|tsx|js|mjs|cjs|cs|py|go|rs|java|kt|rb|sh|md|json|yaml|yml|toml)$/.test(field)
-		&& /^\d+(?::\d+)?(?:[-–]\d+)?(?=$|[^\w])/.test(value);
+		&& /^\d+(?::\d+)?(?:[-–]\d+)?[`'")\],.;:]*$/.test(value);
 }
 
 function connectionCandidate(text: string, field: string, [start, end]: [number, number], out: Candidate[]): void {
