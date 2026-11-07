@@ -34,6 +34,23 @@ test("unrelated TTLs, short cache fields and OpenAI payloads are untouched", () 
 	assert.equal(result.tools, payload.tools);
 });
 
+test("tool arguments and tool schemas are never rewritten", () => {
+	const nested = () => ({ cache_control: { type: "ephemeral", ttl: "1h" }, cachePoint: { type: "default", ttl: "1h" } });
+	const payload = {
+		messages: [{ role: "assistant", content: [
+			{ type: "tool_use", id: "t1", name: "write", input: nested() },
+			{ toolUse: { toolUseId: "t2", name: "write", input: nested() } },
+		] }],
+		tools: [{ name: "write", input_schema: nested() }, { toolSpec: { name: "write", inputSchema: { json: nested() } } }],
+	};
+	assert.equal(stripLongTtl(payload), undefined);
+	const mixed = { ...payload, system: [{ type: "text", text: "s", cache_control: cache() }] };
+	const result = stripLongTtl(mixed) as any;
+	assert.equal(result.system[0].cache_control.ttl, undefined);
+	assert.equal(result.messages, mixed.messages);
+	assert.equal(result.tools, mixed.tools);
+});
+
 test("only known subagents use the short tier; kill switch and shared env stay safe", () => {
 	const roles = processRoles();
 	const primary = roles.primary;
