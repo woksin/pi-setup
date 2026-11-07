@@ -95,6 +95,8 @@ import json
 import os
 import stat
 import sys
+import time
+import uuid
 from pathlib import Path
 
 mode, marker, start, listing = sys.argv[1:]
@@ -103,6 +105,22 @@ mode, marker, start, listing = sys.argv[1:]
 def fingerprint(path):
     stat = path.stat()
     return [stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size]
+
+
+def quarantine_marker():
+    try:
+        info = os.lstat(marker)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISREG(info.st_mode):
+        return False
+    destination = f"{marker}.invalid.{time.time_ns()}.{uuid.uuid4().hex}"
+    try:
+        os.rename(marker, destination)
+    except FileNotFoundError:
+        return True
+    print(f"inbox-watch: warning: invalid marker moved to {destination}", file=sys.stderr)
+    return True
 
 
 def open_marker():
@@ -137,7 +155,40 @@ def read_baseline(source):
         return {}
 
 
-if mode == "record":
+def load_marker():
+    if quarantine_marker():
+        return {}, 0, True
+    try:
+        with open_marker() as source:
+            marker_time = os.fstat(source.fileno()).st_mtime_ns
+            return read_baseline(source), marker_time, False
+    except FileNotFoundError:
+        return {}, 0, True
+    except OSError:
+        if quarantine_marker():
+            return {}, 0, True
+        raise
+
+
+def write_marker(baseline):
+    temporary = f"{marker}.tmp.{uuid.uuid4().hex}"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+    try:
+        with os.fdopen(fd, "w") as target:
+            json.dump(baseline, target)
+            target.flush()
+            cutoff = (Path(start).stat().st_mtime_ns // 1_000_000_000 - 2) * 1_000_000_000
+            os.utime(target.fileno(), ns=(cutoff, cutoff))
+        quarantine_marker()
+        os.replace(temporary, marker)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def initial_baseline():
     cutoff = Path(start).stat().st_mtime_ns
     baseline = {}
     for path in Path(".").glob("*.md"):
@@ -148,17 +199,16 @@ if mode == "record":
         # A write during first-arm scanning must remain eligible on the next poll.
         if path.is_file() and stamp[2] <= cutoff:
             baseline[path.name] = stamp
-    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
-    with os.fdopen(fd, "w") as target:
-        json.dump(baseline, target)
+    return baseline
+
+
+if mode == "record":
+    write_marker(initial_baseline())
 elif mode == "set":
-    with open_marker() as source:
-        cutoff = (Path(start).stat().st_mtime_ns // 1_000_000_000 - 2) * 1_000_000_000
-        os.utime(source.fileno(), ns=(cutoff, cutoff))
+    baseline, _, recovered = load_marker()
+    write_marker(initial_baseline() if recovered else baseline)
 else:
-    with open_marker() as source:
-        marker_time = os.fstat(source.fileno()).st_mtime_ns
-        baseline = read_baseline(source)
+    baseline, marker_time, recovered = load_marker()
     candidates = []
     for name in Path(listing).read_text().splitlines():
         try:
@@ -168,6 +218,8 @@ else:
         if stamp[2] > marker_time and baseline.get(Path(name).name) != stamp:
             candidates.append(name)
     Path(listing).write_text("".join(name + "\n" for name in candidates))
+    if recovered:
+        write_marker(initial_baseline())
 PY
 }
 if [[ ! -e $mark && ! -L $mark ]]; then
