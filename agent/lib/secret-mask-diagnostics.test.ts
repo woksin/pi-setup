@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
+import type { Finding } from "./secret-mask-diagnostics.ts";
 import { normalize } from "node:path";
 import { renderDiagnostics, resultNotice, sanitizeRequestedPath } from "./secret-mask-diagnostics.ts";
 import { scan } from "./secret-mask.ts";
@@ -88,6 +90,47 @@ test("read paths ignore value allowlists and malformed arguments; failures use l
 	}
 	const event = { toolName: "read", get input(): Record<string, unknown> { throw new Error("synthetic"); } };
 	assert.equal(resultNotice(result, event, options), "legacy fallback");
+});
+
+test("named credential notices use fixed vocabulary and read-only sanitized spec-path hints", () => {
+	const value = "Ab12Cd34Ef56Gh78";
+	const result = scan(`public const string ClientSecret = "${value}";`, [], { diagnostics: true });
+	const options = { sensitive, fallback: () => "fallback" };
+	for (const requested of [
+		"/repo/Foo.Integration.Specs/given/Fixture.cs", "/repo/Foo.Specs/Fixture.cs", "/repo/Foo.Tests/Fixture.cs",
+		... ["specs", "tests", "__tests__", "fixtures", "given"].map(segment => `/repo/${segment}/Fixture.cs`),
+	]) {
+		const notice = resultNotice(result, { toolName: "read", input: { path: requested } }, options);
+		assert.match(notice, /connection-string at output line 1 \(provenance unknown\) \(named credential field\)/);
+		assert.match(notice, /Requested path looks like test\/spec code \(path only; this does not show the value is harmless; rotate if it is real\)/);
+		for (const forbidden of [value, value.slice(0, 6), createHash("sha256").update(value).digest("hex"), "ClientSecret"]) {
+			assert.ok(!notice.includes(forbidden), forbidden);
+		}
+		assert.doesNotMatch(notice, /prefix|length|hash|value=/);
+	}
+	for (const requested of ["/repo/src/Foo/Fixture.cs", "/repo/contest/Fixture.cs", "/repo/specs-file/Fixture.cs"]) {
+		assert.doesNotMatch(resultNotice(result, { toolName: "read", input: { path: requested } }, options), /Requested path looks/);
+	}
+	assert.doesNotMatch(resultNotice(result, { toolName: "bash", input: { path: "/repo/tests/Fixture.cs", command: "cat tests/Fixture.cs" } }, options), /Requested path looks|Read request/);
+});
+
+test("spec hints inspect only sanitized paths and never disclose hidden path segments", () => {
+	const result = scan("ClientSecret = 'Ab12Cd34Ef56Gh78'", [], { diagnostics: true });
+	const token = "ghp_" + "a".repeat(36);
+	const options = { sensitive, fallback: () => "fallback" };
+	const notice = resultNotice(result, { toolName: "read", input: { path: `/repo/tests/${token}/Fixture.cs` } }, options);
+	assert.match(notice, /Read request: \[path omitted\]/);
+	assert.ok(!notice.includes(token));
+	assert.doesNotMatch(notice, /Requested path looks/);
+	const hiddenSegment = resultNotice(result, { toolName: "read", input: { path: "/repo/bad\ntests/Fixture.cs" } }, options);
+	assert.match(hiddenSegment, /Read request: \/repo\/\[omitted\]\/Fixture.cs/);
+	assert.doesNotMatch(hiddenSegment, /Requested path looks|bad|\ntests/);
+});
+
+test("forged credential metadata is omitted rather than rendered", () => {
+	const notice = renderDiagnostics(1, [{ kind: "connection-string", line: 1, via: "forged-sentinel" } as unknown as Finding]);
+	assert.doesNotMatch(notice, /forged-sentinel|named credential field|output line/);
+	assert.match(notice, /1 additional redaction\(s\): locations omitted/);
 });
 
 test("renderer accepts only a fixed category vocabulary and valid line numbers", () => {
