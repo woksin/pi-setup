@@ -22,7 +22,7 @@
  *
  * Layering with the Cratis hooks: where the Cratis Pi hooks are installed under process.cwd() AND their extension is proven loaded (its `cratis_quality_gate` tool is registered from that directory; an untrusted project's hooks never count, and no repository script is run then) (lib/cratis-hooks-detect.ts),
  * this guard runs cratis-guard-store-mutations.sh on a chronicle mutation it would confirm and stands down only when the
- * script itself blocks it (exit 2; a silent no-op such as missing `jq`, a timeout or an error keeps this guard blocking)
+ * script itself blocks it for a direct bash event (other execution envelopes are denied locally; a silent no-op such as missing `jq`, a timeout or an error keeps this guard blocking)
  * (one block, one message; CRATIS_HOOKS_ALLOW_STORE_MUTATIONS=1 is the switch, /guards off cratis is not needed) and
  * reads the Cratis read-only list at runtime (falling back to the list below when absent or unparsable). It keeps what
  * Cratis lacks: `prologue start` confirmation, and — when a human has set the Cratis switch — the production check
@@ -571,7 +571,7 @@ export let cratisRunner: CratisRunner = spawnRunner;
 export function setCratisRunner(run: CratisRunner): void { cratisRunner = run; }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("tool_call", shellGuard(async (event, ctx, executionCwd) => {
+	const guard = (envelopeToolName: string) => shellGuard(async (event, ctx, executionCwd) => {
 		if (event.toolName !== "bash") return undefined;
 		const command = String((event.input as { command?: unknown }).command ?? "");
 		if (!/cratis/.test(command)) return undefined;
@@ -589,9 +589,13 @@ export default function (pi: ExtensionAPI) {
 		if (isGuardOff("cratis")) return withoutConfirmation(risky, command, config, ctx);
 
 		if (cratisActive) {
-			// Chronicle mutations belong to cratis-guard-store-mutations.sh: stand down only where it really blocks them.
+			// Only direct bash events are covered by the Cratis Pi bridge.
 			const covered = risky.filter(i => i.path.startsWith("chronicle"));
 			const verdict = covered.length > 0 ? cratisVerdict("store-mutations", executionCwd, command, cratis) : "none";
+			if (verdict === "blocked" && envelopeToolName !== "bash") return {
+				block: true,
+				reason: "cratis-cli-guard: the Cratis hook denied this command.",
+			};
 			if (verdict !== "none") risky = risky.filter(i => !covered.includes(i));
 			if (verdict === "switch") {
 				// A human lifted the Cratis block; the production check is the part Cratis does not have.
@@ -649,5 +653,6 @@ export default function (pi: ExtensionAPI) {
 		};
 		if (choice !== "Yes, run it") return { block: true, reason: "cratis-cli-guard: the user declined this cratis command." };
 		return undefined;
-	}));
+	});
+	pi.on("tool_call", (event, ctx) => guard(event.toolName)(event, ctx));
 }
