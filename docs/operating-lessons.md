@@ -148,3 +148,29 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Cause:** process names and command-line patterns are shared across sessions on the same machine, not scoped to the lane that started them.
 - **Rule:** find the exact PIDs you started (`ps -o pid,ppid,pgid,command` filtered to your own process group or cwd, and `lsof -p PID`) and kill only those numeric PIDs, or let pi-phase clean up its owned process group. Never clean up by name or pattern.
 - **Enforced:** `agent/extensions/kill-guard.ts` blocks name kills and process-search kill pipelines/substitutions before bash executes; `/guards off kill` is the user's switch.
+
+## 2026-11-07
+
+### Train folds regate identical trees
+- **Symptom:** a fold commit triggers another full gate even when its tree matches an already gated head.
+- **Cause:** train gate records require the head SHA to match; tree equality alone does not qualify (`agent/lib/train-ship-check.mjs`).
+- **Rule:** compare `git rev-parse <sha>^{tree}` for the fold/merge and gated head; when they are equal, reuse that gate rather than rerunning identical work.
+- **Enforced:** practice; pi-train's head-SHA gate check does not automate tree-equal reuse.
+
+### Reloading running sessions safely
+- **Symptom:** a reload sent to a terminal does not necessarily reach the intended idle session.
+- **Cause:** terminal keystrokes can be lost or reach a busy session with running subagents.
+- **Rule:** verify the target is a foreground pi, idle, with no running subagents (read task-output stop markers). Confirm the reload happened in the session log; never assume keystrokes succeeded.
+- **Enforced:** practice.
+
+### Session-id prefix collisions
+- **Symptom:** a short session-id prefix matches the wrong session.
+- **Cause:** concurrent sessions can share short prefixes; `issue-work`'s eight-character display abbreviation is not a unique identifier.
+- **Rule:** use at least 13 characters when identifying a session and resolve ambiguity before acting.
+- **Enforced:** practice; no 13-character minimum was verified in issue-work or session-watchdog tooling.
+
+### Live-directory tests need isolation
+- **Symptom:** tests reading or writing the real agent directory can affect running sessions.
+- **Cause:** tests inherit live HOME and agent-directory state unless explicitly isolated.
+- **Rule:** run these tests through `pi-setup-tests`, never against the live agent directory; it supplies an isolated HOME and `PI_CODING_AGENT_DIR` overlay.
+- **Enforced:** tool (`agent/bin/pi-setup-tests`).
