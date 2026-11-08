@@ -458,7 +458,10 @@ def post_notice(text, dirs, now, logger=log_line):
         path = Path(directory).expanduser()
         if path.is_dir():
             try:
-                (path / f"ALL-disk-growth-{clock(now, '%H%M')}.md").write_text(text)
+                stamp = clock(now, '%H%M')
+                # BCAST is delivered with a lane's next real wake; L0 is still woken through PISETUP.
+                (path / f"BCAST-disk-growth-{stamp}.md").write_text(text)
+                (path / f"PISETUP-to-L0-disk-growth-{stamp}.md").write_text(text)
             except OSError as error:
                 logger(f'message file failed: {error}')
 

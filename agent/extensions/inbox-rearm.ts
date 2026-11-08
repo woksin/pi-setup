@@ -5,6 +5,11 @@ import { isAbsolute, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type Params = { check: string; intervalSeconds: number; timeoutSeconds: number; until?: string; cwd?: string; label?: string; checkTimeoutSeconds?: number; quietTimeouts?: number };
+/** Empty timeouts should re-arm themselves: add quietTimeouts when the whole window still fits the 60-minute lease. */
+export function withQuietTimeouts(params: Params): Params {
+	if (params.quietTimeouts !== undefined || !(params.timeoutSeconds > 0) || params.timeoutSeconds > 1800) return params;
+	return { ...params, quietTimeouts: Math.min(24, Math.max(2, Math.floor(3600 / params.timeoutSeconds))) };
+}
 type Watch = { id: string; kind: string; command: string; status: string; startedAt?: number; lane?: string; inboxDir?: string };
 
 function inboxCheck(check: unknown, lane: string): check is string {
@@ -175,7 +180,7 @@ export default function inboxRearm(pi: ExtensionAPI): void {
 		const lost = lostWatch(history, jobs);
 		if (!lost || reminded.has(lost.id)) return;
 		reminded.add(lost.id); // One continuation per completion: no retry loop if starting a watch is denied.
-		const text = `Inbox watch ${lost.id} for ${lane} finished and no replacement is recorded. Before ending this turn, re-arm with the exact call below, then end the turn (do not poll):\njob_watch(${JSON.stringify(lost.params)})\nIf re-arming is blocked, report the blocker; do not silently drop the inbox.`;
+		const text = `Inbox watch ${lost.id} for ${lane} finished and no replacement is recorded. Before ending this turn, re-arm with the exact call below, then end the turn (do not poll; empty timeouts re-arm themselves):\njob_watch(${JSON.stringify(withQuietTimeouts(lost.params))})\nIf re-arming is blocked, report the blocker; do not silently drop the inbox.`;
 		ctx.ui?.notify(text, "warning");
 		return { continue: true, entries: [...event.entries, { type: "custom_message" as const, customType: "inbox-rearm", content: text, display: true }] };
 	});

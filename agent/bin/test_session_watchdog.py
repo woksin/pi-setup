@@ -92,8 +92,9 @@ class Analyse(Base):
     def test_message_file_and_name(self):
         self.write([msg("a", NOW - 700, "assistant", [call("c1", command="x")], stopReason="toolUse")])
         self.run_wd()
-        (f,) = self.files()
-        self.assertRegex(f, r"^ALL-session-watchdog-\d{4}-stuck\.md$")
+        bcast, wake = self.files()
+        self.assertRegex(bcast, r"^BCAST-session-watchdog-\d{4}-stuck\.md$")
+        self.assertRegex(wake, r"^PISETUP-to-L0-session-watchdog-\d{4}-stuck\.md$")
 
     def test_young_tool_call_not_stuck(self):
         self.write([msg("a", NOW - 500, "assistant", [call("c1", command="x")], stopReason="toolUse")])
@@ -292,7 +293,7 @@ class Alarms(Base):
         self.assertEqual(calls, [])
 
     def test_message_prefixes(self):
-        for suffix, prefix in (("stuck", "ALL"), ("memory", "PISETUP-to-L0"), ("silent", "PISETUP-to-L0"), ("fseventsd", "PISETUP-to-L0")):
+        for suffix, prefix in (("stuck", "BCAST"), ("stuck", "PISETUP-to-L0"), ("memory", "PISETUP-to-L0"), ("silent", "PISETUP-to-L0"), ("fseventsd", "PISETUP-to-L0")):
             sw.notify(suffix, "t", "text", self.msgs, False)
             self.assertTrue(any(f.startswith(f"{prefix}-session-watchdog-") and f.endswith(f"-{suffix}.md") for f in self.files()), suffix)
 
