@@ -100,9 +100,11 @@ class DiskGrowthTests(unittest.TestCase):
         second.mkdir()
         dg.post_notice(text, [self.messages, second, self.home / 'absent'], 1000)
         for directory in (self.messages, second):
-            files = list(directory.iterdir())
-            self.assertEqual(len(files), 1)
-            self.assertRegex(files[0].name, r'^ALL-disk-growth-\d{4}\.md$')
+            files = sorted(directory.iterdir())
+            self.assertEqual(len(files), 2)
+            self.assertRegex(files[1].name, r'^PISETUP-to-L0-disk-growth-\d{4}\.md$')
+            self.assertEqual(files[1].read_text(), text)
+            self.assertRegex(files[0].name, r'^BCAST-disk-growth-\d{4}\.md$')
             self.assertEqual(files[0].read_text(), text)
 
     @patch.object(dg, 'attribution_lines', return_value=['Likely writers (mocked):'])
@@ -124,7 +126,7 @@ class DiskGrowthTests(unittest.TestCase):
             start = time.monotonic()
             dg.run(now=1240, free_bytes=10 * G, env=self.env, notifier=lambda text: None)
         self.assertLess(time.monotonic() - start, 3)
-        notice = self.messages / f"ALL-disk-growth-{dg.clock(1240, '%H%M')}.md"
+        notice = self.messages / f"BCAST-disk-growth-{dg.clock(1240, '%H%M')}.md"
         self.assertIn('probe timed out/partial', notice.read_text())
         self.assertIn('Likely writers (mocked):', notice.read_text())
 

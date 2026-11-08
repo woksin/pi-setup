@@ -9,6 +9,9 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+# Existing specs cover recipient matching, not burst coalescing: no settle wait.
+os.environ.setdefault("INBOX_SETTLE_SECONDS", "0")
+
 SCRIPT = Path(os.environ.get("INBOX_WATCH", Path(__file__).resolve().parent.parent / "agent/bin/inbox-watch"))
 
 
