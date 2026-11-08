@@ -219,7 +219,7 @@ test('GHE repositories are host-qualified: a github.com candidate never refuses 
   assert.deepEqual(await decide('pi-publish pr-create --repo acme/widget --host ghe.example.com --head fix/local --title T --body Safe'), {});
   assert.deepEqual(await decide('gh pr create -R ghe.example.com/acme/widget --head fix/local'), {});
   assert.deepEqual(await decide('gh pr create --head fix/local', 'https://ghe.example.com/acme/widget.git'), {});
-  for (const command of ['gh pr create -R acme/widget --head fix/local', 'gh pr create -R github.com/acme/widget --head fix/local', 'gh pr create -R https://github.com/acme/widget --head fix/local'])
+  for (const command of ['gh pr create -R acme/widget --head fix/local', 'gh pr create -R github.com/acme/widget --head fix/local', 'gh pr create -R https://github.com/acme/widget --head fix/local', 'gh pr create -R www.github.com/acme/widget --head fix/local', 'gh pr create -R https://www.github.com/acme/widget --head fix/local'])
     assert.match((await decide(command)).block!, /PR refused: acme\/widget/, command);
   // scp-style and ssh:// remotes may be SSH aliases for github.com: they keep the plain owner/repo key.
   for (const origin of ['git@ghe.example.com:acme/widget.git', 'git@github.com-work:acme/widget.git', 'ssh://git@ghe.example.com/acme/widget.git', 'https://github.com/acme/widget.git'])

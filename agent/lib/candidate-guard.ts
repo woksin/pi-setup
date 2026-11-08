@@ -73,7 +73,8 @@ function explicitHostForm(remote: string) {
 function enterpriseHost(remote: string) {
   const hosted = explicitHostForm(remote) ? HOSTED_REMOTE.exec(remote) : null;
   const host = hosted?.[1].toLowerCase();
-  return host && host !== 'github.com' ? { host, path: hosted![2] } : undefined;
+  // gh resolves *.github.com to github.com, so those keep the plain github.com key.
+  return host && host !== 'github.com' && !host.endsWith('.github.com') ? { host, path: hosted![2] } : undefined;
 }
 
 function repositoryKey(remote: string) {

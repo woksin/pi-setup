@@ -70,8 +70,11 @@ const bool = (value: unknown) => typeof value === "boolean";
 const number = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0;
 const repo = (value: unknown) => text(value) && /^[A-Za-z0-9][A-Za-z0-9-]*\/(?:\.github|[A-Za-z0-9_][A-Za-z0-9_.-]*)$/.test(value);
 const HOST_MAX_LENGTH = 253;
-/** Lowercase ASCII DNS name with at least one dot: no IP-like final label, no IDN (xn--), no port/path/userinfo. */
-const HOST_PATTERN = "^(?!(?:[a-z0-9-]*\\.)*xn--)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+(?![0-9]+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$";
+/**
+ * Lowercase ASCII DNS name with at least one dot: no IP-like final label, no IDN (xn--), no port/path/userinfo.
+ * Subdomains of github.com are refused: gh resolves them to github.com, so they would bypass host-qualified keys.
+ */
+const HOST_PATTERN = "^(?!(?:[a-z0-9-]+\\.)+github\\.com$)(?!(?:[a-z0-9-]*\\.)*xn--)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+(?![0-9]+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$";
 const hostname = (value: unknown) => text(value) && value.length <= HOST_MAX_LENGTH && new RegExp(HOST_PATTERN, "u").test(value);
 const DEFAULT_HOST = "github.com";
 const fieldName = (value: unknown) => text(value) && /^[A-Za-z0-9_.\[\]]+$/.test(value);

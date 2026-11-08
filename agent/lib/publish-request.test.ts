@@ -202,7 +202,7 @@ const hostileHosts: unknown[] = [
 	"GHE.Example.com", "ghe.example.COM", "ghe.example.com.", ".ghe.example.com", "localhost", "ghe", "127.0.0.1", "1.2.3.4", "[::1]", "::1",
 	"-ghe.example.com", "ghe-.example.com", "ghe.-example.com", "ghe..example.com", "xn--e1afmkfd.example.com", "ghe.xn--p1ai", "ghe.example.xn--p1ai",
 	"ghé.example.com", "ghe\uff0eexample.com", "ghe\u200b.example.com", "ghe.example\u202e.com", "ghe.example.com\ufeff", `${longest}d`, `${"a".repeat(64)}.example.com`,
-	"--evil", "-", "", "github.com:443", 1, 0, true, null, ["ghe.example.com"], { host: "ghe.example.com" },
+	"--evil", "-", "", "github.com:443", "www.github.com", "api.github.com", "a.b.github.com", 1, 0, true, null, ["ghe.example.com"], { host: "ghe.example.com" },
 ];
 
 test("host accepts only strict lowercase dotted DNS names and the schema pattern accepts the same set", () => {

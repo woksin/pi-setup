@@ -78,6 +78,8 @@ test("typed and CLI issue closes reuse touch and actual closed-state confirmatio
 	assert.deepEqual(detectIssueCommands("false || pi-publish issue-close --repo o/r --number 3"), []);
 	assert.deepEqual(detectIssueCommands("pi-publish --help issue-close --repo o/r --number 3"), []);
 	assert.deepEqual(detectPublicationIssues({ ...request, unknown: true }), []);
+	assert.deepEqual(detectPublicationIssues({ ...request, host: "ghe.example.com" }), []);
+	assert.deepEqual(detectPublicationIssues({ ...request, host: "github.com" }), detectPublicationIssues(request));
 	await (await recordDetected(f.deps, session(), request, undefined)).confirm;
 	assert.ok(!(await readEvents(f.deps)).some(event => event.state === "done"));
 	f.state = "CLOSED";
