@@ -507,13 +507,14 @@ def notify(suffix, title, text, messages_dir, dry_run):
         print(f"[dry-run] WOULD NOTIFY ({suffix}): {title}\n{text}\n")
         return
     if messages_dir and os.path.isdir(messages_dir):
-        # Only stuck-session notices go to every lane; host-level notices go to L0 through PISETUP.
-        prefix = "ALL" if suffix == "stuck" else "PISETUP-to-L0"
-        try:
-            with open(os.path.join(messages_dir, f"{prefix}-session-watchdog-{time.strftime('%H%M')}-{suffix}.md"), "w") as f:
-                f.write(text + "\n")
-        except OSError as e:
-            log(f"message file failed: {e}")
+        # Stuck notices also go to every lane as a passive BCAST (no wake); L0 is always woken through PISETUP.
+        prefixes = ("BCAST", "PISETUP-to-L0") if suffix == "stuck" else ("PISETUP-to-L0",)
+        for prefix in prefixes:
+            try:
+                with open(os.path.join(messages_dir, f"{prefix}-session-watchdog-{time.strftime('%H%M')}-{suffix}.md"), "w") as f:
+                    f.write(text + "\n")
+            except OSError as e:
+                log(f"message file failed: {e}")
     short = text.replace("\\", " ").replace('"', "'")[:230]
     try:
         subprocess.run(["osascript", "-e", f'display notification "{short}" with title "session-watchdog"'],

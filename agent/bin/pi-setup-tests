@@ -53,6 +53,8 @@ for tree in lib extensions early-extensions; do
 done
 # The publish tool suite smoke-runs the real launcher at ../bin/pi-publish; copy only that file (mode preserved).
 if [ -f "$agent/bin/pi-publish" ]; then mkdir -p "$fakeagent/bin" && cp -p "$agent/bin/pi-publish" "$fakeagent/bin/pi-publish"; fi
+# The inbox-watch suite runs the real script; copy only that file (mode preserved).
+if [ -f "$agent/bin/inbox-watch" ]; then mkdir -p "$fakeagent/bin" && cp -p "$agent/bin/inbox-watch" "$fakeagent/bin/inbox-watch"; fi
 ln -s "$modules" "$fakeagent/node_modules"
 mkdir -p "$fakeagent/npm"
 ln -s "$modules" "$fakeagent/npm/node_modules"
