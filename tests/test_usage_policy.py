@@ -56,17 +56,15 @@ class UsagePolicy(unittest.TestCase):
                 self.assertIn("never pair `planner` with `Plan`", text)
                 self.assertIn("Stronger user/repository planning requirements take precedence", text)
 
-    def test_scheduling_documents_primary_launch_enforcement_boundary(self):
+    def test_scheduling_documents_model_policy_without_lane_cap(self):
         for path in SCHEDULING:
             with self.subTest(path=path):
                 text = source(path)
-                for phrase in ("six active worker lanes plus two orchestration sessions globally",
-                               "across repositories, not per repository",
-                               "Primary launches enforce the six-worker/two-orchestration admission boundary",
-                               "SDK fan-out and manual launches remain outside it",
-                               "Parked live sessions still count against their pool",
-                               "Sonnet 5.5 medium", "Opus 5.5 medium"):
+                for phrase in ("Sonnet 5.5 medium", "Opus 5.5 medium"):
                     self.assertIn(phrase, text)
+                for stale in ("six active worker lanes", "two orchestration sessions", "six-worker/two-orchestration",
+                              "Parked live sessions still count against their pool"):
+                    self.assertNotIn(stale, text)
                 self.assertNotIn("admission and parking come later", text)
 
     def test_context_prose_and_rollout_preserve_local_safety_state(self):

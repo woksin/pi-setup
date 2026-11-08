@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 58855174af45cdd6f0f8f5080ed577a517b53b7634d4ad13af44b9eaf4588e78
+// pi-setup-source-sha256: 0b4d5b0586e477ea85dd0144c009e80bfbff8f9f7f032a89099ab6e20694531a
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -3810,18 +3810,7 @@ async function admit(ctx, request2, beforeLaunch) {
     if (!owner) throw new Error("admission controller identity unavailable");
     const active = leases(dir, rows);
     const pis = rows.filter((r2) => r2.pi);
-    const covered = /* @__PURE__ */ new Set();
-    for (const l2 of active) {
-      const child = pis.find((p) => !covered.has(p.pid) && below2(p, l2.child ?? l2.owner, rows));
-      if (child) covered.add(child.pid);
-    }
-    const extra = pis.filter((p) => !covered.has(p.pid));
-    const workers = active.filter((l2) => l2.pool === "worker").length + extra.length;
-    const orchestrators = active.filter((l2) => l2.pool === "orchestration").length;
-    const local = active.filter((l2) => l2.root === request2.root && l2.pool === "worker").length + extra.filter((p) => (request2.localCwds ?? [request2.cwd]).includes(p.cwd)).length;
-    const counts2 = `workers=${workers}/6 orchestrators=${orchestrators}/2 local=${local}/${Math.min(request2.localLimit, 6)}`;
-    if (active.some((l2) => l2.cwd === request2.cwd) || pis.some((p) => p.cwd === request2.cwd)) throw new Error(`already running in ${request2.cwd}; ${counts2}`);
-    if (request2.pool === "worker" ? workers >= 6 || local >= Math.min(request2.localLimit, 6) : orchestrators >= 2) throw new Error(`admission refused: ${counts2}`);
+    if (active.some((l2) => l2.cwd === request2.cwd) || pis.some((p) => p.cwd === request2.cwd)) throw new Error(`already running in ${request2.cwd}`);
     const value = {
       version: 1,
       token: randomUUID4(),
@@ -3904,9 +3893,7 @@ async function run(id, opts, c2, root, ctx, beforeLaunch) {
     root: ctx.realpath(root),
     cwd: ctx.realpath(target.cwd),
     id: target.id,
-    pool: target.coordinator || ["repo-orch", "sub-orch"].includes(target.lane?.role ?? "") ? "orchestration" : "worker",
-    localLimit: c2.coordinator.maxRunning,
-    localCwds: c2.lanes.filter((l2) => !l2.retired && !["repo-orch", "sub-orch"].includes(l2.role ?? "")).map((l2) => laneDir(l2, c2, root, ctx)).filter(existsSync14).map((p) => ctx.realpath(p))
+    pool: target.coordinator || ["repo-orch", "sub-orch"].includes(target.lane?.role ?? "") ? "orchestration" : "worker"
   }, beforeLaunch);
   const env = { ...ctx.env };
   for (const name of c2.launch.unsetEnv) delete env[name];

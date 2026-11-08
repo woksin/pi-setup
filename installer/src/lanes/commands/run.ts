@@ -32,9 +32,7 @@ export async function run(id: string, opts: Record<string, string>, c: Config, r
   }
   if (!target.coordinator || !c.launch.preapproveMcp) await preapprove(ctx, target.cwd, c.launch.preapproveMcp);
   const lease = await admit(ctx, { root: ctx.realpath(root), cwd: ctx.realpath(target.cwd), id: target.id,
-    pool: target.coordinator || ["repo-orch", "sub-orch"].includes(target.lane?.role ?? "") ? "orchestration" : "worker",
-    localLimit: c.coordinator.maxRunning, localCwds: c.lanes.filter(l => !l.retired && !["repo-orch", "sub-orch"].includes(l.role ?? ""))
-      .map(l => laneDir(l, c, root, ctx)).filter(existsSync).map(p => ctx.realpath(p)) }, beforeLaunch);
+    pool: target.coordinator || ["repo-orch", "sub-orch"].includes(target.lane?.role ?? "") ? "orchestration" : "worker" }, beforeLaunch);
   const env = { ...ctx.env };
   for (const name of c.launch.unsetEnv) delete env[name];
   const messages = expand(c.messages.dir, c, root, ctx.home);

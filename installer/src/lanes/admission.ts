@@ -10,7 +10,7 @@ interface Lease {
   root: string; cwd: string; id: string; pool: "worker" | "orchestration";
 }
 export interface AdmissionRequest {
-  root: string; cwd: string; id: string; pool: Lease["pool"]; localLimit: number; localCwds?: string[];
+  root: string; cwd: string; id: string; pool: Lease["pool"];
 }
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 async function bounded<T>(work: Promise<T>): Promise<T> {
@@ -122,19 +122,8 @@ export async function admit(ctx: LanesCtx, request: AdmissionRequest, beforeLaun
   const lease = await locked(dir, async () => {
     const rows = await inventory(ctx); const owner = rows.find(r => r.pid === process.pid);
     if (!owner) throw new Error("admission controller identity unavailable");
-    const active = leases(dir, rows); const pis = rows.filter(r => r.pi); const covered = new Set<number>();
-    for (const l of active) {
-      const child = pis.find(p => !covered.has(p.pid) && below(p, l.child ?? l.owner, rows));
-      if (child) covered.add(child.pid);
-    }
-    const extra = pis.filter(p => !covered.has(p.pid));
-    const workers = active.filter(l => l.pool === "worker").length + extra.length;
-    const orchestrators = active.filter(l => l.pool === "orchestration").length;
-    const local = active.filter(l => l.root === request.root && l.pool === "worker").length
-      + extra.filter(p => (request.localCwds ?? [request.cwd]).includes(p.cwd!)).length;
-    const counts = `workers=${workers}/6 orchestrators=${orchestrators}/2 local=${local}/${Math.min(request.localLimit, 6)}`;
-    if (active.some(l => l.cwd === request.cwd) || pis.some(p => p.cwd === request.cwd)) throw new Error(`already running in ${request.cwd}; ${counts}`);
-    if (request.pool === "worker" ? workers >= 6 || local >= Math.min(request.localLimit, 6) : orchestrators >= 2) throw new Error(`admission refused: ${counts}`);
+    const active = leases(dir, rows); const pis = rows.filter(r => r.pi);
+    if (active.some(l => l.cwd === request.cwd) || pis.some(p => p.cwd === request.cwd)) throw new Error(`already running in ${request.cwd}`);
     const value: Lease = { version: 1, token: randomUUID(), owner: { pid: owner.pid, start: owner.start }, root: request.root, cwd: request.cwd, id: request.id, pool: request.pool,
       priorPi: pis.map(p => ({ pid: p.pid, start: p.start })) };
     const file = join(dir, `${value.token}.json`); store(file, value);

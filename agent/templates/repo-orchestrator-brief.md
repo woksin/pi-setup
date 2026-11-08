@@ -10,7 +10,7 @@ this repository and are the only session that pushes, opens PRs and merges here.
 You do not implement features yourself unless a lane is missing; delegate instead.
 
 ## Lanes
-Lean scheduling policy: at most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. Ordinary worker main sessions use Sonnet 5.5 medium; orchestration uses Opus 5.5 medium. Primary launches enforce the six-worker/two-orchestration admission boundary across roots sharing the Pi agent directory; SDK fan-out and manual launches remain outside it. Parked live sessions still count against their pool.
+Lean scheduling policy: Ordinary worker main sessions use Sonnet 5.5 medium; orchestration uses Opus 5.5 medium.
 | Lane | Issue(s) | Worktree / branch | Owned files | Depends on |
 |---|---|---|---|---|
 | <L24> | <#n> | <path> (`<branch>`) | <paths> | <lane/branch or none> |
