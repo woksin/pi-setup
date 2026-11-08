@@ -3512,6 +3512,33 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(self.done(self.run_phase(kind="build"))[0], 0)
         self.assertEqual(self.done(watcher)[0], 0)
 
+    def usage_error(self, *args):
+        error = io.StringIO()
+        with redirect_stderr(error), self.assertRaises(SystemExit) as raised:
+            pi_phase.main(list(args), state=self.state, configuration=self.config)
+        return raised.exception.code, error.getvalue()
+
+    def test_usage_errors_name_the_valid_command(self):
+        code, text = self.usage_error("run", "--kind", "lint", "--label", "x", "--", "true")
+        self.assertEqual(code, 2)
+        self.assertIn("use --kind build", text)
+        code, text = self.usage_error("run", "--", "true")
+        self.assertEqual(code, 2)
+        self.assertIn("minimal command: pi-phase run --kind build|test|integration --label LABEL", text)
+
+    def test_run_help_leads_with_common_usage(self):
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit):
+            pi_phase.main(["run", "--help"], state=self.state, configuration=self.config)
+        self.assertIn("Common usage:\n  pi-phase run --kind build|test|integration", out.getvalue())
+
+    def test_queue_timeout_note_says_not_to_rerun_in_foreground(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            pi_phase.queue_timeout_note(5)
+        self.assertIn("pi-phase status once", out.getvalue())
+        self.assertIn("background job; do not rerun in the foreground", out.getvalue())
+
     def test_limits_and_vstest_preset_reject_unconfirmed(self):
         self.assertEqual(self.done(self.run_phase(timeout="601"))[0], 125)
         self.assertEqual(self.done(self.run_phase(timeout="nan"))[0], 125)
