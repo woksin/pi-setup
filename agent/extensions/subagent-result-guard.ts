@@ -13,6 +13,8 @@ import { resolve, sep } from "node:path";
 import { isGuardOff } from "../lib/guards.ts";
 import { integrityWarnings, parseNotifications, type Notification, type RecordLike } from "../lib/subagent-integrity.ts";
 import { argsOf, executableCommands } from "./wait-guard.ts";
+import { logError } from "../lib/output-cap.ts";
+import { expandNotification, type NotifyRecord } from "../lib/subagent-notify.ts";
 
 const FETCH_HELP = "subagent-results: completion notification already delivered. Use that result; do not fetch it again. " +
   "A truncated preview permits only the first fetch. Use verbose: true only when you need the full conversation.";
@@ -20,6 +22,35 @@ const OUTPUT_HELP = "subagent-results: raw task transcript reads through bash ar
   "or get_subagent_result once if its preview was truncated; use verbose: true when the full conversation is needed.";
 const TRUNCATION = "...(truncated, use get_subagent_result for full output)";
 const decode = (text: string) => text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+
+type RegistryRecord = NotifyRecord & { handle?: string; alias?: string; sessionFile?: string };
+
+/** The documented pi-subagents manager registry exposes records by id; fails open when absent. */
+function registryRecord(id: string): RegistryRecord | undefined {
+  const registry = (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] as
+    { getRecord?: (id: string) => RegistryRecord | undefined } | undefined;
+  return registry?.getRecord?.(id);
+}
+
+/** Rewrite the text of a custom subagent-notification message; returns the same object when unchanged. */
+function expandMessage<T>(message: T): T {
+  const msg = message as { role?: string; customType?: string; content?: unknown } | undefined;
+  if (msg?.role !== "custom" || msg.customType !== "subagent-notification") return message;
+  if (typeof msg.content === "string") {
+    const content = expandNotification(msg.content, registryRecord);
+    return content === msg.content ? message : { ...msg, content } as T;
+  }
+  if (!Array.isArray(msg.content)) return message;
+  let changed = false;
+  const content = msg.content.map(part => {
+    if (part?.type !== "text" || typeof part.text !== "string") return part;
+    const text = expandNotification(part.text, registryRecord);
+    if (text === part.text) return part;
+    changed = true;
+    return { ...part, text };
+  });
+  return changed ? { ...msg, content } as T : message;
+}
 
 export class ResultTracker {
   private delivered = new Map<string, { truncated: boolean; fetched: boolean }>();
@@ -45,11 +76,13 @@ export class ResultTracker {
   notification(message: unknown): void {
     const msg = message as { role?: string; customType?: string; content?: unknown; timestamp?: number } | undefined;
     if (msg?.role !== "custom" || msg.customType !== "subagent-notification") return;
-    const content = typeof msg.content === "string" ? msg.content : Array.isArray(msg.content)
+    const original = typeof msg.content === "string" ? msg.content : Array.isArray(msg.content)
       ? msg.content.map(part => part?.type === "text" ? part.text : "").join("\n") : "";
-    const delivery = `${msg.timestamp ?? ""}\0${content}`;
+    const delivery = `${msg.timestamp ?? ""}\0${original}`;
     if (this.observed.has(delivery)) return;
     this.observed.add(delivery);
+    // A preview expanded to the whole report counts as complete: no pointless fetch.
+    const content = expandNotification(original, registryRecord);
     for (const match of content.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
       const id = /<task-id>([^<]+)<\/task-id>/.exec(match[1])?.[1];
       const result = /<result>([\s\S]*?)<\/result>/.exec(match[1])?.[1];
@@ -58,11 +91,7 @@ export class ResultTracker {
       // message_end and before_agent_start may observe the same notification.
       const fresh = !this.delivered.has(key);
       if (fresh) this.delivered.set(key, { truncated: decode(result).endsWith(TRUNCATION), fetched: false });
-      // The documented pi-subagents manager registry exposes records by id.
-      // Read identity only: no npm import, mutation, result read or consumption.
-      const registry = (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] as
-        { getRecord?: (id: string) => { handle?: string; alias?: string; sessionFile?: string } | undefined } | undefined;
-      const record = registry?.getRecord?.(key);
+      const record = registryRecord(key);
       this.alias(key, record?.handle);
       this.alias(key, record?.alias);
       if (fresh && !this.replaying) for (const n of parseNotifications(match[0])) this.onFresh?.(n, record);
@@ -138,6 +167,15 @@ export default function (pi: ExtensionAPI) {
   // without triggerTurn). Observe them at the actual model-delivery boundary too.
   pi.on("context", event => {
     for (const message of event.messages) tracker.notification(message);
+    if (isGuardOff("subagent-results")) return undefined;
+    // Deliver whole reports instead of the 500/300-char preview (per-call copy; session file untouched).
+    try {
+      const messages = event.messages.map(expandMessage);
+      return messages.some((m, i) => m !== event.messages[i]) ? { messages } : undefined;
+    } catch (e) {
+      logError("subagent-result-guard", "context", e);
+      return undefined;
+    }
   });
   pi.on("before_agent_start", event => {
     if (event.messageType === "custom") tracker.notification({ ...event.message, role: "custom" });

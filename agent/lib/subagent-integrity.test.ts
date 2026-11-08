@@ -100,3 +100,22 @@ test("reload replay does not re-warn; a fresh notification afterwards does", () 
   assert.equal(seen.length, 1);
   assert.match(seen[0], /subagent new/);
 });
+
+test("expanded complete notification blocks the fetch; truncated-at-limit allows one", () => {
+  const marker = "\n...(truncated, use get_subagent_result for full output)";
+  const reg = (result: string) => { (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = { getRecord: () => ({ status: "completed", result }) }; };
+  const msg = (id: string, preview: string) => ({ role: "custom", customType: "subagent-notification", timestamp: Math.random(),
+    content: `<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>\n<result>${preview}${marker}</result>\n</task-notification>` });
+  try {
+    reg("r".repeat(1200));
+    const whole = new ResultTracker();
+    whole.notification(msg("w1", "r".repeat(500)));
+    assert.match(whole.fetch("w1", false) ?? "", /already delivered/);
+    reg("r".repeat(3000));
+    const cut = new ResultTracker();
+    cut.notification(msg("c1", "r".repeat(500)));
+    assert.equal(cut.fetch("c1", false), undefined);
+  } finally {
+    (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = undefined;
+  }
+});
