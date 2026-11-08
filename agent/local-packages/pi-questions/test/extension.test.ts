@@ -324,3 +324,23 @@ test("no hard-coded /Users paths in src or test", () => {
 	}
 	assert.ok(!readFileSync("test/extension.test.ts", "utf8").split("\n").some(l => l.includes(`"${["", "Users"].join("/")}`)));
 });
+
+test("mutating actions return a one-line status; get trims to the last 5 comments unless all:true", async t => {
+	const { root, home } = env(t);
+	const a = session(t, { root, home, sessionId: "sa", lane: "LANE-A" });
+	await a.call({ action: "ask", kind: "fyi", title: `Heads up ${"long title ".repeat(10)}` });
+	let last = "";
+	for (let i = 1; i <= 7; i++) last = text(await a.call({ action: "comment", id: "Q-1", text: `note number ${i}` }));
+	const [head, status, ...rest] = last.split("\n");
+	assert.equal(head, "Comment added.");
+	assert.equal(rest.length, 0);
+	assert.match(status, /^Q-1 \[fyi\] open · rev \d+ · 7 comments · Heads up long title /);
+	assert.ok(status.endsWith("…"));
+	assert.ok(status.split(" · ")[3].length <= 60);
+	const trimmed = text(await a.call({ action: "get", id: "Q-1" }));
+	assert.match(trimmed, /… 2 earlier comments \(get with all: true\)/);
+	assert.ok(!trimmed.includes("note number 2"));
+	assert.ok(trimmed.includes("note number 3") && trimmed.includes("note number 7"));
+	const full = text(await a.call({ action: "get", id: "Q-1", all: true }));
+	assert.ok(full.includes("note number 1") && !full.includes("earlier comment"));
+});
