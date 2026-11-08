@@ -100,3 +100,70 @@ test("reload replay does not re-warn; a fresh notification afterwards does", () 
   assert.equal(seen.length, 1);
   assert.match(seen[0], /subagent new/);
 });
+
+test("expanded complete notification blocks the fetch; truncated-at-limit allows one", () => {
+  const marker = "\n...(truncated, use get_subagent_result for full output)";
+  const reg = (result: string) => { (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = { getRecord: () => ({ status: "completed", result }) }; };
+  const msg = (id: string, preview: string) => ({ role: "custom", customType: "subagent-notification", timestamp: Math.random(),
+    content: `<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>\n<result>${preview}${marker}</result>\n</task-notification>` });
+  try {
+    reg("r".repeat(1200));
+    const whole = new ResultTracker();
+    whole.notification(msg("w1", "r".repeat(500)));
+    assert.match(whole.fetch("w1", false) ?? "", /already delivered/);
+    reg("r".repeat(3000));
+    const cut = new ResultTracker();
+    cut.notification(msg("c1", "r".repeat(500)));
+    assert.equal(cut.fetch("c1", false), undefined);
+  } finally {
+    (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = undefined;
+  }
+});
+
+test("fetch of a running agent is blocked without wait; fails open otherwise", () => {
+  const set = (rec: unknown) => { (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = rec === undefined ? undefined : { getRecord: (id: string) => id === "r1" ? rec : undefined }; };
+  try {
+    const t = new ResultTracker();
+    set({ status: "running" });
+    assert.match(t.fetch("r1", false) ?? "", /r1 is still running.*do not poll/);
+    assert.match(t.fetch("r1", true) ?? "", /still running/);
+    assert.equal(t.fetch("r1", false, true), undefined);
+    set({ status: "queued" });
+    assert.match(t.fetch("r1", false) ?? "", /still running/);
+    set({ status: "completed" });
+    assert.equal(t.fetch("r1", false), undefined); // no delivered state: existing behaviour
+    assert.equal(t.fetch("unknown", false), undefined);
+    set(undefined);
+    assert.equal(t.fetch("r1", false), undefined);
+  } finally {
+    set(undefined);
+  }
+});
+
+test("oversized reports are logged once per fresh notification, not on replay", async () => {
+  const { reportOversize } = await import("../extensions/subagent-result-guard.ts");
+  const { readFileSync, existsSync } = await import("node:fs");
+  const file = join(mkdtempSync(join(tmpdir(), "os-")), "errors.jsonl");
+  const prev = process.env.PI_EFFICIENCY_ERRORS_FILE;
+  process.env.PI_EFFICIENCY_ERRORS_FILE = file;
+  const results: Record<string, string> = { big: "x".repeat(2000), small: "x".repeat(100), old: "x".repeat(2000) };
+  (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = { getRecord: (id: string) => ({ status: "completed", type: "ops", result: results[id] }) };
+  const msg = (id: string) => ({ role: "custom", customType: "subagent-notification", timestamp: Math.random(),
+    content: `<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>\n<result>ok</result>\n</task-notification>` });
+  try {
+    const t = new ResultTracker();
+    t.onFresh = reportOversize;
+    t.replay(() => t.notification(msg("old")));
+    t.notification(msg("small"));
+    assert.equal(existsSync(file), false);
+    t.notification(msg("big"));
+    t.notification(msg("big"));
+    const lines = readFileSync(file, "utf8").trim().split("\n").map(l => JSON.parse(l));
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].event, "oversized-report");
+    assert.match(lines[0].message, /ops big report 2000 chars > 1500/);
+  } finally {
+    (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = undefined;
+    if (prev === undefined) delete process.env.PI_EFFICIENCY_ERRORS_FILE; else process.env.PI_EFFICIENCY_ERRORS_FILE = prev;
+  }
+});

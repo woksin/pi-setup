@@ -51,3 +51,6 @@ Only send actionable coordination: deliveries, blocker changes, questions/decisi
 
 ## Stop and report to <L0 id> when
 A lane is blocked on another repository, CI fails for a reason you cannot attribute, a release would be major, or the lanes disagree on a design you cannot settle from the repository's rules.
+
+## Report size
+Reply ≤1.5k chars, first 400 chars = the verdict; longer detail goes to a file you name.
