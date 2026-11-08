@@ -2,7 +2,7 @@
 
 ## Primary admission and parking
 
-All `lanes start`/`resume` terminal commands converge on `lanes --dir ROOT run ID|coordinator`; printing reserves nothing until executed. Admission spans wrapper relaunch and confirmed child exit. Across roots sharing `PI_CODING_AGENT_DIR` (default `~/.pi/agent`), pools are six workers plus two orchestration primaries, with no borrowing. Only the configured coordinator and validated repo-orch/sub-orch roles use orchestration. `coordinator.maxRunning` defaults to six and limits local workers to `min(configured, 6)`. Unmanaged Pi and extra Pi children count conservatively as workers. Existing over-budget work is not killed. SDK fan-out, prompts in existing sessions and arbitrary later manual launches are not intercepted; budget them cooperatively.
+All `lanes start`/`resume` terminal commands converge on `lanes --dir ROOT run ID|coordinator`; printing reserves nothing until executed. Admission spans wrapper relaunch and confirmed child exit. Admission only refuses a second launch in a directory that already has a running lane or Pi; there is no worker or orchestration count cap, and `coordinator.maxRunning` is retained for compatibility but not enforced. SDK fan-out, prompts in existing sessions and arbitrary later manual launches are not intercepted; budget them cooperatively.
 
 Handoff start/resume requests validate and print/open a launch command without restoring configuration. Its digest binds the handoff bytes, canonical paths, target ID and validated config. Only the admitted `run` revalidates HEAD/worktree and saves restoration before spawning; changed or foreign targets are refused. A child failure leaves that explicit restoration persisted for inspection/retry, not silently rolled back.
 

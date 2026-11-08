@@ -30,7 +30,7 @@ test("run holds lease through wrapper relaunch, forwards verified cancellation, 
   await new Promise(resolve => setImmediate(resolve));
   process.emit("SIGTERM"); await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(signals, ["SIGTERM"]);
   rows.push({ pid: 30, ppid: 20, start: "pi-first", pi: true, cwd: ctx.home });
-  await assert.rejects(admit(ctx, { root: ctx.home, cwd: ctx.home, id: "L0", pool: "orchestration", localLimit: 6 }), /already running/);
+  await assert.rejects(admit(ctx, { root: ctx.home, cwd: ctx.home, id: "L0", pool: "orchestration" }), /already running/);
   rows.pop(); rows.push({ pid: 31, ppid: 20, start: "pi-relaunch", pi: true, cwd: ctx.home });
   const files = readdirSync(join(ctx.piAgentDir, "lanes-admission")).filter(n => n.endsWith(".json")); assert.equal(files.length, 1);
   rows.splice(1); finish({ code: 17, signal: null }); assert.equal(await running, 17);

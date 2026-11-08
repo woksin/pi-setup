@@ -9,43 +9,30 @@ const owner = { pid: process.pid, ppid: 1, start: "owner", pi: false };
 const pi = (pid: number, cwd = `/work/${pid}`, ppid = 1): AdmissionProcess => ({ pid, ppid, start: `start-${pid}`, pi: true, cwd });
 function setup(rows: AdmissionProcess[] = []) {
   const ctx = laneCtx({ admissionInventory: async () => [owner, ...rows] });
-  const request = { root: ctx.home, cwd: join(ctx.home, "work"), id: "L1", pool: "worker" as const, localLimit: 6 };
+  const request = { root: ctx.home, cwd: join(ctx.home, "work"), id: "L1", pool: "worker" as const };
   mkdirSync(request.cwd); return { ctx, request };
 }
-test("six workers and two orchestrators are separate non-borrowing pools", async () => {
-  for (const count of [5, 6]) {
-    const { ctx, request } = setup(Array.from({ length: count }, (_, i) => pi(i + 100)));
-    if (count === 6) await assert.rejects(admit(ctx, request), /workers=6/);
-    else { const lease = await admit(ctx, request); await lease.release(); }
-  }
-  const { ctx, request } = setup();
-  const a = await admit(ctx, { ...request, pool: "orchestration" });
-  const b = await admit(ctx, { ...request, pool: "orchestration", cwd: ctx.home, id: "L0" });
-  await assert.rejects(admit(ctx, { ...request, pool: "orchestration", cwd: "/third" }), /orchestrators=2/);
-  const worker = await admit(ctx, { ...request, cwd: "/worker" });
-  await worker.release(); await b.release(); await a.release();
+test("worker and orchestration admissions are never refused for counts", async () => {
+  const { ctx, request } = setup(Array.from({ length: 8 }, (_, i) => pi(i + 100)));
+  const leases = [];
+  for (let i = 0; i < 4; i++) leases.push(await admit(ctx, { ...request, cwd: `/worker-${i}`, id: `W${i}` }));
+  for (let i = 0; i < 4; i++) leases.push(await admit(ctx, { ...request, pool: "orchestration", cwd: `/orch-${i}`, id: `O${i}` }));
+  for (const l of leases) await l.release();
 });
-test("two roots race atomically for the last shared worker slot; pending counts", async () => {
-  const { ctx, request } = setup(Array.from({ length: 5 }, (_, i) => pi(i + 100)));
-  const results = await Promise.allSettled([admit(ctx, request), admit(ctx, { ...request, root: "/other-root", cwd: "/other-work" })]);
-  assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
-  assert.equal(results.filter(r => r.status === "rejected").length, 1);
-  for (const r of results) if (r.status === "fulfilled") await r.value.release();
-});
-test("verified child deduplicates once, extra Pi and unmanaged Pi count as workers", async () => {
+test("lease child registration works; unrelated Pi processes do not block other cwds", async () => {
   const rows: AdmissionProcess[] = [];
   const { ctx, request } = setup(rows);
   const lease = await admit(ctx, request);
   rows.push({ pid: 20, ppid: process.pid, start: "child", pi: false });
   await lease.child(20);
-  rows.push(pi(30, request.cwd, 20), pi(31, "/extra", 20));
-  await assert.rejects(admit(ctx, { ...request, cwd: "/new", localLimit: 1 }), /local=1/);
-  rows.splice(0); await lease.release();
+  rows.push(pi(30, "/elsewhere", 20), pi(31, "/extra", 20));
+  const other = await admit(ctx, { ...request, cwd: "/new", id: "L2" }); 
+  await assert.rejects(admit(ctx, { ...request, cwd: "/extra", id: "L3" }), /already running/);
+  rows.splice(0); await other.release(); await lease.release();
 });
-test("local limit, duplicate canonical cwd, malformed inventory and leases fail closed", async () => {
+test("duplicate canonical cwd, malformed inventory and leases fail closed", async () => {
   const { ctx, request } = setup(); const lease = await admit(ctx, request);
   await assert.rejects(admit(ctx, request), /already running/);
-  await assert.rejects(admit(ctx, { ...request, cwd: "/new", localLimit: 1 }), /local=1/);
   ctx.admissionInventory = async () => [];
   await assert.rejects(admit(ctx, { ...request, cwd: "/new" }), /identity/);
   ctx.admissionInventory = async () => [owner]; await lease.release();

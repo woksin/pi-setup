@@ -9,7 +9,7 @@ This delivery changes source/configuration, primary-launch admission and explici
 ## Routing and scheduling policy
 
 - Ordinary worker main sessions: Sonnet 5.5 medium. Orchestration: Opus 5.5 medium.
-- At most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. The primary launcher enforces separate non-borrowing pools across roots sharing one Pi agent directory. Coordinators must still budget SDK fan-out cooperatively; SDK agents, prompts in existing sessions and arbitrary hand-started processes are outside this interception boundary. Do not cancel inbox watches as a substitute for explicit parking.
+- There is no global cap on worker lanes or orchestration sessions. Coordinators should still budget SDK fan-out cooperatively. Do not cancel inbox watches as a substitute for explicit parking.
 - Lean planner, Plan and general-purpose: Sonnet medium; ops: Haiku low; scout: Haiku medium with its existing research tools. Ambiguous reasoning goes to Sonnet/Opus, not more Haiku fan-out.
 - Sol high implementation, Sonnet medium careful implementation, Opus medium review, Sol high review and existing narrowly scoped Astra roles are unchanged. The full review workflow is an unchanged copy, including independent provider verification, security coverage (also for config/tests/docs), review caps and Astra verification semantics. There is no diff-size security exemption.
 - Use a planner only for more than three implementation files, a cross-repository dependency or a named unresolved design/behaviour question. Tests and docs do not inflate the count. Otherwise the main session writes the standard brief. Reuse valid plans; never pair Plan and planner. Stronger user/repository requirements take precedence.
@@ -18,7 +18,7 @@ Only send actionable coordination: deliveries, blocker changes, questions/decisi
 
 ## Runtime admission and parking
 
-All start/resume and terminal backends print or invoke `lanes --dir ROOT run ID`. Printing or opening an unused tab reserves nothing. Execution reloads validated configuration and atomically admits just before spawning the configured wrapper with inherited stdio; the lease spans wrapper relaunches. `coordinator.maxRunning` defaults to six and is the local worker limit, capped at six even for legacy larger values. Only the coordinator and validated repo-orch/sub-orch roles use the two orchestration slots. Observed unmanaged Pi and extra Pi descendants count conservatively as workers. Over-budget existing work is not killed.
+All start/resume and terminal backends print or invoke `lanes --dir ROOT run ID`. Printing or opening an unused tab reserves nothing. Execution reloads validated configuration and atomically registers a lease (duplicate-directory guard only; no count limit) just before spawning the configured wrapper with inherited stdio; the lease spans wrapper relaunches. No worker or orchestration count limit applies; `coordinator.maxRunning` is retained in configuration for compatibility but is not enforced.
 
 Leases and a bounded exclusive lock live under `PI_CODING_AGENT_DIR/lanes-admission` (default `~/.pi/agent`). Different agent directories are separate registries. Unknown inventories, reused identities, malformed state and uncertain cleanup refuse/retain rather than guessing. A crashed controller can leave a pending lease or lock that requires operator inspection; never clear it by age alone. No live installation or activation is part of this delivery.
 
