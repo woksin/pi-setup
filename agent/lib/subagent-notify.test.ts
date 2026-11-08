@@ -45,3 +45,11 @@ test("grouped notifications are each expanded", () => {
   const out = expandNotification(input, lookupOf({ a1: { status: "completed", result: a + "A" }, b1: { status: "error", result: b + "B" } }));
   assert.equal(out, note("a1", a + "A") + "\n" + note("b1", b + "B"));
 });
+
+test("oversizedReport applies per-type limits", async () => {
+  const { oversizedReport } = await import("./subagent-notify.ts");
+  assert.deepEqual(oversizedReport("x".repeat(1501), "ops"), { chars: 1501, limit: 1500 });
+  assert.equal(oversizedReport("x".repeat(1500), "reviewer"), undefined);
+  assert.equal(oversizedReport("x".repeat(2000), "worker"), undefined);
+  assert.deepEqual(oversizedReport("x".repeat(2501), undefined), { chars: 2501, limit: 2500 });
+});

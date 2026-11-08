@@ -11,10 +11,10 @@ import { tmpdir } from "node:os";
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { isGuardOff } from "../lib/guards.ts";
-import { integrityWarnings, parseNotifications, type Notification, type RecordLike } from "../lib/subagent-integrity.ts";
+import { integrityWarnings, parseNotifications, type Notification } from "../lib/subagent-integrity.ts";
 import { argsOf, executableCommands } from "./wait-guard.ts";
 import { logError } from "../lib/output-cap.ts";
-import { expandNotification, type NotifyRecord } from "../lib/subagent-notify.ts";
+import { expandNotification, oversizedReport, type NotifyRecord } from "../lib/subagent-notify.ts";
 
 const FETCH_HELP = "subagent-results: completion notification already delivered. Use that result; do not fetch it again. " +
   "A truncated preview permits only the first fetch. Use verbose: true only when you need the full conversation.";
@@ -23,7 +23,7 @@ const OUTPUT_HELP = "subagent-results: raw task transcript reads through bash ar
 const TRUNCATION = "...(truncated, use get_subagent_result for full output)";
 const decode = (text: string) => text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
 
-type RegistryRecord = NotifyRecord & { handle?: string; alias?: string; sessionFile?: string };
+type RegistryRecord = NotifyRecord & { type?: string; handle?: string; alias?: string; sessionFile?: string };
 
 /** The documented pi-subagents manager registry exposes records by id; fails open when absent. */
 function registryRecord(id: string): RegistryRecord | undefined {
@@ -57,7 +57,7 @@ export class ResultTracker {
   private aliases = new Map<string, string>();
   private observed = new Set<string>();
   /** Called once per newly delivered notification (not for restored ones: set after restore). */
-  onFresh?: (notification: Notification, record: RecordLike | undefined) => void;
+  onFresh?: (notification: Notification, record: RegistryRecord | undefined) => void;
   private replaying = false;
   /** Run history restore without firing onFresh (reload must not re-warn on old notifications). */
   replay(fn: () => void): void {
@@ -133,10 +133,18 @@ export function readsTaskOutput(command: string, cwd: string): boolean {
   }));
 }
 
+/** Measure reports over their briefed size (efficiency-errors.jsonl); never throws. */
+export function reportOversize(n: Notification, record: RegistryRecord | undefined): void {
+  if (typeof record?.result !== "string") return;
+  const over = oversizedReport(record.result, record.type);
+  if (over) logError("subagent-result-guard", "oversized-report", new Error(`${record.type ?? "agent"} ${n.id} report ${over.chars} chars > ${over.limit}`));
+}
+
 export default function (pi: ExtensionAPI) {
   const tracker = new ResultTracker();
   // Integrity warnings: visible, no turn trigger; reach the model on its next turn.
   tracker.onFresh = (n, record) => {
+    reportOversize(n, record);
     if (isGuardOff("subagent-results")) return;
     for (const warning of integrityWarnings(n, record)) {
       pi.sendMessage({ customType: "subagent-integrity", content: warning, display: true }, { triggerTurn: false, deliverAs: "nextTurn" });

@@ -35,3 +35,12 @@ export function expandNotification(content: string, lookup: NotifyLookup, limit 
     return content;
   }
 }
+
+const REPORT_LIMITS: Record<string, number> = { ops: 1500, reviewer: 1500 };
+const DEFAULT_REPORT_LIMIT = 2500;
+
+/** The report is over the size its agent type is briefed to stay within (chars of the full registry result). */
+export function oversizedReport(result: string, agentType: string | undefined): { chars: number; limit: number } | undefined {
+  const limit = (agentType && REPORT_LIMITS[agentType]) || DEFAULT_REPORT_LIMIT;
+  return result.length > limit ? { chars: result.length, limit } : undefined;
+}

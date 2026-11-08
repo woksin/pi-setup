@@ -139,3 +139,31 @@ test("fetch of a running agent is blocked without wait; fails open otherwise", (
     set(undefined);
   }
 });
+
+test("oversized reports are logged once per fresh notification, not on replay", async () => {
+  const { reportOversize } = await import("../extensions/subagent-result-guard.ts");
+  const { readFileSync, existsSync } = await import("node:fs");
+  const file = join(mkdtempSync(join(tmpdir(), "os-")), "errors.jsonl");
+  const prev = process.env.PI_EFFICIENCY_ERRORS_FILE;
+  process.env.PI_EFFICIENCY_ERRORS_FILE = file;
+  const results: Record<string, string> = { big: "x".repeat(2000), small: "x".repeat(100), old: "x".repeat(2000) };
+  (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = { getRecord: (id: string) => ({ status: "completed", type: "ops", result: results[id] }) };
+  const msg = (id: string) => ({ role: "custom", customType: "subagent-notification", timestamp: Math.random(),
+    content: `<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>\n<result>ok</result>\n</task-notification>` });
+  try {
+    const t = new ResultTracker();
+    t.onFresh = reportOversize;
+    t.replay(() => t.notification(msg("old")));
+    t.notification(msg("small"));
+    assert.equal(existsSync(file), false);
+    t.notification(msg("big"));
+    t.notification(msg("big"));
+    const lines = readFileSync(file, "utf8").trim().split("\n").map(l => JSON.parse(l));
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0].event, "oversized-report");
+    assert.match(lines[0].message, /ops big report 2000 chars > 1500/);
+  } finally {
+    (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = undefined;
+    if (prev === undefined) delete process.env.PI_EFFICIENCY_ERRORS_FILE; else process.env.PI_EFFICIENCY_ERRORS_FILE = prev;
+  }
+});
