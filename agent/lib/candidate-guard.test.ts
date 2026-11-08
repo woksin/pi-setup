@@ -46,6 +46,17 @@ test('typed and CLI PR create share head/repo, candidate and trusted exception r
   assert.ok(!JSON.stringify(invalid).includes('private-value'));
 });
 
+test('.github publication reaches candidate policy without another repo parser rejecting it', async t => {
+  const f = await fixture(t), repo = 'validorg/.github';
+  const manifest = { ...f.manifest, repo };
+  await saveManifest(manifestPath(f.env, repo, manifest.train), manifest);
+  const context = { cwd: '/repo', env: f.env, git: f.git };
+  const request = { kind: 'pr-create', repo, head: 'fix/local', title: 'Title', body: 'Safe' };
+  assert.match((await publicationDecision(request, context)).block!, /PR refused: validorg\/\.github has open candidate train\/test/);
+  assert.match((await f.decide('pi-publish pr-create --repo validorg/.github --head fix/local --title Title --body Safe')).block!, /PR refused: validorg\/\.github/);
+  assert.deepEqual(await publicationDecision({ ...request, head: manifest.train }, context), {});
+});
+
 test('typed candidate fallback remains fail-open but value-free on native metadata errors', async t => {
   const f = await fixture(t);
   const decision = await publicationDecision({ kind: 'pr-create', repo: 'acme/widget', title: 'Title', body: 'Safe' }, { cwd: '/repo', env: f.env, git: () => { throw new Error('private-value'); } });

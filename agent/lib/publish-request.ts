@@ -66,7 +66,7 @@ const list = (item: (value: unknown) => boolean) => (value: unknown): boolean =>
 const enumeration = (...values: unknown[]) => (value: unknown) => values.includes(value);
 const bool = (value: unknown) => typeof value === "boolean";
 const number = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0;
-const repo = (value: unknown) => text(value) && /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(value);
+const repo = (value: unknown) => text(value) && /^[A-Za-z0-9][A-Za-z0-9-]*\/(?:\.github|[A-Za-z0-9_][A-Za-z0-9_.-]*)$/.test(value);
 const fieldName = (value: unknown) => text(value) && /^[A-Za-z0-9_.\[\]]+$/.test(value);
 function primitive(value: unknown): boolean {
 	if (value === null) return true;
