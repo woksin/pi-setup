@@ -45,7 +45,7 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const daysAgo = (days: number) => new Date(Date.parse(now) - days * 86_400_000).toISOString();
-const queryOwner = (issue = 5, days?: number, ownSessionId?: string) => owner(deps(), { refs: [{ repo: "o/r", issue }], days, ownSessionId });
+const queryOwner = (issue = 5, days?: number, ownSessionId?: string, verbose?: boolean) => owner(deps(), { refs: [{ repo: "o/r", issue }], days, ownSessionId, verbose });
 
 for (const row of [
 	{ name: "no entry", verdict: "FREE", reason: /no register entry/ },
@@ -61,7 +61,7 @@ for (const row of [
 ] as const) {
 	test(`owner verdict: ${row.name}`, async () => {
 		if ("state" in row) await appendEvent(deps(), ev({ issue: 5, sessionId: "other", state: row.state, ts: daysAgo(row.age), branch: "b2", cwd: "/repo", note: "note" in row ? row.note : "latest note" }));
-		const result = await queryOwner();
+		const result = await queryOwner(5, undefined, undefined, true);
 		assert.equal(result.results[0].verdict, row.verdict);
 		assert.match(result.results[0].reason, row.reason);
 		if ("state" in row) {
@@ -83,7 +83,8 @@ for (const unknown of [false, true]) {
 		const result = await queryOwner(5, undefined, "abcdefgh-session");
 		assert.equal(result.results[0].verdict, "OWNED");
 		assert.match(result.text, unknown ? /liveness cannot be verified/ : /held by live session abcdefgh/);
-		assert.match(result.text, /abcdefgh \(this session\)/);
+		assert.match(result.text, /abcdefgh.*\(this session\)/);
+		assert.equal(result.text.split("\n").length, 1, "own or unverifiable holder: compact");
 		assert.equal(calls.length, 0);
 	});
 }
@@ -96,7 +97,7 @@ test("owner marks a claim queried by its delegating session", async (t) => {
 	calls = [];
 	const result = await queryOwner(5, undefined, s.sessionId);
 	assert.match(result.text, /held by live session abcdefgh.*\(this session\)/);
-	assert.match(result.text, /abcdefgh \(this session\) live\/in-progress/);
+	assert.match((await queryOwner(5, undefined, s.sessionId, true)).text, /abcdefgh \(this session\) live\/in-progress/);
 	assert.equal(calls.length, 0);
 	t.diagnostic(result.text);
 });
@@ -108,7 +109,7 @@ test("owner uses latest session state and note, and clamps the window", async ()
 	await appendEvent(deps(), ev({ issue: 6, sessionId: "other", state: "in-review", ts: daysAgo(2) }));
 	assert.equal((await queryOwner(6, 0)).results[0].verdict, "FREE");
 	assert.equal((await queryOwner(6, 100)).results[0].verdict, "OWNED");
-	assert.match((await queryOwner(6, 100)).text, /sessions \(90d\)/);
+	assert.match((await queryOwner(6, 100, undefined, true)).text, /sessions \(90d\)/);
 });
 
 test("owner parses, deduplicates and orders issue refs without side effects", async () => {
@@ -193,4 +194,17 @@ test("extension exposes read-only owner to subagents and register-first guidance
 	const prompt = { systemPromptOptions: { sections: {} as Record<string, string> } };
 	handlers.get("before_agent_start")(prompt, { ...ctx, hasUI: true });
 	assert.match(prompt.systemPromptOptions.sections.issue_work_guidance, /issue_work owner/);
+});
+
+test("owner is one line per issue unless verbose or another live session holds it", async () => {
+	await appendEvent(deps(), ev({ issue: 5, sessionId: "ended1", state: "paused", branch: "b1", cwd: "/repo", ts: daysAgo(3) }));
+	const compact = await queryOwner();
+	assert.equal(compact.text.split("\n").length, 1);
+	assert.match(compact.text, /^o\/r#5: FREE .*\| latest: Paused 3d ago \| branch: b1$/);
+	assert.match((await queryOwner(5, undefined, undefined, true)).text, /\n  latest: .*\n  sessions \(14d\): ended1/);
+	alivePids.add(222);
+	await writeLease(deps(), session("live-other", 222, "b2"));
+	await appendEvent(deps(), ev({ issue: 6, sessionId: "live-other", state: "in-progress", branch: "b2", cwd: "/repo" }));
+	const held = await queryOwner(6, undefined, "me");
+	assert.match(held.text, /OWNED — held by live session live-oth.*\n  latest: .*\n  sessions \(14d\): live-oth live\/in-progress/);
 });

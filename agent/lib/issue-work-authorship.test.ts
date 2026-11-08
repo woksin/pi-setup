@@ -106,15 +106,16 @@ test("check, update and list distinguish outsider authorship", async () => {
 	association = "CONTRIBUTOR";
 	comments = [{ id: 1, user: { login: "visitor" }, created_at: now, body: "request", author_association: "FIRST_TIMER" }];
 	assert.match(await check(d, session, target), /visitor \[FIRST_TIMER\] \(outside author\)/);
-	assert.match(await update(d, session, { ...target, state: "paused" }), /opener \[CONTRIBUTOR\] \(outside author\)/);
-	assert.match(await list(d), /issue author: opener \[CONTRIBUTOR\] \(outside author\)/);
+	assert.match(await update(d, { ...session, sessionId: "first-look" }, { ...target, state: "paused" }), /opener \[CONTRIBUTOR\] \(outside author\)/);
+	assert.match(await update(d, session, { ...target, state: "paused" }), /No new activity on o\/r#5/);
+	assert.match(await list(d), /· outside author/);
 });
 
 test("activity caps comments at ten and bodies at 600 characters with overflow hints", async () => {
 	await check(d, session, target);
 	comments = Array.from({ length: 12 }, (_, id) => ({ id, user: { login: "person" }, created_at: now, body: `Line one\n${"x".repeat(650)}` }));
 	const text = await check(d, session, target);
-	assert.equal(text.split("\n").filter((line) => line.startsWith("- ")).length, 11, "issue body plus ten comments");
+	assert.equal(text.split("\n").filter((line) => line.startsWith("- ")).length, 10, "ten comments; the unchanged issue body is not repeated");
 	assert.equal(text.split("…[truncated]").length - 1, 10);
 	assert.match(text, /    Line one\n    x{591}…\[truncated\]\n    ```/);
 	assert.match(text, /…and 2 more — run `gh issue view 5 --repo o\/r --comments`/);
