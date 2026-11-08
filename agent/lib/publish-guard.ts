@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import { simpleCommands } from "../extensions/wait-guard.ts";
 
 export type PublicationCode = "gh-publication" | "http-publication" | "unsupported-env" | "malformed-execution";
-export const PUBLICATION_REASON = "publish guard: use the publish tool for GitHub text. It scans the exact captured payload before sending. Rewrite refused text; do not evade checks. Only the user may disable this guard with /guards off publish.";
+export const PUBLICATION_REASON = "publish guard: use the publish tool for GitHub text (GitHub Enterprise: set its host field, e.g. host: \"ghe.example.com\", after `gh auth login --hostname`). It scans the exact captured payload before sending. Rewrite refused text; do not evade checks. Only the user may disable this guard with /guards off publish.";
 type Word = string;
 type Words = Word[];
 interface Executable { words: Words; unsupported?: boolean }

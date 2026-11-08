@@ -235,6 +235,8 @@ export function detectPublicationIssues(value: unknown): DetectedIssueCommand[] 
 		const metadata = toGhPlan(validateRequest(value)).authority;
 		if (!metadata.kind.startsWith("issue-")) return [];
 		if (!metadata.repo || !metadata.number) return [];
+		// The register and its follow-up gh calls address github.com; hosted (GHE) issues are not tracked.
+		if (metadata.host) return [];
 		const verb = metadata.kind.slice("issue-".length);
 		return [{ repo: metadata.repo, issue: metadata.number, verb, state: verb === "close" ? "done" : verb === "reopen" ? "unknown" : undefined }];
 	} catch { return []; }

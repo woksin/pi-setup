@@ -307,3 +307,102 @@ test("unsupported operations fail validation before any IO", async () => {
 	code(await publish({ ...base, kind: "issue-delete", bodyFile: "source.md" }, safeContext, mocks), "invalid-request");
 	assert.equal(calls, 0);
 });
+
+const hostedBase = { ...base, host: "ghe.example.com" };
+const ambientTokens = { GH_TOKEN: "env-token", GITHUB_TOKEN: "env-token", GH_ENTERPRISE_TOKEN: "env-token", GITHUB_ENTERPRISE_TOKEN: "env-token", GH_REPO: "other/repo", GH_HOST: "evil.invalid", KEEP: "yes" };
+const TOKEN_NAMES = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+type Spawned = { argv: string[]; env: NodeJS.ProcessEnv };
+function recording(exitCodes: Record<string, number | null> = {}) {
+	const calls: Spawned[] = [];
+	const mocks = adapters((_executable, argv, options) => {
+		calls.push({ argv, env: options.env as NodeJS.ProcessEnv });
+		const child = new Child(); queueMicrotask(() => child.finish(exitCodes[argv[0]] ?? 0)); return child;
+	});
+	mocks.env = { ...ambientTokens };
+	return { calls, mocks };
+}
+
+test("hosted run: preflight then send; send pins GH_HOST to the host over ambient GH_HOST and uses HOST/OWNER/REPO", async () => {
+	const { calls, mocks } = recording();
+	code(await publish({ ...hostedBase, body: "Safe" }, safeContext, mocks), "published");
+	assert.equal(calls.length, 2);
+	assert.deepEqual(calls[0].argv, ["auth", "status", "--hostname=ghe.example.com"]);
+	assert.equal(calls[1].env.GH_HOST, "ghe.example.com");
+	assert.ok(calls[1].argv.includes("--repo=ghe.example.com/owner/repo")); assert.ok(!calls[1].argv.includes("--repo=owner/repo"));
+	const api = recording();
+	code(await publish({ kind: "api", endpoint: "repos/o/r/issues", method: "POST", host: "ghe.example.com" }, safeContext, api.mocks), "published");
+	assert.ok(api.calls[1].argv.includes("--hostname=ghe.example.com")); assert.ok(!api.calls[1].argv.includes("--hostname=github.com"));
+});
+
+test("token isolation: hosted preflight and send carry no env token, GH_REPO or target GH_HOST; github.com keeps only GH_TOKEN/GITHUB_TOKEN", async () => {
+	const hosted = recording();
+	code(await publish({ ...hostedBase, body: "Safe" }, safeContext, hosted.mocks), "published");
+	const [preflight, sent] = hosted.calls;
+	for (const env of [preflight.env, sent.env]) {
+		for (const name of [...TOKEN_NAMES, "GH_REPO", "GH_DEBUG", "DEBUG"]) assert.equal(env[name], undefined, name);
+		assert.equal(env.KEEP, "yes"); assert.equal(env.GH_PROMPT_DISABLED, "1");
+	}
+	assert.equal("GH_HOST" in preflight.env, false); assert.ok(!Object.values(preflight.env).includes("ghe.example.com"));
+	const plain = recording();
+	code(await publish({ ...base, body: "Safe" }, safeContext, plain.mocks), "published");
+	assert.equal(plain.calls.length, 1);
+	const env = plain.calls[0].env;
+	assert.equal(env.GH_HOST, "github.com"); assert.equal(env.GH_TOKEN, "env-token"); assert.equal(env.GITHUB_TOKEN, "env-token");
+	for (const name of ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_REPO"]) assert.equal(env[name], undefined, name);
+});
+
+test("host github.com is the default path: no preflight, same argv and env as no host", async () => {
+	const explicit = recording(), implicit = recording();
+	code(await publish({ ...base, host: "github.com", body: "Safe" }, safeContext, explicit.mocks), "published");
+	code(await publish({ ...base, body: "Safe" }, safeContext, implicit.mocks), "published");
+	assert.equal(explicit.calls.length, 1);
+	assert.deepEqual(explicit.calls[0].argv.slice(0, 4), implicit.calls[0].argv.slice(0, 4)); assert.deepEqual(explicit.calls[0].env, implicit.calls[0].env);
+});
+
+test("failing preflight is host-unauthenticated with no snapshot and no send", async () => {
+	const { calls, mocks } = recording({ auth: 1 });
+	let snapshots = 0; mocks.io!.mkdtemp = async () => { snapshots++; throw new Error("private-value"); };
+	code(await publish({ ...hostedBase, body: "Safe" }, safeContext, mocks), "host-unauthenticated");
+	assert.equal(calls.length, 1); assert.equal(calls[0].argv[0], "auth"); assert.equal(snapshots, 0);
+	const spawnThrows = adapters(() => { throw new Error("private-value"); });
+	code(await publish({ ...hostedBase, body: "Safe" }, safeContext, spawnThrows), "host-unauthenticated");
+});
+
+test("host never bypasses scanning: refused body, refused host text and check-with-host spawn nothing", () => fixture(async root => {
+	const { calls, mocks } = recording();
+	const refused = await publish({ ...hostedBase, body: "/Users/alice/private-value" }, safeContext, mocks);
+	code(refused, "scan-refused"); assert.equal(refused.diagnostics?.source, "body");
+	const file = join(root, "body.md"); writeFileSync(file, "/Users/alice/private-value");
+	code(await publish({ ...hostedBase, bodyFile: file }, safeContext, mocks), "scan-refused");
+	code(await publish({ kind: "check", files: [file], host: "ghe.example.com" }, safeContext, mocks), "invalid-request");
+	code(await publish({ ...base, host: "GHE.example.com", body: "Safe" }, safeContext, mocks), "invalid-request");
+	assert.equal(calls.length, 0);
+}));
+
+test("preflight cancellation and timeout keep their existing codes and never send", async () => {
+	for (const termination of ["abort", "timeout"] as const) {
+		const controller = new AbortController(); let fire!: () => void, child!: Child, start!: () => void; const argvs: string[][] = [];
+		const started = new Promise<void>(resolve => { start = resolve; });
+		const mocks = adapters((_path, argv) => { argvs.push(argv); child = new Child(); start(); return child; });
+		mocks.clock = { after: (_ms, callback) => { fire = callback; return () => {}; } };
+		const pending = publish({ ...hostedBase, body: "Safe" }, { ...safeContext, signal: controller.signal }, mocks);
+		await started;
+		if (termination === "abort") controller.abort("private-value"); else fire();
+		assert.equal(child.kills, 1); child.finish(null);
+		code(await pending, termination === "abort" ? "cancelled" : "gh-timeout");
+		assert.equal(argvs.length, 1); assert.equal(argvs[0][0], "auth");
+	}
+});
+
+test("plain UTF-8 bodyFile by absolute and cwd-relative path publishes from a real tmpdir (symlinked /var on macOS)", () => fixture(async root => {
+	const source = join(root, "comment.md"); writeFileSync(source, "Plain UTF-8 body — æøå\n");
+	for (const [bodyFile, cwd] of [[source, undefined], ["comment.md", root]] as const) {
+		let sent = "";
+		const mocks = adapters((_executable, argv) => {
+			sent = readFileSync(argv.find(arg => arg.startsWith("--body-file="))!.slice("--body-file=".length), "utf8");
+			const child = new Child(); queueMicrotask(() => child.finish()); return child;
+		});
+		code(await publish({ ...base, bodyFile }, { ...safeContext, cwd }, mocks), "published");
+		assert.equal(sent, "Plain UTF-8 body — æøå\n");
+	}
+}));
