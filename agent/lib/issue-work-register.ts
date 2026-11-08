@@ -163,14 +163,23 @@ function sessionLine(s: RecentSession, o: RegisterContext & { ownSessionId?: str
 	return `${short(s.sessionId)}${ownMark(s.sessionId, o.ownSessionId)} ${sessionStatus(o.liveness, s.sessionId)}/${s.lastState ?? "-"} ${cwd} ${s.branch ?? "-"} ${relativeTime(s.lastTs, o.now)}`;
 }
 
-export function formatOwnership(o: Ownership, context: RegisterContext & { ownSessionId?: string }): string {
-	const lines = [ownershipHeading(o, context.ownSessionId)];
+/** Per-session history is shown on request or when another live session holds the issue (what a caller needs to decide). */
+function wantsSessions(o: Ownership, context: RegisterContext & { ownSessionId?: string; verbose?: boolean }): boolean {
+	if (context.verbose) return true;
+	if (o.verdict !== "OWNED") return false;
+	return !!o.view?.sessions.some((s) => isHolder(s) && s.sessionId !== context.ownSessionId && sessionStatus(context.liveness, s.sessionId) === "live");
+}
+
+export function formatOwnership(o: Ownership, context: RegisterContext & { ownSessionId?: string; verbose?: boolean }): string {
+	const heading = ownershipHeading(o, context.ownSessionId);
+	if (!wantsSessions(o, context)) return o.view ? `${heading} | latest: ${STATE_LABEL[o.view.state]} ${relativeTime(o.view.lastTs, context.now)} | branch: ${o.view.branch ?? "-"}` : heading;
+	const lines = [heading];
 	if (o.view) lines.push(latestLine(o.view, context.now));
 	if (o.recent.length) lines.push(`  sessions (${o.days}d): ${o.recent.map((s) => sessionLine(s, context)).join(", ")}`);
 	return lines.join("\n");
 }
 
-export function ownerResult(o: RegisterContext & { refs: IssueRef[]; ownSessionId?: string }) {
+export function ownerResult(o: RegisterContext & { refs: IssueRef[]; ownSessionId?: string; verbose?: boolean }) {
 	const views = foldRegistry(o.events);
 	const rows = o.refs.map((ref) => ({ ...ownershipOf({ ...o, view: views.get(issueKey(ref.repo, ref.issue)) }), ...ref }));
 	return {
