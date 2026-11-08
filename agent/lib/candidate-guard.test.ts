@@ -39,7 +39,7 @@ test('typed and CLI PR create share head/repo, candidate and trusted exception r
   assert.deepEqual(await f.decide('/trusted/pi-publish pr-create --repo acme/widget --head train/test --title Title --body Safe'), {});
   assert.equal((await publicationDecision(request, { ...context, env: { ...f.env, PI_CANDIDATE_EXCEPTION: 'major' } })).log, 'exception major for fix/local');
   assert.equal((await f.decide('PI_CANDIDATE_EXCEPTION=urgent-fix pi-publish pr-create --repo acme/widget --head fix/local --title Title --body Safe')).log, 'exception urgent-fix for fix/local');
-  assert.match((await publicationDecision(request, { ...context, orchestrated: true })).warn!, /PR refused/);
+  assert.match((await publicationDecision(request, { ...context, orchestrated: true })).warn!, /Candidate notice:.*created anyway \(warn-only\)/);
   assert.deepEqual(await publicationDecision({ kind: 'issue-comment', repo: 'acme/widget', number: 1, body: 'Safe' }, context), {});
   const invalid = await publicationDecision({ ...request, env: { PI_CANDIDATE_EXCEPTION: 'major' } }, context);
   assert.equal(invalid.block, 'Candidate guard: invalid publication request.');
@@ -75,6 +75,21 @@ test('exact open candidate evidence blocks only non-candidate PRs, exceptions lo
   assert.ok((await f.decide('gh pr create', true)).warn);
   assert.equal((await f.decide('gh pr create', true)).block, undefined);
   assert.equal(f.calls.some(([, args]) => args[0] === 'worktree'), false);
+});
+
+test('candidate block keeps refusal text while warn-only never claims refusal', async t => {
+  const f = await fixture(t);
+  const refusal = 'PR refused: acme/widget has open candidate train/test. Deliver this branch with `pi-train fold fix/local`; the candidate ships as one PR (`pi-train ship`). Named exceptions: prefix `PI_CANDIDATE_EXCEPTION=major` or `=urgent-fix` and give the reason in your report.';
+  const request = { kind: 'pr-create', repo: 'acme/widget', head: 'fix/local', title: 'Title', body: 'Safe' };
+  const context = { cwd: '/repo', env: f.env, git: f.git };
+  assert.deepEqual(await publicationDecision(request, context), { block: refusal });
+  assert.deepEqual(await f.decide(), { block: refusal });
+  for (const decision of [await publicationDecision(request, { ...context, orchestrated: true }), await f.decide('gh pr create', true)]) {
+    assert.equal(decision.block, undefined);
+    assert.match(decision.warn!, /^Candidate notice: acme\/widget has open candidate train\/test; this PR was created anyway \(warn-only\)\./);
+    assert.match(decision.warn!, /Deliver further work with `pi-train fold fix\/local`/);
+    assert.doesNotMatch(decision.warn!, /PR refused/);
+  }
 });
 
 test('cd, assignment prefixes, multiple commands, explicit other repo and fail-open errors', async t => {
@@ -175,7 +190,8 @@ test('extension: block, exception, orchestrated result warning chains after real
   const resultEvent = { ...event, content: [{ type: 'text', text: 'line\n'.repeat(5000) }], isError: false };
   const result = await runner.emitToolResult(resultEvent);
   assert.match(result.content[0].text, /full output:/);
-  assert.match(result.content.at(-1).text, /\[candidate\].*PR refused/);
+  assert.match(result.content.at(-1).text, /\[candidate\].*Candidate notice:.*created anyway \(warn-only\)/);
+  assert.doesNotMatch(result.content.at(-1).text, /PR refused/);
   assert.equal(await train.handlers.get('tool_result')![0](resultEvent), undefined);
   await writeFile(process.env.PI_GUARDS_FILE!, JSON.stringify({ off: { trains: true } }));
   assert.equal(await handler(event, ctx), undefined);
