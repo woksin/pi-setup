@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
-import { answerItem } from "../src/actions.ts";
+import { answerItem, commentItem } from "../src/actions.ts";
 import { ageOf, deliveryMessage, plain, renderCandidates, renderItem, renderList, renderRecord, statusText, wrap } from "../src/format.ts";
 import { seed, session, tempDir } from "./helpers.ts";
 
@@ -80,4 +80,18 @@ test("ages and status text", () => {
 	assert.equal(statusText({ open: 5, blocking: 2, answered: 1 }), "Q 5 open, 2 blocking, 1 answered for you");
 	assert.equal(statusText({ open: 1, blocking: 0, answered: 0 }), "Q 1 open");
 	assert.equal(statusText({ open: 1, blocking: 0, answered: 1, held: true }), "Q 1 open, 1 answered for you (delivery held)");
+});
+
+test("renderItem trims old comments but keeps the full answer and other history", t => {
+	const home = tempDir(t);
+	const item = seed(home, { kind: "decision", title: "Pick one", options: [{ key: "a", text: "Alpha" }] });
+	const me = { kind: "user" as const, sessionId: "u", name: "u" };
+	for (let i = 1; i <= 6; i++) commentItem(home, item.id, me, `remark ${i}`);
+	const answered = answerItem(home, item.id, me, { text: `Go with a. ${LONG}`.trim(), by: "u", via: "quote", source: "s", option: "a" });
+	const out = renderItem(answered, Date.now());
+	assert.match(out, /… 1 earlier comment \(get with all: true\)/);
+	assert.ok(!out.includes("remark 1") && out.includes("remark 2") && out.includes("remark 6"));
+	assert.match(out, /Answer \[option a: Alpha\]: Go with a\./);
+	assert.match(out, /answered|decided/);
+	assert.ok(renderItem(answered, Date.now(), undefined, true).includes("remark 1"));
 });

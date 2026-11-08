@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Mutating actions (comment, update, withdraw, supersede, close, record_answer) return a one-line status instead of the full item.
+- `get` and the show command render only the last 5 comments plus a count of earlier ones; `get` with `all: true` shows every comment. Answers and other history events always show in full.
+
 ## 0.2.0
 
 - `ask` requires evidence of research/source verification and an independent second review on the other provider for questions, decisions and approvals; FYIs are exempt.

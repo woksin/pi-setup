@@ -98,7 +98,17 @@ function answerLine(item: Item): string | undefined {
 	return `Answer${opt}: ${a.text} (by ${a.by} via ${how}, ${a.at})`;
 }
 
-export function renderItem(item: Item, now: number, duplicateOf?: string): string {
+export const SHOWN_COMMENTS = 5;
+
+/** One-line status for mutating tool results: `Q-1 [fyi] open · rev 3 · 2 comments · title`. */
+export function statusLine(item: Item): string {
+	const n = item.history.filter(h => h.type === "comment").length;
+	const title = item.title.length > 60 ? `${item.title.slice(0, 59)}…` : item.title;
+	return `${item.id} [${item.kind}] ${item.status} · rev ${item.rev} · ${n} comment${n === 1 ? "" : "s"} · ${title}`;
+}
+
+/** Full item text. Shows the last SHOWN_COMMENTS comments unless allComments; other history events always show. */
+export function renderItem(item: Item, now: number, duplicateOf?: string, allComments = false): string {
 	const lines: string[] = [];
 	lines.push(...wrap(`${item.id} [${item.kind}] ${item.title}`, WIDTH, "  "));
 	lines.push(`Status: ${item.status}${item.deferredUntil ? ` until ${item.deferredUntil.slice(0, 10)}` : ""}   Urgency: ${item.urgency}   Age: ${ageOf(item.createdAt, now)}   rev ${item.rev}`);
@@ -119,7 +129,18 @@ export function renderItem(item: Item, now: number, duplicateOf?: string): strin
 	const a = answerLine(item);
 	if (a) lines.push("", ...wrap(a, WIDTH, "  "));
 	lines.push("", "History:");
-	for (const h of item.history) lines.push(...wrap(`  #${h.seq} ${h.at.slice(0, 16)} ${h.actor.kind}${h.actor.name ? ` ${h.actor.name}` : ""} ${h.type}${h.text ? `: ${h.text}` : ""}`, WIDTH, "      "));
+	const comments = item.history.filter(h => h.type === "comment");
+	const hidden = allComments ? 0 : Math.max(0, comments.length - SHOWN_COMMENTS);
+	const skip = new Set(comments.slice(0, hidden));
+	let noted = false;
+	for (const h of item.history) {
+		if (skip.has(h)) {
+			if (!noted) lines.push(`  … ${hidden} earlier comment${hidden === 1 ? "" : "s"} (get with all: true)`);
+			noted = true;
+			continue;
+		}
+		lines.push(...wrap(`  #${h.seq} ${h.at.slice(0, 16)} ${h.actor.kind}${h.actor.name ? ` ${h.actor.name}` : ""} ${h.type}${h.text ? `: ${h.text}` : ""}`, WIDTH, "      "));
+	}
 	return plain(lines.flatMap(l => fit(l)));
 }
 
