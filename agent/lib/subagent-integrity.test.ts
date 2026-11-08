@@ -119,3 +119,23 @@ test("expanded complete notification blocks the fetch; truncated-at-limit allows
     (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = undefined;
   }
 });
+
+test("fetch of a running agent is blocked without wait; fails open otherwise", () => {
+  const set = (rec: unknown) => { (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = rec === undefined ? undefined : { getRecord: (id: string) => id === "r1" ? rec : undefined }; };
+  try {
+    const t = new ResultTracker();
+    set({ status: "running" });
+    assert.match(t.fetch("r1", false) ?? "", /r1 is still running.*do not poll/);
+    assert.match(t.fetch("r1", true) ?? "", /still running/);
+    assert.equal(t.fetch("r1", false, true), undefined);
+    set({ status: "queued" });
+    assert.match(t.fetch("r1", false) ?? "", /still running/);
+    set({ status: "completed" });
+    assert.equal(t.fetch("r1", false), undefined); // no delivered state: existing behaviour
+    assert.equal(t.fetch("unknown", false), undefined);
+    set(undefined);
+    assert.equal(t.fetch("r1", false), undefined);
+  } finally {
+    set(undefined);
+  }
+});

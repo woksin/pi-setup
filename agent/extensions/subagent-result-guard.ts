@@ -98,9 +98,16 @@ export class ResultTracker {
     }
   }
   /** Reserve the one fetch at tool_call time, so parallel calls cannot both take it. */
-  fetch(ref: string, verbose: boolean): string | undefined {
+  fetch(ref: string, verbose: boolean, wait = false): string | undefined {
     const key = ref.replace(/^@/, "");
-    const state = this.delivered.get(this.aliases.get(key) ?? key);
+    const id = this.aliases.get(key) ?? key;
+    if (!wait) {
+      const status = registryRecord(id)?.status;
+      if (status === "running" || status === "queued") {
+        return `subagent-results: ${id} is still running; you will be woken on completion — do not poll (use wait: true only if you must block)`;
+      }
+    }
+    const state = this.delivered.get(id);
     if (!state) return undefined;
     if (!verbose && (!state.truncated || state.fetched)) return FETCH_HELP;
     state.fetched = true;
@@ -151,12 +158,12 @@ export default function (pi: ExtensionAPI) {
       const msg = entry.message;
       if (msg.role === "toolResult") for (const call of msg.nestedCalls?.calls ?? []) {
         const input = call.arguments as { agent_id?: string; verbose?: boolean } | undefined;
-        if (call.name === "get_subagent_result" && input?.agent_id) tracker.fetch(input.agent_id, input.verbose === true);
+        if (call.name === "get_subagent_result" && input?.agent_id) tracker.fetch(input.agent_id, input.verbose === true, true);
       }
       if (msg.role === "assistant") for (const part of msg.content) {
         if (part.type !== "toolCall") continue;
         const input = part.arguments as { agent_id?: string; verbose?: boolean; resume?: string };
-        if (part.name === "get_subagent_result" && input.agent_id) tracker.fetch(input.agent_id, input.verbose === true);
+        if (part.name === "get_subagent_result" && input.agent_id) tracker.fetch(input.agent_id, input.verbose === true, true);
         if (part.name === "Agent" && input.resume) tracker.restarted(input.resume);
       }
     } });
@@ -187,11 +194,11 @@ export default function (pi: ExtensionAPI) {
     if (id) tracker.alias(id, event.input.name);
   });
   pi.on("tool_call", shellGuard((event, ctx, executionCwd) => {
-    const input = event.input as { agent_id?: string; verbose?: boolean; command?: string; resume?: string };
+    const input = event.input as { agent_id?: string; verbose?: boolean; wait?: boolean; command?: string; resume?: string };
     if (event.toolName === "Agent" && typeof input.resume === "string") tracker.restarted(input.resume);
     let reason: string | undefined;
     if (event.toolName === "get_subagent_result" && typeof input.agent_id === "string") {
-      reason = tracker.fetch(input.agent_id, input.verbose === true);
+      reason = tracker.fetch(input.agent_id, input.verbose === true, input.wait === true);
     } else if (event.toolName === "bash" && typeof input.command === "string" && readsTaskOutput(input.command, executionCwd)) {
       reason = OUTPUT_HELP;
     }
