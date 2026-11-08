@@ -3536,8 +3536,8 @@ class PhaseTests(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             pi_phase.queue_timeout_note(5)
-        self.assertIn("pi-phase status", out.getvalue())
-        self.assertIn("do not rerun in the foreground", out.getvalue())
+        self.assertIn("pi-phase status once", out.getvalue())
+        self.assertIn("background job; do not rerun in the foreground", out.getvalue())
 
     def test_limits_and_vstest_preset_reject_unconfirmed(self):
         self.assertEqual(self.done(self.run_phase(timeout="601"))[0], 125)

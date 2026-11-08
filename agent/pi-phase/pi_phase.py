@@ -4332,7 +4332,7 @@ def bounded(value, name, approved):
 def queue_timeout_note(timeout):
     note(f"queue timeout ({timeout:g}s); command not started")
     note("not a failed command/test attempt. Do not loop short requeues; check pi-phase status once.")
-    note("check `pi-phase status`; run long queue waits in a background job (job_start), do not rerun in the foreground.")
+    note("Run long queue waits in a background job; do not rerun in the foreground.")
     note("If a retry is appropriate, retry once in the background (job_start if available, otherwise a background agent) "
          "with an explicit queue-sized budget (e.g. --queue-timeout 2400; keep a larger budget if appropriate).")
     note("The outer deadline must cover queue + execution + cleanup. Admission is not guaranteed; "
