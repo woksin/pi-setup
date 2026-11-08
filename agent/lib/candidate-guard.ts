@@ -91,7 +91,9 @@ async function decidePR(segment: Segment, env: NodeJS.ProcessEnv, orchestrated: 
   if (trains.some(train => train.train === head)) return {};
   if (trains.length) {
     if (segment.exception) return { log: `exception ${segment.exceptionName} for ${head}` };
-    const reason = refusal(repo, trains[0].train, head);
+    const reason = orchestrated
+      ? `Candidate notice: ${repo} has open candidate ${trains[0].train}; this PR was created anyway (warn-only). Deliver further work with \`pi-train fold ${head}\`; the candidate ships as one PR (\`pi-train ship\`).`
+      : refusal(repo, trains[0].train, head);
     return orchestrated ? { warn: reason } : { block: reason };
   }
   const warn = concurrentNotice(await repositoryScan(segment, manifests));
