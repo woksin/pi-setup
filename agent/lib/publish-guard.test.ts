@@ -89,3 +89,16 @@ test("extension respects the explicit publish switch and never includes command 
 		assert.equal(await handler(event), undefined);
 	} finally { setGuards("publish", false); }
 });
+
+test("refusal hint names the GHE host path truthfully and keeps the user-only switch", () => {
+	assert.match(PUBLICATION_REASON, /^publish guard: use the publish tool for GitHub text/);
+	assert.match(PUBLICATION_REASON, /GitHub Enterprise: set its host field/);
+	assert.match(PUBLICATION_REASON, /gh auth login --hostname/);
+	assert.match(PUBLICATION_REASON, /Only the user may disable this guard with \/guards off publish\.$/);
+});
+test("raw GHE gh writes stay refused, including a GH_HOST prefix", () => {
+	for (const command of ["gh issue comment 1 -R ghe.example.com/o/r --body x", "gh --repo ghe.example.com/o/r pr create", "gh api repos/o/r -XPOST --hostname ghe.example.com",
+		"GH_HOST=ghe.example.com gh issue comment 1 --body x", "env GH_HOST=ghe.example.com gh issue comment 1 --body x"])
+		assert.equal(publicationGuard(command), "gh-publication", command);
+	assert.equal(publicationGuard("pi-publish issue-comment --repo o/r --host ghe.example.com --number 1 --body-file file"), undefined);
+});

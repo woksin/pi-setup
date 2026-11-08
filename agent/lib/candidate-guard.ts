@@ -59,11 +59,34 @@ function decisionInput(value: string) {
   return value;
 }
 
+/**
+ * Only explicit `HOST/OWNER/REPO` and `https://HOST/...` name a non-github.com host; the key is then
+ * host-qualified and never equals a github.com train manifest repo. scp-style and ssh:// remotes may be
+ * SSH aliases for github.com, so they keep the plain owner/repo key.
+ */
+const HOSTED_REMOTE = /^(?:https:\/\/(?:[^/@\s]+@)?)?([A-Za-z0-9.-]+\.[A-Za-z0-9-]+)(?::\d+)?\/([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/;
+
+function explicitHostForm(remote: string) {
+  return remote.startsWith('https://') || /^[^/]+\/[^/]+\/[^/]+$/.test(remote);
+}
+
+function enterpriseHost(remote: string) {
+  const hosted = explicitHostForm(remote) ? HOSTED_REMOTE.exec(remote) : null;
+  const host = hosted?.[1].toLowerCase();
+  return host && host !== 'github.com' ? { host, path: hosted![2] } : undefined;
+}
+
+function repositoryKey(remote: string) {
+  const hosted = enterpriseHost(remote);
+  if (hosted) return `${hosted.host}/${repoKey(`https://github.com/${hosted.path}`)}`;
+  return repoKey(/^[\w.-]+\/[\w.-]+$/.test(remote) ? `https://github.com/${remote}` : remote);
+}
+
 function identity(segment: Segment) {
   validate(segment);
   const { tokens, cwd, git } = segment;
   const remote = decisionInput(option(tokens, '-R', '--repo') ?? git(cwd, ['remote', 'get-url', 'origin']).trim());
-  const repo = repoKey(/^[\w.-]+\/[\w.-]+$/.test(remote) ? `https://github.com/${remote}` : remote);
+  const repo = repositoryKey(remote);
   const head = decisionInput(option(tokens, '-H', '--head') ?? git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim()).trim().replace(/^[^:]+:/, '');
   if (!head) throw new Error('unresolved branch');
   return { repo, head };

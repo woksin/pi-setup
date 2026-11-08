@@ -86,7 +86,7 @@ Each component needs a unique nonempty `id`, `kind` (`build` or `test`) and a ca
 | Tool | Purpose | Help | Source |
 |---|---|---|---|
 | `pi-train` | Manages a release train: fold several PRs into one branch, check status and ship it. See [Release trains](../README.md#release-trains). | `pi-train --help` | [source](../agent/bin/pi-train) |
-| `pi-publish` | Posts issue, PR and comment text through a secret scan. Normally used from inside pi. | `pi-publish --help` | [source](../agent/bin/pi-publish) |
+| `pi-publish` | Posts issue, PR and comment text through a secret scan, on github.com or a GitHub Enterprise host (`--host`). Normally used from inside pi. | `pi-publish --help` | [source](../agent/bin/pi-publish) |
 
 ## Lanes and messaging (opt-in)
 
