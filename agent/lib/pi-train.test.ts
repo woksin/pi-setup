@@ -993,7 +993,7 @@ test('ship routes create, notes comment and link comment through gh with exact g
   const f = await readyToShip(t);
   assert.equal(await f.invoke('ship'), 0, f.errors.join('\n'));
   const pr = f.state.trainPR, linkBody = f.state.pr.comments.at(-1).body;
-  assert.match(pr.comments[0].body, /^## Folded items\n\n- #7: /); assert.match(pr.comments[0].body, /<!-- pi-train:ship train\/test [0-9a-f]{64} -->\n$/);
+  assert.match(pr.comments[0].body, /^## Folded items\n\n- `#7` at `/); assert.match(pr.comments[0].body, /<!-- pi-train:ship train\/test [0-9a-f]{64} -->\n$/);
   assert.equal(linkBody, `Train PR: #42\n\n<!-- pi-train:train-pr train/test pr=42 -->`);
   // Every free-text write reached gh via the publisher's private body file; none carries --body or --title text on argv.
   const writes = f.state.raw.filter(argv => ['create', 'edit', 'comment'].includes(argv[1]));

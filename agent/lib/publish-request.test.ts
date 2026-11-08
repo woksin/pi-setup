@@ -34,6 +34,15 @@ for (const request of cases) test(`validates and plans ${request.kind}`, () => {
 	assert.ok(plan.payloads.every(source => /^(?:body|files\[\d+\]|fields\[\d+\])$/.test(source.label)));
 });
 
+for (const kind of ["issue-create", "pr-create"] as const) test(`${kind} accepts exactly the .github repository name`, () => {
+	const request = { kind, repo: "validorg/.github", title: "Title", body: "Body" };
+	assert.deepEqual(validateRequest(request), request);
+	assert.equal(toGhPlan(request).authority.repo, request.repo);
+	for (const repo of ["", "owner/", "owner/..", "owner/.", "owner/.hidden", "owner/.GitHub", "owner/-repo", "owner/repo/other", "owner/.github/x", "owner/.github..", "owner/.github ", "owner/.github\t", "owner/.github\n", "owner/.github\r", "owner/.github\0", "owner/.github\u200b", "owner / .github", ".owner/.github", "-owner/.github", "own_er/.github"]) {
+		assert.throws(() => validateRequest({ ...request, repo }), InvalidRequest);
+	}
+});
+
 test("request and nested arrays detach and freeze; caller mutation cannot alter authority", () => {
 	const request = { kind: "issue-create", repo: target.repo, title: "Title", body: "Body", labels: ["safe"] };
 	const validated = validateRequest(request);

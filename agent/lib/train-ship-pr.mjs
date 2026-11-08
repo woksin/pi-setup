@@ -27,7 +27,7 @@ export function shipBody(manifest, summary) {
 
 export function reviewerNotes(manifest, evidence) {
   const lines = manifest.items.filter(item => item.kind === 'folded').map(item =>
-    `- ${item.pr ? `#${item.pr}` : item.branch}: ${item.sha}; cancelled runs: ${(item.cancelledRuns ?? []).join(', ') || 'none'}`);
+    `- \`${item.pr ? `#${item.pr}` : item.branch}\` at \`${item.sha}\`; cancelled runs: ${(item.cancelledRuns ?? []).join(', ') || 'none'}`);
   return `## Folded items\n\n${lines.join('\n')}\n\n## Verification\n\n${evidence}\n`;
 }
 
