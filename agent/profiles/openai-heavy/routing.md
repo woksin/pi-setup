@@ -40,7 +40,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `cleanup-steward` performs post-work inventory and only explicitly authorised, safety-checked cleanup.
 - Cross-provider review: `reviewer` reviews GPT-written work; `sol-reviewer` or `second-opinion` reviews Claude-written work. Before merge run the `review` workflow.
 - Start a fresh parent session from a short `.ai-work/` handoff around ~600k tokens (hard ceiling 800k; see "Orchestrator context" in the global rules).
-- Delegate searches needing more than about three grep/find/read calls to `Explore`, extraction from long logs to `grunt`, and multi-source web research to `scout`.
+- Delegate searches needing more than about three grep/find/read calls to `Explore` (it can also answer "where/how is X implemented": ask for file:line and a short answer, spot-check what you rely on), extraction from long logs to `grunt`, and multi-source web research to `scout`.
 - Never poll: no repeated sleep/check loops, `.output` tailing, or repeated CI status calls. For waits longer than a minute, use `job_start` (e.g. `gh run watch <run-id> --exit-status`) or `job_watch` (re-runs a check until it passes), then end the turn: the completion message wakes you. Do not call `job_list`/`job_output` to wait. Otherwise use one bounded waiting command.
 - Never call `get_subagent_result` with `wait: true`; completion notifications start a new turn.
 - In repositories with Cratis AI installed, its rules and skills take precedence for Cratis conventions; prefer these pinned agent types over Cratis corpus agents, which inherit the session model.

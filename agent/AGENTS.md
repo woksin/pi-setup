@@ -97,6 +97,7 @@ The `review` workflow gates only on **blocking** findings: critical or major iss
 - After provider limits lift, `/provider-restore` (this session) or `provider-restore --all-sessions` (every running session) switches fallback sessions back to their original model. Never edit the limits file or switch terminals by hand.
 - **Record lessons.** When you hit a systemic problem (a failure mode that will recur for other sessions), append an entry to `docs/operating-lessons.md` in the setup repository (symptom, cause, rule, where it is enforced), or send it to the coordinator who owns that file. Turn the rule into tooling or an `AGENTS.md` rule where possible.
 - Keep raw output out of the main session. Cap your own commands (`| tail -n 40` only for display, never for gate evidence). Delegate digests of logs, diffs, CI failures and PR/issue state to `ops`.
+- **Investigation budget.** A main session orchestrates; reading is a budget. Beyond about 5 direct reads/searches or ~200 lines of output for one question (understanding code, diagnosing a failure, digesting logs, verifying an implementer's diff beyond `git diff --stat` and spot checks), hand it to a subagent and ask for a short answer: `Explore` to find or explain where/how something is implemented, `ops` to read and summarise code or logs, `sol-reviewer`/`reviewer` for correctness, `planner` for design research. Direct reads are fine when the target is known and small. A `delegation-nudge` reminder in a tool result means you are over budget: delegate the next step.
 - The context budget is enforced by the `context-budget` extension (main sessions: write the handoff at 150k, reset by 220k, hard guardrail 400k; subagent budgets are unchanged). When it asks for a handoff, call `context_handoff` at the next safe point: verified facts (HEAD SHA, "review passed at <sha>", CI run ids, PR/issue states) separate from plans, decisions, the user's constraints verbatim, the next step and the files to read first. The extension then resets the context in place and the session continues on its own, with the same jobs, watches, subagents and issue claims. Do not stop, ask for a new session, or argue with the block; only the user switches it off. Keep `.ai-work/<task>/STATE.md` current for long-running coordination (facts and evidence, decisions, unresolved questions, owners, merge/dependency order). Before handoff, reconcile it with live state; include a watch-action table (job/run ID, immutable target, completion action, cancellation), exact next commands, and verbatim user asks/constraints. List every needed state/brief/protocol file in `files_to_read`, not just STATE.md. After reset, re-verify mutable facts before acting; never treat a plan or old watch result as current evidence.
 
 <!-- pi-setup:codescene:start -->
@@ -132,7 +133,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `content-writer`: Claude Opus 5.5, medium
 - `cratis-cli`: GPT-6.1 Sol, medium
 - `doc-writer`: Claude Sonnet 5.5, medium
-- `Explore`: Claude Haiku 5.5, low (lookups only; not for facts, edits or review)
+- `Explore`: Claude Haiku 5.5, low (locating code and answering "where/how is X implemented" with file:line evidence; verify load-bearing claims; not for edits or review)
 - `general-purpose`: Claude Sonnet 5.5, medium
 - `grunt`: Claude Sonnet 5.5, low
 - `implementer`: GPT-6.1 Sol, high
@@ -160,7 +161,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - Context size is enforced by the `context-budget` extension (see "Orchestrator context" in the global rules): hand off with `context_handoff` when asked and keep working.
 - The main session plans, briefs and decides. Delegate collection and extraction to `ops` (Haiku for bounded evidence gathering; escalate ambiguous reasoning to Sonnet/Opus); route substantive bounded correctness and root-cause diagnosis to `sol-reviewer` (high), with named files, evidence, checks and stop conditions:
   - `ops` — collect git/gh/CI state, extract failing-job logs and PR/issue content, summarise logs/code, and draft PR notes or handoffs. Use it for collection/extraction that would take more than about three git/gh/cat/grep calls or produce more than ~100 lines of output. It does not adjudicate root cause or correctness, or certify review.
-  - `Explore` — locating code and symbols; `scout` — multi-source web research.
+  - `Explore` — locate code and answer where/how it is implemented (ask for file:line and a short answer; spot-check what you rely on); `scout` — multi-source web research.
   - `grunt` stays for mechanical edits.
 - Never poll: no repeated sleep/check loops, `.output` tailing, or repeated CI status calls. For waits longer than a minute, use `job_start` (e.g. `gh run watch <run-id> --exit-status`) or `job_watch` (re-runs a check until it passes), then end the turn: the completion message wakes you. Do not call `job_list`/`job_output` to wait. Otherwise use one bounded waiting command.
 - Never call `get_subagent_result` with `wait: true`; completion notifications start a new turn.

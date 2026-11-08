@@ -16,7 +16,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - `content-writer`: Claude Opus 5.5, medium
 - `cratis-cli`: GPT-6.1 Sol, xhigh
 - `doc-writer`: Claude Sonnet 5.5, medium
-- `Explore`: Claude Haiku 5.5, low (lookups only; not for facts, edits or review)
+- `Explore`: Claude Haiku 5.5, low (locating code and answering "where/how is X implemented" with file:line evidence; verify load-bearing claims; not for edits or review)
 - `general-purpose`: Claude Sonnet 5.5, medium
 - `grunt`: Claude Sonnet 5.5, low
 - `implementer`: GPT-6.1 Sol, xhigh
@@ -42,7 +42,7 @@ Delegate by agent type; each type pins its own model and thinking level. Never p
 - Write a short `.ai-work/` handoff at 150k tokens; start a fresh parent session by 220k (hard guardrail 400k; see "Orchestrator context" in the global rules).
 - The main session plans, briefs and decides; it does not do the reading. Delegate bounded evidence gathering to Haiku; escalate ambiguous reasoning to Sonnet/Opus:
   - `ops` — git/gh/CI state, failing-job logs, PR/issue reads, long-log triage, reading and summarising code, drafting PR notes or handoffs. Use it whenever the answer would take more than about three git/gh/cat/grep calls or produce more than ~100 lines of output.
-  - `Explore` — locating code and symbols; `scout` — multi-source web research.
+  - `Explore` — locate code and answer where/how it is implemented (ask for file:line and a short answer; spot-check what you rely on); `scout` — multi-source web research.
   - `grunt` stays for mechanical edits.
 - Never poll: no repeated sleep/check loops, `.output` tailing, or repeated CI status calls. For waits longer than a minute, use `job_start` (e.g. `gh run watch <run-id> --exit-status`) or `job_watch` (re-runs a check until it passes), then end the turn: the completion message wakes you. Do not call `job_list`/`job_output` to wait. Otherwise use one bounded waiting command.
 - Never call `get_subagent_result` with `wait: true`; completion notifications start a new turn.

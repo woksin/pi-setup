@@ -22,16 +22,19 @@ export type Role = "main" | "subagent" | "unknown";
 export interface EfficiencyConfig {
 	outputCap: { enabled: boolean; maxChars: number; scope: Scope };
 	observationMask: { enabled: boolean; keep: number; batchTokens: number; minChars: number; scope: Scope };
+	delegationNudge: { enabled: boolean; scope: Scope; thresholdBytes: number; thresholdCalls: number };
 }
 
 /** Values used for fields the file leaves out. A missing or unreadable file disables both features. */
 export const DEFAULTS: EfficiencyConfig = {
 	outputCap: { enabled: true, maxChars: 12000, scope: "all" },
 	observationMask: { enabled: true, keep: 15, batchTokens: 30000, minChars: 1000, scope: "subagents" },
+	delegationNudge: { enabled: true, scope: "main", thresholdBytes: 40000, thresholdCalls: 12 },
 };
 export const DISABLED: EfficiencyConfig = {
 	outputCap: { ...DEFAULTS.outputCap, enabled: false },
 	observationMask: { ...DEFAULTS.observationMask, enabled: false },
+	delegationNudge: { ...DEFAULTS.delegationNudge, enabled: false },
 };
 
 const SCOPES = new Set<Scope>(["all", "subagents", "main", "off"]);
@@ -42,7 +45,7 @@ const bool = (v: unknown, d: boolean) => (typeof v === "boolean" ? v : d);
 export function parseConfig(raw: unknown): EfficiencyConfig {
 	if (!raw || typeof raw !== "object") return DISABLED;
 	const r = raw as Record<string, any>;
-	const c = r.outputCap ?? {}, m = r.observationMask ?? {};
+	const c = r.outputCap ?? {}, m = r.observationMask ?? {}, n = r.delegationNudge ?? {};
 	const d = DEFAULTS;
 	return {
 		outputCap: {
@@ -56,6 +59,12 @@ export function parseConfig(raw: unknown): EfficiencyConfig {
 			batchTokens: num(m.batchTokens, d.observationMask.batchTokens, 0),
 			minChars: num(m.minChars, d.observationMask.minChars, 0),
 			scope: scope(m.scope, d.observationMask.scope),
+		},
+		delegationNudge: {
+			enabled: r.delegationNudge ? bool(n.enabled, d.delegationNudge.enabled) : false,
+			scope: scope(n.scope, d.delegationNudge.scope),
+			thresholdBytes: num(n.thresholdBytes, d.delegationNudge.thresholdBytes, 1000),
+			thresholdCalls: num(n.thresholdCalls, d.delegationNudge.thresholdCalls, 1),
 		},
 	};
 }

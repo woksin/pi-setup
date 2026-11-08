@@ -8,6 +8,7 @@ Reuse a still-valid plan. Run `planner` only for more than three implementation 
 Only send actionable coordination: deliveries, blocker changes, questions/decisions or new relevant safety holds. No unchanged status, ACK-of-ACK or cc messages. ALL is reserved for truly global safety holds; keep targeted critical alerts.
 Send action-needed reports only to the named owner/parent. Acknowledge deliveries and questions, not information-only or ALL/FYI messages. Timeouts only re-arm watches silently; renew waiting-on leases locally. Notify once on blocking, then only on material change, lease expiry or explicit request; no hourly "still waiting" messages.
 Write the parent handoff at 150k context tokens and reset by 220k; 400k is a hard guardrail, not a target.
+Investigation budget: for any question needing more than ~5 reads/searches or ~200 lines of output, send a subagent (`Explore`/`ops`) for a short answer instead of reading yourself.
 
 ## Goal
 <What must be true when you are done, in 1–3 sentences. Link the issue.>
