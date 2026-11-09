@@ -48,16 +48,50 @@ const minimalCases: Record<string, unknown>[] = [
 	{ kind: "gist-create", files: ["a.md"] }, { kind: "gist-edit", gistId: "abc", description: "D" },
 	{ kind: "api", endpoint: "repos/o/r", method: "POST" }, { kind: "check", files: ["a.md"] },
 ];
+// Pinned from ee0ed8f1's oneOf schema + validateRequest, not the current runtime contracts.
+const parityFields: Record<string, { required: string; forbidden: string }> = {
+	"issue-create": { required: "repo title", forbidden: "addAssignees addLabels addReviewers auto base createIfNone deleteBranch description draft editLast endpoint event fields files gistId head matchHeadCommit method number prerelease public reason removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject tag target" },
+	"pr-create": { required: "repo title", forbidden: "addAssignees addLabels addReviewers auto createIfNone deleteBranch description editLast endpoint event fields files gistId matchHeadCommit method number prerelease public reason removeAssignees removeFiles removeLabels removeReviewers strategy subject tag target" },
+	"issue-comment": { required: "repo number", forbidden: "addAssignees addLabels addReviewers assignees auto base deleteBranch description draft endpoint event fields files gistId head labels matchHeadCommit method prerelease public reason removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject tag target title" },
+	"pr-comment": { required: "repo number", forbidden: "addAssignees addLabels addReviewers assignees auto base deleteBranch description draft endpoint event fields files gistId head labels matchHeadCommit method prerelease public reason removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject tag target title" },
+	"issue-edit": { required: "repo number", forbidden: "addReviewers assignees auto base createIfNone deleteBranch description draft editLast endpoint event fields files gistId head labels matchHeadCommit method prerelease public reason removeFiles removeReviewers reviewers strategy subject tag target" },
+	"pr-edit": { required: "repo number", forbidden: "assignees auto createIfNone deleteBranch description draft editLast endpoint event fields files gistId head labels matchHeadCommit method prerelease public reason removeFiles reviewers strategy subject tag target" },
+	"issue-close": { required: "repo number", forbidden: "addAssignees addLabels addReviewers assignees auto base createIfNone deleteBranch description draft editLast endpoint event fields files gistId head labels matchHeadCommit method prerelease public removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject tag target title" },
+	"pr-close": { required: "repo number", forbidden: "addAssignees addLabels addReviewers assignees auto base createIfNone description draft editLast endpoint event fields files gistId head labels matchHeadCommit method prerelease public reason removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject tag target title" },
+	"issue-reopen": { required: "repo number", forbidden: "addAssignees addLabels addReviewers assignees auto base createIfNone deleteBranch description draft editLast endpoint event fields files gistId head labels matchHeadCommit method prerelease public reason removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject tag target title" },
+	"pr-reopen": { required: "repo number", forbidden: "addAssignees addLabels addReviewers assignees auto base createIfNone deleteBranch description draft editLast endpoint event fields files gistId head labels matchHeadCommit method prerelease public reason removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject tag target title" },
+	"pr-review": { required: "repo number event", forbidden: "addAssignees addLabels addReviewers assignees auto base createIfNone deleteBranch description draft editLast endpoint fields files gistId head labels matchHeadCommit method prerelease public reason removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject tag target title" },
+	"pr-merge": { required: "repo number strategy", forbidden: "addAssignees addLabels addReviewers assignees base createIfNone description draft editLast endpoint event fields files gistId head labels method prerelease public reason removeAssignees removeFiles removeLabels removeReviewers reviewers tag target title" },
+	"release-create": { required: "repo tag", forbidden: "addAssignees addLabels addReviewers assignees auto base createIfNone deleteBranch description editLast endpoint event fields files gistId head labels matchHeadCommit method number public reason removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject" },
+	"release-notes": { required: "repo tag", forbidden: "addAssignees addLabels addReviewers assignees auto base createIfNone deleteBranch description draft editLast endpoint event fields files gistId head labels matchHeadCommit method number prerelease public reason removeAssignees removeFiles removeLabels removeReviewers reviewers strategy subject target" },
+	"gist-create": { required: "files", forbidden: "addAssignees addLabels addReviewers assignees auto base body bodyFile createIfNone deleteBranch draft editLast endpoint event fields gistId head host labels matchHeadCommit method number prerelease reason removeAssignees removeFiles removeLabels removeReviewers repo reviewers strategy subject tag target title" },
+	"gist-edit": { required: "gistId", forbidden: "addAssignees addLabels addReviewers assignees auto base body bodyFile createIfNone deleteBranch draft editLast endpoint event fields head host labels matchHeadCommit method number prerelease public reason removeAssignees removeLabels removeReviewers repo reviewers strategy subject tag target title" },
+	api: { required: "endpoint method", forbidden: "addAssignees addLabels addReviewers assignees auto base createIfNone deleteBranch description draft editLast event files gistId head labels matchHeadCommit number prerelease public reason removeAssignees removeFiles removeLabels removeReviewers repo reviewers strategy subject tag target title" },
+	check: { required: "files", forbidden: "addAssignees addLabels addReviewers assignees auto base body bodyFile createIfNone deleteBranch description draft editLast endpoint event fields gistId head host labels matchHeadCommit method number prerelease public reason removeAssignees removeFiles removeLabels removeReviewers repo reviewers strategy subject tag target title" },
+};
+// Each value is valid for its field, including conditional createIfNone: false.
+const parityValues: Record<string, unknown> = {
+	repo: target.repo, number: target.number, title: "T", body: "B", bodyFile: "a.md", subject: "S", description: "D",
+	base: "main", head: "topic", target: "main", tag: "v1", gistId: "abc", endpoint: "repos/o/r",
+	matchHeadCommit: "a".repeat(40), event: "approve", strategy: "merge", reason: "completed", method: "POST", host: "ghe.example.com",
+	labels: ["safe"], assignees: ["person"], reviewers: ["person"], addLabels: ["safe"], removeLabels: ["safe"],
+	addAssignees: ["person"], removeAssignees: ["person"], addReviewers: ["person"], removeReviewers: ["person"],
+	draft: true, editLast: true, createIfNone: false, deleteBranch: true, auto: true, prerelease: true, public: true,
+	files: ["a.md"], removeFiles: ["old.md"], fields: [{ name: "x", value: 1 }],
+};
+function forbiddenCases(request: Record<string, unknown>): Record<string, unknown>[] {
+	return parityFields[request.kind as string].forbidden.split(" ").map(key => ({ ...request, [key]: parityValues[key] }));
+}
 function parityFailures(request: Record<string, unknown>): Record<string, unknown>[] {
-	const contract = kindContract(request.kind as PublishRequest["kind"]);
-	const required = contract.split(" requires: ")[1].split(";")[0].split(", ");
-	const optional = contract.split("; optional: ")[1].split(", ").filter(Boolean);
-	const allowed = [...required, ...optional];
+	const pinned = parityFields[request.kind as string];
+	const required = pinned.required.split(" ");
+	const forbidden = pinned.forbidden.split(" ");
+	const allowed = Object.keys(parityValues).filter(key => !forbidden.includes(key));
 	const failures = [
 		Object.fromEntries(Object.entries(request).filter(([name]) => name !== "kind")),
 		{ ...request, kind: 42 }, { ...request, kind: "VALUE-SENTINEL" },
 		{ ...request, zzz: "VALUE-SENTINEL" },
-		{ ...request, [allowed.includes("host") ? "public" : "host"]: "VALUE-SENTINEL" },
+		...forbiddenCases(request),
 		...required.map(key => Object.fromEntries(Object.entries(request).filter(([name]) => name !== key))),
 	];
 	for (const key of allowed) {
@@ -91,10 +125,23 @@ function parityFailures(request: Record<string, unknown>): Record<string, unknow
 }
 test("parity fixtures cover all 18 publish kinds", () => {
 	assert.equal(minimalCases.length, 18);
+	assert.deepEqual(Object.keys(parityFields), minimalCases.map(request => request.kind));
 	assert.deepEqual(minimalCases.map(request => request.kind), publishRequestSchema.properties.kind.enum);
+	for (const pinned of Object.values(parityFields)) {
+		for (const key of pinned.required.split(" ")) assert.ok(key in parityValues && !pinned.forbidden.split(" ").includes(key), key);
+		for (const key of pinned.forbidden.split(" ")) assert.ok(key in parityValues, key);
+	}
 });
 for (const request of minimalCases) test(`${request.kind} preserves runtime rejection parity before admission`, async () => {
 	assert.deepEqual(validateRequest(request), request);
+	for (const invalid of forbiddenCases(request)) {
+		const key = Object.keys(invalid).find(key => !(key in request))!;
+		assert.throws(() => validateRequest(invalid), error => {
+			assert.ok(error instanceof InvalidRequest);
+			assert.ok(error.detail?.startsWith(`unknown field for ${request.kind}: ${key};`));
+			return true;
+		}, `${request.kind} must forbid valid-typed ${key}`);
+	}
 	let registered: any;
 	publishExtension({ registerTool: (definition: unknown) => { registered = definition; } } as any, {
 		admit: () => assert.fail("invalid requests must not reach authority admission"),
