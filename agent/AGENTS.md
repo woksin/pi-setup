@@ -32,6 +32,7 @@ Answer these with the setup's tools, not hand-rolled `gh`/`ls`/`grep` loops:
 
 ### L0 lane routing
 
+- For hand-started Pi sessions, `lanes register <ID>` records the nearest Pi ancestor and its cwd without editing config or requiring pi-orch; use `--pid PID` / `--cwd DIR` to override discovery, and `lanes unregister <ID>` to retire the identity. Unknown-recipient `lanes send` warnings show up to three closest live candidates but still send to the requested ID: verify the recipient rather than auto-assigning from the warning.
 - Before assigning work, run `lanes who --issue OWNER/REPO#N` or `lanes who --repo R`. Treat `unverified` or `delivered` suggestions as a hold to verify, not permission to assign; prefer the named live holder or an idle lane in that repository before starting another.
 - For assignments, use `lanes send ID task --issue OWNER/REPO#N -m "brief"`. Exit 3 refuses duplicate ownership before writing a message; use the holder, verify delivery, or deliberately pass `--force "reason"` (the reason is recorded in the message). Sends without `--issue` retain their existing behaviour.
 - Roster evidence is local and explicit: missing/error sources, unknown liveness and stale heartbeats are not proof of idleness. Context use is `-` until a reliable local signal exists; do not infer headroom from session-file size.

@@ -2,7 +2,8 @@ import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { LanesCtx } from "./ctx.ts";
-import type { Config } from "./config.ts";
+import { UsageError, type Config } from "./config.ts";
+import { runningPiChecked } from "./processes.ts";
 import { validId } from "./names.ts";
 import { readJsonDir, type RosterInputs, type RosterRow } from "./roster.ts";
 
@@ -22,6 +23,28 @@ export function writeRegistration(root: string, record: Registration): void {
 export function retireRegistration(root: string, id: string, at: string): void {
   const record = JSON.parse(readFileSync(registrationPath(root, id), "utf8")) as Registration;
   writeRegistration(root, { ...record, retiredAt: at });
+}
+export async function registerSession(root: string, input: Pick<Registration, "id" | "pid" | "cwd">, ctx: LanesCtx): Promise<void> {
+  if (!validId(input.id)) throw new UsageError("invalid registration id");
+  const existing = readRegistrations(root).values.find(record => record.id === input.id);
+  if (existing && await sameLiveOwner(existing, input, ctx)) return;
+  writeRegistration(root, { ...input, startedAt: ctx.now().toISOString() });
+}
+async function sameLiveOwner(existing: Registration, input: Pick<Registration, "id" | "pid">, ctx: LanesCtx): Promise<boolean> {
+  const [checked] = checkRegistrations([existing], await runningPiChecked(ctx), ctx);
+  if (!checked.alive) return false;
+  if (existing.pid !== input.pid) throw new Error(`${input.id} already registered to pid ${existing.pid} (${existing.cwd})`);
+  return true;
+}
+export function unregisterSession(root: string, id: string, ctx: LanesCtx): void {
+  if (!validId(id)) throw new UsageError("invalid registration id");
+  let record: Registration;
+  try { record = JSON.parse(readFileSync(registrationPath(root, id), "utf8")); }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`${id} not registered`);
+    throw e;
+  }
+  if (!record.retiredAt) retireRegistration(root, id, ctx.now().toISOString());
 }
 function parseableAt(value: unknown): boolean { return typeof value === "string" && Number.isFinite(Date.parse(value)); }
 function validRegistration(value: any): boolean {

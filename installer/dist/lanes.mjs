@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 66716138c28880307f956723919e19cdcc3eff64e528fe2e5e892bdc22dcb307
+// pi-setup-source-sha256: 318fdaed23c5f4861c2a2be5cef3efc460d0a2d25641ad5b3e7d0af9ee99cfcf
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -17,15 +17,15 @@ import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 var MAX_BUFFER = 16 * 1024 * 1024;
 function inherited(cmd, args, options) {
-  return new Promise((resolve11) => {
+  return new Promise((resolve12) => {
     const child = spawn(cmd, args, { cwd: options.cwd, env: { ...process.env, ...options.env }, stdio: "inherit" });
-    child.on("error", (error) => resolve11({ code: null, stdout: "", stderr: error.message, timedOut: false }));
-    child.on("close", (code) => resolve11({ code, stdout: "", stderr: "", timedOut: false }));
+    child.on("error", (error) => resolve12({ code: null, stdout: "", stderr: error.message, timedOut: false }));
+    child.on("close", (code) => resolve12({ code, stdout: "", stderr: "", timedOut: false }));
   });
 }
 var realRun = (cmd, args, options = {}) => {
   if (options.inherit) return inherited(cmd, args, options);
-  return new Promise((resolve11) => {
+  return new Promise((resolve12) => {
     const child = execFile(
       cmd,
       args,
@@ -33,7 +33,7 @@ var realRun = (cmd, args, options = {}) => {
       (error, stdout, stderr) => {
         const failure = error;
         const code = failure ? typeof failure.code === "number" ? failure.code : null : 0;
-        resolve11({
+        resolve12({
           code,
           stdout: String(stdout ?? ""),
           stderr: failure && code === null && !stderr ? failure.message : String(stderr ?? ""),
@@ -1824,7 +1824,7 @@ async function unchanged(env, s) {
   if (version(current) !== version(s)) throw new Error("handoff request safety evidence changed");
 }
 async function waitForContext(env, s, at) {
-  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
+  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve12) => setTimeout(resolve12, ms)));
   let reason = "lane handoff absent or stale";
   for (let attempt = 0; attempt < 30; attempt++) {
     try {
@@ -1874,7 +1874,7 @@ async function exited(env, pid) {
   return false;
 }
 async function awaitExit(env, pid) {
-  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
+  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve12) => setTimeout(resolve12, ms)));
   for (let attempt = 0; attempt < 5; attempt++) {
     if (await exited(env, pid)) return;
     await sleep(200);
@@ -2334,6 +2334,36 @@ async function descendants2(ctx, rootPid) {
     }
   }
   return rows.filter((r2) => r2.pid !== rootPid && ids.has(r2.pid)).map((r2) => r2.command);
+}
+function ancestorRows(text2) {
+  const rows = /* @__PURE__ */ new Map();
+  for (const line of text2.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    if (match) rows.set(Number(match[1]), { pid: Number(match[1]), parent: Number(match[2]), comm: match[3] });
+  }
+  return rows;
+}
+function nearestPi(rows, startPid) {
+  const visited = /* @__PURE__ */ new Set();
+  let pid = startPid;
+  for (let hops = 0; hops < 64; hops++) {
+    if (visited.has(pid)) return void 0;
+    visited.add(pid);
+    const row = rows.get(pid);
+    if (!row) return void 0;
+    if (row.comm.split("/").at(-1) === "pi") return row.pid;
+    pid = row.parent;
+  }
+  return void 0;
+}
+async function ancestorChain(ctx, startPid = process.pid) {
+  try {
+    const result2 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,comm="], { timeoutMs: 1e4 });
+    if (result2.code !== 0 || result2.timedOut) return void 0;
+    return nearestPi(ancestorRows(result2.stdout), startPid);
+  } catch {
+    return void 0;
+  }
 }
 async function alive(ctx, pid) {
   return (await ctx.run("ps", ["-p", String(pid)], { timeoutMs: 1e4 })).code === 0;
@@ -3270,8 +3300,8 @@ function rosterSeeds(c, root, ctx) {
     ...c.lanes.map((l) => ({ ...l, cwd: canonical(laneDir(l, c, root, ctx), ctx), retired: Boolean(l.retired || l.closed) }))
   ];
 }
-async function readRoster(c, root, ctx, register) {
-  const data = register ?? await readIssueRegister(ctx);
+async function readRoster(c, root, ctx, register2) {
+  const data = register2 ?? await readIssueRegister(ctx);
   const processes = await runningPiChecked(ctx);
   const registrations = readRegistrations(root, registrationCutoff(c, ctx.now()));
   const orch = join32(ctx.home, ".pi/orch");
@@ -3350,10 +3380,10 @@ function unregisteredProcess(p, input) {
   if (!id) row.notes.push("identity unavailable: unregistered");
   return row;
 }
-function rosterProcesses(procs, register) {
+function rosterProcesses(procs, register2) {
   const found = new Map(procs.map((p) => [p.pid, p]));
-  for (const lease of register.leases) {
-    const live = register.liveness.get(lease.sessionId);
+  for (const lease of register2.leases) {
+    const live = register2.liveness.get(lease.sessionId);
     if (live?.status !== "live" || live.pid !== lease.pid || found.has(lease.pid)) continue;
     found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
   }
@@ -3616,6 +3646,29 @@ function writeRegistration(root, record2) {
 function retireRegistration(root, id, at) {
   const record2 = JSON.parse(readFileSync17(registrationPath(root, id), "utf8"));
   writeRegistration(root, { ...record2, retiredAt: at });
+}
+async function registerSession(root, input, ctx) {
+  if (!validId(input.id)) throw new UsageError("invalid registration id");
+  const existing = readRegistrations(root).values.find((record2) => record2.id === input.id);
+  if (existing && await sameLiveOwner(existing, input, ctx)) return;
+  writeRegistration(root, { ...input, startedAt: ctx.now().toISOString() });
+}
+async function sameLiveOwner(existing, input, ctx) {
+  const [checked] = checkRegistrations([existing], await runningPiChecked(ctx), ctx);
+  if (!checked.alive) return false;
+  if (existing.pid !== input.pid) throw new Error(`${input.id} already registered to pid ${existing.pid} (${existing.cwd})`);
+  return true;
+}
+function unregisterSession(root, id, ctx) {
+  if (!validId(id)) throw new UsageError("invalid registration id");
+  let record2;
+  try {
+    record2 = JSON.parse(readFileSync17(registrationPath(root, id), "utf8"));
+  } catch (e) {
+    if (e.code === "ENOENT") throw new Error(`${id} not registered`);
+    throw e;
+  }
+  if (!record2.retiredAt) retireRegistration(root, id, ctx.now().toISOString());
 }
 function parseableAt(value) {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
@@ -4032,9 +4085,9 @@ async function admit(ctx, request2, beforeLaunch) {
 // src/lanes/commands/run.ts
 function nativeSpawn(exe, args, options) {
   const child = spawn2(exe, args, { ...options, stdio: "inherit", shell: false });
-  const done = new Promise((resolve11, reject) => {
+  const done = new Promise((resolve12, reject) => {
     child.once("error", reject);
-    child.once("exit", (code, signal) => resolve11({ code, signal }));
+    child.once("exit", (code, signal) => resolve12({ code, signal }));
   });
   return { pid: child.pid ?? 0, done, signal: (signal) => {
     child.kill(signal);
@@ -4087,8 +4140,8 @@ async function run(id, opts, c, root, ctx, beforeLaunch) {
     }
   }
   let verified;
-  const identity2 = new Promise((resolve11) => {
-    verified = resolve11;
+  const identity2 = new Promise((resolve12) => {
+    verified = resolve12;
   });
   const handlers = /* @__PURE__ */ new Map();
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -4268,17 +4321,12 @@ import { readFileSync as readFileSync19 } from "node:fs";
 import { resolve as resolve10 } from "node:path";
 async function send(args, opts, c, root, ctx) {
   let [to, topic, file] = args;
-  const from = opts.from || ctx.env.PI_ORCH_ID;
-  if (!from) throw new UsageError("set --from or PI_ORCH_ID");
-  if (!validId(from)) throw new UsageError("invalid from");
-  if (!validId(to)) throw new UsageError("invalid to");
-  if (!validTopic(topic)) throw new UsageError("invalid topic");
-  if (opts.m !== void 0 && file !== void 0) throw new UsageError("choose a file or -m, not both");
+  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to, topic, file }, opts);
   const known = [c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.flatMap((l) => [l.id, l.group])];
-  if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  if (!known.includes(to)) await warnUnknown(to, { c, root, ctx });
   const refusal = await guardIssue(to, opts, { c, root, ctx });
   if (refusal) return refusal;
-  let body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync19(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+  let body = await messageBody(file, opts, ctx);
   if (!body.trim()) throw new UsageError("empty message body");
   if (opts.force !== void 0) body = `Ownership override (--force): ${opts.force}
 
@@ -4286,6 +4334,60 @@ ${body}`;
   to = route({ to, from, direct: opts.direct }, c, ctx);
   ctx.out((await backendFor(c, ctx, root).send({ from, to, topic, body })).path);
   return 0;
+}
+function validateMessage(input, opts) {
+  if (!input.from) throw new UsageError("set --from or PI_ORCH_ID");
+  if (!validId(input.from)) throw new UsageError("invalid from");
+  if (!validId(input.to)) throw new UsageError("invalid to");
+  if (!validTopic(input.topic)) throw new UsageError("invalid topic");
+  if (opts.m !== void 0 && input.file !== void 0) throw new UsageError("choose a file or -m, not both");
+  return input.from;
+}
+async function messageBody(file, opts, ctx) {
+  if (opts.m !== void 0) return opts.m;
+  if (file && file !== "-") return readFileSync19(resolve10(ctx.cwd, file), "utf8");
+  return file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+}
+async function liveRoster({ c, root, ctx }) {
+  try {
+    const input = await readRoster(c, root, ctx);
+    const registered = new Set(input.registrations?.filter((r) => r.alive).map((r) => r.id));
+    const rows = buildRoster(input, ctx.now()).rows.filter((row) => liveCandidate(row, registered));
+    return { rows, registered };
+  } catch {
+    return { rows: [], registered: /* @__PURE__ */ new Set() };
+  }
+}
+function liveCandidate(row, registered) {
+  if (["retired", "stopped", "unknown"].includes(row.state)) return false;
+  return row.pid !== null || registered.has(row.lane);
+}
+function sharedPrefix(a, b) {
+  let length = 0;
+  while (length < Math.min(a.length, b.length) && a[length] === b[length]) length++;
+  return length;
+}
+function editDistance(a, b) {
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 0; i < a.length; i++) {
+    const current = [i + 1];
+    for (let j = 0; j < b.length; j++) current.push(Math.min(current[j] + 1, previous[j + 1] + 1, previous[j] + Number(a[i] !== b[j])));
+    previous = current;
+  }
+  return previous[b.length];
+}
+function closestLive(to, rows) {
+  const target = to.toLowerCase();
+  const ranked = rows.map((row) => ({ row, prefix: sharedPrefix(target, row.lane.toLowerCase()), distance: editDistance(target, row.lane.toLowerCase()) }));
+  ranked.sort((a, b) => b.prefix - a.prefix || a.distance - b.distance || Number(b.row.state === "idle") - Number(a.row.state === "idle") || a.row.lane.localeCompare(b.row.lane));
+  return ranked.slice(0, 3).map(({ row }) => `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${row.state}`).join(", ");
+}
+async function warnUnknown(to, deps) {
+  const live = await liveRoster(deps);
+  if (live.registered.has(to)) return;
+  deps.ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  const candidates = closestLive(to, live.rows);
+  if (candidates) deps.ctx.err(`closest live: ${candidates}`);
 }
 function assignmentRepo(to, c) {
   const lanes = c.lanes.filter((l) => l.id === to && !l.retired && !l.closed);
@@ -4978,6 +5080,46 @@ async function unacked(args, opts, c, root, ctx) {
   return rows.length ? 0 : 1;
 }
 
+// src/lanes/commands/register.ts
+import { statSync as statSync14 } from "node:fs";
+import { resolve as resolve11 } from "node:path";
+function explicitPid(value) {
+  const pid = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(pid) || pid <= 0) throw new UsageError("--pid must be a positive integer");
+  return pid;
+}
+async function registrationPid(value, ctx) {
+  const pid = value === void 0 ? await ancestorChain(ctx) : explicitPid(value);
+  if (pid === void 0) throw new Error("no pi process found among ancestors; pass --pid");
+  if (!(ctx.pidAlive ?? pidAlive)(pid)) throw new Error(`pid ${pid} is not alive`);
+  return pid;
+}
+async function registrationCwd(opts, pid, ctx) {
+  let cwd = opts.cwd;
+  if (cwd === void 0) {
+    try {
+      cwd = await processCwd2(ctx, pid);
+    } catch {
+    }
+  }
+  const canonical2 = ctx.realpath(resolve11(ctx.cwd, cwd ?? ctx.cwd));
+  if (!statSync14(canonical2).isDirectory()) throw new Error(`not a directory: ${canonical2}`);
+  return canonical2;
+}
+async function register(id, opts, root, ctx) {
+  if (!validId(id)) throw new UsageError("invalid registration id");
+  const pid = await registrationPid(opts.pid, ctx);
+  const cwd = await registrationCwd(opts, pid, ctx);
+  await registerSession(root, { id, pid, cwd }, ctx);
+  ctx.out(`registered ${id} pid=${pid} cwd=${cwd}`);
+  return 0;
+}
+function unregister(id, root, ctx) {
+  unregisterSession(root, id, ctx);
+  ctx.out(`unregistered ${id}`);
+  return 0;
+}
+
 // src/lanes/main.ts
 var HELP = `Usage: lanes [--dir root] <command> [options]
   adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
@@ -4987,6 +5129,8 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
   start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
   run <ID>|coordinator [--from-handoff ID|file]
   resume <ID> [--terminal backend]
+  register <ID> [--cwd DIR] [--pid PID]
+  unregister <ID>
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
   who [--repo R] [--issue N|OWNER/REPO#N] [--json]
   unacked [--json] [--minutes N] [--hours N] [--include-retired]
@@ -5039,6 +5183,8 @@ var OPTIONS = {
   send: ["m", "from", "direct", "issue", "force"],
   who: ["repo", "issue", "json"],
   unacked: ["json", "minutes", "hours", "include-retired"],
+  register: ["cwd", "pid"],
+  unregister: [],
   status: ["all"],
   messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"],
@@ -5129,6 +5275,8 @@ function validateInvocation({ command, positional, opts }) {
     who: [0, 0],
     status: [0, 0],
     messages: [1, 1],
+    register: [1, 1],
+    unregister: [1, 1],
     unacked: [0, 0],
     "idle-check": [0, 0],
     nudge: [2, 2],
@@ -5162,6 +5310,8 @@ async function dispatch(input, env) {
     send: () => send(args, opts, c, root, ctx),
     who: () => who(args, opts, c, root, ctx),
     unacked: () => unacked(args, opts, c, root, ctx),
+    register: () => register(args[0], opts, root, ctx),
+    unregister: () => unregister(args[0], root, ctx),
     "idle-check": () => idleCheck(opts, c, root, ctx),
     nudge: () => nudge(args[0], args[1], opts, c, root, ctx),
     "resume-check": () => resumeCheck(c, root, ctx),
