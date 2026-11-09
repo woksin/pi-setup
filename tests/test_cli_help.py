@@ -58,6 +58,7 @@ EXEMPT = {
     "agent/bin/test_retain.py": "test",
     "agent/bin/test_session_watchdog.py": "test",
     "tools/skills.test.mjs": "test",
+    "tools/sync-review-workflow.mjs": "repository maintenance generator run with node, not installed; prints usage for -h/--help",
     "tools/bin/ai-work-lifecycle": "3-line wrapper that execs the installed copy; the source script is covered instead",
 }
 
