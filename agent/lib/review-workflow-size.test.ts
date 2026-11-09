@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const root = new URL("../", import.meta.url);
@@ -20,7 +20,8 @@ function loadFit(path: string): (res: Record<string, unknown>, budget?: number) 
 }
 
 for (const path of files) {
-  test(`${path}: fit measures the arranged result including reviewerLines`, () => {
+  // The test sandbox installs agent/ only; profile copies are checked in the repo checkout.
+  test(`${path}: fit measures the arranged result including reviewerLines`, { skip: !existsSync(new URL(path, root)) }, () => {
     const fit = loadFit(path);
     const reviewers = Array.from({ length: 12 }, (_, i) => ({ label: `review:long-label-number-${i}`, effective: ["provider/some-long-model-name"], ok: true, expected: "provider/some-long-model-name", assistants: 3 }));
     const blocking = Array.from({ length: 6 }, (_, i) => `(major) file${i}.ts:1: ${"x".repeat(120)}`);
