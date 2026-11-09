@@ -141,12 +141,13 @@ function checkSkill(ctx, name) {
 }
 
 function validateEntry(ctx, entry) {
-  const { errors, allowed, corpus, agentsPath } = ctx;
-  if (!["reworded", "merged", "removed", "moved-core"].includes(entry.kind)) errors.push(`map: ${label(entry)} has unknown kind ${entry.kind}`);
+  const { errors, corpus, agentsPath } = ctx;
+  if (!["reworded", "merged", "removed"].includes(entry.kind)) errors.push(`map: ${label(entry)} has unknown kind ${entry.kind} (moved/moved-core entries are not accepted; every rule stays in ${agentsPath})`);
   if (!entry.reason?.trim()) errors.push(`map: ${label(entry)} needs a reason`);
-  if (entry.kind === "removed") return;
-  if (!allowed.has(entry.to)) { errors.push(`map: ${label(entry)} points to ${entry.to}, which is not ${agentsPath} or a configured skill`); return; }
-  if (entry.kind !== "moved-core") { const problem = newTextProblem(corpus, entry); if (problem) errors.push(problem); }
+  if (entry.kind === "removed" || !["reworded", "merged"].includes(entry.kind)) return;
+  if (entry.to !== agentsPath) { errors.push(`map: ${label(entry)} points to ${entry.to}; new text must be in ${agentsPath}`); return; }
+  const problem = newTextProblem(corpus, entry);
+  if (problem) errors.push(problem);
 }
 
 // An empty needle is a substring of every corpus, so a missing or trivial new text would silently pass any rule.
@@ -172,17 +173,12 @@ function indexMap(ctx) {
 }
 
 // Verifies a mapped unit; returns true when it counts as mapped.
-function verifyMapped(ctx, unit, entry, pinned) {
-  const { errors, corpus, agentsPath } = ctx;
-  if (!ctx.allowed.has(entry.to)) return false;
-  if (entry.kind === "moved-core") {
-    if (!corpus.get(entry.to)?.includes(normalize(unit.text))) errors.push(`map: moved-core ${unit.id} is not verbatim in ${entry.to}`);
-    return true;
-  }
+function verifyMapped(ctx, unit, entry) {
+  const { errors } = ctx;
+  if (entry.to !== ctx.agentsPath) return false;
   const normNew = normalize(entry.new ?? ""), dropped = new Set((entry.droppedTokens ?? []).map(normalize));
   const missing = constraintTokens(unit.text).filter((t) => !hasToken(normNew, t) && !dropped.has(t));
   if (missing.length) errors.push(`map: ${unit.id} drops constraint token(s) [${missing.join(", ")}]; keep them or list droppedTokens with a reason`);
-  if (pinned && entry.to !== agentsPath) errors.push(`map: pinned ${unit.id} reworded into ${entry.to}; keep it in ${agentsPath} or use kind moved-core with the verbatim text`);
   return true;
 }
 
@@ -196,13 +192,13 @@ function classifyUnit(ctx, unit, entry, tally) {
   if (entry?.kind === "removed") { tally.removed.push({ unit, entry }); return; }
   const pinned = isPinned(ctx.config, unit);
   if (entry) {
-    if (verifyMapped(ctx, unit, entry, pinned)) tally.mapped.push({ unit, entry });
+    if (verifyMapped(ctx, unit, entry)) tally.mapped.push({ unit, entry });
     return;
   }
   const norm = normalize(unit.text);
   const where = [...ctx.corpus].find(([, text]) => text.includes(norm))?.[0];
   if (!where) tally.lost.push(unit);
-  else if (pinned && where !== ctx.agentsPath) ctx.errors.push(`pinned ${unit.id} (${unit.section}) is only in ${where}; hard constraints stay in ${ctx.agentsPath} (or map it as moved-core with a reason)`);
+  else if (pinned && where !== ctx.agentsPath) ctx.errors.push(`pinned ${unit.id} (${unit.section}) is only in ${where}; hard constraints stay in ${ctx.agentsPath}`);
   else { tally.exact++; tally.exactFiles[where] = (tally.exactFiles[where] ?? 0) + 1; }
 }
 
