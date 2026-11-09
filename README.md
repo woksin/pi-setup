@@ -453,9 +453,11 @@ CLI: `pi-publish issue-comment --repo OWNER/REPO --number 123 --body-file .ai-wo
 - `ai-work-lifecycle`: managing temporary AI task outputs without leaving large caches behind.
 - `dev-machine-performance`: diagnosing slow gates and queues, with safe machine advice and CI-parity lane habits.
 - `github-issue-hygiene`: keeping issues current and closing them when done (includes `issue-status.py`).
+- `ci-and-pushing`: local-gate and push batching detail, cancelling GitHub Actions runs, waiting on CI, and keeping local Docker usable.
+- `shipping-trains`: release-train mechanics (one candidate per repository, folding, cadence, eviction) and the repo orchestrator role.
 - `sol-loop`: a bounded review loop with the native `sol-reviewer` agent. Invoked by saying "sol loop"; ships its upstream MIT `LICENSE`.
 
-Descriptions are invocation hints only. Source lives here in `skills/` and the installer copies it to `~/.agents/skills/`; `sync.sh` is an optional live-to-repository snapshot of `ai-work-lifecycle`, `github-issue-hygiene`, `dev-machine-performance`, `report-setup-issue` and `sol-loop`. See [`docs/authoring-skills.md`](docs/authoring-skills.md), [`docs/skill-template.md`](docs/skill-template.md) and [`docs/skills-adoption.md`](docs/skills-adoption.md).
+Descriptions are invocation hints only. Source lives here in `skills/` and the installer copies it to `~/.agents/skills/`; `sync.sh` is an optional live-to-repository snapshot of `ai-work-lifecycle`, `github-issue-hygiene`, `dev-machine-performance`, `report-setup-issue`, `sol-loop`, `ci-and-pushing` and `shipping-trains`. See [`docs/authoring-skills.md`](docs/authoring-skills.md), [`docs/skill-template.md`](docs/skill-template.md) and [`docs/skills-adoption.md`](docs/skills-adoption.md).
 
 ### `tools/` → `~/.local/`
 

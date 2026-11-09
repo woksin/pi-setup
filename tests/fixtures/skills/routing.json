@@ -15,6 +15,12 @@
     { "request": "Optimise the slow query in the orders endpoint", "load": [], "notLoad": ["dev-machine-performance"], "rationale": "Application-runtime tuning is the near miss the description excludes." },
     { "request": "I'm about to start work on issue 60; set it up", "load": ["github-issue-hygiene"], "notLoad": [], "rationale": "Starting work on a GitHub issue." },
     { "request": "The work is done, close the duplicate issues", "load": ["github-issue-hygiene"], "notLoad": [], "rationale": "Post-work cleanup of duplicate issues." },
-    { "request": "Rename this variable", "load": [], "notLoad": ["github-issue-hygiene"], "rationale": "No issue involved." }
+    { "request": "Rename this variable", "load": [], "notLoad": ["github-issue-hygiene", "ci-and-pushing", "shipping-trains"], "rationale": "No issue, push or train involved." },
+    { "request": "Two stale CI runs are queued for my PR branch; cancel the superseded one", "load": ["ci-and-pushing"], "notLoad": ["shipping-trains"], "rationale": "Cancelling GitHub Actions runs." },
+    { "request": "I'm about to push this branch; what should the local gate cover first?", "load": ["ci-and-pushing"], "notLoad": [], "rationale": "Before pushing a branch." },
+    { "request": "Why does this GitHub Actions workflow use a matrix build?", "load": [], "notLoad": ["ci-and-pushing"], "rationale": "Explaining workflow syntax is not pushing, waiting on or cancelling runs." },
+    { "request": "My branch is finished; fold it into the repository's open release train", "load": ["shipping-trains"], "notLoad": [], "rationale": "Folding into a train." },
+    { "request": "The PR is green and reviewed; merge it and hand off", "load": ["shipping-trains"], "notLoad": [], "rationale": "Merging or handing off a green PR in a train repository." },
+    { "request": "Explain what a release train is in general software engineering", "load": [], "notLoad": ["shipping-trains"], "rationale": "A conceptual question, not finishing work in a train repository." }
   ]
 }

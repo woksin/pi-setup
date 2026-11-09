@@ -51,7 +51,7 @@ jq 'del(.deviceId, .lastChangelogVersion)
                   | reduce .[] as $p ([]; if any(.[]; . == $p) then . else . + [$p] end))' "$PI/settings.json" > agent/settings.json
 jq '{name, private, dependencies}' "$PI/npm/package.json" > agent/npm-package.json
 
-for s in ai-work-lifecycle github-issue-hygiene dev-machine-performance report-setup-issue sol-loop; do
+for s in ai-work-lifecycle github-issue-hygiene dev-machine-performance report-setup-issue sol-loop ci-and-pushing shipping-trains; do
   "${RS[@]}" -L "$HOME/.agents/skills/$s/" "skills/$s/"
 done
 "${RS[@]}" "$HOME/.local/share/ai-work-lifecycle/" tools/ai-work-lifecycle/
@@ -83,7 +83,7 @@ cp "$STAGE"/agent/launchd/* agent/launchd/
 for f in AGENTS.md AGENTS.subagent.md models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json settings.json npm-package.json; do
   cp "$STAGE/agent/$f" "agent/$f"
 done
-for s in ai-work-lifecycle github-issue-hygiene dev-machine-performance report-setup-issue sol-loop; do
+for s in ai-work-lifecycle github-issue-hygiene dev-machine-performance report-setup-issue sol-loop ci-and-pushing shipping-trains; do
   "${RS[@]}" "$STAGE/skills/$s/" "skills/$s/"
 done
 "${RS[@]}" "$STAGE/tools/ai-work-lifecycle/" tools/ai-work-lifecycle/

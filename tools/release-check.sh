@@ -4,7 +4,7 @@ set -euo pipefail
 case "${1:-}" in -h|--help)
     cat <<'HELP'
 Usage: tools/release-check.sh [-h|--help]
-Maintainer release gate: skills tests, pi-setup-tests, unit tests, installer build and a full-history secret scan.
+Maintainer release gate: skills and AGENTS.md rule-inventory tests, pi-setup-tests, unit tests, installer build and a full-history secret scan.
 Running it without a help flag executes the whole gate (including npm ci).
 
 Examples:
@@ -19,6 +19,8 @@ HELP
 esac
 cd "$(dirname "$0")/.."
 node --test --test-timeout=30000 tools/skills.test.mjs
+node --test --test-timeout=30000 tools/agents-rules.test.mjs
+node tools/agents-rules.mjs --check
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s skills/github-issue-hygiene/scripts -p 'test_*.py'
 # Tests the repository being released (agent/), not the live install; node_modules fall back to ~/.pi/agent/npm.
 agent/bin/pi-setup-tests "${PI_AGENT_DIR:-agent}"

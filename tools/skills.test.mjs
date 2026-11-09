@@ -43,6 +43,8 @@ const EXPECTED = {
   "ai-work-lifecycle": "Use before creating disposable task outputs, running verification that leaves local artifacts, or closing a task with temporary artifacts.",
   "dev-machine-performance": "Use when local gates or phase queues are slow, the machine is swapping, or Docker shows memory pressure. Not for application-runtime performance tuning.",
   "github-issue-hygiene": "Use when starting work on, creating, commenting on, updating the description of, or finishing work on a GitHub issue, and during post-work cleanup to close completed, duplicate or obsolete issues.",
+  "ci-and-pushing": "Use before pushing a branch, when waiting on or cancelling GitHub Actions runs, or when local Docker must stay available for CI-like runs.",
+  "shipping-trains": "Use when finishing work in a repository that ships through release trains: folding branches into a train, delivering to a repo orchestrator, merging, or handing off a green PR.",
 };
 
 const skillDirs = () => readdirSync(SKILLS, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
