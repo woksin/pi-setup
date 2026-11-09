@@ -12,7 +12,7 @@ function fixture() {
   const home = tempDir("lanes-who"); const lines: string[] = []; const errors: string[] = [];
   const now = new Date("2026-01-20T12:00:00Z");
   const ctx: LanesCtx = { home, cwd: home, env: {}, platform: "linux", now: () => now,
-    run: async (name, args) => ({ code: 0, stdout: name === "pgrep" ? "701" : args.includes("lstart=") ? "synthetic start" : "701", stderr: "", timedOut: false }),
+    run: async (_name, args) => ({ code: 0, stdout: args.includes("-axo") ? "701 pi" : args.includes("lstart=") ? "synthetic start" : "701", stderr: "", timedOut: false }),
     readCwd: async () => join(home, "worker"), realpath: p => p, which: () => undefined,
     out: s => lines.push(s), err: s => errors.push(s), stdinTTY: true, readStdin: async () => "body",
     templatesDir: join(REPO, "installer/lanes/templates"), piAgentDir: join(home, "agent"), loadModule: async () => ({}) };
@@ -39,7 +39,7 @@ test("who joins registered process, lease, register and fresh heartbeat with sta
 });
 test("absent processes are stopped but failed process discovery is unknown", async () => {
   for (const code of [1, 2]) {
-    const f = fixture(); f.ctx.run = async () => ({ code, stdout: "", stderr: "probe failed", timedOut: false });
+    const f = fixture(); f.ctx.run = async () => ({ code: code === 1 ? 0 : code, stdout: "", stderr: "probe failed", timedOut: false });
     const { report } = await f.who();
     assert.equal(report.rows.find((r: any) => r.lane === "W1").state, code === 1 ? "stopped" : "unknown");
     assert.equal(report.sources.processes.status, code === 1 ? "ok" : "error");
@@ -54,7 +54,7 @@ test("unknown running identities are visible, and orch sessions supply identitie
 });
 test("orch processes sharing an unregistered cwd remain separate roster rows", async () => {
   const f = fixture(); const cwd = join(f.home, "shared");
-  f.ctx.run = async () => ({ code: 0, stdout: "701\n702", stderr: "", timedOut: false });
+  f.ctx.run = async () => ({ code: 0, stdout: "701 pi\n702 pi", stderr: "", timedOut: false });
   f.ctx.readCwd = async () => cwd;
   f.put(".pi/orch/sessions/p701.json", { pid: 701, id: "ORCH1", cwd });
   f.put(".pi/orch/sessions/p702.json", { pid: 702, id: "ORCH2", cwd });
@@ -63,6 +63,50 @@ test("orch processes sharing an unregistered cwd remain separate roster rows", a
   assert.deepEqual(rows.map((r: any) => ({ lane: r.lane, pid: r.pid, worktree: r.worktree })), [
     { lane: "ORCH1", pid: 701, worktree: cwd }, { lane: "ORCH2", pid: 702, worktree: cwd },
   ]);
+});
+test("who projects every held issue and suggestions name the PID-verified row sharing a cwd", async () => {
+  const f = fixture(); const cwd = join(f.home, "shared");
+  f.ctx.run = async (_name, args) => ({ code: 0, stdout: args.includes("-axo") ? "702 pi\n701 pi" : args.includes("lstart=") ? "synthetic start" : "701", stderr: "", timedOut: false });
+  f.ctx.readCwd = async () => cwd;
+  f.lease();
+  f.put("agent/issue-work/sessions/worker.json", { sessionId: "session-worker", pid: 701, startedAt: f.ctx.now().toISOString(), procStart: "synthetic start", cwd });
+  f.put("agent/issue-work/sessions/other.json", { sessionId: "session-other", pid: 702, startedAt: f.ctx.now().toISOString(), procStart: "synthetic start", cwd });
+  f.put(".pi/orch/sessions/p701.json", { pid: 701, id: "HOLDER", cwd });
+  f.put(".pi/orch/sessions/p702.json", { pid: 702, id: "OTHER", cwd });
+  f.put("agent/issue-work/registry.jsonl", [f.event, { ...f.event, issue: 1082, ts: "2026-01-20T12:01:00Z" },
+    { ...f.event, issue: 99, sessionId: "session-other" }].map(e => JSON.stringify(e)).join("\n"));
+  const unfiltered = await f.who();
+  assert.equal(unfiltered.report.rows.find((r: any) => r.lane === "HOLDER").issue.number, 1082);
+  assert.equal(unfiltered.report.rows.find((r: any) => r.lane === "OTHER").sessionId, "session-other");
+  for (const issue of [42, 1082]) {
+    const { code, report } = await f.who("--issue", `example/alpha#${issue}`);
+    assert.equal(code, 0); assert.equal(report.rows.length, 1);
+    assert.equal(report.rows[0].lane, "HOLDER"); assert.equal(report.rows[0].pid, 701);
+    assert.equal(report.rows[0].issue.number, issue); assert.equal(report.suggest.target, report.rows[0].lane);
+    assert.equal(report.suggest.rule, "issue-owner");
+  }
+});
+test("a second process sharing a registered cwd retains its own holder row", async () => {
+  const f = fixture(); f.lease();
+  f.ctx.run = async (_name, args) => ({ code: 0, stdout: args.includes("-axo") ? "702 pi\n701 pi" : args.includes("lstart=") ? "synthetic start" : "701", stderr: "", timedOut: false });
+  f.put(".pi/orch/sessions/p701.json", { pid: 701, id: "HOLDER", cwd: join(f.home, "worker") });
+  f.put("agent/issue-work/registry.jsonl", JSON.stringify(f.event));
+  const { code, report } = await f.who("--issue", "42");
+  assert.equal(code, 0); assert.deepEqual(report.rows.map((r: any) => [r.lane, r.pid]), [["HOLDER", 701]]);
+  assert.equal(report.suggest.target, "HOLDER");
+});
+test("who retains a verified-live holder omitted from process discovery", async () => {
+  const f = fixture(); f.lease();
+  const run = f.ctx.run;
+  f.ctx.run = async (name, args, opts) => args.includes("-axo")
+    ? { code: 0, stdout: "702 pi", stderr: "", timedOut: false } : run(name, args, opts);
+  f.put(".pi/orch/sessions/p701.json", { pid: 701, id: "HOLDER", cwd: join(f.home, "worker") });
+  f.put("agent/issue-work/registry.jsonl", JSON.stringify(f.event));
+  const { code, report } = await f.who("--issue", "example/alpha#42");
+  assert.equal(code, 0); assert.equal(report.rows.length, 1);
+  assert.equal(report.rows[0].lane, "HOLDER"); assert.equal(report.rows[0].pid, 701);
+  assert.equal(report.rows[0].sessionId, "session-worker"); assert.equal(report.rows[0].issue.number, 42);
+  assert.equal(report.suggest.target, report.rows[0].lane); assert.equal(report.suggest.rule, "issue-owner");
 });
 test("a stateless detected touch preserves the session's blocked state and prevents idle routing", async () => {
   const f = fixture(); f.lease();
@@ -100,6 +144,15 @@ test("recent ended delivery prevents assignment; idle repo selection and start-l
   result = await f.who("--issue", "example/alpha#42"); assert.equal(result.report.suggest.target, null); assert.equal(result.report.suggest.rule, "delivered");
   result = await f.who("--repo", "example/missing"); assert.equal(result.code, 1); assert.equal(result.report.suggest.rule, "start-lane");
 });
+test("issue filtering preserves same-repo idle suggestions for lanes unrelated to the issue", async () => {
+  const f = fixture(); f.lease();
+  const unfiltered = await f.who();
+  const idle = unfiltered.report.rows.find((r: any) => r.lane === "W1");
+  assert.equal(idle.state, "idle"); assert.equal(idle.pid, 701); assert.equal(idle.issue, null);
+  const { code, report } = await f.who("--issue", "example/alpha#42");
+  assert.equal(code, 1); assert.deepEqual(report.rows, []);
+  assert.equal(report.suggest.target, "W1"); assert.equal(report.suggest.rule, "idle-in-repo");
+});
 test("process timeout, thrown probe and unreadable cwd remain unknown, never stopped", async () => {
   for (const failure of ["timeout", "throw", "cwd"]) {
     const f = fixture();
@@ -121,12 +174,12 @@ test("multiple sessions per cwd fold last state and PID reuse does not claim own
   f.put("agent/issue-work/registry.jsonl", [f.event, { ...f.event, state: "done", ts: "2026-01-20T12:01:00Z" }].map(e => JSON.stringify(e)).join("\n"));
   let result = await f.who(); assert.equal(result.report.rows.find((r: any) => r.lane === "W1").issue.holder, false);
   f.put("agent/issue-work/registry.jsonl", JSON.stringify(f.event));
-  f.ctx.run = async (name, args) => ({ code: 0, stdout: name === "pgrep" ? "701" : args.includes("lstart=") ? "different start" : "701", stderr: "", timedOut: false });
+  f.ctx.run = async (_name, args) => ({ code: 0, stdout: args.includes("-axo") ? "701 pi" : args.includes("lstart=") ? "different start" : "701", stderr: "", timedOut: false });
   result = await f.who(); assert.equal(result.report.rows.find((r: any) => r.lane === "W1").sessionId, null);
 });
 test("unknown holder liveness and corrupt register block suggestions", async () => {
   const f = fixture(); f.lease(); f.put("agent/issue-work/registry.jsonl", JSON.stringify(f.event));
-  f.ctx.run = async (name, args) => ({ code: 0, stdout: name === "pgrep" ? "701" : args.includes("lstart=") ? "" : "701", stderr: "", timedOut: false });
+  f.ctx.run = async (_name, args) => ({ code: 0, stdout: args.includes("-axo") ? "701 pi" : args.includes("lstart=") ? "" : "701", stderr: "", timedOut: false });
   let result = await f.who("--issue", "example/alpha#42"); assert.equal(result.report.suggest.rule, "unverified"); assert.equal(result.report.suggest.target, null);
   f.put("agent/issue-work/registry.jsonl", "broken"); result = await f.who("--issue", "example/alpha#42");
   assert.equal(result.report.suggest.rule, "unverified");
@@ -135,7 +188,7 @@ test("retired and suppressed lanes are not candidates; workers win deterministic
   const f = fixture();
   f.c.lanes.push({ ...f.c.lanes[0], id: "W2", worktree: "second", cwd: join(f.home, "second"), parent: "W1" });
   f.c.lanes[0].role = "repo-orch"; saveConfig(f.home, f.c);
-  f.ctx.run = async (name) => ({ code: 0, stdout: name === "pgrep" ? "701\n702" : "", stderr: "", timedOut: false });
+  f.ctx.run = async (_name, args) => ({ code: 0, stdout: args.includes("-axo") ? "701 pi\n702 pi" : "", stderr: "", timedOut: false });
   f.ctx.readCwd = async pid => join(f.home, pid === 701 ? "worker" : "second");
   let result = await f.who("--repo", "example/alpha"); assert.equal(result.report.suggest.target, "W2");
   f.put("messages/status/W2.status", 'waiting-on "synthetic dependency" until 2026-01-20T13:00:00Z');

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: dd91464dcab796232fc566702ec72dd8e8d564dfc37ba6f8f19ea739dd1b769c
+// pi-setup-source-sha256: e2b7d0a0b96dffebadf645b1380eb5462d9fd758d5d83ac1c81ac43f7d62cba5
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -2750,33 +2750,46 @@ async function runningPi(ctx) {
   }
   return found;
 }
+async function checkedProcess(ctx, pid) {
+  try {
+    const cwd = await checkedCwd(ctx, pid);
+    if (cwd) return { pid, cwd: ctx.realpath(cwd), ok: true };
+  } catch {
+  }
+  return { pid, cwd: "", ok: false };
+}
+function piPids(text4) {
+  const pids = [];
+  let ok = true;
+  for (const line of text4.split("\n").filter((s) => s.trim())) {
+    const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+    if (!match) {
+      ok = false;
+      continue;
+    }
+    if (match[2] === "pi") pids.push(Number(match[1]));
+  }
+  return { pids, ok };
+}
+async function probeInBatches(values, probe) {
+  const results = [];
+  let next = 0;
+  async function worker() {
+    while (next < values.length) {
+      const index = next++;
+      results[index] = await probe(values[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, values.length) }, () => worker()));
+  return results;
+}
 async function runningPiChecked(ctx) {
   try {
-    const result3 = await ctx.run("pgrep", ["-x", "pi"], { timeoutMs: 2e3 });
-    if (result3.timedOut) return { ok: false, procs: [] };
-    if (result3.code === 1) return { ok: true, procs: [] };
-    if (result3.code !== 0) return { ok: false, procs: [] };
-    const procs = [];
-    let ok = true;
-    for (const token of result3.stdout.trim().split(/\s+/).filter(Boolean)) {
-      if (!/^\d+$/.test(token)) {
-        ok = false;
-        continue;
-      }
-      const pid = Number(token);
-      try {
-        const cwd = await checkedCwd(ctx, pid);
-        if (cwd) procs.push({ pid, cwd: ctx.realpath(cwd) });
-        else {
-          ok = false;
-          procs.push({ pid, cwd: "" });
-        }
-      } catch {
-        ok = false;
-        procs.push({ pid, cwd: "" });
-      }
-    }
-    return { ok, procs };
+    const result3 = await ctx.run("ps", ["-axo", "pid=,comm="], { timeoutMs: 2e3 });
+    if (result3.timedOut || result3.code !== 0) return { ok: false, procs: [] };
+    const parsed = piPids(result3.stdout);
+    const checked = await probeInBatches(parsed.pids, (pid) => checkedProcess(ctx, pid));
+    return { ok: parsed.ok && checked.every((p) => p.ok), procs: checked.map(({ pid, cwd }) => ({ pid, cwd })) };
   } catch {
     return { ok: false, procs: [] };
   }
@@ -4247,7 +4260,7 @@ function sessionLiveness(leases2, isPidAlive, startTimeOf) {
   return out;
 }
 function deliveries(o) {
-  const sessions = foldRegistry(o.events).get(o.key)?.sessions ?? [];
+  const sessions = (o.views ?? foldRegistry(o.events)).get(o.key)?.sessions ?? [];
   const days = windowDays(o.days);
   return sessions.filter((s) => s.sessionId !== o.excludeSessionId && inWindow(s.lastTs, o.now, days) && (inWindow(s.lastStateTs, o.now, days) && ["in-review", "done"].includes(s.lastState) || inWindow(s.noteTs, o.now, days) && /(?<!\bnot )\bdelivered\b/i.test(s.note ?? "")));
 }
@@ -4310,19 +4323,19 @@ function readLeases(path2) {
 async function probeLeases(leases2, ctx) {
   const alive3 = /* @__PURE__ */ new Set();
   const starts = /* @__PURE__ */ new Map();
-  for (const pid of new Set(leases2.map((l2) => l2.pid))) {
+  await probeInBatches([...new Set(leases2.map((l2) => l2.pid))], async (pid) => {
     try {
       const result3 = await ctx.run("ps", ["-p", String(pid)], { timeoutMs: 2e3 });
-      if (result3.code === 1 && !result3.timedOut) continue;
+      if (result3.code === 1 && !result3.timedOut) return;
       alive3.add(pid);
-      if (result3.code !== 0 || result3.timedOut) continue;
+      if (result3.code !== 0 || result3.timedOut) return;
       const start2 = await ctx.run("ps", ["-o", "lstart=", "-p", String(pid)], { timeoutMs: 2e3 });
       const value = start2.stdout.trim().replace(/\s+/g, " ");
       if (start2.code === 0 && !start2.timedOut && value) starts.set(pid, value);
     } catch {
       alive3.add(pid);
     }
-  }
+  });
   return sessionLiveness(leases2, (pid) => alive3.has(pid), (pid) => starts.get(pid));
 }
 async function readIssueRegister(ctx) {
@@ -4341,6 +4354,7 @@ var RECENT_DAYS, DAY_MS, REPO_RE, issueKey, holding, short, inWindow, windowDays
 var init_issue_register = __esm({
   "src/lanes/issue-register.ts"() {
     init_config();
+    init_processes();
     RECENT_DAYS = 14;
     DAY_MS = 864e5;
     REPO_RE = /^(?!\.+\/)[A-Za-z0-9_.-]+\/(?!\.+$)[A-Za-z0-9_.-]+$/;
@@ -4425,7 +4439,7 @@ async function readRoster(c2, root, ctx, register) {
   const messages2 = await readMessages(c2, root, ctx);
   const lanes = rosterSeeds(c2, root, ctx);
   const idle2 = /* @__PURE__ */ new Map();
-  for (const cwd of /* @__PURE__ */ new Set([...lanes.map((l2) => l2.cwd), ...processes.procs.map((p) => p.cwd)])) idle2.set(cwd, idleMinutes2(cwd, ctx) ?? null);
+  for (const cwd of /* @__PURE__ */ new Set([...lanes.map((l2) => l2.cwd), ...rosterProcesses(processes.procs, data).map((p) => p.cwd)])) idle2.set(cwd, idleMinutes2(cwd, ctx) ?? null);
   return {
     lanes,
     processes,
@@ -4451,7 +4465,7 @@ async function readRoster(c2, root, ctx, register) {
 function matchedSessions(cwd, pids, data) {
   return [...new Set(data.leases.filter((l2) => {
     const live = data.liveness.get(l2.sessionId);
-    return live?.status === "live" && live.pid === l2.pid && (pids.includes(l2.pid) || Boolean(cwd && l2.cwd === cwd));
+    return live?.status === "live" && live.pid === l2.pid && (pids.length ? pids.includes(l2.pid) : Boolean(cwd && l2.cwd === cwd));
   }).map((l2) => l2.sessionId))];
 }
 function emptyRow(lane, identity2) {
@@ -4490,41 +4504,65 @@ function unregisteredProcess(p, input) {
   if (!id) row.notes.push("identity unavailable: unregistered");
   return row;
 }
+function rosterProcesses(procs, register) {
+  const found = new Map(procs.map((p) => [p.pid, p]));
+  for (const lease of register.leases) {
+    const live = register.liveness.get(lease.sessionId);
+    if (live?.status !== "live" || live.pid !== lease.pid || found.has(lease.pid)) continue;
+    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+  }
+  return [...found.values()];
+}
 function processRows(input) {
   const seeds = input.lanes.map((l2) => ({ ...emptyRow(l2.id, "registered"), repo: l2.repo ?? null, worktree: l2.cwd, branch: l2.branch ?? null, evidence: ["lanes.json"] }));
   const rows = [...seeds];
-  for (const p of input.processes.procs) {
+  for (const p of rosterProcesses(input.processes.procs, input.register)) {
     const matched = seeds.find((r2) => r2.worktree && r2.worktree === p.cwd);
-    if (matched) {
-      if (matched.pid === null) matched.pid = p.pid;
+    if (matched && matched.pid === null) {
+      matched.pid = p.pid;
       continue;
     }
     rows.push(unregisteredProcess(p, input));
   }
   return rows;
 }
-function joinIssue(row, sessions, input) {
-  const events = input.register.events.filter((e) => sessions.includes(e.sessionId)).sort((a2, b) => b.ts.localeCompare(a2.ts));
-  const views = foldRegistry(input.register.events);
-  const held = [...views.values()].flatMap((v) => v.sessions.filter((s) => sessions.includes(s.sessionId) && holding(s.lastState)).map((s) => ({ v, s }))).sort((a2, b) => b.s.lastTs.localeCompare(a2.s.lastTs))[0];
-  if (held) row.issue = { repo: held.v.repo, number: held.v.issue, state: held.s.lastState, holder: true };
-  else if (events[0]) {
-    const event = events[0];
-    const touch = views.get(issueKey(event.repo, event.issue))?.sessions.find((s) => s.sessionId === event.sessionId);
-    row.issue = { repo: event.repo, number: event.issue, state: touch?.lastState ?? "unknown", holder: false };
+function indexRosterRegistry(events) {
+  const views = foldRegistry(events);
+  const latest = /* @__PURE__ */ new Map();
+  const held = /* @__PURE__ */ new Map();
+  events.forEach((event, order3) => {
+    const previous = latest.get(event.sessionId);
+    if (!previous || event.ts > previous.event.ts) latest.set(event.sessionId, { event, order: order3 });
+  });
+  let order2 = 0;
+  for (const view of views.values()) for (const touch of view.sessions) {
+    if (!holding(touch.lastState)) continue;
+    const claims = held.get(touch.sessionId) ?? [];
+    claims.push({ issue: { repo: view.repo, number: view.issue, state: touch.lastState, holder: true }, ts: touch.lastTs, order: order2++ });
+    held.set(touch.sessionId, claims);
+  }
+  return { views, latest, held };
+}
+function joinIssue(row, sessions, input, registry3) {
+  const latest = sessions.flatMap((id) => registry3.latest.get(id) ?? []).sort((a2, b) => b.event.ts.localeCompare(a2.event.ts) || a2.order - b.order)[0]?.event;
+  const claims = sessions.flatMap((id) => registry3.held.get(id) ?? []).sort((a2, b) => b.ts.localeCompare(a2.ts) || a2.order - b.order);
+  row[heldClaims] = claims.map((c2) => c2.issue);
+  if (claims.length) row.issue = claims[0].issue;
+  else if (latest) {
+    const touch = registry3.views.get(issueKey(latest.repo, latest.issue))?.sessions.find((s) => s.sessionId === latest.sessionId);
+    row.issue = { repo: latest.repo, number: latest.issue, state: touch?.lastState ?? "unknown", holder: false };
   } else {
     const seed = input.lanes.find((l2) => l2.id === row.lane);
     if (seed?.repo && seed.issue) row.issue = { repo: seed.repo, number: seed.issue, state: "unknown", holder: false };
   }
-  if (events.length) {
+  if (latest) {
     row.evidence.push("registry");
-    row.repo ??= events[0].repo;
-    row.branch ??= events[0].branch ?? null;
+    row.repo ??= latest.repo;
+    row.branch ??= latest.branch ?? null;
   }
 }
 function rowSessions(row, input) {
-  const pids = input.processes.procs.filter((p) => p.cwd && p.cwd === row.worktree).map((p) => p.pid);
-  if (row.pid !== null && !pids.includes(row.pid)) pids.push(row.pid);
+  const pids = row.pid === null ? [] : [row.pid];
   const sessions = matchedSessions(row.worktree, pids, input.register);
   if (sessions.length) {
     row.evidence.push("lease");
@@ -4580,36 +4618,68 @@ function stateOf(row, input, now) {
   if (!live) return seed ? "stopped" : "unknown";
   return activeState(row, line, h2, now);
 }
+function indexMessage(index, key, message) {
+  const latest = index.get(key) ?? [];
+  const sameSender = latest.findIndex((m2) => m2.from === message.from);
+  if (sameSender >= 0) {
+    if (messageOrder(message, latest[sameSender]) >= 0) return;
+    latest.splice(sameSender, 1);
+  }
+  latest.push(message);
+  latest.sort(messageOrder);
+  index.set(key, latest.slice(0, 2));
+}
+function messageEndpoints(to) {
+  const parts = to.split("-");
+  const endpoints = /* @__PURE__ */ new Set([to]);
+  for (let start2 = 0; start2 < parts.length; start2++) for (let end = start2 + 1; end <= parts.length; end++) {
+    endpoints.add(parts.slice(start2, end).join("-"));
+  }
+  return endpoints;
+}
+function indexMessages(messages2, now) {
+  const index = { inbound: /* @__PURE__ */ new Map(), outbound: /* @__PURE__ */ new Map(), identities: /* @__PURE__ */ new Set() };
+  for (const message of messages2) {
+    indexMessage(index.outbound, message.from, message);
+    for (const to of message.to) for (const endpoint of messageEndpoints(to)) indexMessage(index.inbound, endpoint, message);
+    if (message.at.getTime() >= now.getTime() - 14 * 864e5) {
+      for (const id of [message.from, ...message.to]) index.identities.add(id);
+    }
+  }
+  return index;
+}
 function lastMessage(messages2, now) {
-  const last = [...messages2].sort((a2, b) => b.at.getTime() - a2.at.getTime() || b.name.localeCompare(a2.name))[0];
+  const last = messages2.sort(messageOrder)[0];
   return last ? { name: last.name, ageMin: Math.max(0, Math.floor((now.getTime() - last.at.getTime()) / 6e4)) } : null;
 }
-function joinMessages(row, input, now) {
+function joinMessages(row, input, now, index) {
   const group = input.lanes.find((l2) => l2.id === row.lane)?.group;
   const recipients = [row.lane, "ALL", input.broadcast, ...group ? [group] : []];
-  row.lastInbound = lastMessage(input.messages.filter((m2) => m2.from !== row.lane && recipients.some((id) => addressed2(m2, id))), now);
-  row.lastOutbound = lastMessage(input.messages.filter((m2) => m2.from === row.lane), now);
+  row.lastInbound = lastMessage(recipients.flatMap((id) => (index.inbound.get(id) ?? []).filter((m2) => m2.from !== row.lane)), now);
+  row.lastOutbound = lastMessage([...index.outbound.get(row.lane) ?? []], now);
   if (row.lastInbound || row.lastOutbound) row.evidence.push("messages");
 }
-function messageRows(rows, input, now) {
+function messageRows(rows, input, index) {
   const reserved = /* @__PURE__ */ new Set(["", "ALL", "BCAST", input.broadcast, ...input.lanes.flatMap((l2) => l2.group ? [l2.group] : [])]);
-  const ids = input.messages.filter((m2) => m2.at.getTime() >= now.getTime() - 14 * 864e5).flatMap((m2) => [m2.from, ...m2.to]);
-  for (const id of new Set(ids)) if (!reserved.has(id) && !rows.some((r2) => r2.lane === id)) {
+  const known = new Set(rows.map((r2) => r2.lane));
+  for (const id of index.identities) if (!reserved.has(id) && !known.has(id)) {
     const row = emptyRow(id, "message-only");
     row.notes.push("identity known only from messages");
     rows.push(row);
+    known.add(id);
   }
 }
-function buildRoster(input, now) {
+function buildRoster(input, now, registry3 = indexRosterRegistry(input.register.events)) {
+  const messages2 = indexMessages(input.messages, now);
   const rows = processRows(input);
-  messageRows(rows, input, now);
+  messageRows(rows, input, messages2);
   for (const row of rows) {
     if (row.pid !== null) row.evidence.push("process");
     const sessions = rowSessions(row, input);
-    joinIssue(row, sessions, input);
+    joinIssue(row, sessions, input, registry3);
     row.idleMinutes = input.idle.get(row.worktree ?? "") ?? null;
     row.state = stateOf(row, input, now);
-    joinMessages(row, input, now);
+    joinMessages(row, input, now, messages2);
   }
   return { rows: rows.sort((a2, b) => a2.lane.localeCompare(b.lane)), sources: input.sources };
 }
@@ -4618,8 +4688,18 @@ function repoMatches(repo, filter) {
   const target = filter.toLowerCase();
   return value === target || !target.includes("/") && value?.split("/").at(-1) === target;
 }
+function issueMatches(issue, selection) {
+  return issue?.number === selection.number && (!selection.repo || repoMatches(issue.repo, selection.repo));
+}
 function filterRows(rows, selection) {
-  return rows.filter((r2) => (!selection.repo || repoMatches(r2.repo, selection.repo)) && (!selection.issue || r2.issue?.number === selection.issue.number && (!selection.issue.repo || repoMatches(r2.issue.repo, selection.issue.repo))));
+  return rows.flatMap((row) => {
+    if (selection.issue) {
+      const issue = [...row[heldClaims] ?? [], ...row.issue ? [row.issue] : []].find((i2) => issueMatches(i2, selection.issue));
+      if (!issue) return [];
+      row = { ...row, issue, repo: issue.repo };
+    }
+    return !selection.repo || repoMatches(row.repo, selection.repo) ? [row] : [];
+  });
 }
 function ownershipUnavailable(input) {
   if ([input.register.sources.registry, input.register.sources.leases].some((s) => s.status === "error")) {
@@ -4629,7 +4709,8 @@ function ownershipUnavailable(input) {
 function liveOwner(rows, sessionIds, input) {
   return rows.find((r2) => r2.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r2.state) && matchedSessions(r2.worktree, r2.pid === null ? [] : [r2.pid], input.register).some((id) => sessionIds.includes(id)));
 }
-function viewSuggestion(view, rows, input, now, unique) {
+function viewSuggestion(view, rows, context, unique) {
+  const { input, now, registry: registry3 } = context;
   const holders = view.sessions.filter((s) => holding(s.lastState));
   if (holders.some((s) => input.register.liveness.get(s.sessionId)?.status === "unknown")) return { target: null, rule: "unverified", reason: "holder liveness unknown; verify before assigning" };
   const live = holders.filter((s) => input.register.liveness.get(s.sessionId)?.status === "live");
@@ -4638,23 +4719,25 @@ function viewSuggestion(view, rows, input, now, unique) {
     if (owner && live.length === 1 && unique) return { target: owner.lane, rule: "issue-owner", reason: "live issue holder" };
     return { target: null, rule: "unverified", reason: "holder has no unique matched lane; verify before assigning" };
   }
-  const delivered = deliveries({ ...input.register, key: view.key, now });
+  const delivered = deliveries({ ...input.register, views: registry3.views, key: view.key, now });
   if (delivered.length) return { target: null, rule: "delivered", reason: `${delivered.map((s) => short(s.sessionId)).join(", ")}: do not assign; verify` };
-  const ownership = ownershipOf({ ...input.register, view, now });
+  const ownership = ownershipOf({ ...input.register, views: registry3.views, view, now });
   if (ownership.verdict === "OWNED") return { target: null, rule: "unverified", reason: ownership.reason };
 }
-function issueSuggestion(rows, input, selection, now) {
+function issueSuggestion(rows, context) {
+  const { selection, registry: registry3 } = context;
   if (!selection.issue) return void 0;
-  const views = [...foldRegistry(input.register.events).values()].filter((v) => v.issue === selection.issue.number && (!selection.issue.repo || repoMatches(v.repo, selection.issue.repo)) && (!selection.repo || repoMatches(v.repo, selection.repo)));
+  const views = [...registry3.views.values()].filter((v) => v.issue === selection.issue.number && (!selection.issue.repo || repoMatches(v.repo, selection.issue.repo)) && (!selection.repo || repoMatches(v.repo, selection.repo)));
   for (const view of views) {
-    const suggestion = viewSuggestion(view, rows, input, now, views.length === 1);
+    const suggestion = viewSuggestion(view, rows, context, views.length === 1);
     if (suggestion) return suggestion;
   }
 }
 function suggestTarget(rows, input, selection, now) {
   const unavailable = ownershipUnavailable(input);
   if (unavailable) return unavailable;
-  const issue = issueSuggestion(rows, input, selection, now);
+  const registry3 = input.registry ?? indexRosterRegistry(input.register.events);
+  const issue = issueSuggestion(rows, { input, selection, now, registry: registry3 });
   if (issue) return issue;
   const repo = selection.repo || selection.issue?.repo;
   const candidates = rows.filter((r2) => repo && repoMatches(r2.repo, repo) && r2.state === "idle" && r2.pid !== null && !r2.issue?.holder && r2.identity !== "unregistered");
@@ -4662,7 +4745,7 @@ function suggestTarget(rows, input, selection, now) {
   candidates.sort((a2, b) => roleRank(a2) - roleRank(b) || (b.idleMinutes ?? -1) - (a2.idleMinutes ?? -1) || a2.lane.localeCompare(b.lane));
   return candidates.length ? { target: candidates[0].lane, rule: "idle-in-repo", reason: "longest idle lane in repository (ties by lane id; workers before repo orchestrator)" } : { target: null, rule: "start-lane", reason: `no live lane for ${repo ?? "matching repositories"}` };
 }
-var HEARTBEAT_STALE_MIN;
+var HEARTBEAT_STALE_MIN, heldClaims, messageOrder;
 var init_roster = __esm({
   "src/lanes/roster.ts"() {
     init_backend();
@@ -4672,6 +4755,8 @@ var init_roster = __esm({
     init_sessions();
     init_status_line();
     HEARTBEAT_STALE_MIN = 15;
+    heldClaims = /* @__PURE__ */ Symbol("held claims");
+    messageOrder = (a2, b) => b.at.getTime() - a2.at.getTime() || b.name.localeCompare(a2.name);
   }
 });
 
@@ -5300,9 +5385,10 @@ async function who(args, opts, c2, root, ctx) {
   const selection = { repo: opts.repo, issue: opts.issue === void 0 ? void 0 : parseIssue(opts.issue) };
   const now = ctx.now();
   const input = await readRoster(c2, root, ctx);
-  const roster = buildRoster(input, now);
+  const registry3 = indexRosterRegistry(input.register.events);
+  const roster = buildRoster(input, now, registry3);
   const rows = filterRows(roster.rows, selection);
-  const suggest = suggestTarget(roster.rows, input, selection, now);
+  const suggest = suggestTarget(roster.rows, { ...input, registry: registry3 }, selection, now);
   if (opts.json) ctx.out(JSON.stringify({ at: now.toISOString(), rows, sources: roster.sources, suggest }, null, 2));
   else {
     for (const row of rows) ctx.out(humanRow(row));

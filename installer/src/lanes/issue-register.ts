@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { UsageError } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
+import { probeInBatches } from "./processes.ts";
 
 export const RECENT_DAYS = 14;
 const DAY_MS = 86_400_000;
@@ -25,7 +26,7 @@ export interface Source { status: "ok" | "missing" | "error"; count: number; det
 export interface RegisterData {
   events: RegistryEvent[]; leases: Lease[]; liveness: Map<string, SessionLiveness>; sources: Record<string, Source>;
 }
-interface RegisterContext { events: RegistryEvent[]; liveness: Map<string, SessionLiveness>; now: Date; days?: number }
+interface RegisterContext { events: RegistryEvent[]; liveness: Map<string, SessionLiveness>; now: Date; days?: number; views?: Map<string, IssueView> }
 export const issueKey = (repo: string, issue: number): string => `${repo.toLowerCase()}#${issue}`;
 export const holding = (state?: string): boolean => state === "in-progress" || state === "in-review";
 export const short = (id: string): string => id.slice(0, 12);
@@ -100,7 +101,7 @@ export function sessionLiveness(leases: Lease[], isPidAlive: (pid: number) => bo
   return out;
 }
 export function deliveries(o: RegisterContext & { key: string; excludeSessionId?: string }): SessionTouch[] {
-  const sessions = foldRegistry(o.events).get(o.key)?.sessions ?? [];
+  const sessions = (o.views ?? foldRegistry(o.events)).get(o.key)?.sessions ?? [];
   const days = windowDays(o.days);
   return sessions.filter(s => s.sessionId !== o.excludeSessionId && inWindow(s.lastTs, o.now, days)
     && (inWindow(s.lastStateTs, o.now, days) && ["in-review", "done"].includes(s.lastState!)
@@ -153,17 +154,17 @@ export function readLeases(path: string): { leases: Lease[]; source: Source } {
 }
 async function probeLeases(leases: Lease[], ctx: LanesCtx): Promise<Map<string, SessionLiveness>> {
   const alive = new Set<number>(); const starts = new Map<number, string>();
-  for (const pid of new Set(leases.map(l => l.pid))) {
+  await probeInBatches([...new Set(leases.map(l => l.pid))], async pid => {
     try {
       const result = await ctx.run("ps", ["-p", String(pid)], { timeoutMs: 2000 });
-      if (result.code === 1 && !result.timedOut) continue;
+      if (result.code === 1 && !result.timedOut) return;
       alive.add(pid);
-      if (result.code !== 0 || result.timedOut) continue;
+      if (result.code !== 0 || result.timedOut) return;
       const start = await ctx.run("ps", ["-o", "lstart=", "-p", String(pid)], { timeoutMs: 2000 });
       const value = start.stdout.trim().replace(/\s+/g, " ");
       if (start.code === 0 && !start.timedOut && value) starts.set(pid, value);
     } catch { alive.add(pid); }
-  }
+  });
   return sessionLiveness(leases, pid => alive.has(pid), pid => starts.get(pid));
 }
 export async function readIssueRegister(ctx: LanesCtx): Promise<RegisterData> {
