@@ -648,7 +648,7 @@ test("activity fetch failure does not block claim; the original issue fetch stil
 	assert.equal(existsSync(join(dir, "seen")), false, "failed checks do not acknowledge unread activity");
 });
 
-test("PR fetch failure does not block done or advance its activity watermark", async () => {
+test("PR fetch failure refuses done and does not advance its activity watermark", async () => {
 	const d = deps();
 	await appendEvent(d, ev({ issue: 5, pr: "https://github.com/o/r/pull/2" }));
 	await check(d, session(), { repo: "o/r", issue: 5 });
@@ -659,13 +659,14 @@ test("PR fetch failure does not block done or advance its activity watermark", a
 		return fakeRun(cmd, args, opts);
 	} };
 	const text = await update(failing, session(), { repo: "o/r", issue: 5, state: "done" });
-	assert.match(text, /Updated o\/r#5 to Done/);
 	assert.match(text, /Could not check for new activity: offline/);
+	assert.match(text, /Not applied: done needs a successful activity check/);
+	assert.equal(githubWrites().length, 0);
 	assert.equal(seenRecords()[0].sources.issueComments.checkedAt, "2026-10-08T12:00:00.000Z");
 	assert.match(await check(d, session(), { repo: "o/r", issue: 5 }), /Still needs attention/);
 });
 
-test("identity fetch failure does not block done and is reported without acknowledging unseen activity", async () => {
+test("identity fetch failure refuses done and is reported without acknowledging unseen activity", async () => {
 	await check(deps(), session(), { repo: "o/r", issue: 5 });
 	issueComments = [comment("person", "2026-10-08T12:30:00Z", "New input")];
 	now = "2026-10-08T13:00:00.000Z";
@@ -674,8 +675,9 @@ test("identity fetch failure does not block done and is reported without acknowl
 		return fakeRun(cmd, args, opts);
 	} };
 	const text = await update(d, session(), { repo: "o/r", issue: 5, state: "done" });
-	assert.match(text, /Updated o\/r#5 to Done/);
 	assert.match(text, /Could not check for new activity: identity unavailable/);
+	assert.match(text, /Not applied: done needs a successful activity check/);
+	assert.equal(githubWrites().length, 0);
 	assert.equal(seenRecords()[0].sources.issueComments.checkedAt, "2026-10-08T12:00:00.000Z");
 	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /New input/);
 });
@@ -1497,6 +1499,25 @@ test("done is not applied when the activity check was rate limited, even if the 
 	const calls: string[][] = [];
 	const text = await update({ ...deps(), run: async (c, a, o) => { calls.push([c, ...a]); return run(c, a, o); } }, session(), { repo: "o/r", issue: 5, state: "done", pr: "https://github.com/o/r/pull/9" });
 	assert.match(text, /^Could not check for new activity: GitHub rate limited; retry after /);
-	assert.match(text, /Not applied: done needs the activity check/);
+	assert.match(text, /Not applied: done needs a successful activity check/);
 	assert.equal(calls.some((c) => c.includes("issue-status.py") || c.join(" ").includes("edit")), false, "nothing was written");
+});
+
+test("done is refused for a nonexistent PR URL and when offline, but in-progress still applies", async () => {
+	const missing: Deps = { ...deps(), run: async (cmd, args, o) => {
+		if (cmd === "gh" && args[0] === "pr" && args[1] === "view") throw Object.assign(new Error("Command failed"), { stderr: "GraphQL: Could not resolve to a PullRequest (HTTP 404)" });
+		return fakeRun(cmd, args, o);
+	} };
+	const text = await update(missing, session(), { repo: "o/r", issue: 5, state: "done", pr: "https://github.com/o/r/pull/99999" });
+	assert.match(text, /^Could not check for new activity: .*Could not resolve/);
+	assert.match(text, /Not applied: done needs a successful activity check; fix the cause/);
+	assert.equal(githubWrites().length, 0);
+	const offline: Deps = { ...deps(), run: async (cmd, args, o) => {
+		if (cmd === "gh" && args[0] === "api" && args[1] !== "user") throw new Error("offline");
+		return fakeRun(cmd, args, o);
+	} };
+	const off = await update(offline, session(), { repo: "o/r", issue: 5, state: "done" });
+	assert.match(off, /Not applied: done needs a successful activity check/);
+	assert.equal(githubWrites().length, 0);
+	assert.match(await update(missing, session(), { repo: "o/r", issue: 5, state: "in-progress", pr: "https://github.com/o/r/pull/99999" }), /Updated o\/r#5 to In progress/);
 });
