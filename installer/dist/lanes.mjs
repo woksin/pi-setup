@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: bff81daaeed20896bdcdfb272600696e44358e8e27a14df6a25d224d209efdf7
+// pi-setup-source-sha256: cb68a0b3b3069e45ca5b9017b0715dcb8a5c461874da645d301fc8db6b925348
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -1023,8 +1023,8 @@ function validMarker(time, now) {
 }
 function markerTime(s, root, dir, now) {
   const times = [];
-  const canonical = join8(dir, `${s.id}-inbox.marker`);
-  if (existsSync3(canonical)) times.push(statSync4(canonical).mtimeMs);
+  const canonical2 = join8(dir, `${s.id}-inbox.marker`);
+  if (existsSync3(canonical2)) times.push(statSync4(canonical2).mtimeMs);
   const watcher = join8(root, ".state", `inbox-${s.id}.marker`);
   if (existsSync3(watcher)) {
     const value = readFileSync6(watcher, "utf8").trim();
@@ -1088,8 +1088,8 @@ function owned(status2, s) {
 }
 function fresh(status2, now) {
   if (terminal(status2.state)) return false;
-  const age = typeof status2.at === "string" ? now - Date.parse(status2.at) : NaN;
-  return Number.isFinite(age) && age >= 0 && age <= 6e5;
+  const age2 = typeof status2.at === "string" ? now - Date.parse(status2.at) : NaN;
+  return Number.isFinite(age2) && age2 >= 0 && age2 <= 6e5;
 }
 function subagents(s, ctx) {
   const statuses = jsonFiles(join9(ctx.piAgentDir, "context-budget/status"));
@@ -1859,10 +1859,10 @@ function ready(s, env) {
 }
 async function revalidate(env, s, to) {
   await recipient(env, to);
-  const fresh2 = await collect(env);
-  if (fresh2.asks.length || fresh2.keeps.length) throw new Error("quit refused: safety evidence changed");
-  if (fingerprint(fresh2) !== fingerprint(s)) throw new Error("quit refused: safety evidence changed");
-  verifyOwnContext(env, fresh2);
+  const fresh3 = await collect(env);
+  if (fresh3.asks.length || fresh3.keeps.length) throw new Error("quit refused: safety evidence changed");
+  if (fingerprint(fresh3) !== fingerprint(s)) throw new Error("quit refused: safety evidence changed");
+  verifyOwnContext(env, fresh3);
 }
 async function exited(env, pid) {
   const probe = await env.ctx.run("ps", ["-p", String(pid)], { timeoutMs: 2e3 });
@@ -2239,6 +2239,43 @@ async function runningPi(ctx) {
     }
   }
   return found;
+}
+async function runningPiChecked(ctx) {
+  try {
+    const result2 = await ctx.run("pgrep", ["-x", "pi"], { timeoutMs: 2e3 });
+    if (result2.timedOut) return { ok: false, procs: [] };
+    if (result2.code === 1) return { ok: true, procs: [] };
+    if (result2.code !== 0) return { ok: false, procs: [] };
+    const procs = [];
+    let ok = true;
+    for (const token of result2.stdout.trim().split(/\s+/).filter(Boolean)) {
+      if (!/^\d+$/.test(token)) {
+        ok = false;
+        continue;
+      }
+      const pid = Number(token);
+      try {
+        const cwd = await checkedCwd(ctx, pid);
+        if (cwd) procs.push({ pid, cwd: ctx.realpath(cwd) });
+        else {
+          ok = false;
+          procs.push({ pid, cwd: "" });
+        }
+      } catch {
+        ok = false;
+        procs.push({ pid, cwd: "" });
+      }
+    }
+    return { ok, procs };
+  } catch {
+    return { ok: false, procs: [] };
+  }
+}
+async function checkedCwd(ctx, pid) {
+  if (ctx.readCwd) return ctx.readCwd(pid);
+  const r = ctx.platform === "darwin" ? await ctx.run("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeoutMs: 2e3 }) : await ctx.run("readlink", [`/proc/${pid}/cwd`], { timeoutMs: 2e3 });
+  if (r.code !== 0 || r.timedOut) return void 0;
+  return ctx.platform === "darwin" ? r.stdout.split("\n").find((s) => s.startsWith("n"))?.slice(1) : r.stdout.trim();
 }
 async function ttyOf(ctx, pid) {
   const r = await ctx.run("ps", ["-o", "tty=", "-p", String(pid)], { timeoutMs: 1e4 });
@@ -3510,8 +3547,498 @@ function requireWorktree(path) {
 }
 
 // src/lanes/commands/send.ts
-import { readFileSync as readFileSync16 } from "node:fs";
+import { readFileSync as readFileSync18 } from "node:fs";
 import { resolve as resolve10 } from "node:path";
+
+// src/lanes/issue-register.ts
+import { readFileSync as readFileSync16, readdirSync as readdirSync12 } from "node:fs";
+import { join as join35 } from "node:path";
+var RECENT_DAYS = 14;
+var DAY_MS = 864e5;
+var REPO_RE = /^(?!\.+\/)[A-Za-z0-9_.-]+\/(?!\.+$)[A-Za-z0-9_.-]+$/;
+var issueKey = (repo, issue) => `${repo.toLowerCase()}#${issue}`;
+var holding = (state) => state === "in-progress" || state === "in-review";
+var short = (id) => id.slice(0, 12);
+var inWindow = (ts, now, days) => ts !== void 0 && Date.parse(ts) >= now.getTime() - days * DAY_MS;
+var windowDays = (days = RECENT_DAYS) => Math.max(1, Math.min(90, Number.isFinite(days) ? Math.trunc(days) : RECENT_DAYS));
+function validIssueMatch(m) {
+  if (m[1] && !REPO_RE.test(m[1])) return false;
+  return Number.isSafeInteger(Number(m[2])) && Number(m[2]) > 0;
+}
+function parseIssue(text2) {
+  const m = /^(?:([^/#]+\/[^/#]+)#|#?)(\d+)$/.exec(text2);
+  if (!m || !validIssueMatch(m)) {
+    throw new UsageError("issue must be N, #N or OWNER/REPO#N");
+  }
+  return { repo: m[1], number: Number(m[2]) };
+}
+function parseRegistry(text2) {
+  return text2.split("\n").flatMap((line) => {
+    try {
+      const e = JSON.parse(line);
+      return e && REPO_RE.test(e.repo) && typeof e.repo === "string" && Number.isInteger(e.issue) && e.issue > 0 && typeof e.ts === "string" && typeof e.sessionId === "string" ? [e] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+function touchEvent(touch, ev) {
+  if (ev.ts > touch.lastTs) touch.lastTs = ev.ts;
+  if (ev.state) {
+    touch.lastState = ev.state;
+    touch.lastStateTs = ev.ts;
+  }
+  if (ev.source === "tool" && ev.note !== void 0) {
+    touch.note = ev.note;
+    touch.noteTs = ev.ts;
+  }
+  for (const field2 of ["cwd", "branch", "pr"]) if (ev[field2]) touch[field2] = ev[field2];
+  if (ev.pid) touch.pid = ev.pid;
+}
+function foldRegistry(events) {
+  const views = /* @__PURE__ */ new Map();
+  for (const ev of events) {
+    const key = issueKey(ev.repo, ev.issue);
+    const view = views.get(key) ?? { key, repo: ev.repo, issue: ev.issue, state: "unknown", lastTs: ev.ts, sessions: [] };
+    if (ev.state) view.state = ev.state;
+    if (ev.branch) view.branch = ev.branch;
+    if (ev.ts > view.lastTs) view.lastTs = ev.ts;
+    const touch = view.sessions.find((s) => s.sessionId === ev.sessionId) ?? { sessionId: ev.sessionId, lastTs: ev.ts };
+    if (!view.sessions.includes(touch)) view.sessions.push(touch);
+    touchEvent(touch, ev);
+    views.set(key, view);
+  }
+  return views;
+}
+function parseLeases(texts) {
+  return texts.flatMap((text2) => {
+    try {
+      const l = JSON.parse(text2);
+      return l && typeof l.sessionId === "string" && Number.isInteger(l.pid) && l.pid > 0 && typeof l.startedAt === "string" ? [l] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+function newestLeases(leases2) {
+  const newest = /* @__PURE__ */ new Map();
+  for (const l of leases2) if (!newest.has(l.pid) || l.startedAt > newest.get(l.pid).startedAt) newest.set(l.pid, l);
+  return [...newest.values()];
+}
+function leaseStatus(lease, current) {
+  if (current !== void 0 && current !== lease.procStart) return void 0;
+  return { status: current === void 0 ? "unknown" : "live", pid: lease.pid };
+}
+function sessionLiveness(leases2, isPidAlive, startTimeOf) {
+  const out = /* @__PURE__ */ new Map();
+  for (const lease of newestLeases(leases2)) {
+    if (!lease.procStart || !isPidAlive(lease.pid)) continue;
+    const status2 = leaseStatus(lease, startTimeOf(lease.pid));
+    if (status2 && out.get(lease.sessionId)?.status !== "live") out.set(lease.sessionId, status2);
+  }
+  return out;
+}
+function deliveries(o) {
+  const sessions = foldRegistry(o.events).get(o.key)?.sessions ?? [];
+  const days = windowDays(o.days);
+  return sessions.filter((s) => s.sessionId !== o.excludeSessionId && inWindow(s.lastTs, o.now, days) && (inWindow(s.lastStateTs, o.now, days) && ["in-review", "done"].includes(s.lastState) || inWindow(s.noteTs, o.now, days) && /(?<!\bnot )\bdelivered\b/i.test(s.note ?? "")));
+}
+function holderReason(view, o) {
+  const holders = view.sessions.filter((s) => holding(s.lastState));
+  const live = holders.find((s) => o.liveness.get(s.sessionId)?.status === "live");
+  if (live) return `held by live session ${short(live.sessionId)} (${live.lastState}), branch ${live.branch ?? "-"}, ${age(live.lastTs, o.now)}`;
+  const unknown = holders.find((s) => o.liveness.get(s.sessionId)?.status === "unknown");
+  if (unknown) return `held by session ${short(unknown.sessionId)} (${unknown.lastState}), branch ${unknown.branch ?? "-"}, ${age(unknown.lastTs, o.now)}; liveness cannot be verified`;
+}
+function age(ts, now) {
+  return `${Math.max(0, Math.floor((now.getTime() - Date.parse(ts)) / 6e4))}m ago`;
+}
+function recentReason(view, o) {
+  const found = deliveries({ ...o, key: view.key });
+  if (found.length) return `delivered or in review: ${found.map((s) => `${short(s.sessionId)} (${s.lastState ?? "unknown"}, branch ${s.branch ?? "-"}, ${age(s.lastStateTs ?? s.lastTs, o.now)})`).join(", ")}`;
+  if (["in-progress", "blocked"].includes(view.state) && inWindow(view.lastTs, o.now, windowDays(o.days))) {
+    const latest = [...view.sessions].sort((a, b) => b.lastTs.localeCompare(a.lastTs))[0];
+    return `ended session ${short(latest.sessionId)} left ${view.state}, branch ${latest.branch ?? "-"}, ${age(view.lastTs, o.now)}; confirm with its owner before reassigning`;
+  }
+  if (view.state === "paused" && inWindow(view.lastTs, o.now, 1)) return `paused ${age(view.lastTs, o.now)} (under 24 h)`;
+}
+function ownershipOf(o) {
+  if (!o.view) return { verdict: "FREE", reason: "no register entry" };
+  const reason = holderReason(o.view, o) ?? recentReason(o.view, o);
+  return reason ? { verdict: "OWNED", reason } : { verdict: "FREE", reason: "no live holder or recent delivery" };
+}
+function sourceFailure(error) {
+  return { status: error.code === "ENOENT" ? "missing" : "error", count: 0, detail: error.message };
+}
+function readRegistry(path) {
+  try {
+    const text2 = readFileSync16(path, "utf8");
+    const events = parseRegistry(text2);
+    const skipped = text2.split("\n").filter((l) => l.trim()).length - events.length;
+    return { events, source: { status: skipped && !events.length ? "error" : "ok", count: events.length, ...skipped ? { detail: `${skipped} invalid lines skipped` } : {} } };
+  } catch (e) {
+    return { events: [], source: sourceFailure(e) };
+  }
+}
+function readLeases(path) {
+  try {
+    const names = readdirSync12(path).filter((n) => n.endsWith(".json"));
+    const leases2 = [];
+    let skipped = 0;
+    for (const name of names) {
+      try {
+        const parsed = parseLeases([readFileSync16(join35(path, name), "utf8")]);
+        leases2.push(...parsed);
+        if (!parsed.length) skipped++;
+      } catch {
+        skipped++;
+      }
+    }
+    return { leases: leases2, source: { status: skipped ? "error" : "ok", count: leases2.length, ...skipped ? { detail: `${skipped} invalid or unreadable leases skipped` } : {} } };
+  } catch (e) {
+    return { leases: [], source: sourceFailure(e) };
+  }
+}
+async function probeLeases(leases2, ctx) {
+  const alive3 = /* @__PURE__ */ new Set();
+  const starts = /* @__PURE__ */ new Map();
+  for (const pid of new Set(leases2.map((l) => l.pid))) {
+    try {
+      const result2 = await ctx.run("ps", ["-p", String(pid)], { timeoutMs: 2e3 });
+      if (result2.code === 1 && !result2.timedOut) continue;
+      alive3.add(pid);
+      if (result2.code !== 0 || result2.timedOut) continue;
+      const start2 = await ctx.run("ps", ["-o", "lstart=", "-p", String(pid)], { timeoutMs: 2e3 });
+      const value = start2.stdout.trim().replace(/\s+/g, " ");
+      if (start2.code === 0 && !start2.timedOut && value) starts.set(pid, value);
+    } catch {
+      alive3.add(pid);
+    }
+  }
+  return sessionLiveness(leases2, (pid) => alive3.has(pid), (pid) => starts.get(pid));
+}
+async function readIssueRegister(ctx) {
+  const dir = join35(ctx.piAgentDir, "issue-work");
+  const registry3 = readRegistry(join35(dir, "registry.jsonl"));
+  const { leases: leases2, source } = readLeases(join35(dir, "sessions"));
+  for (const lease of leases2) if (lease.cwd) {
+    try {
+      lease.cwd = ctx.realpath(lease.cwd);
+    } catch {
+    }
+  }
+  return { events: registry3.events, leases: leases2, liveness: await probeLeases(leases2, ctx), sources: { registry: registry3.source, leases: source } };
+}
+
+// src/lanes/roster.ts
+import { readFileSync as readFileSync17, readdirSync as readdirSync13, statSync as statSync10 } from "node:fs";
+import { join as join36 } from "node:path";
+var HEARTBEAT_STALE_MIN = 15;
+function readJsonDir(dir, valid) {
+  try {
+    const names = readdirSync13(dir).filter((n) => n.endsWith(".json"));
+    const values = [];
+    let skipped = 0;
+    for (const name of names) {
+      try {
+        const value = JSON.parse(readFileSync17(join36(dir, name), "utf8"));
+        if (valid(value)) values.push(value);
+        else skipped++;
+      } catch {
+        skipped++;
+      }
+    }
+    return { values, source: { status: skipped ? "error" : "ok", count: values.length, ...skipped ? { detail: `${skipped} invalid or unreadable files skipped` } : {} } };
+  } catch (e) {
+    return { values: [], source: sourceFailure(e) };
+  }
+}
+function readStatuses(dir) {
+  const values = /* @__PURE__ */ new Map();
+  try {
+    const names = readdirSync13(dir).filter((n) => n.endsWith(".status"));
+    let skipped = 0;
+    for (const name of names) {
+      try {
+        values.set(name.slice(0, -7), readFileSync17(join36(dir, name), "utf8").split(/\r?\n/)[0]);
+      } catch {
+        skipped++;
+      }
+    }
+    return { values, source: { status: skipped ? "error" : "ok", count: values.size, ...skipped ? { detail: `${skipped} unreadable status files` } : {} } };
+  } catch (e) {
+    return { values, source: sourceFailure(e) };
+  }
+}
+async function readMessages(c, root, ctx) {
+  try {
+    statSync10(expand(c.messages.dir, c, root, ctx.home));
+    const values = await backendFor(c, ctx, root).list();
+    return { values, source: { status: "ok", count: values.length } };
+  } catch (e) {
+    return { values: [], source: sourceFailure(e) };
+  }
+}
+function canonical(path, ctx) {
+  try {
+    return ctx.realpath(path);
+  } catch {
+    return path;
+  }
+}
+function rosterSeeds(c, root, ctx) {
+  return [
+    { id: c.coordinator.id, cwd: canonical(expand(c.coordinator.cwd, c, root, ctx.home), ctx), role: "coordinator" },
+    ...c.lanes.map((l) => ({ ...l, cwd: canonical(laneDir(l, c, root, ctx), ctx), retired: Boolean(l.retired || l.closed) }))
+  ];
+}
+async function readRoster(c, root, ctx, register) {
+  const data = register ?? await readIssueRegister(ctx);
+  const processes = await runningPiChecked(ctx);
+  const orch = join36(ctx.home, ".pi/orch");
+  const heartbeats = readJsonDir(join36(orch, "heartbeats"), (v) => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
+  const sessions = readJsonDir(join36(orch, "sessions"), (v) => v && Number.isInteger(v.pid) && (v.id === void 0 || typeof v.id === "string"));
+  const assignments = readJsonDir(join36(orch, "assignments"), (v) => v && typeof v === "object");
+  const statusDir = ctx.env.LANE_STATUS_DIR || (c.messages.dir ? join36(expand(c.messages.dir, c, root, ctx.home), "status") : join36(ctx.piAgentDir, "lane-status"));
+  const statuses = readStatuses(statusDir);
+  const messages2 = await readMessages(c, root, ctx);
+  const lanes = rosterSeeds(c, root, ctx);
+  const idle2 = /* @__PURE__ */ new Map();
+  for (const cwd of /* @__PURE__ */ new Set([...lanes.map((l) => l.cwd), ...processes.procs.map((p) => p.cwd)])) idle2.set(cwd, idleMinutes2(cwd, ctx) ?? null);
+  return {
+    lanes,
+    processes,
+    register: data,
+    heartbeats: heartbeats.values,
+    sessions: sessions.values,
+    statuses: statuses.values,
+    messages: messages2.values,
+    idle: idle2,
+    broadcast: c.messages.broadcast,
+    sources: {
+      lanes: { status: "ok", count: lanes.length },
+      processes: { status: processes.ok ? "ok" : "error", count: processes.procs.length, ...!processes.ok ? { detail: "process discovery unavailable or incomplete" } : {} },
+      ...data.sources,
+      heartbeats: heartbeats.source,
+      sessions: sessions.source,
+      assignments: assignments.source,
+      "status-files": statuses.source,
+      messages: messages2.source
+    }
+  };
+}
+function matchedSessions(cwd, pids, data) {
+  return [...new Set(data.leases.filter((l) => {
+    const live = data.liveness.get(l.sessionId);
+    return live?.status === "live" && live.pid === l.pid && (pids.includes(l.pid) || Boolean(cwd && l.cwd === cwd));
+  }).map((l) => l.sessionId))];
+}
+function emptyRow(lane, identity2) {
+  return {
+    lane,
+    identity: identity2,
+    repo: null,
+    worktree: null,
+    branch: null,
+    issue: null,
+    state: "unknown",
+    idleMinutes: null,
+    contextUse: null,
+    pid: null,
+    sessionId: null,
+    lastInbound: null,
+    lastOutbound: null,
+    evidence: [],
+    notes: []
+  };
+}
+function heartbeatFor2(pid, input) {
+  return input.heartbeats.filter((h) => h.pid === pid).sort((a, b) => b.at.localeCompare(a.at))[0];
+}
+function fresh2(h, now) {
+  return Boolean(h && Date.parse(h.at) >= now.getTime() - HEARTBEAT_STALE_MIN * 6e4);
+}
+function unregisteredProcess(p, input) {
+  const session = input.sessions.find((s) => s.pid === p.pid);
+  const h = heartbeatFor2(p.pid, input);
+  const id = session?.id || h?.id;
+  const row = emptyRow(id || `unregistered-p${p.pid}`, id ? "orch" : "unregistered");
+  row.pid = p.pid;
+  row.worktree = p.cwd || session?.cwd || null;
+  if (session) row.evidence.push("orch-session");
+  if (!id) row.notes.push("identity unavailable: unregistered");
+  return row;
+}
+function processRows(input) {
+  const rows = input.lanes.map((l) => ({ ...emptyRow(l.id, "registered"), repo: l.repo ?? null, worktree: l.cwd, branch: l.branch ?? null, evidence: ["lanes.json"] }));
+  for (const p of input.processes.procs) {
+    const matched = rows.find((r) => r.worktree && r.worktree === p.cwd);
+    if (matched) {
+      if (matched.pid === null) matched.pid = p.pid;
+      continue;
+    }
+    rows.push(unregisteredProcess(p, input));
+  }
+  return rows;
+}
+function joinIssue(row, sessions, input) {
+  const events = input.register.events.filter((e) => sessions.includes(e.sessionId)).sort((a, b) => b.ts.localeCompare(a.ts));
+  const views = foldRegistry(input.register.events);
+  const held = [...views.values()].flatMap((v) => v.sessions.filter((s) => sessions.includes(s.sessionId) && holding(s.lastState)).map((s) => ({ v, s }))).sort((a, b) => b.s.lastTs.localeCompare(a.s.lastTs))[0];
+  if (held) row.issue = { repo: held.v.repo, number: held.v.issue, state: held.s.lastState, holder: true };
+  else if (events[0]) row.issue = { repo: events[0].repo, number: events[0].issue, state: events[0].state ?? "unknown", holder: false };
+  else {
+    const seed = input.lanes.find((l) => l.id === row.lane);
+    if (seed?.repo && seed.issue) row.issue = { repo: seed.repo, number: seed.issue, state: "unknown", holder: false };
+  }
+  if (events.length) {
+    row.evidence.push("registry");
+    row.repo ??= events[0].repo;
+    row.branch ??= events[0].branch ?? null;
+  }
+}
+function rowSessions(row, input) {
+  const pids = input.processes.procs.filter((p) => p.cwd && p.cwd === row.worktree).map((p) => p.pid);
+  if (row.pid !== null && !pids.includes(row.pid)) pids.push(row.pid);
+  const sessions = matchedSessions(row.worktree, pids, input.register);
+  if (sessions.length) {
+    row.evidence.push("lease");
+    row.sessionId = sessions[0];
+    row.pid ??= input.register.liveness.get(sessions[0]).pid;
+  } else {
+    const orch = input.sessions.find((s) => s.pid === row.pid);
+    const h = heartbeatFor2(row.pid, input);
+    row.sessionId = orch?.sessionId || h?.sessionId || null;
+  }
+  return sessions;
+}
+function heartbeatEvidence(row, h, now) {
+  const current = fresh2(h, now);
+  if (h) {
+    if (current) row.evidence.push("heartbeat(fresh)");
+    else row.notes.push("heartbeat stale");
+  }
+  return current;
+}
+function suppressedState(line, row, now) {
+  const status2 = parseStatus(line);
+  const expired = status2.until !== void 0 && !(status2.until > now.getTime());
+  if (expired) row.notes.push("status expired");
+  if (row.issue?.state === "blocked") return "blocked";
+  if (!suppressed(line, now)) return void 0;
+  if (status2.kind === "barred-by") return "blocked";
+  if (!expired) return "waiting";
+}
+function activeState(row, line, h, now) {
+  const held = suppressedState(line, row, now);
+  if (held) return held;
+  if (parseStatus(line).kind === "working") return "working";
+  if (fresh2(h, now)) {
+    if (h?.state === "working") return "working";
+  } else row.notes.push("no heartbeat");
+  return "idle";
+}
+function discoveryUnknown(row, input, heartbeatFresh) {
+  if (input.processes.ok || heartbeatFresh || row.evidence.includes("lease")) return false;
+  row.notes.push("processes unavailable");
+  return true;
+}
+function stateOf(row, input, now) {
+  const seed = input.lanes.find((l) => l.id === row.lane);
+  const line = input.statuses.get(row.lane);
+  if (line) row.evidence.push("status-file");
+  const h = heartbeatFor2(row.pid, input);
+  const heartbeatFresh = heartbeatEvidence(row, h, now);
+  if (seed?.retired || parseStatus(line).kind === "closed") return "retired";
+  if (discoveryUnknown(row, input, heartbeatFresh)) return "unknown";
+  const live = row.pid !== null || row.evidence.includes("lease") || heartbeatFresh;
+  if (!live) return seed ? "stopped" : "unknown";
+  return activeState(row, line, h, now);
+}
+function lastMessage(messages2, now) {
+  const last = [...messages2].sort((a, b) => b.at.getTime() - a.at.getTime() || b.name.localeCompare(a.name))[0];
+  return last ? { name: last.name, ageMin: Math.max(0, Math.floor((now.getTime() - last.at.getTime()) / 6e4)) } : null;
+}
+function joinMessages(row, input, now) {
+  const group = input.lanes.find((l) => l.id === row.lane)?.group;
+  const recipients = [row.lane, "ALL", input.broadcast, ...group ? [group] : []];
+  row.lastInbound = lastMessage(input.messages.filter((m) => m.from !== row.lane && recipients.some((id) => addressed2(m, id))), now);
+  row.lastOutbound = lastMessage(input.messages.filter((m) => m.from === row.lane), now);
+  if (row.lastInbound || row.lastOutbound) row.evidence.push("messages");
+}
+function messageRows(rows, input, now) {
+  const reserved = /* @__PURE__ */ new Set(["", "ALL", "BCAST", input.broadcast, ...input.lanes.flatMap((l) => l.group ? [l.group] : [])]);
+  const ids = input.messages.filter((m) => m.at.getTime() >= now.getTime() - 14 * 864e5).flatMap((m) => [m.from, ...m.to]);
+  for (const id of new Set(ids)) if (!reserved.has(id) && !rows.some((r) => r.lane === id)) {
+    const row = emptyRow(id, "message-only");
+    row.notes.push("identity known only from messages");
+    rows.push(row);
+  }
+}
+function buildRoster(input, now) {
+  const rows = processRows(input);
+  messageRows(rows, input, now);
+  for (const row of rows) {
+    if (row.pid !== null) row.evidence.push("process");
+    const sessions = rowSessions(row, input);
+    joinIssue(row, sessions, input);
+    row.idleMinutes = input.idle.get(row.worktree ?? "") ?? null;
+    row.state = stateOf(row, input, now);
+    joinMessages(row, input, now);
+  }
+  return { rows: rows.sort((a, b) => a.lane.localeCompare(b.lane)), sources: input.sources };
+}
+function repoMatches(repo, filter) {
+  const value = repo?.toLowerCase();
+  const target = filter.toLowerCase();
+  return value === target || !target.includes("/") && value?.split("/").at(-1) === target;
+}
+function filterRows(rows, selection) {
+  return rows.filter((r) => (!selection.repo || repoMatches(r.repo, selection.repo)) && (!selection.issue || r.issue?.number === selection.issue.number && (!selection.issue.repo || repoMatches(r.issue.repo, selection.issue.repo))));
+}
+function ownershipUnavailable(input) {
+  if ([input.register.sources.registry, input.register.sources.leases].some((s) => s.status === "error")) {
+    return { target: null, rule: "unverified", reason: "ownership unavailable; verify before assigning" };
+  }
+}
+function liveOwner(rows, sessionIds, input) {
+  return rows.find((r) => r.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r.state) && matchedSessions(r.worktree, r.pid === null ? [] : [r.pid], input.register).some((id) => sessionIds.includes(id)));
+}
+function viewSuggestion(view, rows, input, now, unique) {
+  const holders = view.sessions.filter((s) => holding(s.lastState));
+  if (holders.some((s) => input.register.liveness.get(s.sessionId)?.status === "unknown")) return { target: null, rule: "unverified", reason: "holder liveness unknown; verify before assigning" };
+  const live = holders.filter((s) => input.register.liveness.get(s.sessionId)?.status === "live");
+  const owner = liveOwner(rows, live.map((s) => s.sessionId), input);
+  if (live.length) {
+    if (owner && live.length === 1 && unique) return { target: owner.lane, rule: "issue-owner", reason: "live issue holder" };
+    return { target: null, rule: "unverified", reason: "holder has no unique matched lane; verify before assigning" };
+  }
+  const delivered = deliveries({ ...input.register, key: view.key, now });
+  if (delivered.length) return { target: null, rule: "delivered", reason: `${delivered.map((s) => short(s.sessionId)).join(", ")}: do not assign; verify` };
+  const ownership = ownershipOf({ ...input.register, view, now });
+  if (ownership.verdict === "OWNED") return { target: null, rule: "unverified", reason: ownership.reason };
+}
+function issueSuggestion(rows, input, selection, now) {
+  if (!selection.issue) return void 0;
+  const views = [...foldRegistry(input.register.events).values()].filter((v) => v.issue === selection.issue.number && (!selection.issue.repo || repoMatches(v.repo, selection.issue.repo)) && (!selection.repo || repoMatches(v.repo, selection.repo)));
+  for (const view of views) {
+    const suggestion = viewSuggestion(view, rows, input, now, views.length === 1);
+    if (suggestion) return suggestion;
+  }
+}
+function suggestTarget(rows, input, selection, now) {
+  const unavailable = ownershipUnavailable(input);
+  if (unavailable) return unavailable;
+  const issue = issueSuggestion(rows, input, selection, now);
+  if (issue) return issue;
+  const repo = selection.repo || selection.issue?.repo;
+  const candidates = rows.filter((r) => repo && repoMatches(r.repo, repo) && r.state === "idle" && r.pid !== null && !r.issue?.holder && r.identity !== "unregistered");
+  const roleRank = (r) => input.lanes.find((l) => l.id === r.lane)?.role === "repo-orch" ? 1 : 0;
+  candidates.sort((a, b) => roleRank(a) - roleRank(b) || (b.idleMinutes ?? -1) - (a.idleMinutes ?? -1) || a.lane.localeCompare(b.lane));
+  return candidates.length ? { target: candidates[0].lane, rule: "idle-in-repo", reason: "longest idle lane in repository (ties by lane id; workers before repo orchestrator)" } : { target: null, rule: "start-lane", reason: `no live lane for ${repo ?? "matching repositories"}` };
+}
+
+// src/lanes/commands/send.ts
 async function send(args, opts, c, root, ctx) {
   let [to, topic, file] = args;
   const from = opts.from || ctx.env.PI_ORCH_ID;
@@ -3522,11 +4049,76 @@ async function send(args, opts, c, root, ctx) {
   if (opts.m !== void 0 && file !== void 0) throw new UsageError("choose a file or -m, not both");
   const known = [c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.flatMap((l) => [l.id, l.group])];
   if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
-  const body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync16(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+  const refusal = await guardIssue(to, opts, { c, root, ctx });
+  if (refusal) return refusal;
+  let body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync18(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
   if (!body.trim()) throw new UsageError("empty message body");
+  if (opts.force !== void 0) body = `Ownership override (--force): ${opts.force}
+
+${body}`;
   to = route({ to, from, direct: opts.direct }, c, ctx);
   ctx.out((await backendFor(c, ctx, root).send({ from, to, topic, body })).path);
   return 0;
+}
+function assignmentRepo(to, c) {
+  const lanes = c.lanes.filter((l) => l.id === to && !l.retired && !l.closed);
+  return lanes.length === 1 ? lanes[0].repo : void 0;
+}
+function concreteRecipient(to, c) {
+  if (["ALL", "BCAST", c.messages.broadcast, ...c.lanes.map((l) => l.group)].includes(to)) {
+    throw new UsageError("--issue requires a concrete recipient, not a broadcast or group");
+  }
+}
+function validateForce(opts) {
+  if (opts.force === void 0) return;
+  if (opts.issue === void 0 || !opts.force.trim()) throw new UsageError("--force requires --issue and a non-blank reason");
+}
+function unavailableReason(data) {
+  if (data.sources.registry.status === "error") return `ownership unavailable: ${data.sources.registry.detail ?? "registry read failed"}`;
+  if (data.sources.leases.status === "error") return `ownership unavailable: ${data.sources.leases.detail}`;
+}
+async function guardIssue(to, opts, deps) {
+  const { c, ctx } = deps;
+  validateForce(opts);
+  if (opts.issue === void 0) return 0;
+  concreteRecipient(to, c);
+  const issue = parseIssue(opts.issue);
+  const repo = issue.repo ?? assignmentRepo(to, c);
+  if (!repo) throw new UsageError("issue needs a repo: use OWNER/REPO#N");
+  const data = await readIssueRegister(ctx);
+  const source = data.sources.registry;
+  if (source.status === "missing") {
+    ctx.err("issue register not found; ownership not checked");
+    return forceNote(opts, ctx);
+  }
+  const reason = unavailableReason(data) ?? await conflictingOwner(to, { repo, number: issue.number }, deps, data);
+  if (!reason) return forceNote(opts, ctx);
+  ctx.err(`${repo}#${issue.number}: ${reason}${opts.force === void 0 ? "; use lanes who --issue OWNER/REPO#N, choose the holder, or --force <reason>" : ""}`);
+  if (opts.force !== void 0) return forceNote(opts, ctx);
+  return 3;
+}
+function forceNote(opts, ctx) {
+  if (opts.force !== void 0) ctx.err(`ownership override (--force): ${opts.force}`);
+  return 0;
+}
+async function recipientSessions(to, deps, data) {
+  const input = await readRoster(deps.c, deps.root, deps.ctx, data);
+  const recipient2 = buildRoster(input, deps.ctx.now()).rows.find((r) => r.lane === to);
+  if (!recipient2) return [];
+  const pids = input.processes.procs.filter((p) => p.cwd && p.cwd === recipient2.worktree).map((p) => p.pid);
+  return matchedSessions(recipient2.worktree, pids, data);
+}
+async function conflictingOwner(to, issue, deps, data) {
+  const view = foldRegistry(data.events).get(issueKey(issue.repo, issue.number));
+  const { ctx } = deps;
+  const now = ctx.now();
+  const ownership = ownershipOf({ ...data, view, now });
+  if (ownership.verdict === "FREE") return void 0;
+  const sessions = await recipientSessions(to, deps, data);
+  const conflicts = view.sessions.filter((s) => holding(s.lastState) && data.liveness.has(s.sessionId));
+  if (conflicts.length && conflicts.every((s) => data.liveness.get(s.sessionId)?.status === "live" && sessions.includes(s.sessionId))) return void 0;
+  const details = view.sessions.map((s) => `${s.sessionId}, branch ${s.branch ?? view.branch ?? "-"}, ${s.lastState ?? view.state}, ${age(s.lastTs, now)}`).join("; ");
+  return `${ownership.reason}; ${details}`;
 }
 function route(input, c, ctx) {
   const sender = c.lanes.find((l) => l.id === input.from && !l.retired);
@@ -3590,12 +4182,12 @@ async function nudge(id, text2, opts, c, root, ctx) {
 }
 
 // src/lanes/commands/resume-check.ts
-import { existsSync as existsSync14, readFileSync as readFileSync17, statSync as statSync11 } from "node:fs";
-import { join as join36 } from "node:path";
+import { existsSync as existsSync14, readFileSync as readFileSync19, statSync as statSync12 } from "node:fs";
+import { join as join38 } from "node:path";
 
 // src/lanes/joblogs.ts
-import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync12, statSync as statSync10 } from "node:fs";
-import { join as join35 } from "node:path";
+import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync14, statSync as statSync11 } from "node:fs";
+import { join as join37 } from "node:path";
 function parseWatches(text2) {
   return text2.split(/\r?\n/).flatMap((line) => {
     const [tag, label, until2, interval, ...check] = line.split("|");
@@ -3620,17 +4212,17 @@ function liveWatch(jobs, watch2, now) {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   for (const date of [now, yesterday]) {
-    const dir = join35(jobs, day(date));
+    const dir = join37(jobs, day(date));
     let names;
     try {
-      names = readdirSync12(dir);
+      names = readdirSync14(dir);
     } catch (e) {
       if (e.code === "ENOENT") continue;
       throw e;
     }
     for (const name of names.filter((n) => n.endsWith(".log"))) {
-      const path = join35(dir, name);
-      const stat2 = statSync10(path);
+      const path = join37(dir, name);
+      const stat2 = statSync11(path);
       if (!stat2.isFile() || !chunk(path, Math.min(4096, stat2.size), 0).split("\n")[0].includes(watch2.check)) continue;
       const tail = chunk(path, Math.min(65536, stat2.size), Math.max(0, stat2.size - 65536));
       const last = tail.split("\n").filter((s) => /^--- check .* exit \d+ ---$/.test(s)).at(-1);
@@ -3663,12 +4255,12 @@ async function resumeCheck(c, root, ctx) {
   const now = ctx.now();
   let bad = false;
   ctx.out(`date: ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`);
-  const watches = join36(root, "coordinator/WATCHES.md");
+  const watches = join38(root, "coordinator/WATCHES.md");
   if (!existsSync14(watches)) {
     ctx.out("MISSING coordinator/WATCHES.md");
     bad = true;
-  } else for (const w of parseWatches(readFileSync17(watches, "utf8"))) {
-    if (liveWatch(join36(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
+  } else for (const w of parseWatches(readFileSync19(watches, "utf8"))) {
+    if (liveWatch(join38(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
     else {
       ctx.out(`MISSING watch: ${w.label} -> job_watch until=${w.until} interval=${w.interval} check from coordinator/WATCHES.md`);
       bad = true;
@@ -3684,19 +4276,19 @@ async function resumeCheck(c, root, ctx) {
     if (old.length) bad = true;
     else ctx.out("OK      inbox: no unread backlog");
   }
-  const path = join36(root, "coordinator/NOW.md");
+  const path = join38(root, "coordinator/NOW.md");
   if (!existsSync14(path)) {
     ctx.out("MISSING coordinator/NOW.md");
     bad = true;
   } else {
-    await livePrs(readFileSync17(path, "utf8"), ctx);
-    const age = Math.floor((now.getTime() - statSync11(path).mtimeMs) / 6e4);
-    if (age > 90) {
-      ctx.out(`STALE   NOW.md not updated for ${age} min`);
+    await livePrs(readFileSync19(path, "utf8"), ctx);
+    const age2 = Math.floor((now.getTime() - statSync12(path).mtimeMs) / 6e4);
+    if (age2 > 90) {
+      ctx.out(`STALE   NOW.md not updated for ${age2} min`);
       bad = true;
     }
   }
-  const questions = join36(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
+  const questions = join38(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
   if (existsSync14(questions)) {
     const r = await ctx.run(process.execPath, [questions, "list", "--all"], { timeoutMs: 15e3 });
     for (const line of r.stdout.split("\n").filter((s) => /^Q-\d+/.test(s))) ctx.out(`OPEN    ${line}`);
@@ -3705,8 +4297,8 @@ async function resumeCheck(c, root, ctx) {
 }
 
 // src/lanes/commands/green-prs.ts
-import { existsSync as existsSync15, mkdirSync as mkdirSync11, readFileSync as readFileSync18, writeFileSync as writeFileSync9 } from "node:fs";
-import { join as join37 } from "node:path";
+import { existsSync as existsSync15, mkdirSync as mkdirSync11, readFileSync as readFileSync20, writeFileSync as writeFileSync9 } from "node:fs";
+import { join as join39 } from "node:path";
 
 // src/lanes/stale-check.ts
 var completedCheck = (check) => check.status === "completed" && ["success", "skipped", "neutral"].includes(check.conclusion);
@@ -3807,15 +4399,15 @@ async function greenPrs(opts, c, root, ctx) {
     }
   }
   refs.sort();
-  const ack = join37(root, ".state/green-ack");
+  const ack = join39(root, ".state/green-ack");
   if (opts.ack) {
-    mkdirSync11(join37(root, ".state"), { recursive: true });
+    mkdirSync11(join39(root, ".state"), { recursive: true });
     writeFileSync9(ack, refs.length ? `${refs.join("\n")}
 ` : "");
     ctx.out(`acked ${refs.length}`);
     return 0;
   }
-  const previous = opts.new && existsSync15(ack) ? readFileSync18(ack, "utf8").split(/\r?\n/) : [];
+  const previous = opts.new && existsSync15(ack) ? readFileSync20(ack, "utf8").split(/\r?\n/) : [];
   const output = opts.new ? refs.filter((r) => !previous.includes(r)) : refs;
   if (output.length) ctx.out(await annotatedRefs(output, details, ctx));
   return opts.new && !output.length ? 1 : 0;
@@ -3843,8 +4435,8 @@ async function quit(id, pid, cwd, c, root, ctx) {
     ctx.err(`REFUSED: busy children: ${busy.join(" ")}`);
     return false;
   }
-  const age = idleMinutes2(cwd, ctx);
-  if (age !== void 0 && age < 3) {
+  const age2 = idleMinutes2(cwd, ctx);
+  if (age2 !== void 0 && age2 < 3) {
     ctx.err("REFUSED: session wrote less than 180s ago");
     return false;
   }
@@ -3924,7 +4516,7 @@ async function status(c, root, ctx, all = false) {
       pid,
       String(idleMinutes2(lane.cwd, ctx) ?? "-"),
       await backend.status(lane.id) || "-",
-      lastMessage(messages2[0], ctx)
+      lastMessage2(messages2[0], ctx)
     ]);
   }
   warnMissingOrchestrators(c, ctx);
@@ -3974,7 +4566,7 @@ function findPid(cwd, processes, ctx) {
   }
   return pid;
 }
-function lastMessage(last, ctx) {
+function lastMessage2(last, ctx) {
   return last ? `${last.name} (${Math.max(0, Math.floor((ctx.now().getTime() - last.at.getTime()) / 6e4))}m)` : "-";
 }
 function warnMissingOrchestrators(c, ctx) {
@@ -3987,6 +4579,36 @@ function warnMissingOrchestrators(c, ctx) {
   }
 }
 
+// src/lanes/commands/who.ts
+function humanRow(row) {
+  const issue = row.issue ? `#${row.issue.number}` : "-";
+  const notes = row.notes.length ? `; ${row.notes.join("; ")}` : "";
+  const inbound = row.lastInbound ? `${row.lastInbound.name} (${row.lastInbound.ageMin}m)` : "-";
+  const outbound = row.lastOutbound ? `${row.lastOutbound.name} (${row.lastOutbound.ageMin}m)` : "-";
+  return `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${issue} ${row.state} idle=${row.idleMinutes ?? "-"}m ctx=- pid=${row.pid ?? "-"} session=${row.sessionId ?? "-"} branch=${row.branch ?? "-"} cwd=${row.worktree ?? "-"} in=${inbound} out=${outbound} ${row.evidence.join(",")}${notes}`;
+}
+function humanSources(sources, ctx) {
+  for (const [name, source] of Object.entries(sources)) {
+    if (source.status !== "ok" || source.detail) ctx.out(`source: ${name} ${source.status}${source.detail ? ` \u2014 ${source.detail}` : ""}`);
+  }
+}
+async function who(args, opts, c, root, ctx) {
+  if (args.length) throw new UsageError("who takes no positional arguments");
+  const selection = { repo: opts.repo, issue: opts.issue === void 0 ? void 0 : parseIssue(opts.issue) };
+  const now = ctx.now();
+  const input = await readRoster(c, root, ctx);
+  const roster = buildRoster(input, now);
+  const rows = filterRows(roster.rows, selection);
+  const suggest = suggestTarget(roster.rows, input, selection, now);
+  if (opts.json) ctx.out(JSON.stringify({ at: now.toISOString(), rows, sources: roster.sources, suggest }, null, 2));
+  else {
+    for (const row of rows) ctx.out(humanRow(row));
+    humanSources(roster.sources, ctx);
+    ctx.out(`suggest: ${suggest.target ?? "-"} [${suggest.rule}] ${suggest.reason}`);
+  }
+  return rows.length ? 0 : 1;
+}
+
 // src/lanes/main.ts
 var HELP = `Usage: lanes [--dir root] <command> [options]
   adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
@@ -3996,7 +4618,8 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
   start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
   run <ID>|coordinator [--from-handoff ID|file]
   resume <ID> [--terminal backend]
-  send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
+  send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
+  who [--repo R] [--issue N|OWNER/REPO#N] [--json]
   status [--all]
   messages prune [--dry-run] [--json] [--legacy [--legacy-age hours] [--apply]]
   idle-check [--minutes n]
@@ -4008,6 +4631,7 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
   snooze <ID> --until ISO|+90m | --clear
   close <ID> [--reassign-to ID2] [--reason text] [--from ID] [--quit]
 Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
+Send: 3 ownership refusal (with --issue); --force requires an explicit reason.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 Reap work: an owned pi-phase run, a build/test descendant (dotnet/msbuild/vstest,
@@ -4042,7 +4666,8 @@ var OPTIONS = {
   run: ["from-handoff", "handoff-digest"],
   start: ["terminal", "from-handoff"],
   resume: ["terminal"],
-  send: ["m", "from", "direct"],
+  send: ["m", "from", "direct", "issue", "force"],
+  who: ["repo", "issue", "json"],
   status: ["all"],
   messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"],
@@ -4129,6 +4754,7 @@ function validateInvocation({ command, positional, opts }) {
     start: [1, 1],
     resume: [1, 1],
     send: [2, 3],
+    who: [0, 0],
     status: [0, 0],
     messages: [1, 1],
     "idle-check": [0, 0],
@@ -4160,6 +4786,7 @@ async function dispatch(input, env) {
     resume: () => resume(args, opts, env),
     messages: () => messagesPrune(opts, c, root, ctx),
     send: () => send(args, opts, c, root, ctx),
+    who: () => who(args, opts, c, root, ctx),
     "idle-check": () => idleCheck(opts, c, root, ctx),
     nudge: () => nudge(args[0], args[1], opts, c, root, ctx),
     "resume-check": () => resumeCheck(c, root, ctx),
