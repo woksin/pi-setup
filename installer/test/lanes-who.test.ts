@@ -52,6 +52,28 @@ test("unknown running identities are visible, and orch sessions supply identitie
   f.put(".pi/orch/sessions/p701.json", { pid: 701, id: "ORCH1", cwd: join(f.home, "other") });
   result = await f.who(); assert.ok(result.report.rows.some((r: any) => r.identity === "orch" && r.lane === "ORCH1"));
 });
+test("orch processes sharing an unregistered cwd remain separate roster rows", async () => {
+  const f = fixture(); const cwd = join(f.home, "shared");
+  f.ctx.run = async () => ({ code: 0, stdout: "701\n702", stderr: "", timedOut: false });
+  f.ctx.readCwd = async () => cwd;
+  f.put(".pi/orch/sessions/p701.json", { pid: 701, id: "ORCH1", cwd });
+  f.put(".pi/orch/sessions/p702.json", { pid: 702, id: "ORCH2", cwd });
+  const { report } = await f.who();
+  const rows = report.rows.filter((r: any) => r.identity === "orch");
+  assert.deepEqual(rows.map((r: any) => ({ lane: r.lane, pid: r.pid, worktree: r.worktree })), [
+    { lane: "ORCH1", pid: 701, worktree: cwd }, { lane: "ORCH2", pid: 702, worktree: cwd },
+  ]);
+});
+test("a stateless detected touch preserves the session's blocked state and prevents idle routing", async () => {
+  const f = fixture(); f.lease();
+  const blocked = { ...f.event, state: "blocked" };
+  const detected = { ...f.event, state: undefined, source: "detected", ts: "2026-01-20T12:01:00Z" };
+  f.put("agent/issue-work/registry.jsonl", [blocked, detected].map(e => JSON.stringify(e)).join("\n"));
+  const { report } = await f.who("--repo", "example/alpha");
+  const row = report.rows.find((r: any) => r.lane === "W1");
+  assert.equal(row.issue.state, "blocked"); assert.equal(row.state, "blocked");
+  assert.equal(report.suggest.target, null); assert.equal(report.suggest.rule, "start-lane");
+});
 test("message-only identities and last inbound/outbound are retained", async () => {
   const f = fixture(); const path = f.put("messages/GHOST-to-W1-20260120-120000-task.md", "synthetic"); utimesSync(path, f.ctx.now(), f.ctx.now());
   const { report } = await f.who(); const ghost = report.rows.find((r: any) => r.lane === "GHOST");

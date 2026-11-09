@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: cb68a0b3b3069e45ca5b9017b0715dcb8a5c461874da645d301fc8db6b925348
+// pi-setup-source-sha256: dd91464dcab796232fc566702ec72dd8e8d564dfc37ba6f8f19ea739dd1b769c
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -3870,9 +3870,10 @@ function unregisteredProcess(p, input) {
   return row;
 }
 function processRows(input) {
-  const rows = input.lanes.map((l) => ({ ...emptyRow(l.id, "registered"), repo: l.repo ?? null, worktree: l.cwd, branch: l.branch ?? null, evidence: ["lanes.json"] }));
+  const seeds = input.lanes.map((l) => ({ ...emptyRow(l.id, "registered"), repo: l.repo ?? null, worktree: l.cwd, branch: l.branch ?? null, evidence: ["lanes.json"] }));
+  const rows = [...seeds];
   for (const p of input.processes.procs) {
-    const matched = rows.find((r) => r.worktree && r.worktree === p.cwd);
+    const matched = seeds.find((r) => r.worktree && r.worktree === p.cwd);
     if (matched) {
       if (matched.pid === null) matched.pid = p.pid;
       continue;
@@ -3886,8 +3887,11 @@ function joinIssue(row, sessions, input) {
   const views = foldRegistry(input.register.events);
   const held = [...views.values()].flatMap((v) => v.sessions.filter((s) => sessions.includes(s.sessionId) && holding(s.lastState)).map((s) => ({ v, s }))).sort((a, b) => b.s.lastTs.localeCompare(a.s.lastTs))[0];
   if (held) row.issue = { repo: held.v.repo, number: held.v.issue, state: held.s.lastState, holder: true };
-  else if (events[0]) row.issue = { repo: events[0].repo, number: events[0].issue, state: events[0].state ?? "unknown", holder: false };
-  else {
+  else if (events[0]) {
+    const event = events[0];
+    const touch = views.get(issueKey(event.repo, event.issue))?.sessions.find((s) => s.sessionId === event.sessionId);
+    row.issue = { repo: event.repo, number: event.issue, state: touch?.lastState ?? "unknown", holder: false };
+  } else {
     const seed = input.lanes.find((l) => l.id === row.lane);
     if (seed?.repo && seed.issue) row.issue = { repo: seed.repo, number: seed.issue, state: "unknown", holder: false };
   }

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { addressed, backendFor, type MessageRef } from "./backend.ts";
 import { expand, laneDir, type Config } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
-import { deliveries, foldRegistry, holding, ownershipOf, readIssueRegister, short, sourceFailure, type RegisterData, type Source, type IssueView } from "./issue-register.ts";
+import { deliveries, foldRegistry, holding, issueKey, ownershipOf, readIssueRegister, short, sourceFailure, type RegisterData, type Source, type IssueView } from "./issue-register.ts";
 import { runningPiChecked } from "./processes.ts";
 import { idleMinutes } from "./sessions.ts";
 import { parseStatus, suppressed } from "./status-line.ts";
@@ -110,9 +110,10 @@ function unregisteredProcess(p: { pid: number; cwd: string }, input: RosterInput
   return row;
 }
 function processRows(input: RosterInputs): RosterRow[] {
-  const rows = input.lanes.map(l => ({ ...emptyRow(l.id, "registered"), repo: l.repo ?? null, worktree: l.cwd, branch: l.branch ?? null, evidence: ["lanes.json"] }));
+  const seeds = input.lanes.map(l => ({ ...emptyRow(l.id, "registered"), repo: l.repo ?? null, worktree: l.cwd, branch: l.branch ?? null, evidence: ["lanes.json"] }));
+  const rows = [...seeds];
   for (const p of input.processes.procs) {
-    const matched = rows.find(r => r.worktree && r.worktree === p.cwd);
+    const matched = seeds.find(r => r.worktree && r.worktree === p.cwd);
     if (matched) { if (matched.pid === null) matched.pid = p.pid; continue; }
     rows.push(unregisteredProcess(p, input));
   }
@@ -124,7 +125,11 @@ function joinIssue(row: RosterRow, sessions: string[], input: RosterInputs): voi
   const held = [...views.values()].flatMap(v => v.sessions.filter(s => sessions.includes(s.sessionId) && holding(s.lastState)).map(s => ({ v, s })))
     .sort((a, b) => b.s.lastTs.localeCompare(a.s.lastTs))[0];
   if (held) row.issue = { repo: held.v.repo, number: held.v.issue, state: held.s.lastState!, holder: true };
-  else if (events[0]) row.issue = { repo: events[0].repo, number: events[0].issue, state: events[0].state ?? "unknown", holder: false };
+  else if (events[0]) {
+    const event = events[0];
+    const touch = views.get(issueKey(event.repo, event.issue))?.sessions.find(s => s.sessionId === event.sessionId);
+    row.issue = { repo: event.repo, number: event.issue, state: touch?.lastState ?? "unknown", holder: false };
+  }
   else {
     const seed = input.lanes.find(l => l.id === row.lane);
     if (seed?.repo && seed.issue) row.issue = { repo: seed.repo, number: seed.issue, state: "unknown", holder: false };
