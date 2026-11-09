@@ -347,6 +347,7 @@ for (const [message, category, advice] of [
 	["HTTP 422: Validation Failed", "validation", "do not retry; fix the request (repo, number, fields)"],
 	["error connecting: connection reset to api.github.com", "network", "retry once, then stop"],
 	["HTTP 503 Service Unavailable", "network", "retry once, then stop"],
+	["error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com", "network", "retry once, then stop"],
 	["dial tcp: no such host", "network", "retry once, then stop"],
 	["TLS handshake timed out", "network", "retry once, then stop"],
 	["unexpected failure", "unclassified", "do not retry blindly"],

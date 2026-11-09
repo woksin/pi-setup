@@ -223,7 +223,7 @@ const GH_CATEGORIES = [
 	["auth", /HTTP 40[13]|bad credentials|authentication|gh auth login|not logged in|requires authentication|resource not accessible|SAML/i],
 	["not-found", /HTTP 404|not found|could not resolve to a/i],
 	["validation", /HTTP 422|validation failed|unprocessable|invalid (?:input|request)/i],
-	["network", /HTTP 5\d\d|timeout|timed out|no such host|connection (?:refused|reset)|dial tcp|ECONN|EOF|TLS|could not resolve host/i],
+	["network", /HTTP 5\d\d|timeout|timed out|no such host|connection (?:refused|reset)|dial tcp|ECONN|EOF|TLS|could not resolve host|error connecting to|check your internet connection/i],
 ] as const;
 type GhCategory = typeof GH_CATEGORIES[number][0] | "unclassified";
 const GH_ADVICE: Record<GhCategory, string> = {
