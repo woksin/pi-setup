@@ -185,10 +185,13 @@ class OutputWithoutArguments(Base):
         self.assertNotIn("args", sw.analyse(path))
         with patch.object(sw.subprocess, "run") as notification:
             self.run_wd(inject_ttys={}, phase_state=os.path.join(self.tmp.name, "phase"))
-        (name,) = self.files()
-        self.assertTrue(name.startswith("ALL-" if confirmed else "PISETUP-to-L0-"))
-        with open(os.path.join(self.msgs, name)) as f:
-            self.assert_notice(f.read(), tool)
+        names = self.files()
+        expected = ("BCAST-", "PISETUP-to-L0-") if confirmed else ("PISETUP-to-L0-",)
+        self.assertEqual(len(names), len(expected), names)
+        for name, prefix in zip(names, expected):
+            self.assertTrue(name.startswith(prefix), name)
+            with open(os.path.join(self.msgs, name)) as f:
+                self.assert_notice(f.read(), tool)
         self.assertEqual(notification.call_count, 1)
         self.assert_no_arguments(str(notification.call_args))
         with open(sw.LOG) as f:
