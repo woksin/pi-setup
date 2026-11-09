@@ -193,10 +193,10 @@ class DryBudgetTests(unittest.TestCase):
             budget.configure(args)
             cleanup.dry_plan_steps(ctx, [], budget, rep)
         # Worktrees is measured first; caches' two sub-sections share one slice.
-        self.assertEqual(len(allowances), 6)
+        self.assertEqual(len(allowances), 7)
         self.assertTrue(all(0 < seconds < 20 for seconds in allowances), allowances)
         self.assertLess(sum(allowances), args.budget)
-        shares = allowances[:3] + [sum(allowances[3:5]), allowances[5]]
+        shares = allowances[:3] + [sum(allowances[3:5]), allowances[5], allowances[6]]
         for share in shares:
             self.assertAlmostEqual(share, shares[0])
         self.assertEqual(set(budget.incomplete), set(args.steps))

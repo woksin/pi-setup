@@ -49,11 +49,13 @@ TOOLS = {
 # path -> reason it has no help of its own
 EXEMPT = {
     "agent/bin/bin_sweep.py": "library, no __main__",
+    "agent/bin/handoff_sweep.py": "library, no __main__",
     "agent/bin/holders.py": "library, no __main__",
     "agent/bin/package_cache.py": "library, no __main__",
     "agent/bin/phase_status.py": "library, no __main__",
     "agent/bin/disk_growth_probe.py": "internal; reads a JSON request on stdin",
     "agent/bin/test_disk_growth.py": "test",
+    "agent/bin/test_handoff_sweep.py": "test",
     "agent/bin/test_lane_status.py": "test",
     "agent/bin/test_phase_status.py": "test",
     "agent/bin/test_retain.py": "test",

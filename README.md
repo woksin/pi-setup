@@ -282,6 +282,10 @@ the numeric form is unchanged. Use it for an extra low-disk job; the daily launc
 Open build files, running phase cwds, writes within 60 min or tracked bin files
 keep the worktree; unknown probes fail closed. Each worktree logs a reason and
 bytes freed. Doctor's disk check samples a bounded reclaimable-bin estimate.
+`pi-cleanup --only handoffs` (also scheduled) deletes context-budget handoffs in
+`.ai-work/handoffs` older than `--handoff-age-days` (14), always keeping the newest
+`--handoff-keep-newest` (3) per session, live sessions, relaunch markers, lane/`keep/`
+references and `.ai-work/KEEP`; unknown liveness skips the step. Dry runs report counts and bytes.
 
 Dry runs have one 60-second planning budget (`--budget SECONDS`, `0` for unlimited).
 Text sections stream as they finish; `--json` emits one complete document instead.
