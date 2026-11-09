@@ -1,5 +1,7 @@
-import importlib.machinery, importlib.util, json, os, shutil, subprocess, tempfile, time, unittest
+import importlib.machinery, importlib.util, io, json, os, shutil, subprocess, tempfile, time, unittest
+from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 P = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-watchdog")
 loader = importlib.machinery.SourceFileLoader("session_watchdog", P)
@@ -83,7 +85,9 @@ class Analyse(Base):
         self.assertEqual(len(self.run_wd()), 1)
         self.assertEqual(len(self.run_wd(now=NOW + 120)), 0)   # same record: not re-notified
         self.assertEqual(len(calls), 1)
-        self.assertIn("sleep 9999", calls[0][2])
+        self.assertNotIn("sleep 9999", calls[0][2])
+        self.assertIn("tool call `bash` has no result", calls[0][2])
+        self.assertIn("for: 11m40s", calls[0][2])
         self.assertIn("sid-1", calls[0][2])
         self.assertIn("worker#1", calls[0][2])
         self.heartbeat('sid-1', 100, age=-3700)  # heartbeat stays fresh
@@ -149,6 +153,76 @@ class Analyse(Base):
         self.assertFalse(os.path.exists(os.path.join(sw.STATE_DIR, "state.json")))
 
 
+class OutputWithoutArguments(Base):
+    header = "watchdog-test-header-value"
+    value = "watchdog-test-arbitrary-value"
+
+    def pending(self, hb=True, tool="bash", parallel=False):
+        command = f'curl -H "Authorization: {self.header}" https://example.invalid'
+        calls = [call("c1", tool, command=command, payload=self.value)]
+        if parallel:
+            calls.insert(0, call("done", command="finished"))
+        records = [msg("a", NOW - 700, "assistant", calls, stopReason="toolUse")]
+        if parallel:
+            records.append(msg("b", NOW - 699, "toolResult", [], toolCallId="done"))
+        return self.write(records, hb=hb)
+
+    def assert_no_arguments(self, text):
+        self.assertNotIn(self.header, text)
+        self.assertNotIn(self.value, text)
+        self.assertNotIn("Authorization:", text)
+        self.assertNotIn("payload", text)
+
+    def assert_notice(self, text, tool):
+        self.assert_no_arguments(text)
+        self.assertIn(f"tool call `{tool}` has no result", text)
+        self.assertIn("session sid-1", text)
+        self.assertIn("for: 11m40s", text)
+
+    def check_written_outputs(self, confirmed, tool, parallel=False):
+        path = self.pending(hb=confirmed, tool=tool, parallel=parallel)
+        self.assertNotIn("args", sw.analyse(path))
+        with patch.object(sw.subprocess, "run") as notification:
+            self.run_wd(inject_ttys={}, phase_state=os.path.join(self.tmp.name, "phase"))
+        (name,) = self.files()
+        self.assertTrue(name.startswith("ALL-" if confirmed else "PISETUP-to-L0-"))
+        with open(os.path.join(self.msgs, name)) as f:
+            self.assert_notice(f.read(), tool)
+        self.assertEqual(notification.call_count, 1)
+        self.assert_no_arguments(str(notification.call_args))
+        with open(sw.LOG) as f:
+            text = f.read()
+        self.assert_no_arguments(text)
+        self.assertIn("notified stuck:" if confirmed else "notified possibly-stuck:", text)
+        for name in ("board.md", "board.json", "state.json"):
+            with open(os.path.join(sw.STATE_DIR, name)) as f:
+                text = f.read()
+            self.assert_no_arguments(text)
+            if confirmed:
+                self.assertIn("sid-1", text)
+
+    def test_broadcast_and_board_omit_arguments(self):
+        self.check_written_outputs(True, "bash")
+
+    def test_unconfirmed_notice_omits_arguments(self):
+        self.check_written_outputs(False, "bash")
+
+    def test_parallel_non_bash_call_omits_arguments(self):
+        self.check_written_outputs(True, "custom-tool", parallel=True)
+
+    def test_dry_run_omits_arguments_and_writes_nothing(self):
+        self.pending()
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors), patch.object(sw.subprocess, "run") as notification:
+            self.run_wd(dry_run=True, inject_ttys={}, phase_state=os.path.join(self.tmp.name, "phase"))
+        self.assert_notice(output.getvalue(), "bash")
+        self.assert_no_arguments(errors.getvalue())
+        notification.assert_not_called()
+        self.assertEqual(self.files(), [])
+        self.assertFalse(os.path.exists(sw.STATE_DIR))
+        self.assertFalse(os.path.exists(sw.LOG))
+
+
 class Mapping(Base):
     def stuck_rec(self):
         return [msg("a", NOW - 900, "assistant", [call("c1", command="hang")], stopReason="toolUse")]
@@ -198,11 +272,11 @@ class Mapping(Base):
 
 
 class QueueWait(Base):
-    def phase_state(self, pid, rel="waiters/w1.json"):
+    def phase_state(self, pid, rel="waiters/w1.json", label="i42 gate"):
         d = os.path.join(self.tmp.name, "phase")
         p = os.path.join(d, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        base = {"token": "t", "pid": pid, "cwd": self.cwd, "label": "i42 gate", "kind": "test", "priority": "normal", "policy": "queued"}
+        base = {"token": "t", "pid": pid, "cwd": self.cwd, "label": label, "kind": "test", "priority": "normal", "policy": "queued"}
         if "waiters/" in rel:
             base.update(enqueued=NOW - 400, seq=7, source="flag", rank=2)
         else:  # lease layout (publish() in pi_phase.py)
@@ -211,8 +285,8 @@ class QueueWait(Base):
             json.dump(base, f)
         return d
 
-    def batch(self):
-        cmd = "~/.pi/agent/bin/pi-phase run --kind test --label 'i42 gate' -- make"
+    def batch(self, label="i42 gate"):
+        cmd = f"~/.pi/agent/bin/pi-phase run --kind test --label '{label}' -- make"
         return self.write([msg("a", NOW - 1400, "assistant", [call("c1"), call("c2", command=cmd)], stopReason="toolUse"),
                            msg("b", NOW - 1399, "toolResult", [], toolCallId="c1")])
 
@@ -231,10 +305,35 @@ class QueueWait(Base):
             with open(os.path.join(sw.STATE_DIR, "board.json")) as f:
                 row = json.load(f)["sessions"][0]
             self.assertEqual(row["state"], "waiting")
-            self.assertIn("i42 gate", row["queue"])
+            self.assertNotIn("i42 gate", row["queue"])
             self.assertIn("queued" if "waiters" in kind else "running", row["queue"])
             self.assertIn("rank 2", row["queue"])
             self.assertIn("6m40s", row["queue"])
+
+    def test_queue_label_arguments_are_not_written_to_board(self):
+        header, value = OutputWithoutArguments.header, OutputWithoutArguments.value
+        label = f"{header} {value}"
+        self.batch(label)
+        with patch.object(sw.subprocess, "run") as notification:
+            self.assertEqual(self.run_wd(phase_state=self.phase_state(os.getpid(), label=label), ppids={}, inject_ttys={}), [])
+        notification.assert_not_called()
+        self.assertEqual(self.files(), [])
+        self.assertFalse(os.path.exists(sw.LOG))
+        for name in ("board.json", "board.md", "state.json"):
+            with open(os.path.join(sw.STATE_DIR, name)) as f:
+                text = f.read()
+            self.assertNotIn(header, text)
+            self.assertNotIn(value, text)
+            if name != "state.json":
+                self.assertIn("sid-1", text)
+                self.assertIn("waiting", text)
+                self.assertIn("6m40s", text)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.run_wd(dry_run=True, phase_state=self.phase_state(os.getpid(), label=label), ppids={}, inject_ttys={})
+        self.assertNotIn(header, output.getvalue())
+        self.assertNotIn(value, output.getvalue())
+        self.assertIn("waiting=1", output.getvalue())
 
     def test_label_cwd_fallback_without_ancestry(self):
         self.batch()
