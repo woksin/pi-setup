@@ -43,6 +43,8 @@ const EXPECTED = {
   "ai-work-lifecycle": "Use before creating disposable task outputs, running verification that leaves local artifacts, or closing a task with temporary artifacts.",
   "dev-machine-performance": "Use when local gates or phase queues are slow, the machine is swapping, or Docker shows memory pressure. Not for application-runtime performance tuning.",
   "github-issue-hygiene": "Use when starting work on, creating, commenting on, updating the description of, or finishing work on a GitHub issue, and during post-work cleanup to close completed, duplicate or obsolete issues.",
+  "ci-and-pushing": "Use before pushing a branch, when waiting on or cancelling GitHub Actions runs, or when local Docker must stay available for CI-like runs.",
+  "shipping-trains": "Use when finishing work in a repository that ships through release trains: folding branches into a train, delivering to a repo orchestrator, merging, or handing off a green PR.",
 };
 
 const skillDirs = () => readdirSync(SKILLS, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
@@ -152,7 +154,7 @@ function provenance(model, label) {
   return { source: "model-provenance/v1", runtimeStamp: "model-provenance/tool-call/v1", session: `session-${label}`, agent: "reviewer#fixture",
     initial: model, models: [model], modelCounts: { [model]: 3 }, assistants: 3, errors: 0, firstAt: "2026-10-27T00:00:00Z", lastAt: "2026-10-27T00:01:00Z", switches: [] };
 }
-async function runReview(args, { file = reviewFiles[0], override } = {}) {
+async function runReview(args, { file = reviewFiles[0], override, agentError } = {}) {
   const calls = [];
   const models = modelMap(file);
   const agent = async (prompt, opts) => {
@@ -165,8 +167,8 @@ async function runReview(args, { file = reviewFiles[0], override } = {}) {
   };
   const pipeline = async (items, ...stages) => Promise.all(items.map(async (item) => { let v = item; for (const s of stages) v = await s(v, item); return v; }));
   const parallel = async fns => Promise.all(fns.map(fn => fn().catch(() => null)));
-  const fn = new AsyncFunction("args", "agent", "pipeline", "parallel", "phase", "log", loadReview(file));
-  const result = await fn(args, agent, pipeline, parallel, () => {}, () => {});
+  const fn = new AsyncFunction("args", "agent", "pipeline", "parallel", "phase", "log", "agentError", loadReview(file));
+  const result = await fn(args, agent, pipeline, parallel, () => {}, () => {}, agentError);
   return { result, calls: calls.length, requests: calls };
 }
 
@@ -547,6 +549,35 @@ for (const file of reviewFiles) {
     }
   });
 }
+
+test("failed review partitions say why when the host exposes agentError, and degrade to the bare text otherwise", async () => {
+  const reason = label => label.startsWith("review:") ? "429 rate_limit_error" : undefined;
+  // (a) no hook: unchanged text
+  const bare = await runReview(base, { override: () => null });
+  assert.ok(bare.result.incomplete.every(t => !t.includes("failed:")), bare.result.incomplete.join("|"));
+  assert.ok(bare.result.incomplete.some(t => / review failed$/.test(t)));
+  const bareQuick = await runReview({ ...base, quick: true }, { override: () => null });
+  assert.match(bareQuick.result.error, /^[^:]+ review failed$/);
+  const bareSec = await runReview({ ...base, quick: true }, { override: (opts, res) => opts.label.startsWith("review:security-") ? null : res });
+  assert.match(bareSec.result.error, /^.+ security review failed$/);
+  // (b) hook present
+  const full = await runReview(base, { override: () => null, agentError: reason });
+  assert.equal(full.result.incomplete.filter(t => t.endsWith(" review failed: 429 rate_limit_error")).length, 3, full.result.incomplete.join("|"));
+  assert.ok(full.result.incomplete.some(t => t.includes("(security) review failed: 429 rate_limit_error")));
+  const quick = await runReview({ ...base, quick: true }, { override: () => null, agentError: reason });
+  assert.match(quick.result.error, /review failed: 429 rate_limit_error$/);
+  const quickSec = await runReview({ ...base, quick: true }, { override: (opts, res) => opts.label.startsWith("review:security-") ? null : res, agentError: reason });
+  assert.match(quickSec.result.error, / security review failed: 429 rate_limit_error$/);
+  // (c) hostile reasons
+  const hostile = 'line1\nline2 "quoted" \\ ' + "x".repeat(500);
+  const bad = await runReview(base, { override: () => null, agentError: () => hostile });
+  for (const t of bad.result.incomplete) { assert.ok(t.length <= 170); assert.ok(!/[\n"]/.test(t)); }
+  assert.ok(bad.result.incomplete.some(t => t.includes("review failed: line1 line2 'quoted'")));
+  const thrown = await runReview(base, { override: () => null, agentError: () => { throw new Error("boom"); } });
+  assert.deepEqual(thrown.result.incomplete, bare.result.incomplete);
+  const nonString = await runReview({ ...base, quick: true }, { override: () => null, agentError: () => ({ a: 1 }) });
+  assert.match(nonString.result.error, /^[^:]+ review failed$/);
+});
 
 test("fit preserves gate and coverage with nine blockers and six reviewer records", async () => {
   const run = await runReview(base, { override: (opts, res) => {

@@ -17,6 +17,8 @@ skill. Installed or package-owned copies are not patched from here.
 | `ai-work-lifecycle` | this repository | Rewritten as an invocation hint. |
 | `dev-machine-performance` | this repository | Rewritten as an invocation hint. |
 | `github-issue-hygiene` | this repository (tracked in `skills/`) | Rewritten as an invocation hint; body unchanged. |
+| `ci-and-pushing` | this repository | Moved verbatim out of the global `AGENTS.md` (woksin/pi-setup#158); inventory in `tools/agents-rules/`. |
+| `shipping-trains` | this repository | Moved verbatim out of the global `AGENTS.md` (woksin/pi-setup#158); operator-name templated like `github-issue-hygiene`. |
 
 Delivery note: if a live installed copy of any of these is maintained somewhere else,
 that copy gets the new description when its owner updates it. This slice does not edit

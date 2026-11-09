@@ -1,0 +1,29 @@
+[
+ {
+  "ids": [
+   "shipping-finished-work-default-push-pr-merge-61-6a55687f"
+  ],
+  "kind": "reworded",
+  "to": "agent/AGENTS.md",
+  "new": "Stay and wait for CI as in \"Waiting on GitHub CI\" in `ci-and-pushing`.",
+  "reason": "The waiting procedure moved to the ci-and-pushing skill; the sentence now names it."
+ },
+ {
+  "ids": [
+   "execution-budgets-and-verification-discipline-15-a1ade098"
+  ],
+  "kind": "reworded",
+  "to": "agent/AGENTS.md",
+  "new": "Follow \"Waiting on GitHub CI\" in `ci-and-pushing`.",
+  "reason": "The waiting procedure moved to the ci-and-pushing skill; the reference now names it."
+ },
+ {
+  "ids": [
+   "shipping-finished-work-default-push-pr-merge-32-b283c327"
+  ],
+  "kind": "reworded",
+  "to": "agent/AGENTS.md",
+  "new": "It is not a major release (see the merge exception under \"GitHub issues and pull requests\") and nothing in it needs a product decision from the user.",
+  "reason": "The merge exception lives in the GitHub issues section; the reference now names that section instead of 'above'."
+ }
+]
