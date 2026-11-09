@@ -449,7 +449,7 @@ const full = f => ({
 })
 // Keep the serialized result under the parent notification limit (~4000 chars) without ever dropping
 // gate status or the count of blockers: shrink detail step by step, then fall back to one-liners and counts.
-const fit = (res, budget = 3600) => arrange(fitSize(res, budget))
+const fit = (res, budget = 4000) => arrange(fitSize(res, budget))
 const fitSize = (res, budget) => {
   if (!res.coverageNotes?.length) delete res.coverageNotes
   // Measure the arranged result: arrange adds reviewerLines after this budget check would otherwise run.
