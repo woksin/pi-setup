@@ -26,6 +26,11 @@ class T(unittest.TestCase):
             rc = ls.main(list(args), now=now)
         return rc, out.getvalue(), err.getvalue()
 
+    def test_lane_ids_reject_trailing_newline(self):
+        self.assertEqual(ls.lane_name("A1"), "A1")
+        with self.assertRaises(ls.Err):
+            ls.lane_name("A1\n")
+
     def test_default_dirs(self):
         del os.environ["LANE_STATUS_DIR"]
         self.assertEqual(ls.status_dir(), os.path.join(self.inbox, "status"))
@@ -97,11 +102,11 @@ class T(unittest.TestCase):
         self.assertEqual(len(new), 2)
         self.assertFalse([n for n in os.listdir(self.inbox) if n.startswith("ALL-")])
         bc = [n for n in new if n.startswith("BCAST-")]
-        wake = [n for n in new if n.startswith("PISETUP-to-B-")]
+        wake = [n for n in new if n.startswith("A1-to-B-")]
         self.assertEqual(len(bc), 1)
         self.assertEqual(len(wake), 1)
         self.assertRegex(bc[0], r"^BCAST-lane-closed-A1-\d{4}\.md$")
-        self.assertRegex(wake[0], r"^PISETUP-to-B-lane-closed-A1-\d{4}\.md$")
+        self.assertRegex(wake[0], r"^A1-to-B-lane-closed-\d{4}\.md$")
         self.assertIn(bc[0], open(os.path.join(self.inbox, wake[0])).read())
         body = open(os.path.join(self.inbox, bc[0])).read()
         self.assertIn("Reassigned to B", body)
