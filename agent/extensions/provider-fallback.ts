@@ -36,7 +36,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, watch, writeFileSync, type FSWatcher, type WatchListener } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { ORIGINAL_ENTRY, publishFallbackState, restoreManualPin, restoreOriginal, type OriginalEntryData } from "../lib/provider-fallback-state.ts";
 import { codeFingerprint, fallbackStatusLines } from "../lib/provider-fallback-status.ts";
@@ -394,22 +394,25 @@ function refOf(model: { provider: string; id: string } | undefined): string | un
 	return model ? `${model.provider}/${model.id}` : undefined;
 }
 
+type DirectoryWatch = (directory: string, listener: WatchListener<string>) => Pick<FSWatcher, "on" | "unref" | "close">;
+
 /** Directory watches survive atomic state-file replacement; the slow timer also notices expiry/missed events. */
 class LimitRecoveryWatch {
-	private watcher?: FSWatcher;
+	private watcher?: ReturnType<DirectoryWatch>;
 	private debounce?: ReturnType<typeof setTimeout>;
 	private timer?: ReturnType<typeof setInterval>;
 
 	private readonly check: () => Promise<void>;
+	private readonly watchDirectory: DirectoryWatch;
 
-	constructor(check: () => Promise<void>) { this.check = check; }
+	constructor(check: () => Promise<void>, watchDirectory: DirectoryWatch) { this.check = check; this.watchDirectory = watchDirectory; }
 
 	start(): void {
 		if (this.timer) return;
 		this.timer = setInterval(() => this.schedule(), 60_000);
 		this.timer.unref();
 		try {
-			this.watcher = watch(dirname(statePath()), (_event, filename) => {
+			this.watcher = this.watchDirectory(dirname(statePath()), (_event, filename) => {
 				if (!filename || [basename(statePath()), basename(restorePath())].includes(String(filename))) this.schedule();
 			});
 			this.watcher.on("error", () => { this.watcher?.close(); this.watcher = undefined; });
@@ -437,7 +440,7 @@ class LimitRecoveryWatch {
 	}
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (pi: ExtensionAPI, watchDirectory: DirectoryWatch = watch) {
 	let seenRestore = readJson<Record<string, number>>(restorePath()) ?? {};
 	let fallbacksThisPrompt = 0;
 	let pendingContinue = false;
@@ -535,7 +538,7 @@ export default function (pi: ExtensionAPI) {
 	let lastLimitHeaders: { at: number; provider?: string; headers: Record<string, string> } | undefined;
 	let stalledLimit: StalledLimit | undefined;
 	let checkingRecovery = false;
-	const recoveryWatch = new LimitRecoveryWatch(resumeStalled);
+	const recoveryWatch = new LimitRecoveryWatch(resumeStalled, watchDirectory);
 
 	function clearStall(): void {
 		stalledLimit = undefined;
