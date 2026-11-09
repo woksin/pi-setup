@@ -87,6 +87,20 @@ test("a mapping that drops never or a number fails unless droppedTokens is liste
   assert.ok(constraintTokens("Never use `x --y` more than 10 times unless <id> is set.").includes("10"));
 });
 
+test("a rule cannot be dropped with a reworded entry that has empty, whitespace or trivial new text", () => {
+  const agents = OLD.replace("Keep text short. ", "") + AGENTS_POINTER;
+  for (const extra of [{}, { new: "" }, { new: "   " }, { new: "Keep" }]) {
+    const map = [{ id: idOf("Keep text short"), kind: "reworded", to: "agent/AGENTS.md", reason: "bogus", ...extra }];
+    withRoot({ agents, skills: { ship: SKILL("ship") }, map }, (root) => {
+      const r = check(root);
+      assert.equal(r.ok, false, JSON.stringify(extra));
+      assert.match(r.errors.join("\n"), /needs new text of at least/);
+    });
+  }
+  const blank = [{ id: idOf("Keep text short"), kind: "reworded", to: "agent/AGENTS.md", new: "Keep text brief and tidy.", reason: "  " }];
+  withRoot({ agents: agents.replace("Never push", "Keep text brief and tidy. Never push"), skills: { ship: SKILL("ship") }, map: blank }, (root) => assert.match(check(root).errors.join("\n"), /needs a reason/));
+});
+
 test("a stale map entry whose new text vanished fails", () => {
   const agents = OLD.replace("Never push on Friday.", "Never push on Fridays.") + AGENTS_POINTER;
   const map = [{ id: idOf("Never push"), kind: "reworded", to: "agent/AGENTS.md", new: "Never push on Mondays.", reason: "stale" }];
