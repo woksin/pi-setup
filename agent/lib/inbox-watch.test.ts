@@ -6,14 +6,20 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 const script = join(process.env.HOME ?? homedir(), ".pi/agent/bin/inbox-watch");
-const env = (dir: string) => ({ ...process.env, INBOX_DIR: dir, INBOX_SETTLE_SECONDS: "1", INBOX_SETTLE_MAX_SECONDS: "3", INBOX_ALIASES: "" });
-const run = (dir: string, ...args: string[]) => new Promise<{ code: number | null; out: string[]; ms: number }>(resolve => {
+const env = (dir: string, extra: Record<string, string> = {}) => ({ ...process.env, INBOX_DIR: dir, INBOX_SETTLE_SECONDS: "1", INBOX_SETTLE_MAX_SECONDS: "3", INBOX_ALIASES: "", ...extra });
+const spawnRun = (dir: string, args: string[], extra: Record<string, string>) => new Promise<{ code: number | null; out: string[]; ms: number }>(resolve => {
 	const began = Date.now();
-	const child = spawn(script, args.length ? args : ["L1"], { env: env(dir) });
+	const child = spawn(script, args.length ? args : ["L1"], { env: env(dir, extra) });
 	let out = "";
 	child.stdout.on("data", d => { out += d; });
 	child.on("close", code => resolve({ code, out: out.split("\n").filter(Boolean), ms: Date.now() - began }));
 });
+const run = (dir: string, ...args: string[]) => spawnRun(dir, args, {});
+// "No settle sleep" specs use a 20 s settle window, so a sleep would take 20 s while process
+// startup stays far below the 10 s bound even under heavy machine load.
+const LONG_SETTLE = { INBOX_SETTLE_SECONDS: "20", INBOX_SETTLE_MAX_SECONDS: "20" };
+const NO_SLEEP_MS = 10_000;
+const runLongSettle = (dir: string) => spawnRun(dir, [], LONG_SETTLE);
 const fresh = () => mkdtempSync(join(tmpdir(), "inbox-watch-"));
 const put = (dir: string, name: string, ageSeconds = 0) => {
 	const file = join(dir, name);
@@ -34,11 +40,11 @@ test("first arm creates the marker and exits 1", async () => {
 
 test("a file older than the settle window is reported without added latency", async () => {
 	const dir = await armed();
-	put(dir, "L0-to-L1-a.md", 10);
-	const r = await run(dir);
+	put(dir, "L0-to-L1-a.md", 60);
+	const r = await runLongSettle(dir);
 	assert.equal(r.code, 0);
 	assert.deepEqual(r.out, ["L0-to-L1-a.md"]);
-	assert.ok(r.ms < 900, `took ${r.ms}`);
+	assert.ok(r.ms < NO_SLEEP_MS, `took ${r.ms}`);
 });
 
 test("a burst written during the settle sleep yields one output and the marker is advanced after it", async () => {
@@ -58,9 +64,9 @@ for (const name of ["URGENT-L0-to-L1-x.md", "L0-to-ALL-STOP-x.md"]) {
 		const dir = await armed();
 		put(dir, "L0-to-L1-a.md");
 		put(dir, name);
-		const r = await run(dir);
+		const r = await runLongSettle(dir);
 		assert.equal(r.code, 0);
-		assert.ok(r.ms < 900, `took ${r.ms}`);
+		assert.ok(r.ms < NO_SLEEP_MS, `took ${r.ms}`);
 		assert.deepEqual([...r.out].sort(), ["L0-to-L1-a.md", name].sort());
 		assert.equal((await quiet(dir)).code, 1);
 	});
