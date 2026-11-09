@@ -1,62 +1,29 @@
 [
  {
-  "ids": ["shipping-finished-work-default-push-pr-merge-61-6a55687f"],
+  "ids": [
+   "shipping-finished-work-default-push-pr-merge-61-6a55687f"
+  ],
   "kind": "reworded",
   "to": "agent/AGENTS.md",
   "new": "Stay and wait for CI as in \"Waiting on GitHub CI\" in `ci-and-pushing`.",
   "reason": "The waiting procedure moved to the ci-and-pushing skill; the sentence now names it."
  },
  {
-  "ids": ["execution-budgets-and-verification-discipline-15-a1ade098"],
+  "ids": [
+   "execution-budgets-and-verification-discipline-15-a1ade098"
+  ],
   "kind": "reworded",
   "to": "agent/AGENTS.md",
   "new": "Follow \"Waiting on GitHub CI\" in `ci-and-pushing`.",
   "reason": "The waiting procedure moved to the ci-and-pushing skill; the reference now names it."
  },
  {
-  "ids": ["shipping-finished-work-default-push-pr-merge-32-b283c327"],
+  "ids": [
+   "shipping-finished-work-default-push-pr-merge-32-b283c327"
+  ],
   "kind": "reworded",
   "to": "agent/AGENTS.md",
   "new": "It is not a major release (see the merge exception under \"GitHub issues and pull requests\") and nothing in it needs a product decision from the user.",
   "reason": "The merge exception lives in the GitHub issues section; the reference now names that section instead of 'above'."
- },
- {
-  "ids": [
-   "shipping-finished-work-default-push-pr-merge-9-8074cc7c",
-   "shipping-finished-work-default-push-pr-merge-38-d6024bc7",
-   "shipping-finished-work-default-push-pr-merge-47-11c53bd2"
-  ],
-  "kind": "moved-core",
-  "to": "skills/shipping-trains/SKILL.md",
-  "reason": "Procedural train detail only (repo orchestrator definition, what not to wait on, cut cadence). Every prohibition and safety rule (no PR outside the train, no push to a folded branch, no blind eviction, no retiring sessions by hand) stays verbatim in AGENTS.md."
- },
- {
-  "ids": [
-   "waiting-on-github-ci-2-b63ac286",
-   "waiting-on-github-ci-5-31d5379f",
-   "waiting-on-github-ci-6-1c1253ed",
-   "waiting-on-github-ci-7-a899c3fc",
-   "waiting-on-github-ci-11-e711e7fe"
-  ],
-  "kind": "moved-core",
-  "to": "skills/ci-and-pushing/SKILL.md",
-  "reason": "How-to for watching CI (polling limits, which facts to watch, flake classification window). None is a safety, destructive or publication constraint; AGENTS.md keeps 'do not poll by hand' and a pointer."
- },
- {
-  "ids": [
-   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-1-2aba386e",
-   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-2-011728be",
-   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-3-17d25f9f",
-   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-5-5c09d35e"
-  ],
-  "kind": "moved-core",
-  "to": "skills/ci-and-pushing/SKILL.md",
-  "reason": "Description of what docker-guardian does and how an agent restarts Docker Desktop. The Docker prohibitions (no image/system prune -a, no unwrapped Docker work, pause only on the user's request) stay verbatim in AGENTS.md."
- },
- {
-  "ids": ["cancelling-unnecessary-runs-2026-10-20-2-b9180178"],
-  "kind": "moved-core",
-  "to": "skills/ci-and-pushing/SKILL.md",
-  "reason": "Introductory sentence of the cancelling procedure; all the 'never cancel' safeguards stay verbatim in AGENTS.md."
  }
 ]
