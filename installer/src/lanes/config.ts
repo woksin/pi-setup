@@ -19,7 +19,7 @@ export interface Retention {
 export interface Config {
   version: number; reposRoot: string; worktreesDir: string; baseBranch: string; repos: Record<string, string>;
   coordinator: { id: string; cwd: string; prompt: string; maxRunning: number; [key: string]: unknown };
-  messages: { dir: string; broadcast: string; ackMinutes?: number; retention?: Retention; [key: string]: unknown };
+  messages: { dir: string; broadcast: string; ackMinutes?: number; ackLookbackHours?: number; retention?: Retention; [key: string]: unknown };
   terminal: { backend: string; [key: string]: unknown };
   launch: { wrapper: string; preapproveMcp: boolean; unsetEnv: string[]; [key: string]: unknown };
   idle?: { minutes: number };
@@ -62,6 +62,7 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
   require(c.messages && text(c.messages.dir), "messages.dir");
   require(c.messages && typeof c.messages.broadcast === "string" && validId(c.messages.broadcast), "messages.broadcast");
   require(c.messages.ackMinutes === undefined || (Number.isInteger(c.messages.ackMinutes) && c.messages.ackMinutes > 0), "messages.ackMinutes");
+  require(c.messages.ackLookbackHours === undefined || (Number.isInteger(c.messages.ackLookbackHours) && c.messages.ackLookbackHours > 0), "messages.ackLookbackHours");
   if (c.messages.retention !== undefined) {
     const r = c.messages.retention;
     require(r && typeof r === "object" && !Array.isArray(r), "messages.retention");

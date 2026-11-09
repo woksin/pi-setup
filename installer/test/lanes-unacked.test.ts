@@ -33,7 +33,8 @@ for (const markerAge of [undefined, 70, 60, 20]) test(`unacked distinguishes unr
   const { code, report } = await f.unacked(); assert.equal(code, 0);
   assert.deepEqual(report.rows[0], { name, from: "L0", to: "L1", topic: "topic", ageMin: 60,
     state: markerAge === 20 ? "read-no-reply" : "unread", recipient: { state: "stopped", identity: "registered", pid: null } });
-  assert.deepEqual(Object.keys(report), ["at", "minutes", "rows", "sources"]); assert.equal(report.minutes, 30);
+  assert.deepEqual(Object.keys(report), ["at", "minutes", "hours", "rows", "excluded", "sources"]);
+  assert.equal(report.minutes, 30); assert.equal(report.hours, 24); assert.deepEqual(report.excluded, { retired: 0 });
 });
 test("a live recipient with a stuck watch exposes the held-hour redelivery", async () => {
   const f = fixture(); f.message("L0", "L1", 65); f.marker("L1", 70);
@@ -59,9 +60,9 @@ test("threshold defaults, config and override apply; empty reports exit 1", asyn
 for (const minutes of ["0", "abc", "1.5", "-1"]) test(`invalid minutes ${minutes} exit 2`, async () => {
   const f = fixture(); assert.equal((await f.unacked("--minutes", minutes)).code, 2); assert.match(f.errors.join("\n"), /minutes/);
 });
-test("broadcasts, group fan-out, self-sends and messages outside 14 days are excluded", async () => {
+test("broadcasts, group fan-out, self-sends and messages outside 24 hours are excluded", async () => {
   const f = fixture(); for (const to of ["ALL", "EVERYONE", "BCAST", "TEAM", "L0"]) f.message("L0", to);
-  f.put("BCAST-topic-1200.md", 60); f.message("L0", "L1", 14 * 24 * 60 + 1);
+  f.put("BCAST-topic-1200.md", 60); f.message("L0", "L1", 24 * 60 + 1);
   assert.equal((await f.unacked()).code, 1);
 });
 test("multi-recipient expansion preserves known hyphenated IDs and unknown ambiguous IDs", async () => {
@@ -73,6 +74,52 @@ test("rows are oldest first with stable ties; human output includes recipient li
   const { report } = await f.unacked(); assert.equal(report.rows[0].name, oldest);
   f.lines.length = 0; assert.equal(await main(["unacked"], f.ctx), 0);
   assert.match(f.lines.join("\n"), /90m\s+L0->L2 topic unread recipient=stopped/);
+});
+test("lookback defaults to 24 hours with config and CLI overrides including 14 days", async () => {
+  const f = fixture(); f.message("L0", "L1", 25 * 60);
+  assert.equal((await f.unacked()).code, 1);
+  f.c.messages.ackLookbackHours = 26; saveConfig(f.home, f.c);
+  assert.equal((await f.unacked()).report.rows.length, 1);
+  assert.equal((await f.unacked("--hours", "24")).code, 1);
+  f.message("L0", "L2", 335 * 60); f.message("L0", "R-FOO", 337 * 60);
+  const { code, report } = await f.unacked("--hours", "336");
+  assert.equal(code, 0); assert.equal(report.hours, 336); assert.equal(report.rows.length, 2);
+});
+for (const hours of ["0", "abc", "1.5", "-1", "9007199254740992"]) test(`invalid hours ${hours} exit 2`, async () => {
+  const f = fixture(); assert.equal((await f.unacked("--hours", hours)).code, 2); assert.match(f.errors.join("\n"), /hours/);
+});
+for (const closed of [false, true]) test(`retired recipients (${closed ? "closed status" : "config"}) are excluded unless requested`, async () => {
+  const f = fixture(); f.message("L0", "L1"); f.message("L0", "L1"); f.message("L0", "L2"); f.message("L0", "UNKNOWN");
+  if (closed) { mkdirSync(join(f.home, "messages/status")); writeFileSync(join(f.home, "messages/status/L1.status"), "closed finished"); }
+  else { f.c.lanes.find(l => l.id === "L1")!.retired = true; saveConfig(f.home, f.c); }
+  const { report } = await f.unacked(); assert.deepEqual(report.excluded, { retired: 2 });
+  assert.deepEqual(report.rows.map((r: any) => r.to).sort(), ["L2", "UNKNOWN"]);
+  const included = await f.unacked("--include-retired"); assert.equal(included.report.rows.length, 4);
+  assert.deepEqual(included.report.excluded, { retired: 0 });
+});
+test("only retired outstanding messages exits 1 and still reports exclusions", async () => {
+  const f = fixture(); f.message(); f.c.lanes.find(l => l.id === "L1")!.retired = true; saveConfig(f.home, f.c);
+  const { code, report } = await f.unacked(); assert.equal(code, 1); assert.deepEqual(report.rows, []); assert.deepEqual(report.excluded, { retired: 1 });
+});
+test("human summaries precede the 20 oldest rows while JSON retains every row", async () => {
+  const f = fixture(); f.message("L0", "L2", 120);
+  for (let age = 100; age >= 80; age--) f.message("L0", "L1", age);
+  f.marker("L1", 90);
+  const { report } = await f.unacked(); assert.equal(report.rows.length, 22);
+  f.lines.length = 0; assert.equal(await main(["unacked"], f.ctx), 0);
+  assert.deepEqual(f.lines.slice(0, 2), [
+    "recipient=L2 state=stopped unread=1 read-no-reply=0 oldest=120m",
+    "recipient=L1 state=stopped unread=11 read-no-reply=10 oldest=100m",
+  ]);
+  const messages = f.lines.filter(line => /^\d+m\s/.test(line)); assert.equal(messages.length, 20);
+  assert.match(messages[0], /^120m\s+L0->L2/); assert.match(messages.at(-1)!, /^82m\s+L0->L1/);
+  assert.ok(f.lines.includes("2 message rows omitted; use --json to see all 22."));
+});
+test("human summary ties sort by recipient and small reports omit no rows", async () => {
+  const f = fixture(); f.message("L0", "L2"); f.message("L0", "L1");
+  assert.equal(await main(["unacked"], f.ctx), 0);
+  assert.match(f.lines[0], /^recipient=L1 /); assert.match(f.lines[1], /^recipient=L2 /);
+  assert.equal(f.lines.filter(line => /omitted/.test(line)).length, 0);
 });
 test("missing messages and marker I/O errors exit 2 with a diagnostic", async () => {
   const f = fixture(); f.c.messages.dir = "missing"; saveConfig(f.home, f.c);

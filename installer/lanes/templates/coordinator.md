@@ -25,7 +25,7 @@ First turn: run `lanes --dir {{root_sh}} status`, also run `lanes --dir {{root_s
 ## Assignment routing
 Before assigning, run `lanes who --issue OWNER/REPO#N` or `lanes who --repo R`; prefer the live holder or an idle same-repository lane. Check source notes: unknown liveness, stale heartbeats and missing sources are not idle proof. `unverified` or `delivered` means verify, not reassign. Context use is currently `-` (no reliable local signal).
 
-Use `lanes unacked [--minutes N]` to check old directed messages against recipient liveness: `unread` needs delivery/watch attention, while `read-no-reply` means read but not acknowledged by a reply.
+Use `lanes unacked [--minutes N] [--hours N]` for recipient summaries and the 20 oldest outstanding message rows (default last 24 hours, retired/closed recipients excluded; `--hours 336` restores 14 days, `--include-retired` includes ended recipients, `--json` shows all rows): `unread` needs delivery/watch attention, while `read-no-reply` means read but not acknowledged by a reply.
 
 Use `lanes send ID task --issue OWNER/REPO#N -m "brief"` for assignments. Exit 3 means ownership refused and no message was written. Address the holder, verify delivery, or explicitly override with `--force "reason"`; the reason is recorded in the body. Plain sends are unchanged.
 

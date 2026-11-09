@@ -28,7 +28,7 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
   resume <ID> [--terminal backend]
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
   who [--repo R] [--issue N|OWNER/REPO#N] [--json]
-  unacked [--json] [--minutes N]
+  unacked [--json] [--minutes N] [--hours N] [--include-retired]
   status [--all]
   messages prune [--dry-run] [--json] [--legacy [--legacy-age hours] [--apply]]
   idle-check [--minutes n]
@@ -63,7 +63,7 @@ const OPTIONS: Record<string, string[]> = {
   add: ["repo", "issue", "goal", "group", "branch", "base", "path",
     "orchestrator", "orchestrator-id", "no-orchestrator"],
   run: ["from-handoff", "handoff-digest"], start: ["terminal", "from-handoff"], resume: ["terminal"], send: ["m", "from", "direct", "issue", "force"], who: ["repo", "issue", "json"],
-  unacked: ["json", "minutes"],
+  unacked: ["json", "minutes", "hours", "include-retired"],
   status: ["all"], messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"],
   handoff: ["to", "accept", "from"], reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
@@ -71,7 +71,7 @@ const OPTIONS: Record<string, string[]> = {
   close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"],
 };
 const FLAGS = ["write", "preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all",
-  "no-orchestrator", "inactive", "clear", "apply", "accept", "legacy"];
+  "no-orchestrator", "inactive", "clear", "apply", "accept", "legacy", "include-retired"];
 interface Invocation { command: string; positional: string[]; opts: Record<string, string> }
 interface CommandEnv { c: Config; root: string; ctx: LanesCtx }
 interface ParsePosition { argv: string[]; index: number }
@@ -128,12 +128,13 @@ function validateInvocation({ command, positional, opts }: Invocation): void {
   };
   validateBounds(positional, bounds[command]);
   if (command === "messages" && positional[0] !== "prune") throw new UsageError(HELP);
-  validateMinutes(opts.minutes);
+  validateIntegerOption(opts.minutes, "minutes");
+  validateIntegerOption(opts.hours, "hours");
 }
-function validateMinutes(minutes: string | undefined): void {
-  if (minutes === undefined) return;
-  if (invalidMinutes(minutes)) {
-    throw new UsageError("--minutes must be a positive integer");
+function validateIntegerOption(value: string | undefined, option: string): void {
+  if (value === undefined) return;
+  if (invalidMinutes(value)) {
+    throw new UsageError(`--${option} must be a positive integer`);
   }
 }
 async function dispatch(input: Invocation, env: CommandEnv): Promise<number> {

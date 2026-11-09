@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 02b5767b75ba8cea7d3b50cf290ae85b8c0903ca9c37c5f0b9a586644cf123cd
+// pi-setup-source-sha256: 575bf38b56f7a5ffe3911d87714322f8ea561a105575d7c401e487109d8d27d1
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -522,6 +522,7 @@ function validate(value, root = process.cwd(), home = homedir3()) {
   require2(c2.messages && text4(c2.messages.dir), "messages.dir");
   require2(c2.messages && typeof c2.messages.broadcast === "string" && validId(c2.messages.broadcast), "messages.broadcast");
   require2(c2.messages.ackMinutes === void 0 || Number.isInteger(c2.messages.ackMinutes) && c2.messages.ackMinutes > 0, "messages.ackMinutes");
+  require2(c2.messages.ackLookbackHours === void 0 || Number.isInteger(c2.messages.ackLookbackHours) && c2.messages.ackLookbackHours > 0, "messages.ackLookbackHours");
   if (c2.messages.retention !== void 0) {
     const r2 = c2.messages.retention;
     require2(r2 && typeof r2 === "object" && !Array.isArray(r2), "messages.retention");
@@ -5566,14 +5567,14 @@ function pendingRow(message, to, age2, evidence) {
   };
 }
 function classifyDirected(input) {
-  const { directed, now, minutes: minutes2 } = input;
+  const { directed, now, minutes: minutes2, hours } = input;
   const lastSent = lastReplies(directed);
   const rows = [];
   const roster = new Map(input.lanes.rows.map((row) => [row.lane, row]));
   for (const { message, recipients } of directed) {
     const at = message.at.getTime();
     const age2 = now.getTime() - at;
-    if (age2 < minutes2 * 6e4 || age2 > LOOKBACK_MS) continue;
+    if (age2 < minutes2 * 6e4 || age2 > hours * 36e5) continue;
     for (const to of recipients) {
       if ((lastSent.get(pair(to, message.from)) ?? -Infinity) <= at) rows.push(pendingRow(message, to, age2, { marker: input.markers.get(to), recipient: roster.get(to) }));
     }
@@ -5598,9 +5599,32 @@ function humanRow2(row, markers) {
   const recipient2 = `${row.recipient.state}(${row.recipient.pid ?? "-"})`;
   return `${row.ageMin}m  ${row.from}->${row.to} ${row.topic} ${row.state} recipient=${recipient2}${markers.has(row.to) ? "" : " (no marker)"}`;
 }
+function recipientSummaries(rows) {
+  const summaries = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const summary2 = summaries.get(row.to) ?? { recipient: row.to, state: row.recipient.state, unread: 0, readNoReply: 0, oldest: 0 };
+    if (row.state === "unread") summary2.unread++;
+    else summary2.readNoReply++;
+    summary2.oldest = Math.max(summary2.oldest, row.ageMin);
+    summaries.set(row.to, summary2);
+  }
+  return [...summaries.values()].sort((a2, b) => b.oldest - a2.oldest || a2.recipient.localeCompare(b.recipient));
+}
+function humanReport(rows, markers, ctx) {
+  for (const summary2 of recipientSummaries(rows)) {
+    ctx.out(`recipient=${summary2.recipient} state=${summary2.state} unread=${summary2.unread} read-no-reply=${summary2.readNoReply} oldest=${summary2.oldest}m`);
+  }
+  for (const row of rows.slice(0, HUMAN_MESSAGE_LIMIT)) ctx.out(humanRow2(row, markers));
+  if (rows.length > HUMAN_MESSAGE_LIMIT) ctx.out(`${rows.length - HUMAN_MESSAGE_LIMIT} message rows omitted; use --json to see all ${rows.length}.`);
+}
+function selectRecipients(rows, includeRetired) {
+  const selected = includeRetired ? rows : rows.filter((row) => !["retired", "closed"].includes(row.recipient.state));
+  return { rows: selected, excluded: { retired: rows.length - selected.length } };
+}
 async function unacked(args, opts, c2, root, ctx) {
   if (args.length) throw new UsageError("unacked takes no positional arguments");
   const minutes2 = opts.minutes === void 0 ? c2.messages.ackMinutes ?? ACK_MINUTES_DEFAULT : Number(opts.minutes);
+  const hours = opts.hours === void 0 ? c2.messages.ackLookbackHours ?? ACK_LOOKBACK_HOURS_DEFAULT : Number(opts.hours);
   const now = ctx.now();
   const input = await readRoster(c2, root, ctx);
   if (input.sources.messages.status !== "ok") {
@@ -5611,22 +5635,23 @@ async function unacked(args, opts, c2, root, ctx) {
   const lanes = { rows: roster.rows, groups: c2.lanes.flatMap((l2) => l2.group ? [l2.group] : []), broadcast: c2.messages.broadcast };
   const directed = directedMessages(input.messages, lanes);
   const markers = readMarkers(expand(c2.messages.dir, c2, root, ctx.home), directed);
-  const rows = classifyDirected({ directed, markers, lanes, now, minutes: minutes2 });
-  if (opts.json) ctx.out(JSON.stringify({ at: now.toISOString(), minutes: minutes2, rows, sources: roster.sources }, null, 2));
+  const { rows, excluded } = selectRecipients(classifyDirected({ directed, markers, lanes, now, minutes: minutes2, hours }), Boolean(opts["include-retired"]));
+  if (opts.json) ctx.out(JSON.stringify({ at: now.toISOString(), minutes: minutes2, hours, rows, excluded, sources: roster.sources }, null, 2));
   else {
-    for (const row of rows) ctx.out(humanRow2(row, markers));
+    humanReport(rows, markers, ctx);
     humanSources(roster.sources, ctx);
   }
   return rows.length ? 0 : 1;
 }
-var ACK_MINUTES_DEFAULT, LOOKBACK_MS, pair;
+var ACK_MINUTES_DEFAULT, ACK_LOOKBACK_HOURS_DEFAULT, HUMAN_MESSAGE_LIMIT, pair;
 var init_unacked = __esm({
   "src/lanes/commands/unacked.ts"() {
     init_config();
     init_roster();
     init_who();
     ACK_MINUTES_DEFAULT = 30;
-    LOOKBACK_MS = 14 * 864e5;
+    ACK_LOOKBACK_HOURS_DEFAULT = 24;
+    HUMAN_MESSAGE_LIMIT = 20;
     pair = (from, to) => `${from}\0${to}`;
   }
 });
@@ -5705,12 +5730,13 @@ function validateInvocation({ command, positional, opts }) {
   };
   validateBounds(positional, bounds[command]);
   if (command === "messages" && positional[0] !== "prune") throw new UsageError(HELP);
-  validateMinutes(opts.minutes);
+  validateIntegerOption(opts.minutes, "minutes");
+  validateIntegerOption(opts.hours, "hours");
 }
-function validateMinutes(minutes2) {
-  if (minutes2 === void 0) return;
-  if (invalidMinutes(minutes2)) {
-    throw new UsageError("--minutes must be a positive integer");
+function validateIntegerOption(value, option) {
+  if (value === void 0) return;
+  if (invalidMinutes(value)) {
+    throw new UsageError(`--${option} must be a positive integer`);
   }
 }
 async function dispatch(input, env) {
@@ -5829,7 +5855,7 @@ var init_main = __esm({
   resume <ID> [--terminal backend]
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
   who [--repo R] [--issue N|OWNER/REPO#N] [--json]
-  unacked [--json] [--minutes N]
+  unacked [--json] [--minutes N] [--hours N] [--include-retired]
   status [--all]
   messages prune [--dry-run] [--json] [--legacy [--legacy-age hours] [--apply]]
   idle-check [--minutes n]
@@ -5878,7 +5904,7 @@ Legacy prune considers only regular, non-dot *.md files not owned by the bus bac
       resume: ["terminal"],
       send: ["m", "from", "direct", "issue", "force"],
       who: ["repo", "issue", "json"],
-      unacked: ["json", "minutes"],
+      unacked: ["json", "minutes", "hours", "include-retired"],
       status: ["all"],
       messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
       "idle-check": ["minutes"],
@@ -5905,7 +5931,8 @@ Legacy prune considers only regular, non-dot *.md files not owned by the bus bac
       "clear",
       "apply",
       "accept",
-      "legacy"
+      "legacy",
+      "include-retired"
     ];
   }
 });

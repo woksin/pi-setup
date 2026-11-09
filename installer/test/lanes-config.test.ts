@@ -16,6 +16,16 @@ test("messages.ackMinutes accepts positive integers without adding a default", (
   }
 });
 
+test("messages.ackLookbackHours accepts positive integers without adding a default", () => {
+  const c = defaults(tempDir("lanes-ack-hours"), tempDir("lanes-ack-home"));
+  assert.equal(c.messages.ackLookbackHours, undefined);
+  c.messages.ackLookbackHours = 336; assert.doesNotThrow(() => validate(c));
+  for (const value of [0, "x", 1.5, -1]) {
+    c.messages.ackLookbackHours = value as number;
+    assert.throws(() => validate(c), /invalid messages.ackLookbackHours/);
+  }
+});
+
 test("lane and group ids, topics and message names follow the shared grammar", () => {
   for (const s of ["L0", "R-AI", "GROUP", "A123"]) assert.ok(validId(s));
   for (const s of ["", "a", "L_1", "A--B", "A-1", "A-", "A".repeat(33)]) assert.ok(!validId(s));
