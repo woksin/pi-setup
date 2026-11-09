@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 0b4d5b0586e477ea85dd0144c009e80bfbff8f9f7f032a89099ab6e20694531a
+// pi-setup-source-sha256: bff81daaeed20896bdcdfb272600696e44358e8e27a14df6a25d224d209efdf7
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -110,6 +110,12 @@ function messageName(from, to, topic, at, collision = 1) {
 function parseMessageName(name) {
   if (!name.endsWith(".md")) return void 0;
   const tokens = name.replace(/^(?:\d+-)+/, "").slice(0, -3).split("-");
+  const parsed = parseDirected(tokens);
+  if (parsed || tokens[0] !== "BCAST") return parsed;
+  const topic = tokens.slice(1).join("-").replace(/-[0-9]{4}(?:-[0-9]+)?$/, "");
+  return topic ? { from: "", to: ["BCAST"], topic } : void 0;
+}
+function parseDirected(tokens) {
   const k = tokens.findIndex((t) => t === "to" || t === "from");
   const start2 = k < 0 ? 0 : k + 1;
   let end = start2;
@@ -1318,6 +1324,21 @@ var FileBackend = class {
       try {
         writeFileSync3(path, m.body, { flag: "wx" });
         return { name, from: m.from, to: [m.to], topic: m.topic, at, path };
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+      }
+    }
+  }
+  async postPassive(m) {
+    if (!validTopic(m.topic)) throw new Error("invalid message name");
+    mkdirSync2(this.dir, { recursive: true });
+    const at = this.now();
+    for (let i = 1; ; i++) {
+      const name = messageName("", "BCAST", m.topic, at, i).replace(/^-to-/, "");
+      const path = join13(this.dir, name);
+      try {
+        writeFileSync3(path, m.body, { flag: "wx" });
+        return { name, from: "", to: ["BCAST"], topic: m.topic, at, path };
       } catch (e) {
         if (e.code !== "EEXIST") throw e;
       }
@@ -3869,9 +3890,15 @@ async function close(id, opts, c, root, ctx) {
   persistClosed(c, root, { id, reason: opts.reason || "", by: from, at });
   const line = closedLine(to, opts.reason, at);
   await backend.setStatus(id, line);
-  const message = await backend.send({ from, to: c.messages.broadcast, topic: `lane-closed-${id.toLowerCase()}`, body: closeBody(id, to, opts.reason, unread2) });
+  const topic = `lane-closed-${id.toLowerCase()}`;
+  const message = await backend.postPassive({ topic, body: closeBody(id, to, opts.reason, unread2) });
   ctx.out(`${id}: ${line}`);
   ctx.out(message.path);
+  if (to && to !== from) {
+    const wake = await backend.send({ from, to, topic, body: `Lane ${id} closed, pick up its work; details in ${message.name}
+` });
+    ctx.out(wake.path);
+  }
   ctx.out(hint);
   return 0;
 }
