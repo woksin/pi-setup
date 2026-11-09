@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 575bf38b56f7a5ffe3911d87714322f8ea561a105575d7c401e487109d8d27d1
+// pi-setup-source-sha256: ef37314d00447b2487a5224af3041a207ceba959082fc1b1dffffa1f1b874a81
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -3591,351 +3591,9 @@ var init_legacy_prune = __esm({
   }
 });
 
-// src/lanes/retention.ts
-import { closeSync, copyFileSync as copyFileSync2, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync, readdirSync as readdirSync11, renameSync as renameSync4, unlinkSync as unlinkSync3, utimesSync } from "node:fs";
-import { join as join32 } from "node:path";
-function stat(path2) {
-  try {
-    return lstatSync4(path2);
-  } catch (e) {
-    if (e.code === "ENOENT") return void 0;
-    throw e;
-  }
-}
-function messages(dir) {
-  const info = stat(dir);
-  if (!info) return [];
-  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`not a regular directory: ${dir}`);
-  return readdirSync11(dir).flatMap((name) => {
-    const parsed = parseMessageName(name);
-    if (!parsed || name.startsWith(".")) return [];
-    const path2 = join32(dir, name);
-    const info2 = stat(path2);
-    return info2?.isFile() ? [{ name, path: path2, info: info2, ...parsed, at: info2.mtime }] : [];
-  });
-}
-function unread(m2, c2, dir) {
-  const broadcast = addressed2(m2, "ALL") || addressed2(m2, c2.messages.broadcast);
-  return [{ id: c2.coordinator.id, group: null }, ...c2.lanes].some(({ id, group }) => {
-    if (!broadcast && ![id, ...group ? [group] : []].some((recipient2) => addressed2(m2, recipient2))) return false;
-    const marker = stat(join32(dir, `${id}-inbox.marker`));
-    return marker?.isFile() === true && marker.mtimeMs < m2.info.mtimeMs;
-  });
-}
-function archive2(m2, dir) {
-  mkdirSync9(dir, { recursive: true });
-  const target = join32(dir, m2.name);
-  try {
-    closeSync(openSync(target, "wx"));
-  } catch (e) {
-    if (e.code === "EEXIST") return false;
-    throw e;
-  }
-  try {
-    try {
-      renameSync4(m2.path, target);
-    } catch (e) {
-      if (e.code !== "EXDEV") throw e;
-      copyFileSync2(m2.path, target);
-      utimesSync(target, m2.info.atime, m2.info.mtime);
-      unlinkSync3(m2.path);
-    }
-  } catch (e) {
-    unlinkSync3(target);
-    throw e;
-  }
-  return true;
-}
-function prune(c2, root, ctx, dryRun = false) {
-  const counts2 = { archived: 0, deleted: 0, skippedUnread: 0, skippedCollision: 0, kept: 0, archiveExpired: 0 };
-  const dir = expand(c2.messages.dir, c2, root, ctx.home);
-  const r2 = c2.messages.retention;
-  if (!r2 || r2.mode === "keep" && r2.archiveMaxAgeDays === null) {
-    counts2.kept = messages(dir).length;
-    return counts2;
-  }
-  const destination = archiveDir(c2, root, ctx.home);
-  const destinationInfo = stat(destination);
-  if (destinationInfo && (!destinationInfo.isDirectory() || destinationInfo.isSymbolicLink())) throw new Error(`not a regular directory: ${destination}`);
-  const now = ctx.now().getTime();
-  if (r2.archiveMaxAgeDays !== null) {
-    for (const m2 of messages(destination)) {
-      if (m2.info.mtimeMs >= now - r2.archiveMaxAgeDays * DAY) continue;
-      if (!dryRun) unlinkSync3(m2.path);
-      counts2.archiveExpired++;
-    }
-  }
-  for (const m2 of messages(dir)) {
-    if (r2.mode === "keep" || m2.info.mtimeMs >= now - r2.maxAgeDays * DAY) {
-      counts2.kept++;
-      continue;
-    }
-    if (r2.keepUnread && unread(m2, c2, dir)) {
-      counts2.skippedUnread++;
-      continue;
-    }
-    if (r2.mode === "delete") {
-      if (!dryRun) unlinkSync3(m2.path);
-      counts2.deleted++;
-      continue;
-    }
-    const target = stat(join32(destination, m2.name));
-    const expired = target?.isFile() && r2.archiveMaxAgeDays !== null && target.mtimeMs < now - r2.archiveMaxAgeDays * DAY;
-    if (target && !(dryRun && expired) || !dryRun && !archive2(m2, destination)) {
-      counts2.skippedCollision++;
-      continue;
-    }
-    counts2.archived++;
-  }
-  return counts2;
-}
-function messagesPrune(opts, c2, root, ctx) {
-  if (opts.legacy) return pruneLegacy({ opts, config: c2, root, ctx }, { stat, archive: archive2 });
-  if (opts.apply || opts["legacy-age"]) throw new UsageError("--apply and --legacy-age require --legacy");
-  const counts2 = prune(c2, root, ctx, opts["dry-run"] === "true");
-  ctx.out(opts.json === "true" ? JSON.stringify(counts2) : `archived: ${counts2.archived}, deleted: ${counts2.deleted}, skipped (unread): ${counts2.skippedUnread}, skipped (collision): ${counts2.skippedCollision}, kept: ${counts2.kept}, archive-expired: ${counts2.archiveExpired}`);
-  return 0;
-}
-var DAY;
-var init_retention = __esm({
-  "src/lanes/retention.ts"() {
-    init_backend();
-    init_config();
-    init_names();
-    init_legacy_prune();
-    DAY = 864e5;
-  }
-});
-
-// src/lanes/commands/start.ts
-import { existsSync as existsSync13, statSync as statSync8 } from "node:fs";
-async function start(id, opts, c2, root, ctx) {
-  rejectRetired(id, c2);
-  const { coordinator, lane, cwd } = laneTarget(id, c2, root, ctx);
-  const prompt = expand(coordinator ? c2.coordinator.prompt : lane.prompt, c2, root, ctx.home);
-  if (!existsSync13(cwd) || !statSync8(cwd).isDirectory()) throw new Error(`cwd not found: ${cwd}`);
-  if (!existsSync13(prompt) || !statSync8(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
-  const duplicate = (await runningPi(ctx)).find((p) => p.cwd === ctx.realpath(cwd));
-  if (duplicate) throw new Error(`already running in ${cwd} (pid ${duplicate.pid}); not starting a second session`);
-  if (!coordinator || !c2.launch.preapproveMcp) await preapprove(ctx, cwd, c2.launch.preapproveMcp);
-  const backend = detectBackend(opts.terminal || c2.terminal.backend, ctx);
-  let wrapper = ctx.which(c2.launch.wrapper);
-  if (!wrapper) {
-    wrapper = ctx.which("pi");
-    if (wrapper) ctx.err("pi-session not found; starting pi directly (no relaunch after a context handoff)");
-    else if (backend === "print") {
-      wrapper = c2.launch.wrapper;
-      ctx.err(`${c2.launch.wrapper} and pi not found; printing the command only`);
-    } else throw new Error("pi not found");
-  }
-  if (c2.messages.retention?.auto) {
-    try {
-      prune(c2, root, ctx);
-    } catch (e) {
-      ctx.err(`warning: message prune failed: ${e.message.replace(/\s+/g, " ")}`);
-    }
-  }
-  const command = launchCommand(c2, root, cwd, coordinator ? c2.coordinator.id : id, prompt, wrapper, expand(c2.messages.dir, c2, root, ctx.home), ctx.launcher, opts);
-  return terminalBackend(backend).start(ctx, { id: coordinator ? c2.coordinator.id : id, cwd, command });
-}
-function rejectRetired(id, c2) {
-  if (c2.lanes.find((l2) => l2.id === id)?.retired) throw new Error(`lane ${id} is retired; add a fresh lane instead`);
-}
-var init_start = __esm({
-  "src/lanes/commands/start.ts"() {
-    init_config();
-    init_sessions();
-    init_processes();
-    init_retention();
-    init_preapprove();
-    init_terminal();
-  }
-});
-
-// src/lanes/admission.ts
-import { lstatSync as lstatSync5, mkdirSync as mkdirSync10, readFileSync as readFileSync17, readdirSync as readdirSync12, renameSync as renameSync5, rmdirSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync8 } from "node:fs";
-import { basename as basename5, join as join33 } from "node:path";
-import { randomUUID as randomUUID4 } from "node:crypto";
-async function bounded(work) {
-  let timer;
-  try {
-    return await Promise.race([work, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("admission inventory timed out")), 5e3);
-    })]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function inventory2(ctx) {
-  const rows = await bounded(ctx.admissionInventory ? ctx.admissionInventory() : nativeInventory(ctx));
-  if (!Array.isArray(rows) || rows.length > 2e4 || rows.some((r2) => !Number.isSafeInteger(r2.pid) || r2.pid < 1 || !Number.isSafeInteger(r2.ppid) || r2.ppid < 0 || typeof r2.start !== "string" || !r2.start.trim() || typeof r2.pi !== "boolean" || r2.pi && !r2.cwd) || new Set(rows.map((r2) => r2.pid)).size !== rows.length) {
-    throw new Error("admission inventory malformed or identity unavailable");
-  }
-  return rows;
-}
-async function nativeInventory(ctx) {
-  const result3 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4e3 });
-  if (result3.code !== 0 || result3.timedOut || !result3.stdout.trim()) throw new Error("admission inventory unavailable");
-  const rows = [];
-  for (const line of result3.stdout.trim().split("\n")) {
-    const m2 = /^(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.+)$/.exec(line.trim());
-    if (!m2) throw new Error("admission inventory malformed");
-    const row = { pid: Number(m2[1]), ppid: Number(m2[2]), start: m2[3].replace(/\s+/g, " "), pi: basename5(m2[4]) === "pi" };
-    if (row.pi) {
-      if (ctx.readCwd) row.cwd = await ctx.readCwd(row.pid);
-      else {
-        const cwd = ctx.platform === "darwin" ? await ctx.run("lsof", ["-a", "-p", String(row.pid), "-d", "cwd", "-Fn"], { timeoutMs: 4e3 }) : await ctx.run("readlink", [`/proc/${row.pid}/cwd`], { timeoutMs: 4e3 });
-        if (cwd.code !== 0 || cwd.timedOut) throw new Error(`admission cwd unavailable for ${row.pid}`);
-        row.cwd = ctx.platform === "darwin" ? cwd.stdout.split("\n").find((s) => s.startsWith("n"))?.slice(1) : cwd.stdout.trim();
-      }
-      if (row.cwd) row.cwd = ctx.realpath(row.cwd);
-    }
-    rows.push(row);
-  }
-  return rows;
-}
-function privateDir(path2) {
-  mkdirSync10(path2, { recursive: true, mode: 448 });
-  const stat2 = lstatSync5(path2);
-  if (!stat2.isDirectory() || (stat2.mode & 63) !== 0) throw new Error("admission directory must be private and not a symlink");
-}
-async function locked(dir, work) {
-  privateDir(dir);
-  const lock = join33(dir, "lock");
-  const deadline = Date.now() + 2e3;
-  for (; ; ) {
-    try {
-      mkdirSync10(lock, { mode: 448 });
-      break;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      if (Date.now() >= deadline) throw new Error("admission lock busy/uncertain; retry after inspecting its controller (no age-based removal)");
-      await pause(20);
-    }
-  }
-  try {
-    return await work();
-  } finally {
-    rmdirSync(lock);
-  }
-}
-function identity(value) {
-  return value && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.start === "string" && value.start.length > 0;
-}
-function readLease(file) {
-  if (!lstatSync5(file).isFile()) throw new Error("admission lease is not a regular file");
-  const v = JSON.parse(readFileSync17(file, "utf8"));
-  if (v?.version !== 1 || !identity(v.owner) || v.child !== void 0 && !identity(v.child) || v.priorPi !== void 0 && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)) || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some((s) => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
-  return v;
-}
-function store(file, lease) {
-  const temp = `${file}.${randomUUID4()}.tmp`;
-  writeFileSync8(temp, JSON.stringify(lease), { mode: 384, flag: "wx" });
-  renameSync5(temp, file);
-}
-function alive2(id, rows) {
-  const row = rows.find((r2) => r2.pid === id.pid);
-  if (row && row.start !== id.start) throw new Error(`admission identity uncertain: pid ${id.pid} reused`);
-  return Boolean(row);
-}
-function below2(row, owner, rows) {
-  const seen = /* @__PURE__ */ new Set();
-  let at = row;
-  while (at && !seen.has(at.pid)) {
-    if (at.pid === owner.pid) return at.start === owner.start;
-    seen.add(at.pid);
-    at = rows.find((r2) => r2.pid === at.ppid);
-  }
-  return false;
-}
-function uncertainPi(lease, all, rows) {
-  return rows.filter((r2) => r2.pi).some((pi) => {
-    if (pi.cwd === lease.cwd || below2(pi, lease.owner, rows)) return true;
-    if (lease.priorPi?.some((prior) => prior.pid === pi.pid && prior.start === pi.start)) return false;
-    return !all.some((other) => other.token !== lease.token && [other.owner, other.child].some((id) => id && alive2(id, rows) && below2(pi, id, rows)));
-  });
-}
-function registry2(dir) {
-  return readdirSync12(dir).filter((n3) => n3.endsWith(".json")).map((n3) => {
-    const file = join33(dir, n3);
-    return { file, lease: readLease(file) };
-  });
-}
-function leases(dir, rows) {
-  const entries = registry2(dir);
-  const all = entries.map((e) => e.lease);
-  return entries.flatMap(({ file, lease }) => {
-    if (alive2(lease.owner, rows)) {
-      if (lease.child) alive2(lease.child, rows);
-      return [lease];
-    }
-    if (!lease.child) throw new Error("admission lease uncertain: dead owner with unrecorded child");
-    if (alive2(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
-    unlinkSync4(file);
-    return [];
-  });
-}
-async function admit(ctx, request2, beforeLaunch) {
-  const dir = join33(ctx.piAgentDir, "lanes-admission");
-  const lease = await locked(dir, async () => {
-    const rows = await inventory2(ctx);
-    const owner = rows.find((r2) => r2.pid === process.pid);
-    if (!owner) throw new Error("admission controller identity unavailable");
-    const active = leases(dir, rows);
-    const pis = rows.filter((r2) => r2.pi);
-    if (active.some((l2) => l2.cwd === request2.cwd) || pis.some((p) => p.cwd === request2.cwd)) throw new Error(`already running in ${request2.cwd}`);
-    const value = {
-      version: 1,
-      token: randomUUID4(),
-      owner: { pid: owner.pid, start: owner.start },
-      root: request2.root,
-      cwd: request2.cwd,
-      id: request2.id,
-      pool: request2.pool,
-      priorPi: pis.map((p) => ({ pid: p.pid, start: p.start }))
-    };
-    const file2 = join33(dir, `${value.token}.json`);
-    store(file2, value);
-    try {
-      await beforeLaunch?.();
-    } catch (e) {
-      unlinkSync4(file2);
-      throw e;
-    }
-    return value;
-  });
-  const file = join33(dir, `${lease.token}.json`);
-  return {
-    async child(pid) {
-      return locked(dir, async () => {
-        const row = (await inventory2(ctx)).find((r2) => r2.pid === pid);
-        if (!row || row.ppid !== process.pid) throw new Error("admission child identity unavailable; lease retained");
-        lease.child = { pid, start: row.start };
-        store(file, lease);
-        return lease.child;
-      });
-    },
-    async release() {
-      await locked(dir, async () => {
-        const current = readLease(file);
-        if (current.token !== lease.token || current.owner.pid !== process.pid || current.owner.start !== lease.owner.start) throw new Error("admission lease ownership changed");
-        const rows = await inventory2(ctx);
-        if (lease.child && alive2(lease.child, rows) || uncertainPi(lease, registry2(dir).map((e) => e.lease), rows)) throw new Error("admission child cleanup uncertain; lease retained");
-        unlinkSync4(file);
-      });
-    }
-  };
-}
-var pause;
-var init_admission = __esm({
-  "src/lanes/admission.ts"() {
-    pause = (ms) => new Promise((done) => setTimeout(done, ms));
-  }
-});
-
 // src/lanes/issue-register.ts
-import { readFileSync as readFileSync18, readdirSync as readdirSync13 } from "node:fs";
-import { join as join34 } from "node:path";
+import { readFileSync as readFileSync17, readdirSync as readdirSync11 } from "node:fs";
+import { join as join32 } from "node:path";
 function validIssueMatch(m2) {
   if (m2[1] && !REPO_RE.test(m2[1])) return false;
   return Number.isSafeInteger(Number(m2[2])) && Number(m2[2]) > 0;
@@ -4047,7 +3705,7 @@ function sourceFailure(error) {
 }
 function readRegistry(path2) {
   try {
-    const text4 = readFileSync18(path2, "utf8");
+    const text4 = readFileSync17(path2, "utf8");
     const events = parseRegistry(text4);
     const skipped = text4.split("\n").filter((l2) => l2.trim()).length - events.length;
     return { events, source: { status: skipped && !events.length ? "error" : "ok", count: events.length, ...skipped ? { detail: `${skipped} invalid lines skipped` } : {} } };
@@ -4057,12 +3715,12 @@ function readRegistry(path2) {
 }
 function readLeases(path2) {
   try {
-    const names = readdirSync13(path2).filter((n3) => n3.endsWith(".json"));
+    const names = readdirSync11(path2).filter((n3) => n3.endsWith(".json"));
     const leases2 = [];
     let skipped = 0;
     for (const name of names) {
       try {
-        const parsed = parseLeases([readFileSync18(join34(path2, name), "utf8")]);
+        const parsed = parseLeases([readFileSync17(join32(path2, name), "utf8")]);
         leases2.push(...parsed);
         if (!parsed.length) skipped++;
       } catch {
@@ -4093,9 +3751,9 @@ async function probeLeases(leases2, ctx) {
   return sessionLiveness(leases2, (pid) => alive3.has(pid), (pid) => starts.get(pid));
 }
 async function readIssueRegister(ctx) {
-  const dir = join34(ctx.piAgentDir, "issue-work");
-  const registry3 = readRegistry(join34(dir, "registry.jsonl"));
-  const { leases: leases2, source } = readLeases(join34(dir, "sessions"));
+  const dir = join32(ctx.piAgentDir, "issue-work");
+  const registry3 = readRegistry(join32(dir, "registry.jsonl"));
+  const { leases: leases2, source } = readLeases(join32(dir, "sessions"));
   for (const lease of leases2) if (lease.cwd) {
     try {
       lease.cwd = ctx.realpath(lease.cwd);
@@ -4121,16 +3779,16 @@ var init_issue_register = __esm({
 });
 
 // src/lanes/roster.ts
-import { readFileSync as readFileSync19, readdirSync as readdirSync14, statSync as statSync9 } from "node:fs";
-import { join as join35 } from "node:path";
+import { readFileSync as readFileSync18, readdirSync as readdirSync12, statSync as statSync8 } from "node:fs";
+import { join as join33 } from "node:path";
 function readJsonDir(dir, valid) {
   try {
-    const names = readdirSync14(dir).filter((n3) => n3.endsWith(".json"));
+    const names = readdirSync12(dir).filter((n3) => n3.endsWith(".json"));
     const values = [];
     let skipped = 0;
     for (const name of names) {
       try {
-        const value = JSON.parse(readFileSync19(join35(dir, name), "utf8"));
+        const value = JSON.parse(readFileSync18(join33(dir, name), "utf8"));
         if (valid(value)) values.push(value);
         else skipped++;
       } catch {
@@ -4145,11 +3803,11 @@ function readJsonDir(dir, valid) {
 function readStatuses(dir) {
   const values = /* @__PURE__ */ new Map();
   try {
-    const names = readdirSync14(dir).filter((n3) => n3.endsWith(".status"));
+    const names = readdirSync12(dir).filter((n3) => n3.endsWith(".status"));
     let skipped = 0;
     for (const name of names) {
       try {
-        values.set(name.slice(0, -7), readFileSync19(join35(dir, name), "utf8").split(/\r?\n/)[0]);
+        values.set(name.slice(0, -7), readFileSync18(join33(dir, name), "utf8").split(/\r?\n/)[0]);
       } catch {
         skipped++;
       }
@@ -4161,7 +3819,7 @@ function readStatuses(dir) {
 }
 async function readMessages(c2, root, ctx) {
   try {
-    statSync9(expand(c2.messages.dir, c2, root, ctx.home));
+    statSync8(expand(c2.messages.dir, c2, root, ctx.home));
     const values = await backendFor(c2, ctx, root).list();
     return { values, source: { status: "ok", count: values.length } };
   } catch (e) {
@@ -4184,12 +3842,12 @@ function rosterSeeds(c2, root, ctx) {
 async function readRoster(c2, root, ctx, register) {
   const data = register ?? await readIssueRegister(ctx);
   const processes = await runningPiChecked(ctx);
-  const registrations = readRegistrations(root);
-  const orch = join35(ctx.home, ".pi/orch");
-  const heartbeats = readJsonDir(join35(orch, "heartbeats"), (v) => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
-  const sessions = readJsonDir(join35(orch, "sessions"), (v) => v && Number.isInteger(v.pid) && (v.id === void 0 || typeof v.id === "string"));
-  const assignments = readJsonDir(join35(orch, "assignments"), (v) => v && typeof v === "object");
-  const statusDir = ctx.env.LANE_STATUS_DIR || (c2.messages.dir ? join35(expand(c2.messages.dir, c2, root, ctx.home), "status") : join35(ctx.piAgentDir, "lane-status"));
+  const registrations = readRegistrations(root, registrationCutoff(c2, ctx.now()));
+  const orch = join33(ctx.home, ".pi/orch");
+  const heartbeats = readJsonDir(join33(orch, "heartbeats"), (v) => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
+  const sessions = readJsonDir(join33(orch, "sessions"), (v) => v && Number.isInteger(v.pid) && (v.id === void 0 || typeof v.id === "string"));
+  const assignments = readJsonDir(join33(orch, "assignments"), (v) => v && typeof v === "object");
+  const statusDir = ctx.env.LANE_STATUS_DIR || (c2.messages.dir ? join33(expand(c2.messages.dir, c2, root, ctx.home), "status") : join33(ctx.piAgentDir, "lane-status"));
   const statuses = readStatuses(statusDir);
   const messages2 = await readMessages(c2, root, ctx);
   const lanes = rosterSeeds(c2, root, ctx);
@@ -4374,7 +4032,7 @@ function stateOf(row, input, now) {
   const registered = row.evidence.includes("registration");
   const live = row.pid !== null || row.evidence.includes("lease") || heartbeatFresh || registered;
   const ended = registrationState(row, input);
-  if (ended) return ended;
+  if (!live && ended) return ended;
   if (!registered && discoveryUnknown(row, input, heartbeatFresh)) return "unknown";
   if (!live) return seed ? "stopped" : "unknown";
   return activeState(row, line, h2, now);
@@ -4524,24 +4182,24 @@ var init_roster = __esm({
 });
 
 // src/lanes/registration.ts
-import { mkdirSync as mkdirSync11, readFileSync as readFileSync20, renameSync as renameSync6, writeFileSync as writeFileSync9 } from "node:fs";
-import { randomUUID as randomUUID5 } from "node:crypto";
-import { join as join36 } from "node:path";
+import { lstatSync as lstatSync4, mkdirSync as mkdirSync9, readFileSync as readFileSync19, readdirSync as readdirSync13, renameSync as renameSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync8 } from "node:fs";
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { join as join34 } from "node:path";
 function registrationPath(root, id) {
   if (!validId(id)) throw new Error("invalid registration id");
-  return join36(registrationDir(root), `${id}.json`);
+  return join34(registrationDir(root), `${id}.json`);
 }
 function writeRegistration(root, record3) {
   const path2 = registrationPath(root, record3.id);
   const dir = registrationDir(root);
-  mkdirSync11(dir, { recursive: true });
-  const tmp = join36(dir, `.${record3.id}-${randomUUID5()}.tmp`);
-  writeFileSync9(tmp, `${JSON.stringify(record3)}
+  mkdirSync9(dir, { recursive: true });
+  const tmp = join34(dir, `.${record3.id}-${randomUUID4()}.tmp`);
+  writeFileSync8(tmp, `${JSON.stringify(record3)}
 `, { flag: "wx" });
-  renameSync6(tmp, path2);
+  renameSync4(tmp, path2);
 }
 function retireRegistration(root, id, at) {
-  const record3 = JSON.parse(readFileSync20(registrationPath(root, id), "utf8"));
+  const record3 = JSON.parse(readFileSync19(registrationPath(root, id), "utf8"));
   writeRegistration(root, { ...record3, retiredAt: at });
 }
 function parseableAt(value) {
@@ -4552,8 +4210,41 @@ function validRegistration(value) {
   if (!Number.isInteger(value.pid) || value.pid <= 0 || !parseableAt(value.startedAt)) return false;
   return value.retiredAt === void 0 || parseableAt(value.retiredAt);
 }
-function readRegistrations(root) {
-  return readJsonDir(registrationDir(root), validRegistration);
+function registrationCutoff(c2, now) {
+  return now.getTime() - (c2.messages.retention?.maxAgeDays ?? 14) * 864e5;
+}
+function expiredRegistration(record3, cutoff) {
+  return record3.retiredAt !== void 0 && Date.parse(record3.retiredAt) < cutoff;
+}
+function readRegistrations(root, cutoff = -Infinity) {
+  const result3 = readJsonDir(registrationDir(root), validRegistration);
+  result3.values = result3.values.filter((record3) => !expiredRegistration(record3, cutoff));
+  result3.source.count = result3.values.length;
+  return result3;
+}
+function registrationFiles(root) {
+  try {
+    for (const dir of [join34(root, ".state"), registrationDir(root)]) {
+      const info = lstatSync4(dir);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`not a regular directory: ${dir}`);
+    }
+    return readdirSync13(registrationDir(root)).filter((name) => !name.startsWith(".") && name.endsWith(".json")).map((name) => join34(registrationDir(root), name));
+  } catch (e) {
+    if (e.code === "ENOENT") return [];
+    throw e;
+  }
+}
+function expiredRegistrationFile(path2, cutoff) {
+  try {
+    if (!lstatSync4(path2).isFile()) return false;
+    const record3 = JSON.parse(readFileSync19(path2, "utf8"));
+    return validRegistration(record3) && expiredRegistration(record3, cutoff);
+  } catch {
+    return false;
+  }
+}
+function pruneRegistrations(root, cutoff, dryRun = false) {
+  for (const path2 of registrationFiles(root)) if (expiredRegistrationFile(path2, cutoff) && !dryRun) unlinkSync3(path2);
 }
 function pidAlive(pid) {
   try {
@@ -4578,7 +4269,7 @@ function checkRegistrations(records, processes, ctx) {
 function launchedRows(rows, input, empty) {
   for (const record3 of input.registrations ?? []) {
     if (rows.some((r2) => r2.lane === record3.id)) continue;
-    const detected = record3.alive && rows.find((r2) => r2.identity === "unregistered" && r2.worktree === record3.cwd);
+    const detected = rows.find((r2) => r2.identity === "unregistered" && r2.worktree === record3.cwd);
     if (detected) {
       detected.lane = record3.id;
       detected.identity = "launched";
@@ -4594,6 +4285,7 @@ function joinRegistration(row, input) {
   else row.notes.push(record3.retiredAt ? `session ended ${record3.retiredAt}` : "registration stale (no exit recorded)");
 }
 function registrationState(row, input) {
+  if (row.pid !== null || row.evidence.includes("lease") || row.evidence.includes("heartbeat(fresh)")) return void 0;
   const record3 = input.registrations?.find((r2) => r2.id === row.lane);
   if (!record3 || record3.alive) return void 0;
   return record3.retiredAt && !input.lanes.some((l2) => l2.id === row.lane) ? "retired" : "stopped";
@@ -4603,7 +4295,351 @@ var init_registration = __esm({
   "src/lanes/registration.ts"() {
     init_names();
     init_roster();
-    registrationDir = (root) => join36(root, ".state/roster");
+    registrationDir = (root) => join34(root, ".state/roster");
+  }
+});
+
+// src/lanes/retention.ts
+import { closeSync, copyFileSync as copyFileSync2, lstatSync as lstatSync5, mkdirSync as mkdirSync10, openSync, readdirSync as readdirSync14, renameSync as renameSync5, unlinkSync as unlinkSync4, utimesSync } from "node:fs";
+import { join as join35 } from "node:path";
+function stat(path2) {
+  try {
+    return lstatSync5(path2);
+  } catch (e) {
+    if (e.code === "ENOENT") return void 0;
+    throw e;
+  }
+}
+function messages(dir) {
+  const info = stat(dir);
+  if (!info) return [];
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`not a regular directory: ${dir}`);
+  return readdirSync14(dir).flatMap((name) => {
+    const parsed = parseMessageName(name);
+    if (!parsed || name.startsWith(".")) return [];
+    const path2 = join35(dir, name);
+    const info2 = stat(path2);
+    return info2?.isFile() ? [{ name, path: path2, info: info2, ...parsed, at: info2.mtime }] : [];
+  });
+}
+function unread(m2, c2, dir) {
+  const broadcast = addressed2(m2, "ALL") || addressed2(m2, c2.messages.broadcast);
+  return [{ id: c2.coordinator.id, group: null }, ...c2.lanes].some(({ id, group }) => {
+    if (!broadcast && ![id, ...group ? [group] : []].some((recipient2) => addressed2(m2, recipient2))) return false;
+    const marker = stat(join35(dir, `${id}-inbox.marker`));
+    return marker?.isFile() === true && marker.mtimeMs < m2.info.mtimeMs;
+  });
+}
+function archive2(m2, dir) {
+  mkdirSync10(dir, { recursive: true });
+  const target = join35(dir, m2.name);
+  try {
+    closeSync(openSync(target, "wx"));
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    try {
+      renameSync5(m2.path, target);
+    } catch (e) {
+      if (e.code !== "EXDEV") throw e;
+      copyFileSync2(m2.path, target);
+      utimesSync(target, m2.info.atime, m2.info.mtime);
+      unlinkSync4(m2.path);
+    }
+  } catch (e) {
+    unlinkSync4(target);
+    throw e;
+  }
+  return true;
+}
+function prune(c2, root, ctx, dryRun = false) {
+  const counts2 = { archived: 0, deleted: 0, skippedUnread: 0, skippedCollision: 0, kept: 0, archiveExpired: 0 };
+  const dir = expand(c2.messages.dir, c2, root, ctx.home);
+  pruneRegistrations(root, registrationCutoff(c2, ctx.now()), dryRun);
+  const r2 = c2.messages.retention;
+  if (!r2 || r2.mode === "keep" && r2.archiveMaxAgeDays === null) {
+    counts2.kept = messages(dir).length;
+    return counts2;
+  }
+  const destination = archiveDir(c2, root, ctx.home);
+  const destinationInfo = stat(destination);
+  if (destinationInfo && (!destinationInfo.isDirectory() || destinationInfo.isSymbolicLink())) throw new Error(`not a regular directory: ${destination}`);
+  const now = ctx.now().getTime();
+  if (r2.archiveMaxAgeDays !== null) {
+    for (const m2 of messages(destination)) {
+      if (m2.info.mtimeMs >= now - r2.archiveMaxAgeDays * DAY) continue;
+      if (!dryRun) unlinkSync4(m2.path);
+      counts2.archiveExpired++;
+    }
+  }
+  for (const m2 of messages(dir)) {
+    if (r2.mode === "keep" || m2.info.mtimeMs >= now - r2.maxAgeDays * DAY) {
+      counts2.kept++;
+      continue;
+    }
+    if (r2.keepUnread && unread(m2, c2, dir)) {
+      counts2.skippedUnread++;
+      continue;
+    }
+    if (r2.mode === "delete") {
+      if (!dryRun) unlinkSync4(m2.path);
+      counts2.deleted++;
+      continue;
+    }
+    const target = stat(join35(destination, m2.name));
+    const expired = target?.isFile() && r2.archiveMaxAgeDays !== null && target.mtimeMs < now - r2.archiveMaxAgeDays * DAY;
+    if (target && !(dryRun && expired) || !dryRun && !archive2(m2, destination)) {
+      counts2.skippedCollision++;
+      continue;
+    }
+    counts2.archived++;
+  }
+  return counts2;
+}
+function messagesPrune(opts, c2, root, ctx) {
+  if (opts.legacy) return pruneLegacy({ opts, config: c2, root, ctx }, { stat, archive: archive2 });
+  if (opts.apply || opts["legacy-age"]) throw new UsageError("--apply and --legacy-age require --legacy");
+  const counts2 = prune(c2, root, ctx, opts["dry-run"] === "true");
+  ctx.out(opts.json === "true" ? JSON.stringify(counts2) : `archived: ${counts2.archived}, deleted: ${counts2.deleted}, skipped (unread): ${counts2.skippedUnread}, skipped (collision): ${counts2.skippedCollision}, kept: ${counts2.kept}, archive-expired: ${counts2.archiveExpired}`);
+  return 0;
+}
+var DAY;
+var init_retention = __esm({
+  "src/lanes/retention.ts"() {
+    init_backend();
+    init_config();
+    init_names();
+    init_legacy_prune();
+    init_registration();
+    DAY = 864e5;
+  }
+});
+
+// src/lanes/commands/start.ts
+import { existsSync as existsSync13, statSync as statSync9 } from "node:fs";
+async function start(id, opts, c2, root, ctx) {
+  rejectRetired(id, c2);
+  const { coordinator, lane, cwd } = laneTarget(id, c2, root, ctx);
+  const prompt = expand(coordinator ? c2.coordinator.prompt : lane.prompt, c2, root, ctx.home);
+  if (!existsSync13(cwd) || !statSync9(cwd).isDirectory()) throw new Error(`cwd not found: ${cwd}`);
+  if (!existsSync13(prompt) || !statSync9(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
+  const duplicate = (await runningPi(ctx)).find((p) => p.cwd === ctx.realpath(cwd));
+  if (duplicate) throw new Error(`already running in ${cwd} (pid ${duplicate.pid}); not starting a second session`);
+  if (!coordinator || !c2.launch.preapproveMcp) await preapprove(ctx, cwd, c2.launch.preapproveMcp);
+  const backend = detectBackend(opts.terminal || c2.terminal.backend, ctx);
+  let wrapper = ctx.which(c2.launch.wrapper);
+  if (!wrapper) {
+    wrapper = ctx.which("pi");
+    if (wrapper) ctx.err("pi-session not found; starting pi directly (no relaunch after a context handoff)");
+    else if (backend === "print") {
+      wrapper = c2.launch.wrapper;
+      ctx.err(`${c2.launch.wrapper} and pi not found; printing the command only`);
+    } else throw new Error("pi not found");
+  }
+  if (c2.messages.retention?.auto) {
+    try {
+      prune(c2, root, ctx);
+    } catch (e) {
+      ctx.err(`warning: message prune failed: ${e.message.replace(/\s+/g, " ")}`);
+    }
+  }
+  const command = launchCommand(c2, root, cwd, coordinator ? c2.coordinator.id : id, prompt, wrapper, expand(c2.messages.dir, c2, root, ctx.home), ctx.launcher, opts);
+  return terminalBackend(backend).start(ctx, { id: coordinator ? c2.coordinator.id : id, cwd, command });
+}
+function rejectRetired(id, c2) {
+  if (c2.lanes.find((l2) => l2.id === id)?.retired) throw new Error(`lane ${id} is retired; add a fresh lane instead`);
+}
+var init_start = __esm({
+  "src/lanes/commands/start.ts"() {
+    init_config();
+    init_sessions();
+    init_processes();
+    init_retention();
+    init_preapprove();
+    init_terminal();
+  }
+});
+
+// src/lanes/admission.ts
+import { lstatSync as lstatSync6, mkdirSync as mkdirSync11, readFileSync as readFileSync20, readdirSync as readdirSync15, renameSync as renameSync6, rmdirSync, unlinkSync as unlinkSync5, writeFileSync as writeFileSync9 } from "node:fs";
+import { basename as basename5, join as join36 } from "node:path";
+import { randomUUID as randomUUID5 } from "node:crypto";
+async function bounded(work) {
+  let timer;
+  try {
+    return await Promise.race([work, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("admission inventory timed out")), 5e3);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function inventory2(ctx) {
+  const rows = await bounded(ctx.admissionInventory ? ctx.admissionInventory() : nativeInventory(ctx));
+  if (!Array.isArray(rows) || rows.length > 2e4 || rows.some((r2) => !Number.isSafeInteger(r2.pid) || r2.pid < 1 || !Number.isSafeInteger(r2.ppid) || r2.ppid < 0 || typeof r2.start !== "string" || !r2.start.trim() || typeof r2.pi !== "boolean" || r2.pi && !r2.cwd) || new Set(rows.map((r2) => r2.pid)).size !== rows.length) {
+    throw new Error("admission inventory malformed or identity unavailable");
+  }
+  return rows;
+}
+async function nativeInventory(ctx) {
+  const result3 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4e3 });
+  if (result3.code !== 0 || result3.timedOut || !result3.stdout.trim()) throw new Error("admission inventory unavailable");
+  const rows = [];
+  for (const line of result3.stdout.trim().split("\n")) {
+    const m2 = /^(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.+)$/.exec(line.trim());
+    if (!m2) throw new Error("admission inventory malformed");
+    const row = { pid: Number(m2[1]), ppid: Number(m2[2]), start: m2[3].replace(/\s+/g, " "), pi: basename5(m2[4]) === "pi" };
+    if (row.pi) {
+      if (ctx.readCwd) row.cwd = await ctx.readCwd(row.pid);
+      else {
+        const cwd = ctx.platform === "darwin" ? await ctx.run("lsof", ["-a", "-p", String(row.pid), "-d", "cwd", "-Fn"], { timeoutMs: 4e3 }) : await ctx.run("readlink", [`/proc/${row.pid}/cwd`], { timeoutMs: 4e3 });
+        if (cwd.code !== 0 || cwd.timedOut) throw new Error(`admission cwd unavailable for ${row.pid}`);
+        row.cwd = ctx.platform === "darwin" ? cwd.stdout.split("\n").find((s) => s.startsWith("n"))?.slice(1) : cwd.stdout.trim();
+      }
+      if (row.cwd) row.cwd = ctx.realpath(row.cwd);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+function privateDir(path2) {
+  mkdirSync11(path2, { recursive: true, mode: 448 });
+  const stat2 = lstatSync6(path2);
+  if (!stat2.isDirectory() || (stat2.mode & 63) !== 0) throw new Error("admission directory must be private and not a symlink");
+}
+async function locked(dir, work) {
+  privateDir(dir);
+  const lock = join36(dir, "lock");
+  const deadline = Date.now() + 2e3;
+  for (; ; ) {
+    try {
+      mkdirSync11(lock, { mode: 448 });
+      break;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      if (Date.now() >= deadline) throw new Error("admission lock busy/uncertain; retry after inspecting its controller (no age-based removal)");
+      await pause(20);
+    }
+  }
+  try {
+    return await work();
+  } finally {
+    rmdirSync(lock);
+  }
+}
+function identity(value) {
+  return value && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.start === "string" && value.start.length > 0;
+}
+function readLease(file) {
+  if (!lstatSync6(file).isFile()) throw new Error("admission lease is not a regular file");
+  const v = JSON.parse(readFileSync20(file, "utf8"));
+  if (v?.version !== 1 || !identity(v.owner) || v.child !== void 0 && !identity(v.child) || v.priorPi !== void 0 && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)) || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some((s) => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
+  return v;
+}
+function store(file, lease) {
+  const temp = `${file}.${randomUUID5()}.tmp`;
+  writeFileSync9(temp, JSON.stringify(lease), { mode: 384, flag: "wx" });
+  renameSync6(temp, file);
+}
+function alive2(id, rows) {
+  const row = rows.find((r2) => r2.pid === id.pid);
+  if (row && row.start !== id.start) throw new Error(`admission identity uncertain: pid ${id.pid} reused`);
+  return Boolean(row);
+}
+function below2(row, owner, rows) {
+  const seen = /* @__PURE__ */ new Set();
+  let at = row;
+  while (at && !seen.has(at.pid)) {
+    if (at.pid === owner.pid) return at.start === owner.start;
+    seen.add(at.pid);
+    at = rows.find((r2) => r2.pid === at.ppid);
+  }
+  return false;
+}
+function uncertainPi(lease, all, rows) {
+  return rows.filter((r2) => r2.pi).some((pi) => {
+    if (pi.cwd === lease.cwd || below2(pi, lease.owner, rows)) return true;
+    if (lease.priorPi?.some((prior) => prior.pid === pi.pid && prior.start === pi.start)) return false;
+    return !all.some((other) => other.token !== lease.token && [other.owner, other.child].some((id) => id && alive2(id, rows) && below2(pi, id, rows)));
+  });
+}
+function registry2(dir) {
+  return readdirSync15(dir).filter((n3) => n3.endsWith(".json")).map((n3) => {
+    const file = join36(dir, n3);
+    return { file, lease: readLease(file) };
+  });
+}
+function leases(dir, rows) {
+  const entries = registry2(dir);
+  const all = entries.map((e) => e.lease);
+  return entries.flatMap(({ file, lease }) => {
+    if (alive2(lease.owner, rows)) {
+      if (lease.child) alive2(lease.child, rows);
+      return [lease];
+    }
+    if (!lease.child) throw new Error("admission lease uncertain: dead owner with unrecorded child");
+    if (alive2(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
+    unlinkSync5(file);
+    return [];
+  });
+}
+async function admit(ctx, request2, beforeLaunch) {
+  const dir = join36(ctx.piAgentDir, "lanes-admission");
+  const lease = await locked(dir, async () => {
+    const rows = await inventory2(ctx);
+    const owner = rows.find((r2) => r2.pid === process.pid);
+    if (!owner) throw new Error("admission controller identity unavailable");
+    const active = leases(dir, rows);
+    const pis = rows.filter((r2) => r2.pi);
+    if (active.some((l2) => l2.cwd === request2.cwd) || pis.some((p) => p.cwd === request2.cwd)) throw new Error(`already running in ${request2.cwd}`);
+    const value = {
+      version: 1,
+      token: randomUUID5(),
+      owner: { pid: owner.pid, start: owner.start },
+      root: request2.root,
+      cwd: request2.cwd,
+      id: request2.id,
+      pool: request2.pool,
+      priorPi: pis.map((p) => ({ pid: p.pid, start: p.start }))
+    };
+    const file2 = join36(dir, `${value.token}.json`);
+    store(file2, value);
+    try {
+      await beforeLaunch?.();
+    } catch (e) {
+      unlinkSync5(file2);
+      throw e;
+    }
+    return value;
+  });
+  const file = join36(dir, `${lease.token}.json`);
+  return {
+    async child(pid) {
+      return locked(dir, async () => {
+        const row = (await inventory2(ctx)).find((r2) => r2.pid === pid);
+        if (!row || row.ppid !== process.pid) throw new Error("admission child identity unavailable; lease retained");
+        lease.child = { pid, start: row.start };
+        store(file, lease);
+        return lease.child;
+      });
+    },
+    async release() {
+      await locked(dir, async () => {
+        const current = readLease(file);
+        if (current.token !== lease.token || current.owner.pid !== process.pid || current.owner.start !== lease.owner.start) throw new Error("admission lease ownership changed");
+        const rows = await inventory2(ctx);
+        if (lease.child && alive2(lease.child, rows) || uncertainPi(lease, registry2(dir).map((e) => e.lease), rows)) throw new Error("admission child cleanup uncertain; lease retained");
+        unlinkSync5(file);
+      });
+    }
+  };
+}
+var pause;
+var init_admission = __esm({
+  "src/lanes/admission.ts"() {
+    pause = (ms) => new Promise((done) => setTimeout(done, ms));
   }
 });
 
@@ -5043,7 +5079,7 @@ var init_nudge = __esm({
 });
 
 // src/lanes/joblogs.ts
-import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync15, statSync as statSync12 } from "node:fs";
+import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync16, statSync as statSync12 } from "node:fs";
 import { join as join39 } from "node:path";
 function parseWatches(text4) {
   return text4.split(/\r?\n/).flatMap((line) => {
@@ -5072,7 +5108,7 @@ function liveWatch(jobs, watch2, now) {
     const dir = join39(jobs, day(date));
     let names;
     try {
-      names = readdirSync15(dir);
+      names = readdirSync16(dir);
     } catch (e) {
       if (e.code === "ENOENT") continue;
       throw e;
@@ -5521,15 +5557,23 @@ import { join as join42 } from "node:path";
 function endpoints(token, known) {
   if (known.has(token)) return [token];
   const parts = token.split("-");
-  const result3 = [];
-  for (let start2 = 0; start2 < parts.length; ) {
-    let end = parts.length;
-    while (end > start2 && !known.has(parts.slice(start2, end).join("-"))) end--;
-    if (end === start2) return [token];
-    result3.push(parts.slice(start2, end).join("-"));
-    start2 = end;
+  const memo = /* @__PURE__ */ new Map();
+  function split(start2) {
+    if (start2 === parts.length) return [];
+    if (memo.has(start2)) return memo.get(start2);
+    for (let end = parts.length; end > start2; end--) {
+      const id = parts.slice(start2, end).join("-");
+      if (!known.has(id)) continue;
+      const rest = split(end);
+      if (rest === null) continue;
+      const result3 = [id, ...rest];
+      memo.set(start2, result3);
+      return result3;
+    }
+    memo.set(start2, null);
+    return null;
   }
-  return result3;
+  return split(0) ?? [token];
 }
 function directedMessages(messages2, lanes) {
   const reserved = /* @__PURE__ */ new Set(["", "ALL", "BCAST", lanes.broadcast, ...lanes.groups]);
@@ -6066,7 +6110,7 @@ import {
   fsyncSync,
   mkdirSync as mkdirSync14,
   openSync as openSync3,
-  readdirSync as readdirSync16,
+  readdirSync as readdirSync17,
   realpathSync as realpathSync3,
   renameSync as renameSync7,
   statSync as statSync15,
@@ -6080,7 +6124,7 @@ function timestamp(d) {
 function listFiles(dir, base = "") {
   if (!existsSync21(dir)) return [];
   const out = [];
-  for (const entry2 of readdirSync16(join45(dir, base), { withFileTypes: true })) {
+  for (const entry2 of readdirSync17(join45(dir, base), { withFileTypes: true })) {
     const rel = base ? `${base}/${entry2.name}` : entry2.name;
     if (entry2.isFile()) {
       if (!isClutterFile(entry2.name)) out.push(rel);
@@ -6119,14 +6163,14 @@ var init_fsx = __esm({
 
 // src/manifest.ts
 import { createHash as createHash6 } from "node:crypto";
-import { existsSync as existsSync22, lstatSync as lstatSync6, readFileSync as readFileSync24 } from "node:fs";
+import { existsSync as existsSync22, lstatSync as lstatSync7, readFileSync as readFileSync24 } from "node:fs";
 import { isAbsolute as isAbsolute6, join as join46, relative as relative8 } from "node:path";
 function sha256(buf) {
   return createHash6("sha256").update(buf).digest("hex");
 }
 function fileSha(path2) {
   try {
-    return lstatSync6(path2).isFile() ? sha256(readFileSync24(path2)) : void 0;
+    return lstatSync7(path2).isFile() ? sha256(readFileSync24(path2)) : void 0;
   } catch {
     return void 0;
   }
@@ -6366,11 +6410,11 @@ var init_packages = __esm({
 });
 
 // src/backups.ts
-import { existsSync as existsSync24, mkdirSync as mkdirSync15, readdirSync as readdirSync17, rmdirSync as rmdirSync2, rmSync, statSync as statSync16, unlinkSync as unlinkSync5 } from "node:fs";
+import { existsSync as existsSync24, mkdirSync as mkdirSync15, readdirSync as readdirSync18, rmdirSync as rmdirSync2, rmSync, statSync as statSync16, unlinkSync as unlinkSync6 } from "node:fs";
 import { dirname as dirname11, join as join48, relative as relative9 } from "node:path";
 function filesBelow(dir, base = "") {
   const out = [];
-  for (const e of readdirSync17(join48(dir, base), { withFileTypes: true })) {
+  for (const e of readdirSync18(join48(dir, base), { withFileTypes: true })) {
     const rel = base ? `${base}/${e.name}` : e.name;
     if (e.isDirectory()) out.push(...filesBelow(dir, rel));
     else out.push(rel);
@@ -6384,7 +6428,7 @@ function order(name) {
 function listBackups(piDir, pinned) {
   const base = backupsDir(piDir);
   if (!existsSync24(base)) return [];
-  return readdirSync17(base, { withFileTypes: true }).filter((e) => e.isDirectory() && RUN_DIR.test(e.name)).map((e) => e.name).sort((a2, b) => {
+  return readdirSync18(base, { withFileTypes: true }).filter((e) => e.isDirectory() && RUN_DIR.test(e.name)).map((e) => e.name).sort((a2, b) => {
     const [x, y2] = [order(a2), order(b)];
     return x[0] === y2[0] ? y2[1] - x[1] : x[0] < y2[0] ? 1 : -1;
   }).map((name) => {
@@ -6393,8 +6437,8 @@ function listBackups(piDir, pinned) {
   });
 }
 function pruneEmptyDirs(dir) {
-  for (const e of readdirSync17(dir, { withFileTypes: true })) if (e.isDirectory()) pruneEmptyDirs(join48(dir, e.name));
-  if (readdirSync17(dir).length === 0) rmdirSync2(dir);
+  for (const e of readdirSync18(dir, { withFileTypes: true })) if (e.isDirectory()) pruneEmptyDirs(join48(dir, e.name));
+  if (readdirSync18(dir).length === 0) rmdirSync2(dir);
 }
 function prune2(piDir, keep2, pinned, dryRun) {
   const removed = [];
@@ -6407,10 +6451,10 @@ function prune2(piDir, keep2, pinned, dryRun) {
     for (const file of info.files) {
       if (pinned.has(`${info.name}/${file}`)) continue;
       removed.push(join48(info.path, file));
-      if (!dryRun) unlinkSync5(join48(info.path, file));
+      if (!dryRun) unlinkSync6(join48(info.path, file));
     }
     if (!dryRun) {
-      for (const e of readdirSync17(info.path, { withFileTypes: true })) if (e.isDirectory()) pruneEmptyDirs(join48(info.path, e.name));
+      for (const e of readdirSync18(info.path, { withFileTypes: true })) if (e.isDirectory()) pruneEmptyDirs(join48(info.path, e.name));
     }
   }
   return removed;
@@ -6419,7 +6463,7 @@ function tidy(piDir) {
   const base = backupsDir(piDir);
   if (existsSync24(base) && statSync16(base).isDirectory()) pruneEmptyDirs(base);
   const data = dirname11(base);
-  if (existsSync24(data) && readdirSync17(data).length === 0) rmdirSync2(data);
+  if (existsSync24(data) && readdirSync18(data).length === 0) rmdirSync2(data);
 }
 function backupsCommand(ctx, sub, keep2, dryRun) {
   const piDir = join48(ctx.home, ".pi", "agent");
@@ -6487,7 +6531,7 @@ var init_backups = __esm({
 import {
   chmodSync as chmodSync2,
   existsSync as existsSync25,
-  lstatSync as lstatSync7,
+  lstatSync as lstatSync8,
   mkdirSync as mkdirSync16,
   readFileSync as readFileSync26,
   statSync as statSync17,
@@ -6764,7 +6808,7 @@ var init_apply = __esm({
       }
       symlink(a2) {
         try {
-          lstatSync7(a2.path);
+          lstatSync8(a2.path);
           return;
         } catch {
         }
@@ -6983,7 +7027,7 @@ var init_shell_path = __esm({
 });
 
 // src/profiles.ts
-import { existsSync as existsSync26, readdirSync as readdirSync18, readFileSync as readFileSync29 } from "node:fs";
+import { existsSync as existsSync26, readdirSync as readdirSync19, readFileSync as readFileSync29 } from "node:fs";
 import { join as join52 } from "node:path";
 function profilesDir(repoDir2) {
   return join52(repoDir2, "agent", "profiles");
@@ -6991,7 +7035,7 @@ function profilesDir(repoDir2) {
 function profileNames(repoDir2) {
   const dir = profilesDir(repoDir2);
   if (!existsSync26(dir)) return [];
-  return readdirSync18(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  return readdirSync19(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 }
 function stringList(value) {
   return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
@@ -7104,7 +7148,7 @@ var init_profiles = __esm({
 });
 
 // src/components.ts
-import { existsSync as existsSync27, readdirSync as readdirSync19, readFileSync as readFileSync30, statSync as statSync18 } from "node:fs";
+import { existsSync as existsSync27, readdirSync as readdirSync20, readFileSync as readFileSync30, statSync as statSync18 } from "node:fs";
 import { join as join53 } from "node:path";
 function available(id, ctx) {
   if (id === "docker-guardian") return ctx.platform === "darwin" ? true : "needs Docker Desktop on macOS";
@@ -7151,7 +7195,7 @@ function isDir(path2) {
 function hasCratisDir(root) {
   const entries = (dir) => {
     try {
-      return readdirSync19(dir).slice(0, LIMIT);
+      return readdirSync20(dir).slice(0, LIMIT);
     } catch {
       return [];
     }
@@ -7271,7 +7315,7 @@ var init_components = __esm({
 });
 
 // src/plan.ts
-import { existsSync as existsSync28, lstatSync as lstatSync8, readdirSync as readdirSync20, readFileSync as readFileSync31, readlinkSync as readlinkSync2, statSync as statSync19 } from "node:fs";
+import { existsSync as existsSync28, lstatSync as lstatSync9, readdirSync as readdirSync21, readFileSync as readFileSync31, readlinkSync as readlinkSync2, statSync as statSync19 } from "node:fs";
 import { join as join54 } from "node:path";
 function fromSource(src, settings3) {
   const raw = readFileSync31(src);
@@ -7402,7 +7446,7 @@ function linkIfFree(actions, notes, path2, target, home) {
     actions.push({ op: "symlink", path: path2, target });
     return;
   }
-  const link = lstatSync8(path2).isSymbolicLink() ? readlinkSync2(path2) : void 0;
+  const link = lstatSync9(path2).isSymbolicLink() ? readlinkSync2(path2) : void 0;
   if (link === target) return;
   const shown = (p) => p.startsWith(`${home}/`) ? `~/${p.slice(home.length + 1)}` : p;
   notes?.push(`left ${shown(path2)}: ${link === void 0 ? "a file" : `a link to ${shown(link)}`}; pi-setup does not replace it`);
@@ -7471,11 +7515,11 @@ function buildPlan(input) {
 function listSkills(repoDir2) {
   const dir = join54(repoDir2, "skills");
   if (!existsSync28(dir)) return [];
-  return readdirSync20(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  return readdirSync21(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 }
 function lstatExists(path2) {
   try {
-    lstatSync8(path2);
+    lstatSync9(path2);
     return true;
   } catch {
     return false;
@@ -7499,7 +7543,7 @@ var init_plan = __esm({
 });
 
 // src/doctor-checks.ts
-import { existsSync as existsSync29, lstatSync as lstatSync9, readdirSync as readdirSync21, readFileSync as readFileSync32, readlinkSync as readlinkSync3 } from "node:fs";
+import { existsSync as existsSync29, lstatSync as lstatSync10, readdirSync as readdirSync22, readFileSync as readFileSync32, readlinkSync as readlinkSync3 } from "node:fs";
 import { basename as basename8, dirname as dirname14, join as join55, resolve as resolve13 } from "node:path";
 function setupCmd(ctx) {
   if (ctx.which("pi-setup")) return "pi-setup";
@@ -7518,7 +7562,7 @@ function readJson2(path2) {
 function livePins(piDir, settings3) {
   const pins = /* @__PURE__ */ new Map();
   const dir = join55(piDir, "agents");
-  if (existsSync29(dir)) for (const file of readdirSync21(dir).filter((f) => f.endsWith(".md"))) {
+  if (existsSync29(dir)) for (const file of readdirSync22(dir).filter((f) => f.endsWith(".md"))) {
     const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text2(join55(dir, file)))?.[1] ?? "";
     const model = /^model:\s*(\S+)/m.exec(front)?.[1];
     if (!model) continue;
@@ -7548,12 +7592,12 @@ function state(ctx, facts) {
     const path2 = fromHomeRel(ctx.home, rel);
     if (!present(path2)) s.missing.push(rel);
     else if (fileSha(path2) !== entry2.sha256) s.changed.push(rel);
-    else if ((lstatSync9(path2).mode & 4095) !== entry2.mode) s.modes.push(rel);
+    else if ((lstatSync10(path2).mode & 4095) !== entry2.mode) s.modes.push(rel);
   }
   for (const [rel, link] of Object.entries(s.manifest?.symlinks ?? {})) {
     const path2 = fromHomeRel(ctx.home, rel);
     try {
-      if (!lstatSync9(path2).isSymbolicLink() || resolve13(dirname14(path2), readlinkSync3(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
+      if (!lstatSync10(path2).isSymbolicLink() || resolve13(dirname14(path2), readlinkSync3(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
     } catch {
       s.missing.push(rel);
     }
@@ -7715,7 +7759,7 @@ var init_doctor_checks = __esm({
     };
     present = (path2) => {
       try {
-        lstatSync9(path2);
+        lstatSync10(path2);
         return true;
       } catch {
         return false;
@@ -7935,7 +7979,7 @@ var init_update = __esm({
 });
 
 // src/doctor-probes.ts
-import { existsSync as existsSync32, readdirSync as readdirSync22, readFileSync as readFileSync33, writeFileSync as writeFileSync12 } from "node:fs";
+import { existsSync as existsSync32, readdirSync as readdirSync23, readFileSync as readFileSync33, writeFileSync as writeFileSync12 } from "node:fs";
 import { join as join58 } from "node:path";
 function pythonVersionCheck(ctx, version3) {
   const match = /^Python (\d+)\.(\d+)\b/.exec(version3 ?? "");
@@ -7950,7 +7994,7 @@ async function python(ctx) {
 function plists(ctx) {
   const dir = join58(ctx.home, "Library/LaunchAgents");
   if (ctx.platform !== "darwin" || !existsSync32(dir)) return [];
-  return readdirSync22(dir).filter((f) => f.endsWith(".plist")).flatMap((file) => {
+  return readdirSync23(dir).filter((f) => f.endsWith(".plist")).flatMap((file) => {
     const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(readFileSync33(join58(dir, file), "utf8"))?.[1];
     return label && /\.(docker-guardian|pi-cleanup)$/.test(label) ? [{ file, label }] : [];
   });
@@ -8386,7 +8430,7 @@ var init_services = __esm({
 });
 
 // src/doctor-components.ts
-import { existsSync as existsSync34, lstatSync as lstatSync10, readlinkSync as readlinkSync4, statSync as statSync21 } from "node:fs";
+import { existsSync as existsSync34, lstatSync as lstatSync11, readlinkSync as readlinkSync4, statSync as statSync21 } from "node:fs";
 import { join as join61 } from "node:path";
 async function isLoaded(ctx, kind, label) {
   try {
@@ -8402,7 +8446,7 @@ function lanesChecks(ctx) {
   let linked = false;
   let present2 = false;
   try {
-    const stat2 = lstatSync10(bin);
+    const stat2 = lstatSync11(bin);
     present2 = true;
     linked = stat2.isSymbolicLink() && readlinkSync4(bin) === target;
   } catch {
@@ -8751,14 +8795,14 @@ var init_report = __esm({
 import {
   copyFileSync as copyFileSync5,
   existsSync as existsSync35,
-  lstatSync as lstatSync11,
+  lstatSync as lstatSync12,
   mkdirSync as mkdirSync20,
   readFileSync as readFileSync36,
   readlinkSync as readlinkSync5,
   renameSync as renameSync8,
   rmdirSync as rmdirSync3,
   statSync as statSync22,
-  unlinkSync as unlinkSync6
+  unlinkSync as unlinkSync7
 } from "node:fs";
 import { dirname as dirname16, join as join63 } from "node:path";
 function restore(from, to) {
@@ -8768,7 +8812,7 @@ function restore(from, to) {
   } catch (error) {
     if (error.code !== "EXDEV") throw error;
     copyFileSync5(from, to);
-    unlinkSync6(from);
+    unlinkSync7(from);
   }
 }
 function undo(data, op) {
@@ -8795,7 +8839,7 @@ function undoArray(data, op) {
 }
 function lstatExists2(path2) {
   try {
-    lstatSync11(path2);
+    lstatSync12(path2);
     return true;
   } catch {
     return false;
@@ -8803,7 +8847,7 @@ function lstatExists2(path2) {
 }
 function rmdirIfEmpty(path2) {
   try {
-    if (lstatSync11(path2).isDirectory()) rmdirSync3(path2);
+    if (lstatSync12(path2).isDirectory()) rmdirSync3(path2);
   } catch {
   }
 }
@@ -8834,7 +8878,7 @@ function retireSymlinks(ctx, m2, rels) {
     if (!entry2) continue;
     const path2 = fromHomeRel(ctx.home, rel);
     const target = symlinkTarget(ctx.home, entry2.target);
-    if (sameLink(path2, target) || sameLink(path2, entry2.target)) steps.push({ line: `remove ${path2}`, run: () => unlinkSync6(path2) });
+    if (sameLink(path2, target) || sameLink(path2, entry2.target)) steps.push({ line: `remove ${path2}`, run: () => unlinkSync7(path2) });
     else steps.push({ line: `left ${path2}: no longer points at ${target}`, run: () => {
     } });
     delete m2.symlinks[rel];
@@ -8912,13 +8956,13 @@ async function runUninstall(ctx, options, prompter) {
 function finalize(ctx, piDir, old, left) {
   const empty = Object.keys(left.files).length + Object.keys(left.json).length + Object.keys(left.symlinks).length === 0;
   if (empty) {
-    if (existsSync35(manifestPath(piDir))) unlinkSync6(manifestPath(piDir));
+    if (existsSync35(manifestPath(piDir))) unlinkSync7(manifestPath(piDir));
   } else {
     left.dirs = left.dirs.filter((d) => lstatExists2(fromHomeRel(ctx.home, d)));
     saveIfChanged(piDir, old, left, ctx.now());
   }
   const cache = join63(piDir, ".pi-setup/update-check.json");
-  if (existsSync35(cache)) unlinkSync6(cache);
+  if (existsSync35(cache)) unlinkSync7(cache);
   tidy(piDir);
   const rest = listBackups(piDir, pinnedBackups(empty ? void 0 : left));
   for (const rel of [...left.dirs].sort((a2, b) => b.split("/").length - a2.split("/").length || (a2 < b ? 1 : -1))) {
@@ -8939,7 +8983,7 @@ var init_uninstall = __esm({
     init_types();
     sameLink = (path2, target) => {
       try {
-        return lstatSync11(path2).isSymbolicLink() && readlinkSync5(path2) === target;
+        return lstatSync12(path2).isSymbolicLink() && readlinkSync5(path2) === target;
       } catch {
         return false;
       }
@@ -8977,7 +9021,7 @@ var init_uninstall = __esm({
         for (const [rel, entry2] of Object.entries(this.m.files)) if (this.file(rel, entry2)) deleted.add(rel);
         for (const [rel, sha2] of Object.entries(this.m.pendingNew ?? {})) {
           const path2 = this.abs(rel);
-          if (fileSha(path2) === sha2) this.add(`remove ${path2}`, () => unlinkSync6(path2));
+          if (fileSha(path2) === sha2) this.add(`remove ${path2}`, () => unlinkSync7(path2));
           delete this.remaining.pendingNew;
         }
         for (const [rel, link] of Object.entries(this.m.symlinks)) this.symlink(rel, link.target);
@@ -9009,7 +9053,7 @@ var init_uninstall = __esm({
         }
         if (entry2.origin === "replaced" && backup) {
           this.add(`restore ${path2} (from ${backup})`, () => {
-            unlinkSync6(path2);
+            unlinkSync7(path2);
             restore(backup, path2);
           });
         } else if (entry2.origin === "replaced") {
@@ -9018,7 +9062,7 @@ var init_uninstall = __esm({
           delete this.remaining.files[rel];
           return false;
         } else {
-          this.add(`remove ${path2}`, () => unlinkSync6(path2));
+          this.add(`remove ${path2}`, () => unlinkSync7(path2));
         }
         delete this.remaining.files[rel];
         return true;
@@ -9027,13 +9071,13 @@ var init_uninstall = __esm({
         if (!entry2.pending) return;
         const path2 = this.abs(entry2.pending.path);
         const expected = entry2.pending.sha256;
-        if (fileSha(path2) === expected) this.add(`remove ${path2}`, () => unlinkSync6(path2));
+        if (fileSha(path2) === expected) this.add(`remove ${path2}`, () => unlinkSync7(path2));
         if (this.remaining.files[rel]) delete this.remaining.files[rel].pending;
       }
       symlink(rel, target) {
         const path2 = this.abs(rel);
         const targetPath = symlinkTarget(this.ctx.home, target);
-        if (sameLink(path2, targetPath) || sameLink(path2, target)) this.add(`remove ${path2}`, () => unlinkSync6(path2));
+        if (sameLink(path2, targetPath) || sameLink(path2, target)) this.add(`remove ${path2}`, () => unlinkSync7(path2));
         delete this.remaining.symlinks[rel];
       }
       json(rel, entry2) {
@@ -9044,9 +9088,9 @@ var init_uninstall = __esm({
         }
         const backup = this.backupFile(entry2.backup);
         if (!entry2.edited && fileSha(path2) === entry2.sha256After && (entry2.created || backup)) {
-          if (entry2.created) this.add(`remove ${path2}`, () => unlinkSync6(path2));
+          if (entry2.created) this.add(`remove ${path2}`, () => unlinkSync7(path2));
           else this.add(`restore ${path2} (from ${backup})`, () => {
-            unlinkSync6(path2);
+            unlinkSync7(path2);
             restore(backup, path2);
           });
           delete this.remaining.json[rel];
@@ -9068,7 +9112,7 @@ var init_uninstall = __esm({
           if (!undo(data, op)) left.push(op);
         }
         if (entry2.created && Object.keys(data).length === 0 && left.length === 0) {
-          unlinkSync6(path2);
+          unlinkSync7(path2);
           delete this.remaining.json[rel];
           return;
         }
@@ -9432,7 +9476,7 @@ var init_reconcile = __esm({
 });
 
 // src/setup-issue.ts
-import { readFileSync as readFileSync39, readdirSync as readdirSync23 } from "node:fs";
+import { readFileSync as readFileSync39, readdirSync as readdirSync24 } from "node:fs";
 import { arch, release } from "node:os";
 import { join as join67 } from "node:path";
 function reportRepo(component) {
@@ -9465,7 +9509,7 @@ function packageVersions(ctx) {
   const dir = join67(ctx.home, ".pi/agent/npm/node_modules/@woksin");
   let names;
   try {
-    names = readdirSync23(dir).sort();
+    names = readdirSync24(dir).sort();
   } catch {
     return ["woksin packages: none found"];
   }
@@ -11411,7 +11455,7 @@ var run_exports = {};
 __export(run_exports, {
   main: () => main2
 });
-import { existsSync as existsSync38, readdirSync as readdirSync24, readFileSync as readFileSync40 } from "node:fs";
+import { existsSync as existsSync38, readdirSync as readdirSync25, readFileSync as readFileSync40 } from "node:fs";
 import { join as join68 } from "node:path";
 function pickProfile(options, activeBefore, ready3, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
@@ -11807,7 +11851,7 @@ var init_run2 = __esm({
     };
     readdirSyncSafe = (dir) => {
       try {
-        return readdirSync24(dir);
+        return readdirSync25(dir);
       } catch {
         return [];
       }

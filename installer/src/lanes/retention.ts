@@ -5,6 +5,7 @@ import { archiveDir, expand, UsageError, type Config } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
 import { parseMessageName } from "./names.ts";
 import { pruneLegacy } from "./legacy-prune.ts";
+import { pruneRegistrations, registrationCutoff } from "./registration.ts";
 
 export interface PruneCounts { archived: number; deleted: number; skippedUnread: number; skippedCollision: number; kept: number; archiveExpired: number }
 const DAY = 86400000;
@@ -51,6 +52,7 @@ function archive(m: Pick<ReturnType<typeof messages>[number], "name" | "path" | 
 export function prune(c: Config, root: string, ctx: LanesCtx, dryRun = false): PruneCounts {
   const counts: PruneCounts = { archived: 0, deleted: 0, skippedUnread: 0, skippedCollision: 0, kept: 0, archiveExpired: 0 };
   const dir = expand(c.messages.dir, c, root, ctx.home);
+  pruneRegistrations(root, registrationCutoff(c, ctx.now()), dryRun);
   const r = c.messages.retention;
   if (!r || (r.mode === "keep" && r.archiveMaxAgeDays === null)) { counts.kept = messages(dir).length; return counts; }
   const destination = archiveDir(c, root, ctx.home);

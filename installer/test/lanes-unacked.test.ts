@@ -69,6 +69,13 @@ test("multi-recipient expansion preserves known hyphenated IDs and unknown ambig
   const f = fixture(); f.message("L0", "L1-L2"); f.message("L0", "R-FOO"); f.message("L0", "MYSTERY-ID");
   const { report } = await f.unacked(); assert.deepEqual(report.rows.map((r: any) => r.to).sort(), ["L1", "L2", "MYSTERY-ID", "R-FOO"]);
 });
+test("recipient splitting backtracks to a complete known-ID decomposition", async () => {
+  const f = fixture(); f.c.lanes.push(...["R-A", "R-A-R", "R-B"].map(id => ({ id, repo: "example/alpha", worktree: id, branch: id, group: null, prompt: "prompt.md" })));
+  saveConfig(f.home, f.c); f.put("L0-to-R-A-R-B-task-1100.md", 60);
+  assert.deepEqual((await f.unacked()).report.rows.map((r: any) => r.to).sort(), ["R-A", "R-B"]);
+  f.c.lanes.push({ id: "R-A-R-B", repo: "example/alpha", worktree: "whole", branch: "whole", group: null, prompt: "prompt.md" }); saveConfig(f.home, f.c);
+  assert.deepEqual((await f.unacked()).report.rows.map((r: any) => r.to), ["R-A-R-B"]);
+});
 test("rows are oldest first with stable ties; human output includes recipient liveness", async () => {
   const f = fixture(); f.message("L0", "L1", 40); const oldest = f.message("L0", "L2", 90);
   const { report } = await f.unacked(); assert.equal(report.rows[0].name, oldest);

@@ -18,14 +18,18 @@ interface DirectedMessage { message: MessageRef; recipients: string[] }
 /** Prefer a known whole ID, then a complete decomposition; ambiguous unknowns stay whole. */
 function endpoints(token: string, known: Set<string>): string[] {
   if (known.has(token)) return [token];
-  const parts = token.split("-"); const result: string[] = [];
-  for (let start = 0; start < parts.length;) {
-    let end = parts.length;
-    while (end > start && !known.has(parts.slice(start, end).join("-"))) end--;
-    if (end === start) return [token];
-    result.push(parts.slice(start, end).join("-")); start = end;
+  const parts = token.split("-"); const memo = new Map<number, string[] | null>();
+  function split(start: number): string[] | null {
+    if (start === parts.length) return [];
+    if (memo.has(start)) return memo.get(start)!;
+    for (let end = parts.length; end > start; end--) {
+      const id = parts.slice(start, end).join("-"); if (!known.has(id)) continue;
+      const rest = split(end); if (rest === null) continue;
+      const result = [id, ...rest]; memo.set(start, result); return result;
+    }
+    memo.set(start, null); return null;
   }
-  return result;
+  return split(0) ?? [token];
 }
 function directedMessages(messages: MessageRef[], lanes: UnackedLanes): DirectedMessage[] {
   const reserved = new Set(["", "ALL", "BCAST", lanes.broadcast, ...lanes.groups]);

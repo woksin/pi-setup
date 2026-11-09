@@ -7,7 +7,7 @@ import { deliveries, foldRegistry, holding, issueKey, ownershipOf, readIssueRegi
 import { runningPiChecked } from "./processes.ts";
 import { idleMinutes } from "./sessions.ts";
 import { parseStatus, suppressed } from "./status-line.ts";
-import { checkRegistrations, joinRegistration, launchedRows, readRegistrations, registrationState, type CheckedRegistration } from "./registration.ts";
+import { checkRegistrations, joinRegistration, launchedRows, readRegistrations, registrationCutoff, registrationState, type CheckedRegistration } from "./registration.ts";
 
 export const HEARTBEAT_STALE_MIN = 15;
 interface Heartbeat { pid: number; id?: string; sessionId?: string; at: string; state?: string }
@@ -81,7 +81,7 @@ function rosterSeeds(c: Config, root: string, ctx: LanesCtx): Seed[] {
 }
 export async function readRoster(c: Config, root: string, ctx: LanesCtx, register?: RegisterData): Promise<RosterInputs> {
   const data = register ?? await readIssueRegister(ctx); const processes = await runningPiChecked(ctx);
-  const registrations = readRegistrations(root);
+  const registrations = readRegistrations(root, registrationCutoff(c, ctx.now()));
   const orch = join(ctx.home, ".pi/orch");
   const heartbeats = readJsonDir<Heartbeat>(join(orch, "heartbeats"), v => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
   const sessions = readJsonDir<OrchSession>(join(orch, "sessions"), v => v && Number.isInteger(v.pid) && (v.id === undefined || typeof v.id === "string"));
@@ -219,7 +219,7 @@ function stateOf(row: RosterRow, input: RosterInputs, now: Date): string {
   const registered = row.evidence.includes("registration");
   const live = row.pid !== null || row.evidence.includes("lease") || heartbeatFresh || registered;
   const ended = registrationState(row, input);
-  if (ended) return ended;
+  if (!live && ended) return ended;
   if (!registered && discoveryUnknown(row, input, heartbeatFresh)) return "unknown";
   if (!live) return seed ? "stopped" : "unknown";
   return activeState(row, line, h, now);

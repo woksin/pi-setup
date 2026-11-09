@@ -8,7 +8,8 @@ import type { AdmissionProcess } from "../src/lanes/admission.ts";
 import { defaults, saveConfig } from "../src/lanes/config.ts";
 import { run } from "../src/lanes/commands/run.ts";
 import { main } from "../src/lanes/main.ts";
-import { pidAlive } from "../src/lanes/registration.ts";
+import { pidAlive, registrationState } from "../src/lanes/registration.ts";
+import { readRoster } from "../src/lanes/roster.ts";
 
 function fixture() {
   const home = tempDir("lanes-registration"); const lines: string[] = []; const errors: string[] = [];
@@ -86,9 +87,9 @@ for (const seeded of [true, false]) for (const retired of [true, false]) test(`w
   assert.equal(row.identity, seeded ? "registered" : "launched"); assert.equal(row.state, !seeded && retired ? "retired" : "stopped");
   assert.ok(row.notes.includes(retired ? `session ended ${at}` : "registration stale (no exit recorded)"));
 });
-test("wrapper liveness does not borrow a live Pi process after the wrapper dies", async () => {
+test("a dead wrapper with no Pi in its cwd is stopped", async () => {
   const f = fixture(); f.ctx.run = async () => ({ code: 0, stdout: "701 pi", stderr: "", timedOut: false });
-  f.ctx.readCwd = async () => f.home;
+  f.ctx.readCwd = async () => join(f.home, "elsewhere");
   f.put("L0", { id: "L0", pid: 20, cwd: f.home, startedAt: f.ctx.now().toISOString() });
   assert.equal((await f.who()).rows.find((r: any) => r.lane === "L0").state, "stopped");
 });
@@ -100,6 +101,36 @@ for (const orch of [true, false]) test(`live unseeded registration merges with $
   const rows = (await f.who()).rows.filter((r: any) => r.worktree === cwd);
   assert.equal(rows.length, 1); assert.equal(rows[0].lane, "EXTRA"); assert.equal(rows[0].pid, 701);
   assert.equal(rows[0].identity, orch ? "orch" : "launched"); assert.ok(rows[0].evidence.includes("registration"));
+});
+for (const retired of [true, false]) for (const seeded of [true, false]) for (const evidence of ["process", "heartbeat", "lease"]) test(`${retired ? "ended" : "stale"} registration cannot override ${evidence} liveness (${seeded ? "configured" : "launched"})`, async () => {
+  const f = fixture(); const id = seeded ? "L0" : "EXTRA"; const at = f.ctx.now().toISOString();
+  f.put(id, { id, pid: 20, cwd: f.home, startedAt: at, ...(retired ? { retiredAt: at } : {}) });
+  f.ctx.run = async (_name, args) => ({ code: 0, stdout: args.includes("-axo") ? evidence === "lease" ? "" : "701 pi" : args.includes("lstart=") ? "synthetic start" : "701", stderr: "", timedOut: false });
+  f.ctx.readCwd = async () => f.home;
+  // Unconfigured records must join an independently discovered anonymous process, not add a stopped duplicate.
+  if (!seeded) { f.c.coordinator.cwd = join(f.home, "coordinator"); saveConfig(f.home, f.c); }
+  if (evidence === "heartbeat") { mkdirSync(join(f.home, ".pi/orch/heartbeats"), { recursive: true }); writeFileSync(join(f.home, ".pi/orch/heartbeats/p701.json"), JSON.stringify({ pid: 701, at, state: "working" })); }
+  if (evidence === "lease") { mkdirSync(join(f.home, "agent/issue-work/sessions"), { recursive: true }); writeFileSync(join(f.home, "agent/issue-work/sessions/worker.json"), JSON.stringify({ sessionId: "worker", pid: 701, startedAt: at, procStart: "synthetic start", cwd: f.home })); }
+  const rows = (await f.who()).rows.filter((r: any) => r.worktree === f.home);
+  assert.equal(rows.length, 1); const row = rows[0]; assert.equal(row.lane, id); assert.equal(row.pid, 701);
+  assert.equal(row.state, evidence === "heartbeat" ? "working" : "idle");
+  assert.ok(row.notes.includes(retired ? `session ended ${at}` : "registration stale (no exit recorded)"));
+});
+for (const evidence of ["lease", "heartbeat(fresh)"]) test(`registrationState defers to independent ${evidence} evidence without a process PID`, async () => {
+  const f = fixture(); const at = f.ctx.now().toISOString(); f.put("L0", { id: "L0", pid: 20, cwd: f.home, startedAt: at, retiredAt: at });
+  const row = (await f.who()).rows.find((r: any) => r.lane === "L0"); row.pid = null; row.evidence = [evidence];
+  assert.equal(registrationState(row, await readRoster(f.c, f.home, f.ctx)), undefined);
+});
+for (const days of [undefined, 2, 14]) test(`who ignores expired retired registrations using ${days ?? "fallback 14"} days without deleting them`, async () => {
+  const f = fixture(); if (days === undefined) delete f.c.messages.retention; else f.c.messages.retention!.maxAgeDays = days; saveConfig(f.home, f.c);
+  const at = (age: number) => new Date(f.ctx.now().getTime() - age * 86400000).toISOString();
+  f.put("EXPIRED", { id: "EXPIRED", pid: 20, cwd: f.home, startedAt: at(100), retiredAt: at((days ?? 14) + 1) });
+  f.put("BOUNDARY", { id: "BOUNDARY", pid: 20, cwd: f.home, startedAt: at(100), retiredAt: at(days ?? 14) });
+  f.put("STALE", { id: "STALE", pid: 20, cwd: f.home, startedAt: at(100) });
+  const report = await f.who(); assert.equal(report.rows.some((r: any) => r.lane === "EXPIRED"), false);
+  assert.equal(report.rows.find((r: any) => r.lane === "BOUNDARY").state, "retired");
+  assert.equal(report.rows.find((r: any) => r.lane === "STALE").state, "stopped");
+  assert.equal(report.sources.registrations.count, 2); assert.ok(existsSync(join(f.home, ".state/roster/EXPIRED.json")));
 });
 test("default pidAlive regards EPERM as alive and ESRCH as dead", t => {
   t.mock.method(process, "kill", () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); });
