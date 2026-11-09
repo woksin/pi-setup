@@ -1487,3 +1487,16 @@ test("when REST is rate limited too, a short error names the reset time", async 
 	await assert.rejects(claim({ ...deps(), run: rateLimited({ rest: false }) }, session(), { repo: "o/r", issue: 5 }), /GitHub rate limited; retry after/);
 	assert.equal(existsSync(join(dir, "seen")), false, "a failed fetch is not recorded");
 });
+
+test("done is not applied when the activity check was rate limited, even if the REST issue fallback works", async () => {
+	const base = rateLimited({ rest: true });
+	const run: Runner = async (cmd, args, o) => {
+		if (cmd === "gh" && args[0] === "pr" && args[1] === "view") throw RATE_LIMIT;
+		return base(cmd, args, o);
+	};
+	const calls: string[][] = [];
+	const text = await update({ ...deps(), run: async (c, a, o) => { calls.push([c, ...a]); return run(c, a, o); } }, session(), { repo: "o/r", issue: 5, state: "done", pr: "https://github.com/o/r/pull/9" });
+	assert.match(text, /^Could not check for new activity: GitHub rate limited; retry after /);
+	assert.match(text, /Not applied: done needs the activity check/);
+	assert.equal(calls.some((c) => c.includes("issue-status.py") || c.join(" ").includes("edit")), false, "nothing was written");
+});
