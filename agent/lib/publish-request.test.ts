@@ -84,7 +84,7 @@ for (const [index, value] of bad.entries()) test(`rejects invalid operation fixt
 	assert.throws(() => validateRequest(value), error => {
 		assert.ok(error instanceof InvalidRequest);
 		assert.equal(error.message, "publish: invalid-request");
-		assert.deepEqual(Object.keys(error), ["code"]);
+		assert.ok(Object.keys(error).every(key => ["code", "detail"].includes(key)));
 		return true;
 	});
 });
@@ -182,6 +182,36 @@ test("gist-edit plans exactly one single-valued gh operation (--add, --remove or
 	assert.deepEqual(gist({ files: ["file.md"] }), ["gist", "edit", "abc123", { payload: 0, use: "file", prefix: "--add=" }]);
 	const edit = publishRequestSchema.oneOf.find(shape => shape.properties.kind.const === "gist-edit")! as any;
 	assert.equal(edit.allOf.at(-1).oneOf.length, 3);
+});
+
+test("validation details name only known fields and static contracts, never received values", () => {
+	const cases = [
+		[{ kind: "issue-comment", body: "VALUE-SENTINEL" }, /missing: repo, number/],
+		[{ kind: "pr-create", repo: target.repo, title: "VALUE-SENTINEL" }, /pr-create needs body or bodyFile/],
+		[{ kind: "gist-create", repo: "VALUE-SENTINEL", files: ["a"] }, /unknown field for gist-create: repo/],
+		[{ kind: "check", files: ["a"], "sk-KEY-SENTINEL": "VALUE-SENTINEL" }, /unknown fields: 1/],
+		[{ kind: "issue-close", ...target, reason: "VALUE-SENTINEL" }, /invalid value: reason; allowed: completed, not-planned/],
+		[{ kind: "issue-comment", ...target, body: "VALUE-SENTINEL", bodyFile: "draft.md" }, /body and bodyFile are mutually exclusive/],
+	] as const;
+	for (const [value, expected] of cases) assert.throws(() => validateRequest(value), error => {
+		assert.ok(error instanceof InvalidRequest); assert.match(error.detail ?? "", expected);
+		assert.match(error.detail ?? "", new RegExp(`${value.kind} requires: .*optional:`));
+		assert.ok(!JSON.stringify(error).includes("SENTINEL")); return true;
+	});
+	assert.throws(() => validateRequest({ kind: "KIND-SENTINEL" }), error => {
+		assert.ok(error instanceof InvalidRequest); assert.match(error.detail ?? "", /^kind must be one of: issue-create, pr-create,/);
+		assert.ok(!JSON.stringify(error).includes("SENTINEL")); return true;
+	});
+});
+
+test("CLI preserves safe validator detail but hides parser exception values", () => {
+	assert.throws(() => parseCli(["issue-comment", "--body", "VALUE-SENTINEL"]), error => {
+		assert.ok(error instanceof InvalidRequest); assert.match(error.detail ?? "", /missing: repo, number/);
+		assert.ok(!JSON.stringify(error).includes("SENTINEL")); return true;
+	});
+	assert.throws(() => parseCli(["api", "--field-json", "VALUE-SENTINEL"]), error => {
+		assert.ok(error instanceof InvalidRequest); assert.equal(error.detail, undefined); return true;
+	});
 });
 
 test("issue-close maps the typed not-planned reason to gh's spelling", () => {

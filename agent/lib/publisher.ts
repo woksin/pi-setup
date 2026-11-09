@@ -11,8 +11,8 @@ import type { PublicationContext, PublicationScan } from "./publish-scan.ts";
 import { InvalidRequest, MAX_REQUEST_BYTES, MAX_STRING_BYTES, toGhPlan, validateRequest } from "./publish-request.ts";
 import type { GhPlan, PayloadSource, PayloadSlot } from "./publish-request.ts";
 
-export type PublishCode = "published" | "scan-clean" | "invalid-request" | "unsupported-platform" | "payload-unreadable" | "payload-too-large" | "payload-not-utf8" | "scan-refused" | "gh-unavailable" | "gh-failed" | "gh-timeout" | "cancelled" | "gh-output-limit" | "cleanup-failed" | "host-unauthenticated";
-export interface PublishResult { code: PublishCode; text: string; isError: boolean; diagnostics?: { source: string; count: number; findings: PublicationScan["findings"] } }
+export type PublishCode = "published" | "scan-clean" | "invalid-request" | "unsupported-platform" | "payload-unreadable" | "payload-too-large" | "payload-not-utf8" | "scan-refused" | "gh-unavailable" | "gh-failed" | "gh-timeout" | "cancelled" | "gh-output-limit" | "cleanup-failed" | "payload-not-found" | "payload-symlink" | "payload-not-file" | "payload-permission" | "host-unauthenticated";
+export interface PublishResult { code: PublishCode; text: string; isError: boolean; detail?: string; diagnostics?: { source: string; count: number; findings: PublicationScan["findings"] } }
 interface FileStat { size: number; isFile(): boolean }
 export interface CaptureHandle {
 	stat(): Promise<FileStat>;
@@ -53,13 +53,15 @@ interface Runtime {
 class Failure extends Error {
 	readonly code: PublishCode;
 	readonly diagnostics?: PublishResult["diagnostics"];
-	constructor(code: PublishCode, diagnostics?: PublishResult["diagnostics"]) {
+	readonly detail?: string;
+	constructor(code: PublishCode, diagnostics?: PublishResult["diagnostics"], detail?: string) {
 		super(`publish: ${code}`); this.code = code; this.diagnostics = diagnostics;
+		this.detail = detail ?? (code === "gh-failed" ? "exit=none category=unclassified; do not retry blindly" : undefined);
 	}
 }
-function result(code: PublishCode, diagnostics?: PublishResult["diagnostics"]): PublishResult {
+function result(code: PublishCode, diagnostics?: PublishResult["diagnostics"], detail?: string): PublishResult {
 	const success = code === "published" || code === "scan-clean";
-	return { code, text: success ? (code === "published" ? "published" : "scan clean") : `publish: ${code}`, isError: !success, ...(diagnostics ? { diagnostics } : {}) };
+	return { code, text: success ? (code === "published" ? "published" : "scan clean") : `publish: ${code}`, isError: !success, ...(diagnostics ? { diagnostics } : {}), ...(detail ? { detail } : {}) };
 }
 function runtime(context: PublisherContext, adapters: PublisherAdapters): Runtime {
 	return {
@@ -82,7 +84,7 @@ function boundedSize(size: number, limit: number): void {
 	if (size > limit) throw new Failure("payload-too-large");
 }
 function checkStat(stat: FileStat): void {
-	if (!stat.isFile()) throw new Failure("payload-unreadable");
+	if (!stat.isFile()) throw new Failure("payload-not-file");
 	boundedSize(stat.size, MAX_STRING_BYTES);
 }
 function checkRead(read: { bytesRead: number; capacity: number }): void {
@@ -106,18 +108,46 @@ async function readBounded(handle: CaptureHandle, signal?: AbortSignal): Promise
 	}
 	return Buffer.concat(chunks, size);
 }
+const OPEN_ERRORS: Record<string, PublishCode> = {
+	ENOENT: "payload-not-found", ENOTDIR: "payload-not-found", ELOOP: "payload-symlink",
+	EISDIR: "payload-not-file", EACCES: "payload-permission", EPERM: "payload-permission",
+};
+function displayPath(path: string, run: Runtime): string {
+	const absolute = resolve(run.context.cwd ?? process.cwd(), path), home = run.scanContext.home.replace(/\/+$/, "");
+	const displayed = home && (absolute === home || absolute.startsWith(home + "/")) ? "~" + absolute.slice(home.length) : absolute;
+	return displayed.replace(/[\p{Cc}\p{Cf}]/gu, "?").slice(0, 300);
+}
+function openErrorCode(error: unknown): PublishCode {
+	if (!error || typeof error !== "object") return "payload-unreadable";
+	if (!("code" in error)) return "payload-unreadable";
+	const errno = error.code;
+	if (typeof errno !== "string") return "payload-unreadable";
+	return Object.hasOwn(OPEN_ERRORS, errno) ? OPEN_ERRORS[errno] : "payload-unreadable";
+}
+async function openCapture(path: string, flags: number, run: Runtime): Promise<CaptureHandle> {
+	try { return await run.io.open(resolve(run.context.cwd ?? process.cwd(), path), flags); }
+	catch (error) {
+		const code = openErrorCode(error);
+		throw new Failure(code, undefined, code === "payload-unreadable" ? undefined : displayPath(path, run));
+	}
+}
+function captureFailure(error: unknown, path: string, run: Runtime): Failure {
+	if (!(error instanceof Failure)) return new Failure("payload-unreadable");
+	if (error.detail || error.code === "payload-unreadable") return error;
+	return error.code.startsWith("payload-") ? new Failure(error.code, error.diagnostics, displayPath(path, run)) : error;
+}
 async function captureFile(path: string, run: Runtime): Promise<Buffer> {
 	cancelled(run.context.signal);
 	const flags = captureFlags(run.platform);
 	try {
-		const handle = await run.io.open(resolve(run.context.cwd ?? process.cwd(), path), flags);
+		const handle = await openCapture(path, flags, run);
 		try {
 			cancelled(run.context.signal); checkStat(await handle.stat());
 			const bytes = await readBounded(handle, run.context.signal);
 			checkStat(await handle.stat()); cancelled(run.context.signal);
 			return bytes;
 		} finally { await handle.close(); }
-	} catch (error) { if (error instanceof Failure) throw error; throw new Failure("payload-unreadable"); }
+	} catch (error) { throw captureFailure(error, path, run); }
 }
 function decoded(bytes: Buffer): string {
 	try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
@@ -197,22 +227,56 @@ function materialize(slot: PayloadSlot, state: { bytes: Buffer[]; paths: string[
 	return slot.prefix + (slot.use === "file" ? state.paths[slot.payload] : decoded(state.bytes[slot.payload]));
 }
 const OUTPUT_LIMIT = 256 * 1024;
-function watchStream(stream: Readable | null, stop: (code: PublishCode) => void): void {
+const STDERR_LIMIT = 16 * 1024;
+const GH_CATEGORIES = [
+	["rate-limit", /rate limit|secondary rate|HTTP 429|abuse detection/i],
+	["auth", /HTTP 40[13]|bad credentials|authentication|gh auth login|not logged in|requires authentication|resource not accessible|SAML/i],
+	["not-found", /HTTP 404|not found|could not resolve to a/i],
+	["validation", /HTTP 422|validation failed|unprocessable|invalid (?:input|request)/i],
+	["network", /HTTP 5\d\d|timeout|timed out|no such host|connection (?:refused|reset)|dial tcp|ECONN|EOF|TLS|could not resolve host|error connecting to|check your internet connection/i],
+] as const;
+type GhCategory = typeof GH_CATEGORIES[number][0] | "unclassified";
+const GH_ADVICE: Record<GhCategory, string> = {
+	"rate-limit": "retry once, then stop", network: "retry once, then stop",
+	auth: "do not retry; check gh auth status",
+	"not-found": "do not retry; fix the request (repo, number, fields)", validation: "do not retry; fix the request (repo, number, fields)",
+	unclassified: "do not retry blindly",
+};
+function classifyStderr(text: string): GhCategory {
+	return GH_CATEGORIES.find(([, pattern]) => pattern.test(text))?.[0] ?? "unclassified";
+}
+function watchStream(stream: Readable | null, stop: (code: PublishCode) => void, capture?: (chunk: Buffer | string) => void): void {
 	let bytes = 0;
 	stream?.on("data", (chunk: Buffer | string) => {
 		bytes += Buffer.byteLength(chunk);
 		if (bytes > OUTPUT_LIMIT) stop("gh-output-limit");
+		else capture?.(chunk);
 	});
 	stream?.on("error", () => stop("gh-failed"));
 }
-function childFailure(state: { code: number | null; failure?: PublishCode }): Failure | undefined {
+function childFailure(state: { code: number | null; failure?: PublishCode; stderr: string }): Failure | undefined {
 	if (state.failure) return new Failure(state.failure);
-	if (state.code !== 0) return new Failure("gh-failed");
-	return undefined;
+	if (state.code === 0) return undefined;
+	const category = classifyStderr(state.stderr);
+	const exit = Number.isInteger(state.code) && state.code! >= 0 && state.code! <= 255 ? state.code : "none";
+	return new Failure("gh-failed", undefined, `exit=${exit} category=${category}; ${GH_ADVICE[category]}`);
+}
+function stderrCapture() {
+	let text = "", remaining = STDERR_LIMIT;
+	const decoder = new TextDecoder();
+	return {
+		append(chunk: Buffer | string) {
+			if (!remaining) return;
+			const bytes = (typeof chunk === "string" ? Buffer.from(chunk) : chunk).subarray(0, remaining);
+			remaining -= bytes.length; text += decoder.decode(bytes, { stream: true });
+		},
+		take() { const captured = text + decoder.decode(); text = ""; return captured; },
+	};
 }
 function monitor(child: PublisherChild, run: Runtime): Promise<void> {
 	return new Promise((resolve, reject) => {
 		let failure: PublishCode | undefined;
+		const stderr = stderrCapture();
 		const stop = (code: PublishCode) => {
 			if (failure) return;
 			failure = code;
@@ -223,10 +287,10 @@ function monitor(child: PublisherChild, run: Runtime): Promise<void> {
 		child.on("error", () => stop("gh-failed"));
 		child.once("close", (code: number | null) => {
 			cancelTimer(); run.context.signal?.removeEventListener("abort", abort);
-			const error = childFailure({ code, failure });
+			const error = childFailure({ code, failure, stderr: stderr.take() });
 			if (error) reject(error); else resolve();
 		});
-		watchStream(child.stdout, stop); watchStream(child.stderr, stop);
+		watchStream(child.stdout, stop); watchStream(child.stderr, stop, stderr.append);
 		run.context.signal?.addEventListener("abort", abort, { once: true });
 		if (run.context.signal?.aborted) abort();
 	});
@@ -249,8 +313,8 @@ async function hostPreflight(host: string, run: Runtime): Promise<void> {
 	catch (error) { throw error instanceof Failure && error.code === "gh-failed" ? new Failure("host-unauthenticated") : error; }
 }
 function failed(error: unknown): PublishResult {
-	if (error instanceof InvalidRequest) return result("invalid-request");
-	if (error instanceof Failure) return result(error.code, error.diagnostics);
+	if (error instanceof InvalidRequest) return result("invalid-request", undefined, error.detail);
+	if (error instanceof Failure) return result(error.code, error.diagnostics, error.detail);
 	return result("payload-unreadable");
 }
 async function cleanup(state: { directory?: string; outcome: PublishResult }, io: PublisherIO): Promise<PublishResult> {
