@@ -99,16 +99,16 @@ test("a lane-closed wake file wakes only the reassign target, PISETUP included",
 	const dir = fresh();
 	for (const id of ["L1", "L2", "L3", "PISETUP"]) assert.equal((await run(dir, id)).code, 1);
 	await sleep(2100);
-	put(dir, "L1-to-L2-lane-closed-1200.md", 10);
-	put(dir, "L1-to-PISETUP-lane-closed-1201.md", 10);
+	put(dir, "lanestatus-to-L2-lane-closed-L2-A-1200.md", 10);
+	put(dir, "lanestatus-to-PISETUP-lane-closed-L1-1201.md", 10);
 	assert.equal((await run(dir, "L3")).code, 1);
 	assert.equal((await run(dir, "L1")).code, 1);
 	const r = await run(dir, "L2");
-	assert.equal(r.code, 0);
-	assert.deepEqual(r.out, ["L1-to-L2-lane-closed-1200.md"]);
+	assert.equal(r.code, 0, "a dashed closed lane (L2-A) reassigning to its prefix (L2) still wakes the target");
+	assert.deepEqual(r.out, ["lanestatus-to-L2-lane-closed-L2-A-1200.md"]);
 	const p = await run(dir, "PISETUP");
 	assert.equal(p.code, 0);
-	assert.deepEqual(p.out, ["L1-to-PISETUP-lane-closed-1201.md"]);
+	assert.deepEqual(p.out, ["lanestatus-to-PISETUP-lane-closed-L1-1201.md"]);
 });
 
 test("a BCAST file older than the TTL is never reported", async () => {
