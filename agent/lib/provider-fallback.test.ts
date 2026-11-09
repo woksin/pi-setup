@@ -1,7 +1,7 @@
 /** provider-fallback: classification, selection, context veto, turn_end switch/notice. Complements model-drift.test.ts (restore/drift flows). */
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test, type TestContext } from "node:test";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, watch, writeFileSync, type WatchListener } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ORIGINAL_ENTRY, restoreManualPin, restoreOriginal, type OriginalEntryData } from "./provider-fallback-state.ts";
@@ -101,7 +101,7 @@ afterEach(async () => {
 });
 const writeConfig = (c: object) => writeFileSync(process.env.PI_PROVIDER_FALLBACK_CONFIG!, JSON.stringify(c));
 
-function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; target?: { contextWindow: number; maxTokens: number }; gate?: boolean } = {}) {
+function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; target?: { contextWindow: number; maxTokens: number }; gate?: boolean; watch?: Parameters<typeof fallbackExtension>[1] } = {}) {
 	const handlers: Record<string, any> = {};
 	const commands: Record<string, any> = {};
 	const notices: [string, string][] = [];
@@ -134,7 +134,7 @@ function session(opts: { hasUI?: boolean; tokens?: number; model?: typeof A; tar
 			return true;
 		},
 	};
-	fallbackExtension(pi);
+	fallbackExtension(pi, opts.watch);
 	shutdowns.push(() => handlers.session_shutdown({}, ctx));
 	const fire = (errorMessage: string | undefined, over: object = {}) => handlers.turn_end({
 		message: { role: "assistant", stopReason: "error", errorMessage, provider: "anthropic", model: "a", ...over },
@@ -282,32 +282,25 @@ test("shutdown closes the directory watch and cancels fallback and debounced che
 	assert.deepEqual(s.prompts, []);
 });
 
-// Quarantined (woksin/pi-setup#146): machine-wide FSEvents backlog under load can exceed the deadline.
-test("directory watcher notices atomic limit removal without waiting for the slow timer", { skip: "flaky under FSEvents backlog, see woksin/pi-setup#146" }, async () => {
-	const s = session({ hasUI: true });
+test("directory watcher notices atomic limit removal without waiting for the slow timer", async t => {
+	const poll = recoveryClock(t);
+	let change: WatchListener<string> | undefined;
+	const watcher = { on: t.mock.fn(), unref: t.mock.fn(), close: t.mock.fn() };
+	const s = session({ hasUI: true, watch: (directory, listener) => {
+		assert.equal(directory, join(stateFile, ".."));
+		change = listener;
+		return watcher;
+	} });
 	await s.fire("429");
-	// FSEvents may not deliver a rename made before the watch is fully registered, so repeat the
-	// atomic replace until the watcher reacts. The slow fallback timer (60 s) cannot satisfy this.
-	// FSEvents delivery can lag well past 8 s on a loaded machine, so allow up to 30 s: still half
-	// the fallback interval, so only the directory watcher can make this pass.
-	const replace = () => {
-		writeFileSync(`${stateFile}.tmp`, "{}");
-		renameSync(`${stateFile}.tmp`, stateFile);
-	};
-	replace();
-	await new Promise<void>((resolve, reject) => {
-		let ticks = 0;
-		const deadline = setTimeout(() => { clearInterval(check); reject(new Error("watcher did not resume")); }, 30_000);
-		const check = setInterval(() => {
-			if (!s.prompts.length) {
-				if (++ticks % 10 === 0) replace();
-				return;
-			}
-			clearTimeout(deadline);
-			clearInterval(check);
-			resolve();
-		}, 20);
-	});
+	writeFileSync(`${stateFile}.tmp`, "{}");
+	renameSync(`${stateFile}.tmp`, stateFile);
+	assert.ok(change, "directory watch registered");
+	assert.deepEqual(s.prompts, []);
+	const before = Date.now();
+	change("rename", "state.json");
+	assert.deepEqual(s.prompts, []); // The event still goes through the production debounce.
+	await poll(0); // Only the 100 ms debounce fires, not the 60 s fallback timer.
+	assert.equal(Date.now() - before, 100);
 	assert.deepEqual(s.switched, [B, A]);
 	assert.equal(s.prompts.length, 1);
 });

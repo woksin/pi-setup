@@ -117,10 +117,22 @@ test('.github publication reaches candidate policy without another repo parser r
   assert.deepEqual(await publicationDecision({ ...request, head: manifest.train }, context), {});
 });
 
-test('typed candidate fallback remains fail-open but value-free on native metadata errors', async t => {
+test('typed candidate fallback remains fail-open and reports native metadata errors', async t => {
   const f = await fixture(t);
-  const decision = await publicationDecision({ kind: 'pr-create', repo: 'acme/widget', title: 'Title', body: 'Safe' }, { cwd: '/repo', env: f.env, git: () => { throw new Error('private-value'); } });
-  assert.equal(decision.warn, 'Candidate guard: unparsed publication, allowed.');
+  const decision = await publicationDecision({ kind: 'pr-create', repo: 'acme/widget', title: 'Title', body: 'Safe' }, { cwd: '/repo', env: f.env, git: () => { throw new Error('git metadata unavailable'); } });
+  assert.deepEqual(decision, { warn: 'Candidate guard: unparsed publication, allowed (git metadata unavailable)' });
+});
+
+test('publication without an explicit head reports branch resolution failure from a non-git cwd', async t => {
+  const f = await fixture(t), cwd = join(f.root, 'non-git');
+  await mkdir(cwd);
+  const request = { kind: 'pr-create', repo: 'acme/widget', title: 'Title', body: 'Safe' };
+  const decision = await publicationDecision(request, { cwd, env: f.env });
+  assert.equal(decision.block, undefined);
+  assert.match(decision.warn!, /Candidate guard: unparsed publication, allowed \(fatal: not a git repository/);
+  const shell = await prCreateDecision('pi-publish pr-create --repo acme/widget --title Title --body Safe', cwd, f.env);
+  assert.deepEqual(shell, decision);
+  assert.deepEqual(await publicationDecision({ ...request, head: f.manifest.train }, { cwd, env: f.env }), {});
 });
 
 test('exact open candidate evidence blocks only non-candidate PRs, exceptions logged and orchestration warns', async t => {
@@ -186,6 +198,23 @@ test('concurrency only warns, solo stays silent and nonmatching commands make no
   assert.deepEqual(await f.decide('echo hello'), {});
   assert.equal(await gateRunNotice('pi-phase run --kind test -- node --test affected.test.ts', '/repo', f.env, f.git), undefined);
   assert.deepEqual(f.calls, []);
+});
+
+test('publication for an open train from another repository cwd uses the requested target', async t => {
+  const f = await fixture(t), target = join(f.root, 'target'), other = join(f.root, 'other');
+  for (const [cwd, repo] of [[target, 'acme/widget'], [other, 'other/repo']]) {
+    await mkdir(cwd);
+    for (const args of [['init', '-b', 'main'], ['remote', 'add', 'origin', `https://github.com/${repo}.git`]]) {
+      const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+    }
+  }
+  await saveManifest(manifestPath(f.env, f.manifest.repo, f.manifest.train), { ...f.manifest, worktree: target });
+  const request = { kind: 'pr-create', repo: 'acme/widget', head: 'train/test', title: 'Title', body: 'Safe' };
+  const context = { cwd: other, env: f.env };
+  assert.deepEqual(await publicationDecision(request, context), {});
+  assert.deepEqual(await publicationDecision(request, { ...context, orchestrated: true }), {});
+  assert.match((await publicationDecision({ ...request, head: 'fix/local' }, context)).block!, /PR refused: acme\/widget has open candidate train\/test/);
 });
 
 test('explicit publication repo and head need no git metadata when no candidate is open', async t => {
