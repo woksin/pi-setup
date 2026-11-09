@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/home.ts";
 import { FileBackend } from "../src/lanes/backend.ts";
+import { parseMessageName } from "../src/lanes/names.ts";
 
 test("file backend posts passive notices exclusively without delivering to lane inboxes", async () => {
   const dir = tempDir("lanes-passive");
@@ -20,6 +21,15 @@ test("file backend posts passive notices exclusively without delivering to lane 
   writeFileSync(join(dir, "L1-inbox.marker"), "");
   assert.deepEqual(await b.unread("L1"), []);
   await assert.rejects(() => b.postPassive({ topic: "../bad", body: "x" }));
+  for (const id of ["r-to", "r-from"]) {
+    const closed = await b.postPassive({ topic: `lane-closed-${id}`, body: "closed\n" });
+    const again = await b.postPassive({ topic: `lane-closed-${id}`, body: "again\n" });
+    assert.equal(again.name, `BCAST-lane-closed-${id}-1200-2.md`);
+    for (const name of [closed.name, again.name]) {
+      assert.deepEqual(parseMessageName(name), { from: "", to: ["BCAST"], topic: `lane-closed-${id}` });
+    }
+  }
+  assert.equal((await b.list()).length, 6);
 });
 
 test("file backend collision safety, recipient rules, filters and status", async () => {
