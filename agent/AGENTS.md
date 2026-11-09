@@ -30,6 +30,13 @@ Answer these with the setup's tools, not hand-rolled `gh`/`ls`/`grep` loops:
 
 - **The local issue register is authoritative for ownership.** Check it (`issue_work owner`) before assigning, claiming, closing, sweeping or recommending an issue. GitHub status blocks lag and never show train deliveries, so a status block alone never proves an issue is unowned.
 
+### L0 lane routing
+
+- Before assigning work, run `lanes who --issue OWNER/REPO#N` or `lanes who --repo R`. Treat `unverified` or `delivered` suggestions as a hold to verify, not permission to assign; prefer the named live holder or an idle lane in that repository before starting another.
+- For assignments, use `lanes send ID task --issue OWNER/REPO#N -m "brief"`. Exit 3 refuses duplicate ownership before writing a message; use the holder, verify delivery, or deliberately pass `--force "reason"` (the reason is recorded in the message). Sends without `--issue` retain their existing behaviour.
+- Roster evidence is local and explicit: missing/error sources, unknown liveness and stale heartbeats are not proof of idleness. Context use is `-` until a reliable local signal exists; do not infer headroom from session-file size.
+- Future contract (not implemented yet): after claiming work, sessions will emit `AGENT_IDENTITY` with `id`, `sessionId`, `role` and `repo`, plus `issue`/`branch` when known, to their parent. Consumers and automatic emitters land separately; do not rely on these messages yet.
+
 ## Execution budgets and verification discipline
 
 - Reuse one warm worktree per lane; do not share build outputs between lanes.

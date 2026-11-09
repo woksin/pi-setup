@@ -15,6 +15,7 @@ import { greenPrs } from "./commands/green-prs.ts";
 import { close } from "./commands/close.ts";
 import { messagesPrune } from "./retention.ts";
 import { status } from "./commands/status.ts";
+import { who } from "./commands/who.ts";
 
 export const HELP = `Usage: lanes [--dir root] <command> [options]
   adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
@@ -24,7 +25,8 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
   start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
   run <ID>|coordinator [--from-handoff ID|file]
   resume <ID> [--terminal backend]
-  send <TO> <topic> [file|-] [-m text] [--from ID] [--direct]
+  send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
+  who [--repo R] [--issue N|OWNER/REPO#N] [--json]
   status [--all]
   messages prune [--dry-run] [--json] [--legacy [--legacy-age hours] [--apply]]
   idle-check [--minutes n]
@@ -36,6 +38,7 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
   snooze <ID> --until ISO|+90m | --clear
   close <ID> [--reassign-to ID2] [--reason text] [--from ID] [--quit]
 Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
+Send: 3 ownership refusal (with --issue); --force requires an explicit reason.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
 Terminal backends: auto, terminal-app, iterm, tmux, print. Auto falls back to print.
 Reap work: an owned pi-phase run, a build/test descendant (dotnet/msbuild/vstest,
@@ -57,7 +60,7 @@ const OPTIONS: Record<string, string[]> = {
   init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"],
   add: ["repo", "issue", "goal", "group", "branch", "base", "path",
     "orchestrator", "orchestrator-id", "no-orchestrator"],
-  run: ["from-handoff", "handoff-digest"], start: ["terminal", "from-handoff"], resume: ["terminal"], send: ["m", "from", "direct"],
+  run: ["from-handoff", "handoff-digest"], start: ["terminal", "from-handoff"], resume: ["terminal"], send: ["m", "from", "direct", "issue", "force"], who: ["repo", "issue", "json"],
   status: ["all"], messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"],
   handoff: ["to", "accept", "from"], reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
@@ -116,7 +119,7 @@ function validateInvocation({ command, positional, opts }: Invocation): void {
   if (!Object.hasOwn(OPTIONS, command)) throw new UsageError(HELP);
   validateOptions({ command, opts });
   const bounds: Record<string, [number, number]> = {
-    adopt: [0, 0], init: [0, 1], add: [1, 1], run: [1, 1], start: [1, 1], resume: [1, 1], send: [2, 3], status: [0, 0], messages: [1, 1],
+    adopt: [0, 0], init: [0, 1], add: [1, 1], run: [1, 1], start: [1, 1], resume: [1, 1], send: [2, 3], who: [0, 0], status: [0, 0], messages: [1, 1],
     "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], handoff: [1, 1],
     reap: [0, 1], snooze: [1, 1], close: [opts.inactive ? 0 : 1, 1],
   };
@@ -136,7 +139,7 @@ async function dispatch(input: Invocation, env: CommandEnv): Promise<number> {
     add: () => add(args[0], opts, c, root, ctx), start: () => startCommand(args[0], opts, env),
     run: () => runCommand(args[0], opts, env),
     resume: () => resume(args, opts, env),
-    messages: () => messagesPrune(opts, c, root, ctx), send: () => send(args, opts, c, root, ctx),
+    messages: () => messagesPrune(opts, c, root, ctx), send: () => send(args, opts, c, root, ctx), who: () => who(args, opts, c, root, ctx),
     "idle-check": () => idleCheck(opts, c, root, ctx), nudge: () => nudge(args[0], args[1], opts, c, root, ctx),
     "resume-check": () => resumeCheck(c, root, ctx), "green-prs": () => greenPrs(opts, c, root, ctx),
     handoff: () => handoff(args, opts, env), snooze: () => snooze(args, opts, env),

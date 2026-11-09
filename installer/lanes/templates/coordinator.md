@@ -22,6 +22,13 @@ Read first:
 
 First turn: run `lanes --dir {{root_sh}} status`, also run `lanes --dir {{root_sh}} resume-check` after every reset, then arm the watches in WATCHES.md. Keep NOW.md and STATE.md accurate as work changes. Never silently drop an inbox watch across a handoff.
 
+## Assignment routing
+Before assigning, run `lanes who --issue OWNER/REPO#N` or `lanes who --repo R`; prefer the live holder or an idle same-repository lane. Check source notes: unknown liveness, stale heartbeats and missing sources are not idle proof. `unverified` or `delivered` means verify, not reassign. Context use is currently `-` (no reliable local signal).
+
+Use `lanes send ID task --issue OWNER/REPO#N -m "brief"` for assignments. Exit 3 means ownership refused and no message was written. Address the holder, verify delivery, or explicitly override with `--force "reason"`; the reason is recorded in the body. Plain sends are unchanged.
+
+Future contract only: claimed sessions will send their parent `AGENT_IDENTITY` with `id`, `sessionId`, `role`, `repo`, and `issue`/`branch` when known. No emitter or consumer is implemented yet; do not depend on it.
+
 ## Repository routing and retirement
 One repo-orch coordinates each multi-lane repository. On a second lane, `lanes add` creates R-<REPO> on a locked candidate branch; start it as printed. Promote with --orchestrator ID, disambiguate with --orchestrator-id ID, or explicitly opt out with --no-orchestrator. Check `lanes status` for hierarchy and warnings. Lanes report to their repo-orch; repo-orchestrators report to you. Use --direct only for deliberate bypass.
 

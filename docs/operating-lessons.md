@@ -4,6 +4,14 @@ Lessons from running many agent sessions ("lanes") in parallel on one machine. E
 
 Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.md` rule agents follow), **practice** (orchestrator habit, not yet automated).
 
+## 2026-10-28
+
+### Check local routing evidence before assigning
+- **Symptom:** coordination can reassign an issue already held by a live session or delivered by an ended one when registered lanes alone are treated as the whole roster.
+- **Cause:** process, lease, issue-register and message evidence are separate; missing heartbeats or stale GitHub status do not establish idleness or freedom.
+- **Rule:** inspect `lanes who --issue OWNER/REPO#N` (or `--repo R`), prefer its live holder or idle same-repository lane, and verify `delivered`/`unverified` holds. Use `lanes send ... --issue ...` so ownership refusal happens before a message is written; `--force "reason"` is an explicit, body-recorded exception.
+- **Enforced:** tool (`lanes who`, `lanes send --issue`) and rule (`agent/AGENTS.md`, coordinator template). Context use stays unknown without a reliable signal. `AGENT_IDENTITY` is a documented future contract only, not an implemented emitter/consumer.
+
 ## 2026-10-25
 
 ### Every decision gets an independent second review

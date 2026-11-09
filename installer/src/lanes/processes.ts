@@ -11,6 +11,33 @@ export async function runningPi(ctx: LanesCtx): Promise<{ pid: number; cwd: stri
   }
   return found;
 }
+export async function runningPiChecked(ctx: LanesCtx): Promise<{ ok: boolean; procs: { pid: number; cwd: string }[] }> {
+  try {
+    const result = await ctx.run("pgrep", ["-x", "pi"], { timeoutMs: 2000 });
+    if (result.timedOut) return { ok: false, procs: [] };
+    if (result.code === 1) return { ok: true, procs: [] };
+    if (result.code !== 0) return { ok: false, procs: [] };
+    const procs: { pid: number; cwd: string }[] = []; let ok = true;
+    for (const token of result.stdout.trim().split(/\s+/).filter(Boolean)) {
+      if (!/^\d+$/.test(token)) { ok = false; continue; }
+      const pid = Number(token);
+      try {
+        const cwd = await checkedCwd(ctx, pid);
+        if (cwd) procs.push({ pid, cwd: ctx.realpath(cwd) });
+        else { ok = false; procs.push({ pid, cwd: "" }); }
+      } catch { ok = false; procs.push({ pid, cwd: "" }); }
+    }
+    return { ok, procs };
+  } catch { return { ok: false, procs: [] }; }
+}
+async function checkedCwd(ctx: LanesCtx, pid: number): Promise<string | undefined> {
+  if (ctx.readCwd) return ctx.readCwd(pid);
+  const r = ctx.platform === "darwin"
+    ? await ctx.run("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeoutMs: 2000 })
+    : await ctx.run("readlink", [`/proc/${pid}/cwd`], { timeoutMs: 2000 });
+  if (r.code !== 0 || r.timedOut) return undefined;
+  return ctx.platform === "darwin" ? r.stdout.split("\n").find(s => s.startsWith("n"))?.slice(1) : r.stdout.trim();
+}
 export async function ttyOf(ctx: LanesCtx, pid: number): Promise<string | undefined> {
   const r = await ctx.run("ps", ["-o", "tty=", "-p", String(pid)], { timeoutMs: 10000 });
   const tty = r.stdout.trim();
