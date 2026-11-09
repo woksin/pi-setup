@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -10,17 +11,30 @@ export const trainHome = env => env.PI_TRAIN_DIR || join(env.HOME || homedir(), 
 const validRepo = repo => /^[\w.-]+\/[\w.-]+$/.test(repo);
 const validBranch = branch => !!branch && !['.', '..'].includes(slug(branch));
 
+export function normalizeRepo(repo) {
+  return typeof repo === 'string' ? repo.toLowerCase() : repo;
+}
+
 export function repoKey(remote) {
-  const match = remote.trim().match(/(?:[:/])([^/:\s]+)\/([^/\s]+?)(?:\.git)?\/?$/);
+  const match = remote.trim().match(/(?:[:/])([^/:\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i);
   if (!match) throw new TrainError('origin must identify an owner/repo', 2);
   const repo = `${match[1]}/${match[2]}`;
   if (!validRepo(repo)) throw new TrainError('origin must identify an owner/repo', 2);
-  return repo;
+  return normalizeRepo(repo);
+}
+
+function storedRepoDir(home, repo) {
+  const canonical = normalizeRepo(repo).replace('/', '__');
+  let dirs;
+  try { dirs = readdirSync(home); }
+  catch (error) { if (error.code === 'ENOENT') return canonical; throw storageError(home, error); }
+  return dirs.find(dir => dir === canonical) ?? dirs.find(dir => dir.toLowerCase() === canonical) ?? canonical;
 }
 
 export function manifestPath(env, repo, branch) {
   if (!validRepo(repo) || !validBranch(branch)) throw new TrainError('invalid repository or train branch', 2);
-  return join(trainHome(env), repo.replace('/', '__'), `${slug(branch)}.json`);
+  const home = trainHome(env);
+  return join(home, storedRepoDir(home, repo), `${slug(branch)}.json`);
 }
 
 export async function loadManifest(path, branch) {
@@ -30,28 +44,40 @@ export async function loadManifest(path, branch) {
   const manifest = JSON.parse(text);
   if (manifest.v !== 1) throw new TrainError(`unsupported train manifest version: ${manifest.v}`);
   if (branch && manifest.train !== branch) throw new TrainError(`train slug collision: ${branch} and ${manifest.train}`);
+  manifest.repo = normalizeRepo(manifest.repo);
   return manifest;
+}
+
+export class ManifestStoreError extends TrainError {}
+
+function storageError(path, error) {
+  return new ManifestStoreError(error.code === 'ENOTDIR'
+    ? `train storage is not a directory: ${path}`
+    : `train storage unreadable: ${path}: ${error.message}`);
 }
 
 async function entries(path) {
   try { return await readdir(path); }
-  catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; }
+  catch (error) { if (error.code === 'ENOENT') return []; throw storageError(path, error); }
 }
 
 async function repoDirs(home) {
   try { return (await readdir(home, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name); }
-  catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; }
+  catch (error) { if (error.code === 'ENOENT') return []; throw storageError(home, error); }
 }
 
 export async function listManifests(env, repo) {
+  if (repo !== undefined && !validRepo(repo)) return [];
   const home = trainHome(env);
-  const dirs = repo ? [repo.replace('/', '__')] : await repoDirs(home);
+  const dirs = repo === undefined ? await repoDirs(home)
+    : (await entries(home)).filter(dir => dir.toLowerCase() === repo.toLowerCase().replace('/', '__'));
   const result = [];
   for (const dir of dirs) {
     for (const name of await entries(join(home, dir))) {
       if (!name.endsWith('.json')) continue;
       const path = join(home, dir, name);
-      result.push({ path, manifest: await loadManifest(path) });
+      try { result.push({ path, manifest: await loadManifest(path) }); }
+      catch (error) { throw new ManifestStoreError(`train manifest unreadable: ${path}: ${error.message}`); }
     }
   }
   return result;

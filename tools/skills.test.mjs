@@ -2,6 +2,7 @@
 // snapshots, routing-fixture shape, and the review workflow's cache boundary that the sol-loop skill documents.
 // Nothing here calls a model or proves LLM routing quality. Run: node --test tools/skills.test.mjs
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -261,7 +262,7 @@ test("review routing, runtime wrapper and schemas stay synchronized across all p
     assert.equal(wrapper(source), wrapper(reviewSource), `${file}: identical runtime wrapper`);
     assert.ok(!source.includes("additionalProperties"), `${file}: schemas must accept injected provenance`);
     assert.ok(!source.includes("review-v1:"), `${file}: no legacy cache prefix`);
-    if (source.includes("const cacheKey")) assert.match(source, /const cacheKey = 'review-v3-coverage:'/);
+    if (source.includes("const cacheKey")) assert.match(source, /const cacheKey = 'review-v4-coverage:'/);
   }
   for (const profile of ["balanced", "balanced-openai", "lean"]) assert.equal(loadReview(`agent/profiles/${profile}/workflows/review.js`), reviewSource);
 });
@@ -296,7 +297,7 @@ for (const file of reviewFiles) {
     assert.equal(full.calls, 3, "two general reviews plus the security lane");
     assert.equal(full.result.reviewers.length, 3);
     assert.equal(full.requests.filter(r => r.label.startsWith("review:security-")).length, 1);
-    assert.ok(full.result.reviewers.every(run => run.ok && run.effective.length === 1 && run.session));
+    assert.ok(full.result.reviewers.every(run => run.ok && run.effective.length === 1 && run.expected === run.effective[0]));
     const deep = await runReview({ ...base, deep: true, deepReason: "security", deepJustification: "auth change" }, { file, override: withClaims });
     assert.equal(deep.result.passed, true);
     assert.equal(deep.calls, 6);
@@ -435,8 +436,7 @@ test("matching caches without complete reviewer evidence fail INCOMPLETE without
     assert.equal(result.reviewers.length, 6);
     const corruptions = [undefined, [], result.reviewers.slice(1), result.reviewers.filter(run => !run.label.includes("security")), result.reviewers.filter(run => !run.label.startsWith("verify:")),
       result.reviewers.map(run => ({ ...run, effective: ["kimi/moonshot-v1-128k"], modelCounts: { "kimi/moonshot-v1-128k": run.assistants } })),
-      result.reviewers.map(run => run.label.startsWith("verify:") ? { ...run, effective: ["kimi/moonshot-v1-128k"], modelCounts: { "kimi/moonshot-v1-128k": run.assistants } } : run),
-      result.reviewers.map(run => ({ ...run, runtimeStamp: undefined }))];
+      result.reviewers.map(run => run.label.startsWith("verify:") ? { ...run, effective: ["kimi/moonshot-v1-128k"], modelCounts: { "kimi/moonshot-v1-128k": run.assistants } } : run)];
     for (const reviewers of corruptions) {
       const cached = await runReview({ ...base, cachedReview: { ...result, reviewers } }, { file });
       assertUncertified(cached.result);
@@ -479,8 +479,8 @@ for (const file of reviewFiles) {
 
 test("review-v1 cache results cannot bypass runtime provenance enforcement", async () => {
   const { result } = await runReview(base);
-  assert.match(result.reviewCacheKey, /^review-v3-coverage:/);
-  const old = { ...result, reviewCacheKey: result.reviewCacheKey.replace("review-v3-coverage:", "review-v1:") };
+  assert.match(result.reviewCacheKey, /^review-v4-coverage:/);
+  const old = { ...result, reviewCacheKey: result.reviewCacheKey.replace("review-v4-coverage:", "review-v1:") };
   const run = await runReview({ ...base, cachedReview: old });
   assert.equal(run.calls, 3);
   assert.notEqual(run.result.cached, true);
@@ -488,11 +488,11 @@ test("review-v1 cache results cannot bypass runtime provenance enforcement", asy
 
 test("a pre-coverage (review-v2) cached pass is not reused", async () => {
   const { result } = await runReview(base);
-  const legacy = { ...result, reviewCacheKey: result.reviewCacheKey.replace("review-v3-coverage:", "review-v2-security:") };
+  const legacy = { ...result, reviewCacheKey: result.reviewCacheKey.replace("review-v4-coverage:", "review-v2-security:") };
   for (const file of reviewFiles.filter(f => !f.includes("openai-only"))) {
     const fresh = await runReview(base, { file });
     if (!fresh.result.reviewCacheKey) continue;
-    const old = { ...fresh.result, reviewCacheKey: fresh.result.reviewCacheKey.replace("review-v3-coverage:", "review-v2-security:") };
+    const old = { ...fresh.result, reviewCacheKey: fresh.result.reviewCacheKey.replace("review-v4-coverage:", "review-v2-security:") };
     const run = await runReview({ ...base, cachedReview: old }, { file });
     assert.ok(run.calls > 0, file);
     assert.notEqual(run.result.cached, true, file);
@@ -524,7 +524,7 @@ for (const file of reviewFiles) {
       assert.deepEqual(run.result.incomplete, []);
       assert.ok(run.result.coverageNotes.length >= 2);
       assert.ok(run.result.coverageNotes.every(n => n.includes("UNRUN: browser: unavailable") && n.length < 260));
-      assert.ok(JSON.stringify(run.result).length < 3600);
+      assert.ok(JSON.stringify(run.result, null, 2).length <= 3900);
     }
   });
 }
@@ -560,7 +560,7 @@ test("fit preserves gate and coverage with nine blockers and six reviewer record
   assert.equal(run.result.complete, true);
   assert.equal(run.result.blockingCount, 9);
   assert.equal(run.result.reviewers.length, 6);
-  assert.ok(JSON.stringify(run.result).length < 3600);
+  assert.ok(JSON.stringify(run.result, null, 2).length <= 3900);
 });
 
 test("a standalone Sol result is not a full-review cache entry", async () => {
@@ -633,3 +633,110 @@ test("a passing full result with security-lane verification is reused for either
     }
   }
 });
+
+// ---- #157: profile workflows are generated from one source ----
+test("profile review workflows equal the generator output (node tools/sync-review-workflow.mjs --check)", () => {
+  const run = spawnSync(process.execPath, [join(REPO, "tools/sync-review-workflow.mjs"), "--check"], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+});
+
+// ---- #161: results are bounded as delivered (parent notification cuts pretty-printed JSON at 4000) ----
+const prettyLength = result => JSON.stringify(result, null, 2).length;
+const nasty = "\"\\\n\t\u0001\u2028\ud800 ".repeat(40);
+const hostile = text => `${text} ${nasty}`;
+const hostileFinding = index => ({ severity: "major", blocking: true, location: hostile(`src/${index}.ts:1`), problem: hostile(`regression ${index}`),
+  fix: hostile("restore"), coverage: "complete" });
+const adversarial = (opts, res) => {
+  res.summary = hostile("summary");
+  res.coverageNote = hostile("UNRUN: browser: unavailable");
+  if (opts.label.startsWith("review:")) res.findings = [0, 1, 2, 3, 4, 5, 6, 7].map(i => (i < 6 ? hostileFinding(i) : { ...hostileFinding(i), blocking: false, severity: "minor" }));
+  else res.verdicts = [0, 1, 2, 3, 4, 5].map(index => ({ index, status: "blocks", reason: hostile("confirmed") }));
+  return res;
+};
+
+for (const file of reviewFiles) {
+  test(`${file}: pretty-printed results stay <= 3900 chars with hostile text and six runs, and keep the verdict`, async () => {
+    for (const mode of [{}, { deep: true, deepReason: "security", deepJustification: "auth change" }, { quick: true }]) {
+      const blocked = await runReview({ ...base, ...mode }, { file, override: adversarial });
+      assert.ok(prettyLength(blocked.result) <= 3900, `${JSON.stringify(mode)} blocked: ${prettyLength(blocked.result)}`);
+      assert.equal(blocked.result.passed, false);
+      assert.ok(blocked.result.blockingCount >= 6, "blockingCount is the real count");
+      assert.ok(blocked.result.blocking.length <= 4 && blocked.result.blocking.some(f => typeof f === "string" && f.includes("more blocking")));
+      assert.equal(blocked.result.reviewCacheKey, undefined);
+      const clean = await runReview({ ...base, ...mode }, { file, override: (opts, res) => ({ ...res, summary: hostile("s"), findings: opts.label.startsWith("review:")
+        ? [0, 1, 2, 3, 4, 5].map(i => ({ ...hostileFinding(i), blocking: false, severity: "minor", problem: hostile(`PRE-EXISTING: p${i}`) })) : [],
+        coverageNote: hostile("UNRUN: x: y") }) });
+      assert.equal(clean.result.passed, true);
+      assert.ok(prettyLength(clean.result) <= 3900, `${JSON.stringify(mode)} passed: ${prettyLength(clean.result)}`);
+      if (!mode.quick) {
+        assert.match(clean.result.reviewCacheKey, /^review-v4-coverage:/);
+        const hit = await runReview({ ...base, ...mode, cachedReview: clean.result }, { file });
+        assert.equal(hit.calls, 0);
+        assert.equal(hit.result.cached, true);
+        assert.equal(hit.result.reviewCacheKey, clean.result.reviewCacheKey);
+        assert.ok(prettyLength(hit.result) <= 3900);
+        assert.ok(hit.result.reviewers.every(run => run.session === undefined && run.modelCounts === undefined), "cache hits keep slim records");
+      }
+    }
+  });
+
+  test(`${file}: a cache hit enforces unique labels, allowed roles, required lanes, an exact count and bounded output`, async () => {
+    const { result } = await runReview(base, { file, override: withClaims });
+    assert.equal(result.passed, true);
+    const runs = result.reviewers;
+    assert.equal(result.runtimeCallCount, runs.length);
+    assert.deepEqual(Object.keys(runs[0]).sort(), ["agentType", "effective", "expected", "label", "ok"]);
+    const bad = [
+      [...runs, runs[0]],
+      [...runs.slice(1), runs[1]],
+      runs.map((run, i) => (i === 0 ? { ...run, label: "review:other" } : run)),
+      runs.map((run, i) => (i === 0 ? { ...run, agentType: "nonexistent" } : run)),
+      runs.filter(run => !run.label.startsWith("review:security-")),
+      runs.map((run, i) => (i === 0 ? { ...run, ok: false } : run)),
+      runs.map((run, i) => (i === 0 ? { ...run, effective: ["kimi/moonshot-v1-128k"] } : run)),
+      runs.map((run, i) => (i === 0 ? { ...run, expected: "other/model" } : run)),
+      runs.map((run, i) => (i === 0 ? null : run)),
+      runs.map((run, i) => (i === 0 ? { ...run, label: hostile("review:x").repeat(20), effective: [nasty.repeat(10)] } : run)),
+    ];
+    for (const reviewers of bad) {
+      for (const runtimeCallCount of [result.runtimeCallCount, reviewers.length]) {
+        const hit = await runReview({ ...base, cachedReview: { ...result, reviewers, runtimeCallCount } }, { file });
+        assertUncertified(hit.result);
+        assert.equal(hit.calls, 0);
+        assert.ok(prettyLength(hit.result) <= 3900, String(prettyLength(hit.result)));
+      }
+    }
+    for (const changes of [{ passed: false }, { complete: false }, { blockingCount: 1 }, { unverifiedCount: 1 }, { blocking: [{}] }, { unverified: [{}] }, { incomplete: ["x"] }]) {
+      const hit = await runReview({ ...base, cachedReview: { ...result, ...changes } }, { file });
+      assert.ok(hit.calls > 0 && hit.result.cached !== true, JSON.stringify(changes));
+    }
+  });
+}
+
+test("transitional runs without provenance pass but never receive a receipt key", async () => {
+  const run = await runReview(base, { override: (_opts, res) => ({ ...res, runtimeProvenance: undefined }) });
+  assert.equal(run.result.passed, true);
+  assert.equal(run.result.reviewCacheKey, undefined);
+});
+
+// ---- exactly one verdict per blocking finding; anything else fails closed ----
+const verdictCases = {
+  "duplicate contradictory verdict": [{ index: 0, status: "refuted", reason: "r" }, { index: 0, status: "blocks", reason: "b" }],
+  "duplicate identical verdict": [{ index: 0, status: "refuted", reason: "r" }, { index: 0, status: "refuted", reason: "r" }],
+  "extra verdict for an unknown finding": [{ index: 0, status: "refuted", reason: "r" }, { index: 7, status: "refuted", reason: "r" }],
+  "missing verdict": [],
+};
+for (const file of reviewFiles) {
+  for (const [name, verdicts] of Object.entries(verdictCases)) {
+    test(`${file}: ${name} is never a pass and never cacheable`, async () => {
+      const run = await runReview(base, { file, override: (opts, res) => {
+        if (opts.label.startsWith("review:")) res.findings = [blockingClaim(0)];
+        else res.verdicts = verdicts;
+        return res;
+      } });
+      assert.equal(run.result.passed, false);
+      assert.equal(run.result.reviewCacheKey, undefined);
+      assert.ok(run.result.unverifiedCount > 0 || run.result.complete === false);
+    });
+  }
+}

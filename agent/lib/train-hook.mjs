@@ -24,7 +24,7 @@ function chainedScript(path) {
 
 function hookScript(path, chained) {
   const runner = new URL('./train-hook-runner.mjs', import.meta.url).href;
-  // Catch import/startup failures too: only the guard's positive match may return 1.
+  // Catch import/startup failures too: protected refs or unreadable target storage return 1.
   const start = 'try { await import(process.argv[1]); } catch (error) { console.error(error.message); process.exitCode = 2; }';
   const chain = chained ? chainedScript(path) : '';
   return `#!/bin/sh

@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import { tokenizeShell } from './issue-work.ts';
-import { listManifests, repoKey } from './train-manifest.mjs';
+import { listManifests, normalizeRepo, repoKey } from './train-manifest.mjs';
 import { scanRepository } from './train-concurrency.mjs';
 import { nativeGuardGit, changedDirectory, commandTokens } from './train-guard.ts';
 import { parseCli, toGhPlan, validateRequest } from './publish-request.ts';
@@ -108,10 +108,23 @@ function refusal(repo: string, train: string, head: string) {
   return `PR refused: ${repo} has open candidate ${train}. Deliver this branch with \`pi-train fold ${head}\`; the candidate ships as one PR (\`pi-train ship\`). Named exceptions: prefix \`PI_CANDIDATE_EXCEPTION=major\` or \`=urgent-fix\` and give the reason in your report.`;
 }
 
+function unreadableDecision(segment: Segment, context: { repo: string; head: string; orchestrated: boolean }, error: unknown): Decision {
+  const { repo, head, orchestrated } = context;
+  if (segment.exception) return { log: `exception ${segment.exceptionName} for ${head} (manifests unreadable)` };
+  const reason = `Candidate guard: ${repo} manifests unreadable (${(error as Error).message}); repair or remove the unreadable file or storage path before creating a PR.`;
+  return orchestrated ? { warn: reason } : { block: reason };
+}
+
+function openCandidates(manifests: Awaited<ReturnType<typeof listManifests>>, repo: string) {
+  return manifests.map(entry => entry.manifest).filter(m => normalizeRepo(m.repo) === normalizeRepo(repo) && m.state === 'open');
+}
+
 async function decidePR(segment: Segment, env: NodeJS.ProcessEnv, orchestrated: boolean): Promise<Decision> {
   const { repo, head } = identity(segment);
-  const manifests = await listManifests(env);
-  const trains = manifests.map(entry => entry.manifest).filter(m => m.repo === repo && m.state === 'open');
+  let manifests;
+  try { manifests = await listManifests(env, repo); }
+  catch (error) { return unreadableDecision(segment, { repo, head, orchestrated }, error); }
+  const trains = openCandidates(manifests, repo);
   if (trains.some(train => train.train === head)) return {};
   if (trains.length) {
     if (segment.exception) return { log: `exception ${segment.exceptionName} for ${head}` };
@@ -175,7 +188,11 @@ function candidateGateNotice(scan: any, entry: any, segment: Segment) {
 async function gateNotice(segment: Segment, env: NodeJS.ProcessEnv) {
   validate(segment);
   if (segment.exception) return;
-  const scan = await repositoryScan(segment, await listManifests(env));
+  const repo = repoKey(segment.git(segment.cwd, ['remote', 'get-url', 'origin']).trim());
+  let manifests;
+  try { manifests = await listManifests(env, repo); }
+  catch (error) { return `Candidate notice: ${repo} manifests unreadable (${(error as Error).message}); repair or remove the unreadable file or storage path. Proceeding.`; }
+  const scan = await repositoryScan(segment, manifests);
   const entry = scan.worktrees.find(w => w.path === segment.cwd);
   if (entry?.role === 'train') return;
   if (scan.trains.length) return candidateGateNotice(scan, entry, segment);

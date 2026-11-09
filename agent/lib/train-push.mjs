@@ -1,7 +1,7 @@
-import { listManifests } from './train-manifest.mjs';
+import { listManifests, normalizeRepo } from './train-manifest.mjs';
 
 export function protectedItems(manifests, repo) {
-  return manifests.filter(({ manifest }) => manifest.repo === repo && !['released', 'abandoned'].includes(manifest.state))
+  return manifests.filter(({ manifest }) => normalizeRepo(manifest.repo) === normalizeRepo(repo) && !['released', 'abandoned'].includes(manifest.state))
     .flatMap(({ manifest }) => manifest.items.filter(item => ['folded', 'planned'].includes(item.kind))
       .map(item => ({ branch: item.branch, train: manifest.train, pr: manifest.pr })));
 }
@@ -23,9 +23,17 @@ function pushedBranch(line) {
   return remoteRef.slice(11);
 }
 
+export function unreadablePush(repo, error) {
+  return `Train guard: ${repo} manifests unreadable (${error.message}); repair or remove the unreadable file or storage path before pushing.`;
+}
+
 export async function stdinGuard(ctx, repo, input) {
-  const items = protectedItems(await listManifests(ctx.env, repo), repo);
-  const branches = input.trim().split('\n').map(pushedBranch).filter(Boolean);
+  const branches = input.trim().split('\n').map(pushedBranch).filter(branch => branch && branch !== ctx.env.PI_TRAIN_ALLOW_PUSH);
+  if (!branches.length) return 0;
+  let manifests;
+  try { manifests = await listManifests(ctx.env, repo); }
+  catch (error) { ctx.err(unreadablePush(repo, error)); return 1; }
+  const items = protectedItems(manifests, repo);
   const reason = pushBlock(items, branches, ctx.env.PI_TRAIN_ALLOW_PUSH);
   if (!reason) return 0;
   ctx.err(reason);

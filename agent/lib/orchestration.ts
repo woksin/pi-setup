@@ -55,15 +55,16 @@ export function orchLog(guard: string, decision: string, detail: string, env: No
 	} catch { /* logging must never affect a decision */ }
 }
 
-/** Post ALL-guard-<guard>-<HHMM>.md into the lane message directory, if it exists. Never throws. */
-export function postAllNotice(guard: string, text: string, env: NodeJS.ProcessEnv = process.env, now = new Date()): string | undefined {
+/** Post passive BCAST-guard-<guard>-<HHMM>[-act].md into the lane message directory, if it exists (`act` makes it wake lanes). Never throws. */
+export function postBroadcastNotice(guard: string, text: string, env: NodeJS.ProcessEnv = process.env, now = new Date(), act = false): string | undefined {
 	try {
 		const dir = messagesDir(env);
 		if (!existsSync(dir)) return undefined;
 		const hhmm = `${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
 		const safe = guard.replace(/[^A-Za-z0-9_-]/g, "-");
-		let file = join(dir, `ALL-guard-${safe}-${hhmm}.md`);
-		for (let n = 2; existsSync(file); n++) file = join(dir, `ALL-guard-${safe}-${hhmm}-${n}.md`);
+		const suffix = act ? "-act" : "";
+		let file = join(dir, `BCAST-guard-${safe}-${hhmm}${suffix}.md`);
+		for (let n = 2; existsSync(file); n++) file = join(dir, `BCAST-guard-${safe}-${hhmm}-${n}${suffix}.md`);
 		const tmp = `${file}.${process.pid}.tmp`;
 		writeFileSync(tmp, `# Guard notice: ${guard} (${now.toISOString()})\n\n${text}\n`);
 		renameSync(tmp, file);
@@ -97,7 +98,7 @@ export async function boundedSelect(ui: DialogUI, title: string, options: string
 }
 
 /**
- * A bounded guard prompt. On timeout the decision is logged and, in orchestration sessions, an ALL
+ * A bounded guard prompt. On timeout the decision is logged and, in orchestration sessions, a passive BCAST
  * notice tells the lanes which call was resolved to the default (`fallback`) instead of waiting.
  */
 export async function guardSelect(ui: DialogUI, guard: string, title: string, options: string[],
@@ -106,7 +107,7 @@ export async function guardSelect(ui: DialogUI, guard: string, title: string, op
 	const result = await boundedSelect(ui, title, options, opts.ms ?? PROMPT_TIMEOUT_MS);
 	if (result.timedOut) {
 		orchLog(guard, `timeout:${fallback}`, title, env);
-		if (isOrchestrated(env, opts.cwd)) postAllNotice(guard,
+		if (isOrchestrated(env, opts.cwd)) postBroadcastNotice(guard,
 			`A ${guard} guard prompt got no answer within ${Math.round((opts.ms ?? PROMPT_TIMEOUT_MS) / 1000)} s and resolved to: ${fallback}.\n\n` +
 			`Session: ${env.PI_SESSION_ID ?? "unknown"} (pid ${process.pid}).\n\nPrompt:\n\n${title.slice(0, 1500)}`, env);
 	}
