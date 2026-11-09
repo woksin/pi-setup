@@ -248,6 +248,11 @@ const reviewAgent = async (prompt, opts, name) => {
   if (res) record(res, opts, name)
   return res
 }
+// Why a partition failed: `agentError(label)` is an optional host global (absent on older hosts, so this degrades to no reason).
+const failureReason = label => {
+  try { const r = typeof agentError === 'function' ? agentError(label) : undefined; return typeof r === 'string' && r.trim() ? shown(r.trim(), 60) : '' } catch { return '' }
+}
+const failedText = (name, label) => { const r = failureReason(label); return r ? `${name} review failed: ${r}` : `${name} review failed` }
 const runtimeReviewers = () => runtimeRuns.sort((a, b) => a.label.localeCompare(b.label))
 // A receipt is only issued when every run carried a full, valid provenance record (checked here, not on reuse).
 const reusableRun = run => { const p = { ...run, models: run?.effective }; return run?.ok === true && runtimeAvailable(p, runtimeModels(p)) }
@@ -527,8 +532,8 @@ if (quick) {
     () => reviewAgent(reviewPrompt, { agentType: r.agentType, schema: FINDINGS, label: `review:${side}`, phase: 'Review' }, r.name),
     () => reviewAgent(securityPrompt, { agentType: r.agentType, schema: FINDINGS, label: `review:security-${side}`, phase: 'Review' }, `${r.name} (security)`),
   ])
-  if (!res) return { mode: 'quick', round, passed: false, error: `${r.name} review failed` }
-  if (!sec) return { mode: 'quick', round, passed: false, error: `${r.name} security review failed` }
+  if (!res) return { mode: 'quick', round, passed: false, error: failedText(r.name, `review:${side}`) }
+  if (!sec) return { mode: 'quick', round, passed: false, error: failedText(`${r.name} security`, `review:security-${side}`) }
   // Quick mode has no verifier: security blockers gate unverified (fail closed).
   const all = res.findings.concat(sec.findings.map(f => ({ ...f, foundBy: `${r.name} (security)` })))
   const blocking = all.filter(isBlocking)
@@ -565,7 +570,7 @@ const results = await pipeline(
     }, lane.reviewer.name),
   async (res, lane) => {
     const side = lane.side
-    if (!res) return { lane, side, failed: true }
+    if (!res) return { lane, side, failed: true, reason: failureReason(`review:${lane.key}`) }
     // Only blocking claims are adversarially verified; everything else is advisory and never gates.
     const toCheck = res.findings.map((f, i) => ({ f, i })).filter(x => isBlocking(x.f))
     if (toCheck.length === 0) return { lane, side, summary: res.summary, findings: res.findings, coverage: res.coverage, coverageNote: res.coverageNote, verdicts: [] }
@@ -606,9 +611,10 @@ results.forEach((r, i) => {
 for (const r of results.filter(Boolean)) {
   const by = r.lane.reviewer.name
   if (r.failed) {
-    log(`${by} review failed`)
+    const why = r.reason ? `: ${r.reason}` : ''
+    log(`${by} review failed${why}`)
     summaries.push({ by, summary: 'REVIEW FAILED' })
-    incomplete.push(`${by} review failed`)
+    incomplete.push(`${by} review failed${why}`)
     continue
   }
   const cp = coverageProblem(by, r)
