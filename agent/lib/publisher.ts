@@ -11,7 +11,7 @@ import type { PublicationContext, PublicationScan } from "./publish-scan.ts";
 import { InvalidRequest, MAX_REQUEST_BYTES, MAX_STRING_BYTES, toGhPlan, validateRequest } from "./publish-request.ts";
 import type { GhPlan, PayloadSource, PayloadSlot } from "./publish-request.ts";
 
-export type PublishCode = "published" | "scan-clean" | "invalid-request" | "unsupported-platform" | "payload-unreadable" | "payload-too-large" | "payload-not-utf8" | "scan-refused" | "gh-unavailable" | "gh-failed" | "gh-timeout" | "cancelled" | "gh-output-limit" | "cleanup-failed" | "payload-not-found" | "payload-symlink" | "payload-not-file" | "payload-permission";
+export type PublishCode = "published" | "scan-clean" | "invalid-request" | "unsupported-platform" | "payload-unreadable" | "payload-too-large" | "payload-not-utf8" | "scan-refused" | "gh-unavailable" | "gh-failed" | "gh-timeout" | "cancelled" | "gh-output-limit" | "cleanup-failed" | "payload-not-found" | "payload-symlink" | "payload-not-file" | "payload-permission" | "host-unauthenticated";
 export interface PublishResult { code: PublishCode; text: string; isError: boolean; detail?: string; diagnostics?: { source: string; count: number; findings: PublicationScan["findings"] } }
 interface FileStat { size: number; isFile(): boolean }
 export interface CaptureHandle {
@@ -208,9 +208,19 @@ async function ghExecutable(run: Runtime): Promise<string> {
 	}
 	throw new Failure("gh-unavailable");
 }
-function environment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-	const child: NodeJS.ProcessEnv = { ...env, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", GH_PAGER: "cat" };
-	delete child.GH_DEBUG; delete child.DEBUG;
+const ENTERPRISE_TOKENS = ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+const ENV_TOKENS = ["GH_TOKEN", "GITHUB_TOKEN", ...ENTERPRISE_TOKENS];
+/** A non-default host never receives an env token: gh may use only its stored per-host credential. */
+function environment(env: NodeJS.ProcessEnv, host?: string): NodeJS.ProcessEnv {
+	const child: NodeJS.ProcessEnv = { ...env, GH_HOST: host ?? "github.com", GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", GH_PAGER: "cat" };
+	delete child.GH_DEBUG; delete child.DEBUG; delete child.GH_REPO;
+	for (const name of host ? ENV_TOKENS : ENTERPRISE_TOKENS) delete child[name];
+	return child;
+}
+/** Without GH_HOST, `gh auth status --hostname` checks local config and does not contact an unconfigured host. */
+function preflightEnvironment(env: NodeJS.ProcessEnv, host: string): NodeJS.ProcessEnv {
+	const child = environment(env, host);
+	delete child.GH_HOST;
 	return child;
 }
 function materialize(slot: PayloadSlot, state: { bytes: Buffer[]; paths: string[] }): string {
@@ -285,14 +295,22 @@ function monitor(child: PublisherChild, run: Runtime): Promise<void> {
 		if (run.context.signal?.aborted) abort();
 	});
 }
-async function send(plan: GhPlan, state: { bytes: Buffer[]; paths: string[] }, run: Runtime): Promise<void> {
+async function runGh(argv: () => string[], env: NodeJS.ProcessEnv, run: Runtime): Promise<void> {
 	const executable = await ghExecutable(run);
 	cancelled(run.context.signal);
-	const argv = plan.argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state));
+	const args = argv();
 	try {
-		const child = run.spawn(executable, argv, { shell: false, stdio: ["ignore", "pipe", "pipe"], env: environment(run.env), cwd: run.context.cwd });
+		const child = run.spawn(executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"], env, cwd: run.context.cwd });
 		await monitor(child, run);
 	} catch (error) { if (error instanceof Failure) throw error; throw new Failure("gh-failed"); }
+}
+async function send(plan: GhPlan, state: { bytes: Buffer[]; paths: string[] }, run: Runtime): Promise<void> {
+	await runGh(() => plan.argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), environment(run.env, plan.host), run);
+}
+/** A non-default host must already hold a stored gh credential; output is discarded, failure is a fixed code. */
+async function hostPreflight(host: string, run: Runtime): Promise<void> {
+	try { await runGh(() => ["auth", "status", `--hostname=${host}`], preflightEnvironment(run.env, host), run); }
+	catch (error) { throw error instanceof Failure && error.code === "gh-failed" ? new Failure("host-unauthenticated") : error; }
 }
 function failed(error: unknown): PublishResult {
 	if (error instanceof InvalidRequest) return result("invalid-request", undefined, error.detail);
@@ -317,6 +335,7 @@ export async function publish(value: unknown, context: PublisherContext = {}, ad
 		const bytes = await capture(plan, run);
 		cancelled(context.signal);
 		if (request.kind === "check") return result("scan-clean");
+		if (plan.host) await hostPreflight(plan.host, run);
 		cancelled(context.signal);
 		directory = await run.io.mkdtemp(join(run.temporaryRoot(), "pi-publish-"));
 		await run.io.chmod(directory, 0o700);

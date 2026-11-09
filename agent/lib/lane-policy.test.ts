@@ -74,6 +74,24 @@ test("typed publication and CLI reuse exact gh grants without granting unsupport
 	]) assert.ok(assessPublication(request, ctx));
 });
 
+test("hosted publication is host-qualified: never matches an enrolled github.com slug or reuses its grants", () => {
+	grant("issue-write", "39"); grant("pr-create", "lane"); store();
+	const request = { kind: "issue-comment", repo: "Cratis/Studio", number: 39, body: "Safe" };
+	assert.equal(assessPublication(request, ctx), undefined);
+	assert.equal(assessPublication({ ...request, host: "github.com" }, ctx), undefined);
+	assert.match(assessPublication({ ...request, host: "ghe.example.com" }, ctx)!, /Mismatched repository/);
+	assert.match(assessPublication({ kind: "pr-create", repo: "Cratis/Studio", head: "lane", title: "Title", body: "Safe", host: "ghe.example.com" }, ctx)!, /Mismatched repository/);
+	denied("pi-publish issue-comment --repo Cratis/Studio --host ghe.example.com --number 39 --body Safe");
+	allowed("pi-publish issue-comment --repo Cratis/Studio --number 39 --body Safe");
+	const unenrolled = { cwd: outside, session: "unenrolled-session" };
+	const api = { kind: "api", endpoint: "repos/Cratis/Studio/issues", method: "POST" };
+	assert.ok(assessPublication(api, unenrolled));
+	assert.equal(assessPublication({ ...api, host: "ghe.example.com" }, unenrolled), undefined);
+	assert.equal(assessPublication({ ...request, host: "ghe.example.com" }, unenrolled), undefined);
+	assert.ok(assessPublication({ ...api, host: "ghe.example.com" }, ctx));
+	assert.equal(assessPublication({ ...request, host: "GHE.example.com" }, ctx), "Lane policy: invalid publication request.");
+});
+
 test("typed PR create shares head binding and grants; forbidden targets and revisions still apply", () => {
 	grant("pr-create", "lane"); grant("pr-comment", "39"); store();
 	assert.equal(assessPublication({ kind: "pr-create", repo: "Cratis/Studio", head: "lane", base: "main", title: "Title", body: "Safe" }, ctx), undefined);

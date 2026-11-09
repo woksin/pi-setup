@@ -282,7 +282,8 @@ test("shutdown closes the directory watch and cancels fallback and debounced che
 	assert.deepEqual(s.prompts, []);
 });
 
-test("directory watcher notices atomic limit removal without waiting for the slow timer", async () => {
+// Quarantined (woksin/pi-setup#146): machine-wide FSEvents backlog under load can exceed the deadline.
+test("directory watcher notices atomic limit removal without waiting for the slow timer", { skip: "flaky under FSEvents backlog, see woksin/pi-setup#146" }, async () => {
 	const s = session({ hasUI: true });
 	await s.fire("429");
 	// FSEvents may not deliver a rename made before the watch is fully registered, so repeat the

@@ -5,8 +5,10 @@ export const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 type Body = { body: string; bodyFile?: never } | { bodyFile: string; body?: never };
 type OptionalBody = Body | { body?: never; bodyFile?: never };
 type BodyOrTitle = Body | ({ title: string } & OptionalBody);
-type Target = { repo: string; number: number };
-type Create = Body & { repo: string; title: string; labels?: string[]; assignees?: string[] };
+/** Optional GitHub Enterprise host; absent means github.com (the single default representation). */
+type Hosted = { host?: string };
+type Target = Hosted & { repo: string; number: number };
+type Create = Body & Hosted & { repo: string; title: string; labels?: string[]; assignees?: string[] };
 type Comment = Body & Target & { editLast?: boolean; createIfNone?: boolean };
 type Edit = BodyOrTitle & Target & { title?: string; addLabels?: string[]; removeLabels?: string[]; addAssignees?: string[]; removeAssignees?: string[] };
 export type ApiField = { name: string; value: string | number | boolean | null; file?: never } | { name: string; file: string; value?: never };
@@ -21,11 +23,11 @@ export type PublishRequest =
 	| (OptionalBody & Target & { kind: "issue-reopen" | "pr-reopen" })
 	| (Target & { kind: "pr-review" } & ((OptionalBody & { event: "approve" }) | (Body & { event: "comment" | "request-changes" })))
 	| (OptionalBody & Target & { kind: "pr-merge"; strategy: "merge" | "squash" | "rebase"; subject?: string; deleteBranch?: boolean; auto?: boolean; matchHeadCommit?: string })
-	| (Body & { kind: "release-create"; repo: string; tag: string; title?: string; target?: string; draft?: boolean; prerelease?: boolean })
-	| (BodyOrTitle & { kind: "release-notes"; repo: string; tag: string; title?: string })
+	| (Body & Hosted & { kind: "release-create"; repo: string; tag: string; title?: string; target?: string; draft?: boolean; prerelease?: boolean })
+	| (BodyOrTitle & Hosted & { kind: "release-notes"; repo: string; tag: string; title?: string })
 	| { kind: "gist-create"; files: string[]; description?: string; public?: boolean }
 	| { kind: "gist-edit"; gistId: string; files?: string[]; description?: string; removeFiles?: string[] }
-	| (OptionalBody & { kind: "api"; endpoint: string; method: "POST" | "PATCH" | "PUT" | "DELETE"; fields?: ApiField[] })
+	| (OptionalBody & Hosted & { kind: "api"; endpoint: string; method: "POST" | "PATCH" | "PUT" | "DELETE"; fields?: ApiField[] })
 	| { kind: "check"; files: string[] };
 
 export class InvalidRequest extends Error {
@@ -68,6 +70,14 @@ const enumeration = (...values: unknown[]) => (value: unknown) => values.include
 const bool = (value: unknown) => typeof value === "boolean";
 const number = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0;
 const repo = (value: unknown) => text(value) && /^[A-Za-z0-9][A-Za-z0-9-]*\/(?:\.github|[A-Za-z0-9_][A-Za-z0-9_.-]*)$/.test(value);
+const HOST_MAX_LENGTH = 253;
+/**
+ * Lowercase ASCII DNS name with at least one dot: no IP-like final label, no IDN (xn--), no port/path/userinfo.
+ * Subdomains of github.com are refused: gh resolves them to github.com, so they would bypass host-qualified keys.
+ */
+const HOST_PATTERN = "^(?!(?:[a-z0-9-]+\\.)+github\\.com$)(?!(?:[a-z0-9-]*\\.)*xn--)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+(?![0-9]+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$";
+const hostname = (value: unknown) => text(value) && value.length <= HOST_MAX_LENGTH && new RegExp(HOST_PATTERN, "u").test(value);
+const DEFAULT_HOST = "github.com";
 const fieldName = (value: unknown) => text(value) && /^[A-Za-z0-9_.\[\]]+$/.test(value);
 function primitive(value: unknown): boolean {
 	if (value === null) return true;
@@ -93,6 +103,7 @@ const properties: Record<string, Property> = {
 	matchHeadCommit: stringProperty(value => text(value) && /^[a-fA-F0-9]{40}$/.test(value)),
 	event: enumProperty("approve", "comment", "request-changes"), strategy: enumProperty("merge", "squash", "rebase"),
 	reason: enumProperty("completed", "not-planned"), method: enumProperty("POST", "PATCH", "PUT", "DELETE"),
+	host: { validate: hostname, schema: { type: "string", maxLength: HOST_MAX_LENGTH, pattern: HOST_PATTERN } },
 };
 for (const name of ["labels", "assignees", "reviewers", "addLabels", "removeLabels", "addAssignees", "removeAssignees", "addReviewers", "removeReviewers"]) properties[name] = arrayProperty(value => text(value) && value.length > 0 && !/[\p{Cc}]/u.test(value));
 for (const name of ["draft", "editLast", "createIfNone", "deleteBranch", "auto", "prerelease", "public"]) properties[name] = { validate: bool, schema: { type: "boolean" } };
@@ -121,6 +132,8 @@ const contracts: Record<PublishRequest["kind"], Contract> = {
 	"gist-create": contract("files", "description public"), "gist-edit": contract("gistId", "files description removeFiles"),
 	api: contract("endpoint method", `${body} fields`), check: contract("files"),
 };
+// `host` qualifies a repository (or an api call); gist-* and check have no repository and reject it.
+for (const [kind, shape] of Object.entries(contracts)) if (shape.required.includes("repo") || kind === "api") shape.optional.push("host");
 const REQUIRED_BODY_KINDS = ["issue-create", "pr-create", "issue-comment", "pr-comment", "release-create"];
 const EDIT_KINDS = ["issue-edit", "pr-edit", "release-notes"];
 /** `gh gist edit` takes single-valued --add/--remove/--desc, so one edit means exactly one operation with one value. */
@@ -222,6 +235,7 @@ export function validateRequest(value: unknown): PublishRequest {
 		if (Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES) invalid();
 		const detached = JSON.parse(encoded);
 		validateShape(detached); validateBody(detached); validateChanges(detached);
+		if (detached.host === DEFAULT_HOST) delete detached.host;
 		return freeze(detached) as PublishRequest;
 	} catch (error) { throw error instanceof InvalidRequest ? error : new InvalidRequest(); }
 }
@@ -231,8 +245,14 @@ export interface PayloadSlot { payload: number; use: "file" | "text"; prefix: st
 export interface OutboundText { label: string; text: string }
 export interface GhPlan {
 	argv: (string | PayloadSlot)[]; payloads: PayloadSource[]; outbound: OutboundText[];
-	authority: { kind: PublishRequest["kind"]; ghArgs: string[]; repo?: string; number?: number; base?: string; head?: string };
+	authority: { kind: PublishRequest["kind"]; ghArgs: string[]; repo?: string; host?: string; number?: number; base?: string; head?: string };
 	requestBytes: number;
+	/** Non-default GitHub host; absent means github.com. */
+	host?: string;
+}
+/** gh's native HOST/OWNER/REPO form when a non-default host is set; the canonical authority key everywhere. */
+function qualifiedRepo(request: RecordValue): string {
+	return own(request, "host") ? `${request.host}/${request.repo}` : request.repo as string;
 }
 const scalarFlags: Record<string, string> = { repo: "repo", title: "title", base: "base", head: "head", target: "target", subject: "subject", matchHeadCommit: "match-head-commit", reason: "reason", description: "desc" };
 const arrayFlags: Record<string, string> = { labels: "label", assignees: "assignee", reviewers: "reviewer", addLabels: "add-label", removeLabels: "remove-label", addAssignees: "add-assignee", removeAssignees: "remove-assignee", addReviewers: "add-reviewer", removeReviewers: "remove-reviewer", removeFiles: "remove" };
@@ -253,7 +273,7 @@ function scalarOptions(request: RecordValue, plan: GhPlan): void {
 	for (const [key, flag] of Object.entries(scalarFlags)) {
 		if (!own(request, key)) continue;
 		// gh spells the close reason "not planned" (with a space); the typed request uses "not-planned".
-		const value = key === "reason" && request[key] === "not-planned" ? "not planned" : request[key];
+		const value = key === "reason" && request[key] === "not-planned" ? "not planned" : key === "repo" ? qualifiedRepo(request) : request[key];
 		plan.argv.push(`--${flag}=${value}`); plan.outbound.push({ label: key, text: value as string });
 	}
 }
@@ -288,11 +308,17 @@ function addFields(request: RecordValue, plan: GhPlan): void {
 function command(request: RecordValue): string[] {
 	const [family, action] = (request.kind as string).split("-");
 	if (family === "check") return [];
-	if (family === "api") return ["api", request.endpoint as string, `--method=${request.method}`, "--hostname=github.com"];
+	if (family === "api") return ["api", request.endpoint as string, `--method=${request.method}`, `--hostname=${request.host ?? DEFAULT_HOST}`];
 	const argv = [family, action === "notes" ? "edit" : action];
 	for (const key of ["number", "tag", "gistId"]) if (own(request, key)) argv.push(String(request[key]));
 	for (const key of ["event", "strategy"]) if (own(request, key)) argv.push(`--${request[key]}`);
 	return argv;
+}
+function addHost(request: RecordValue, plan: GhPlan): void {
+	const host = request.host as string;
+	plan.host = host; plan.authority.host = host;
+	if (own(request, "repo")) plan.authority.repo = qualifiedRepo(request);
+	plan.outbound.push({ label: "host", text: host });
 }
 /** Payload slots are deliberately not source paths. Only the capture core can materialize them. */
 export function toGhPlan(value: PublishRequest): GhPlan {
@@ -301,6 +327,7 @@ export function toGhPlan(value: PublishRequest): GhPlan {
 		kind: request.kind as PublishRequest["kind"], ghArgs: [],
 		...Object.fromEntries(["repo", "number", "base", "head"].filter(key => own(request, key)).map(key => [key, request[key]])),
 	} };
+	if (own(request, "host")) addHost(request, plan);
 	if (request.kind === "api") plan.outbound.push({ label: "endpoint", text: request.endpoint as string });
 	for (const key of ["tag", "gistId"]) if (own(request, key)) plan.outbound.push({ label: key, text: request[key] as string });
 	addOptions(request, plan); addBody(request, plan); addFiles(request, plan); addFields(request, plan);
@@ -308,7 +335,7 @@ export function toGhPlan(value: PublishRequest): GhPlan {
 	return plan;
 }
 
-const cliScalars: Record<string, string> = Object.fromEntries(["repo", "number", "title", "body", "bodyFile", "base", "head", "event", "strategy", "subject", "matchHeadCommit", "reason", "tag", "target", "gistId", "description", "endpoint", "method"].map(key => [key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`), key]));
+const cliScalars: Record<string, string> = Object.fromEntries(["repo", "number", "title", "body", "bodyFile", "base", "head", "event", "strategy", "subject", "matchHeadCommit", "reason", "tag", "target", "gistId", "description", "endpoint", "method", "host"].map(key => [key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`), key]));
 const cliArrays: Record<string, string> = { label: "labels", assignee: "assignees", reviewer: "reviewers", "add-label": "addLabels", "remove-label": "removeLabels", "add-assignee": "addAssignees", "remove-assignee": "removeAssignees", "add-reviewer": "addReviewers", "remove-reviewer": "removeReviewers", file: "files", "remove-file": "removeFiles", "field-json": "fields" };
 function booleanOption(result: RecordValue, key: string): void {
 	if (own(result, key)) invalid();

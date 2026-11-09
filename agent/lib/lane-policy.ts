@@ -307,9 +307,15 @@ function ghCommand(policy: Policy, ctx: Context, raw: string[], namedScope: bool
 	return permit(policy, repo, ctx, action as Action, branch, target);
 }
 /** Exact target identity from validated fields only; query text never establishes scope. */
-function publicationTarget(request: PublishRequest): string | undefined {
+function publicationRepository(request: PublishRequest): string | undefined {
 	if (request.kind !== "api") return "repo" in request ? request.repo : undefined;
 	return /^\/?repos\/([^/?#]+)\/([^/?#]+)(?:[/?#]|$)/i.exec(decodeURIComponent(request.endpoint))?.slice(1, 3).join("/");
+}
+function publicationTarget(request: PublishRequest): string | undefined {
+	const repo = publicationRepository(request);
+	// A non-default host qualifies the key, so it never equals an enrolled github.com owner/repo slug.
+	const host = "host" in request ? request.host : undefined;
+	return repo && host ? `${host}/${repo}` : repo;
 }
 /** Typed tool/execute admission shares the raw gh authorizer, never a new grant surface. */
 export function assessPublication(value: unknown, ctx: Context, file = policyPath()): string | undefined {

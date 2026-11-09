@@ -220,3 +220,98 @@ test("issue-close maps the typed not-planned reason to gh's spelling", () => {
 	assert.ok(!plan.argv.includes("--reason=not-planned"));
 	assert.ok(toGhPlan(validateRequest({ kind: "issue-close", ...target, reason: "completed" })).argv.includes("--reason=completed"));
 });
+
+const hosted = { kind: "issue-comment", ...target, body: "Body" } as const;
+const hostSchema = (publishRequestSchema.properties as any).host;
+const schemaAccepts = (value: unknown) => typeof value === "string" && value.length <= hostSchema.maxLength && new RegExp(hostSchema.pattern, "u").test(value);
+const longest = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`;
+const acceptedHosts = ["ghe.example.com", "git.corp.example.co", "a1.b-2.example", longest];
+const hostileHosts: unknown[] = [
+	"https://ghe.example.com", "ghe.example.com/path", "ghe.example.com:8443", "user@ghe.example.com", "ghe.example.com?x", "ghe.example.com#x",
+	" ghe.example.com", "ghe.example.com ", "ghe.example.com\n", "\tghe.example.com", "ghe.example.com\0", "ghe\\example.com", "[ghe.example.com]",
+	"GHE.Example.com", "ghe.example.COM", "ghe.example.com.", ".ghe.example.com", "localhost", "ghe", "127.0.0.1", "1.2.3.4", "[::1]", "::1",
+	"-ghe.example.com", "ghe-.example.com", "ghe.-example.com", "ghe..example.com", "xn--e1afmkfd.example.com", "ghe.xn--p1ai", "ghe.example.xn--p1ai",
+	"ghé.example.com", "ghe\uff0eexample.com", "ghe\u200b.example.com", "ghe.example\u202e.com", "ghe.example.com\ufeff", `${longest}d`, `${"a".repeat(64)}.example.com`,
+	"--evil", "-", "", "github.com:443", "www.github.com", "api.github.com", "a.b.github.com", 1, 0, true, null, ["ghe.example.com"], { host: "ghe.example.com" },
+];
+
+test("host accepts only strict lowercase dotted DNS names and the schema pattern accepts the same set", () => {
+	assert.equal(hostSchema.type, "string"); assert.equal(hostSchema.maxLength, 253); assert.equal(typeof hostSchema.pattern, "string");
+	assert.equal(longest.length, 253);
+	for (const host of acceptedHosts) {
+		assert.deepEqual(validateRequest({ ...hosted, host }), { ...hosted, host }, host);
+		assert.equal(schemaAccepts(host), true, host);
+	}
+	for (const host of hostileHosts) {
+		assert.throws(() => validateRequest({ ...hosted, host }), InvalidRequest, JSON.stringify(host));
+		assert.equal(schemaAccepts(host), false, JSON.stringify(host));
+	}
+});
+
+test("host is offered only on repository kinds and api; gist, check and HOST/owner/repo syntax stay invalid", () => {
+	for (const shape of publishRequestSchema.oneOf as any[]) {
+		const kind = shape.properties.kind.const as string, expected = "repo" in shape.properties || kind === "api";
+		assert.equal("host" in shape.properties, expected, kind);
+	}
+	for (const value of [
+		{ kind: "gist-create", files: ["a.md"], host: "ghe.example.com" },
+		{ kind: "gist-edit", gistId: "abc123", description: "d", host: "ghe.example.com" },
+		{ kind: "check", files: ["a.md"], host: "ghe.example.com" },
+		{ ...hosted, repo: "ghe.example.com/owner/repo" },
+		{ ...hosted, repo: "ghe.example.com/owner/repo", host: "ghe.example.com" },
+	]) assert.throws(() => validateRequest(value), InvalidRequest, JSON.stringify(value));
+	assert.throws(() => validateRequest(JSON.parse('{"kind":"issue-comment","repo":"owner/repo","number":39,"body":"B","__proto__":{"host":"ghe.example.com"}}')), InvalidRequest);
+	assert.throws(() => validateRequest(Object.assign(Object.create({ host: "ghe.example.com" }), hosted)), InvalidRequest);
+	assert.throws(() => validateRequest({ ...hosted, constructor: { host: "ghe.example.com" } }), InvalidRequest);
+});
+
+test("host github.com collapses to the default representation without mutating the caller", () => {
+	const value = { ...hosted, host: "github.com" };
+	const validated = validateRequest(value);
+	assert.deepEqual(validated, validateRequest(hosted)); assert.equal("host" in validated, false);
+	assert.equal(value.host, "github.com"); assert.ok(Object.isFrozen(validated));
+	assert.deepEqual(toGhPlan(value), toGhPlan(hosted));
+	assert.deepEqual(toGhPlan({ kind: "api", endpoint: "repos/o/r", method: "POST", host: "github.com" }), toGhPlan({ kind: "api", endpoint: "repos/o/r", method: "POST" }));
+});
+
+test("no-host plans keep their exact argv, authority and outbound", () => {
+	const plain = toGhPlan(hosted);
+	assert.deepEqual(plain.argv, ["issue", "comment", "39", "--repo=owner/repo", { payload: 0, use: "file", prefix: "--body-file=" }]);
+	assert.deepEqual(plain.authority, { kind: "issue-comment", ghArgs: ["issue", "comment", "39", "--repo=owner/repo", "--body-file=publication-payload"], repo: "owner/repo", number: 39 });
+	assert.deepEqual(plain.outbound, [{ label: "repo", text: "owner/repo" }]);
+	assert.equal("host" in plain, false);
+	assert.deepEqual(toGhPlan({ kind: "api", endpoint: "repos/o/r", method: "POST" }).argv, ["api", "repos/o/r", "--method=POST", "--hostname=github.com"]);
+});
+
+test("host qualifies the gh repo selector, authority key and api hostname, and is scanned outbound", () => {
+	const plan = toGhPlan({ ...hosted, host: "ghe.example.com" });
+	assert.deepEqual(plan.argv, ["issue", "comment", "39", "--repo=ghe.example.com/owner/repo", { payload: 0, use: "file", prefix: "--body-file=" }]);
+	assert.equal(plan.host, "ghe.example.com");
+	assert.equal(plan.authority.repo, "ghe.example.com/owner/repo"); assert.equal(plan.authority.host, "ghe.example.com");
+	assert.ok(plan.authority.ghArgs.includes("--repo=ghe.example.com/owner/repo"));
+	assert.ok(!plan.authority.ghArgs.includes("--repo=owner/repo"));
+	assert.ok(plan.outbound.some(source => source.label === "host" && source.text === "ghe.example.com"));
+	assert.ok(plan.outbound.some(source => source.label === "repo" && source.text === "ghe.example.com/owner/repo"));
+	for (const request of [
+		{ kind: "pr-create", repo: "owner/repo", title: "T", body: "B", host: "ghe.example.com" },
+		{ kind: "release-notes", repo: "owner/repo", tag: "v1", title: "T", host: "ghe.example.com" },
+		{ kind: "pr-merge", ...target, strategy: "squash", host: "ghe.example.com" },
+	]) assert.ok(toGhPlan(request as PublishRequest).argv.includes("--repo=ghe.example.com/owner/repo"), request.kind);
+	const api = toGhPlan({ kind: "api", endpoint: "repos/o/r/issues", method: "POST", host: "ghe.example.com" });
+	assert.deepEqual(api.argv, ["api", "repos/o/r/issues", "--method=POST", "--hostname=ghe.example.com"]);
+	assert.equal(api.host, "ghe.example.com"); assert.equal(api.authority.repo, undefined);
+	assert.ok(api.outbound.some(source => source.label === "host" && source.text === "ghe.example.com"));
+});
+
+test("CLI --host uses the same validator; duplicates, = form and hostile values are invalid", () => {
+	assert.deepEqual(parseCli(["issue-comment", "--repo", target.repo, "--host", "ghe.example.com", "--number", "39", "--body", "B"]), { kind: "issue-comment", ...target, host: "ghe.example.com", body: "B" });
+	assert.deepEqual(parseCli(["issue-comment", "--repo", target.repo, "--host", "github.com", "--number", "39", "--body", "B"]), { kind: "issue-comment", ...target, body: "B" });
+	for (const argv of [
+		["issue-comment", "--repo", target.repo, "--host", "ghe.example.com", "--host", "ghe.example.com", "--number", "39", "--body", "B"],
+		["issue-comment", "--repo", target.repo, "--host=ghe.example.com", "--number", "39", "--body", "B"],
+		["issue-comment", "--repo", target.repo, "--host", "GHE.example.com", "--number", "39", "--body", "B"],
+		["issue-comment", "--repo", target.repo, "--host", "https://ghe.example.com", "--number", "39", "--body", "B"],
+		["issue-comment", "--repo", target.repo, "--number", "39", "--body", "B", "--host"],
+		["check", "--file", "a", "--host", "ghe.example.com"],
+	]) assert.throws(() => parseCli(argv), InvalidRequest, argv.join(" "));
+});
