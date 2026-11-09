@@ -27,6 +27,7 @@ Investigation budget: for any question needing more than ~5 reads/searches or ~2
 - [ ] Candidate delivery instead (repo has an open `pi-train` candidate): targeted checks `<command>` exit 0 and the branch is delivered with `pi-train fold <branch>`; the candidate owner runs Tier 1 once.
 - [ ] <acceptance check: failing-first spec now passes / behaviour X observable via Y>.
 - [ ] Every changed file at Code Health >= 9.5 (`code_health_score`), with a before/after table in the report; any exception named with a reason.
+- [ ] No Code Health fix loop: one deliberate pass per file before the gate; a file still below 9.5 gets a reported reason and an uplift entry, not another round.
 - [ ] Diff limited to the owned files; no unrelated reformatting or renames. Work only in this repository and issue; report anything else instead of doing it.
 - [ ] Every claim of "done" is backed by a check you ran on the final code state; a report without a run check is "unverified", not done.
 - [ ] The deliverable is the change in the repository, not notes about it. Decide reversible implementation details yourself and record the choice in the report; ask only for decisions the brief reserves.

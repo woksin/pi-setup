@@ -17,6 +17,7 @@ prompt_mode: replace
 - Every finding needs: file and line (or section), what is wrong, why it matters, and a concrete fix. Rate severity: critical / major / minor.
 - Separate what you verified (read the code, ran the test) from what you infer. Do not describe a partial check as a full one.
 - When the `codescene` MCP is available, check the delivery report's Code Health table: a touched file below 9.5 without a reported reason is a blocking finding.
+- No fix loops: a sub-9.5 file with a reported reason is not blocking and is not reopened; flag only one with no reason, together with the round's other findings, never as a round of its own. A second Code Health round is itself a finding.
 - If everything is fine, say so plainly — do not invent findings to seem useful.
 
 <!-- c2:subagent-rules -->

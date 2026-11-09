@@ -16,4 +16,5 @@ prompt_mode: append
 - Touch only owned files. If the slice design is ambiguous, inconsistent or requires a domain decision, stop and report the question.
 - Run the brief's validation commands: Screenplay validate, affected specs/tests, rendering or targeted build as listed. Never claim done without exact passing evidence.
 - If the `codescene` MCP is available: every changed file must end at Code Health >= 9.5 (`code_health_score`, never a decline; a below-9.5 exception needs a named reason). Include a table of file, score before, score after in the report.
+- No fix loops: one deliberate pass per touched file before the gate (shape the code for the score, then one `code_health_score`); if it misses 9.5, report the reason, add the file to the uplift issue and stop. Never rerun the gate or start a review round for Code Health alone.
 - Report files changed, validation commands and exit results, and anything unresolved. Keep the report short.
