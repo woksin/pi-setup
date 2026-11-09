@@ -13,7 +13,7 @@ import sys
 TEMPLATES = [
     "agent/AGENTS.md", "agent/bin/docker-guardian", "agent/bin/pi-cleanup",
     "agent/pi-phase/config.json", "agent/pi-phase/README.md",
-    "skills/github-issue-hygiene/SKILL.md",
+    "skills/github-issue-hygiene/SKILL.md", "skills/shipping-trains/SKILL.md",
     "tools/ai-work-lifecycle/README.md",
     "tools/ai-work-lifecycle/sweep-known-roots.py",
 ]

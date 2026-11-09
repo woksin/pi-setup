@@ -1,0 +1,70 @@
+[
+ {
+  "ids": ["shipping-finished-work-default-push-pr-merge-61-6a55687f"],
+  "kind": "reworded",
+  "to": "agent/AGENTS.md",
+  "new": "Stay and wait for CI as in \"Waiting on GitHub CI\" in `ci-and-pushing`.",
+  "reason": "The waiting procedure moved to the ci-and-pushing skill; the sentence now names it."
+ },
+ {
+  "ids": [
+   "shipping-finished-work-default-push-pr-merge-7-482f2379",
+   "shipping-finished-work-default-push-pr-merge-9-8074cc7c",
+   "shipping-finished-work-default-push-pr-merge-21-b9c74999",
+   "shipping-finished-work-default-push-pr-merge-38-d6024bc7",
+   "shipping-finished-work-default-push-pr-merge-41-00e42e05",
+   "shipping-finished-work-default-push-pr-merge-45-7f966fd1",
+   "shipping-finished-work-default-push-pr-merge-47-11c53bd2",
+   "shipping-finished-work-default-push-pr-merge-51-2977e99e"
+  ],
+  "kind": "moved-core",
+  "to": "skills/shipping-trains/SKILL.md",
+  "reason": "Release-train and repo-orchestrator mechanics, moved verbatim. They only apply while folding, delivering or cutting a train; AGENTS.md keeps the never-open-a-PR-outside-the-train rule and a pointer naming those triggers."
+ },
+ {
+  "ids": [
+   "pushing-and-ci-minutes-11-76315f65",
+   "pushing-and-ci-minutes-18-cc905ae4",
+   "pushing-and-ci-minutes-22-8ece6ccc",
+   "waiting-on-github-ci-2-b63ac286",
+   "waiting-on-github-ci-5-31d5379f",
+   "waiting-on-github-ci-6-1c1253ed",
+   "waiting-on-github-ci-7-a899c3fc",
+   "waiting-on-github-ci-11-e711e7fe",
+   "waiting-on-github-ci-15-ffdb61ba",
+   "waiting-on-github-ci-17-1b4c6ebe",
+   "waiting-on-github-ci-21-6b7f7410",
+   "waiting-on-github-ci-22-52a980e6"
+  ],
+  "kind": "moved-core",
+  "to": "skills/ci-and-pushing/SKILL.md",
+  "reason": "Build-once, iteration-profile and CI-waiting procedure, moved verbatim. They only matter while pushing or waiting on CI; AGENTS.md keeps the batching, local-gate, no-local-integration and PR-label rules plus a pointer naming those triggers."
+ },
+ {
+  "ids": [
+   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-1-2aba386e",
+   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-2-011728be",
+   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-3-17d25f9f",
+   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-4-9e7ed275",
+   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-5-5c09d35e",
+   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-7-e0df2875",
+   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-10-e9a9fcc2"
+  ],
+  "kind": "moved-core",
+  "to": "skills/ci-and-pushing/SKILL.md",
+  "reason": "Docker guardian and container-phase rules, moved verbatim; the skill description names local Docker and AGENTS.md points to it before touching Docker."
+ },
+ {
+  "ids": [
+   "cancelling-unnecessary-runs-2026-10-20-2-b9180178",
+   "cancelling-unnecessary-runs-2026-10-20-4-8f923039",
+   "cancelling-unnecessary-runs-2026-10-20-6-ac549508",
+   "cancelling-unnecessary-runs-2026-10-20-7-0737c25c",
+   "cancelling-unnecessary-runs-2026-10-20-9-52d29e8e",
+   "cancelling-unnecessary-runs-2026-10-20-11-bc9f1c97"
+  ],
+  "kind": "moved-core",
+  "to": "skills/ci-and-pushing/SKILL.md",
+  "reason": "Safeguards for cancelling runs, moved verbatim; they only apply when cancelling. AGENTS.md keeps the never-cancel-Publish/release/deploy and identify-the-run-exactly rules and points to the skill before cancelling."
+ }
+]
