@@ -188,6 +188,54 @@ test('concurrency only warns, solo stays silent and nonmatching commands make no
   assert.deepEqual(f.calls, []);
 });
 
+test('explicit publication repo and head need no git metadata when no candidate is open', async t => {
+  const f = await fixture(t, false);
+  const git = () => { throw new Error('not a git repository'); };
+  const request = { kind: 'pr-create', repo: 'acme/widget', head: 'fix/local', title: 'Title', body: 'Safe' };
+  assert.deepEqual(await publicationDecision(request, { cwd: '/non-git', env: f.env, git }), {});
+  assert.deepEqual(await prCreateDecision('gh pr create --repo acme/widget --head fix/local', '/non-git', f.env, git), {});
+});
+
+test('explicit publication from a non-git cwd still refuses a non-candidate head', async t => {
+  const f = await fixture(t);
+  const git = () => { throw new Error('not a git repository'); };
+  const request = { kind: 'pr-create', repo: 'acme/widget', head: 'fix/local', title: 'Title', body: 'Safe' };
+  const decision = await publicationDecision(request, { cwd: '/non-git', env: f.env, git });
+  assert.match(decision.block!, /PR refused: acme\/widget has open candidate train\/test/);
+  assert.equal(decision.warn, undefined);
+});
+
+test('another repository origin cannot supply concurrency notices for the PR target', async t => {
+  const f = await fixture(t, false);
+  const git = (cwd: string, args: string[]) => args[0] === 'remote' ? 'git@github.com:other/repo.git' : f.git(cwd, args);
+  const request = { kind: 'pr-create', repo: 'acme/widget', head: 'fix/local', title: 'Title', body: 'Safe' };
+  assert.match((await prCreateDecision('gh pr create', '/repo', f.env, git)).warn!, /3 worktrees in other\/repo/);
+  f.calls.length = 0;
+  assert.deepEqual(await publicationDecision(request, { cwd: '/repo', env: f.env, git }), {});
+  assert.deepEqual(await prCreateDecision('gh pr create --repo acme/widget --head fix/local', '/repo', f.env, git), {});
+  assert.deepEqual(f.calls, []);
+});
+
+test('matching origins retain concurrency notices despite repository case differences', async t => {
+  const f = await fixture(t, false);
+  const git = (cwd: string, args: string[]) => args[0] === 'remote' ? 'git@github.com:AcMe/WiDgEt.git' : f.git(cwd, args);
+  const request = { kind: 'pr-create', repo: 'ACME/widget', head: 'fix/local', title: 'Title', body: 'Safe' };
+  const context = { cwd: '/repo', env: f.env, git };
+  assert.match((await publicationDecision(request, context)).warn!, /3 worktrees in acme\/widget.*fix\/local.*fix\/other/);
+  assert.match((await prCreateDecision('gh pr create --repo ACME/widget --head fix/local', '/repo', f.env, git)).warn!, /3 worktrees in acme\/widget/);
+});
+
+test('concurrency scan failures stay silent after PR identity and candidate checks succeed', async t => {
+  const f = await fixture(t, false);
+  const git = (_cwd: string, args: string[]) => {
+    if (args[0] === 'remote') return 'git@github.com:acme/widget.git';
+    throw new Error('scan failed');
+  };
+  const request = { kind: 'pr-create', repo: 'acme/widget', head: 'fix/local', title: 'Title', body: 'Safe' };
+  assert.deepEqual(await publicationDecision(request, { cwd: '/repo', env: f.env, git }), {});
+  assert.deepEqual(await prCreateDecision('gh pr create --repo acme/widget --head fix/local', '/repo', f.env, git), {});
+});
+
 test('gate notices never block, candidate worktree and named exception silent, delivered wording', async t => {
   const f = await fixture(t), command = 'pi-phase run --kind test -- tools/release-check.sh';
   assert.match((await gateRunNotice(command, '/repo', f.env, f.git))!, /targeted checks.*Tier 1.*Proceeding/);
