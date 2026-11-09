@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { InvalidRequest, MAX_STRING_BYTES, parseCli, publishRequestSchema, toGhPlan, validateRequest } from "./publish-request.ts";
+import { InvalidRequest, kindContract, MAX_STRING_BYTES, parseCli, publishRequestSchema, toGhPlan, validateRequest } from "./publish-request.ts";
+import publishExtension from "../extensions/publish.ts";
 import type { PublishRequest } from "./publish-request.ts";
 
 const target = { repo: "owner/repo", number: 39 };
@@ -32,6 +33,87 @@ for (const request of cases) test(`validates and plans ${request.kind}`, () => {
 	assert.equal(plan.authority.kind, request.kind);
 	assert.ok(plan.argv.every(arg => typeof arg === "string" || Number.isSafeInteger(arg.payload)));
 	assert.ok(plan.payloads.every(source => /^(?:body|files\[\d+\]|fields\[\d+\])$/.test(source.label)));
+});
+
+const minimalCases: Record<string, unknown>[] = [
+	{ kind: "issue-create", repo: target.repo, title: "T", body: "B" },
+	{ kind: "pr-create", repo: target.repo, title: "T", body: "B" },
+	{ kind: "issue-comment", ...target, body: "B" }, { kind: "pr-comment", ...target, body: "B" },
+	{ kind: "issue-edit", ...target, title: "T" }, { kind: "pr-edit", ...target, title: "T" },
+	{ kind: "issue-close", ...target }, { kind: "pr-close", ...target },
+	{ kind: "issue-reopen", ...target }, { kind: "pr-reopen", ...target },
+	{ kind: "pr-review", ...target, event: "approve" }, { kind: "pr-merge", ...target, strategy: "merge" },
+	{ kind: "release-create", repo: target.repo, tag: "v1", body: "B" },
+	{ kind: "release-notes", repo: target.repo, tag: "v1", title: "T" },
+	{ kind: "gist-create", files: ["a.md"] }, { kind: "gist-edit", gistId: "abc", description: "D" },
+	{ kind: "api", endpoint: "repos/o/r", method: "POST" }, { kind: "check", files: ["a.md"] },
+];
+function parityFailures(request: Record<string, unknown>): Record<string, unknown>[] {
+	const contract = kindContract(request.kind as PublishRequest["kind"]);
+	const required = contract.split(" requires: ")[1].split(";")[0].split(", ");
+	const optional = contract.split("; optional: ")[1].split(", ").filter(Boolean);
+	const allowed = [...required, ...optional];
+	const failures = [
+		Object.fromEntries(Object.entries(request).filter(([name]) => name !== "kind")),
+		{ ...request, kind: 42 }, { ...request, kind: "VALUE-SENTINEL" },
+		{ ...request, zzz: "VALUE-SENTINEL" },
+		{ ...request, [allowed.includes("host") ? "public" : "host"]: "VALUE-SENTINEL" },
+		...required.map(key => Object.fromEntries(Object.entries(request).filter(([name]) => name !== key))),
+	];
+	for (const key of allowed) {
+		const schema = (publishRequestSchema.properties as any)[key];
+		const value = schema.type === "string" ? 42 : "VALUE-SENTINEL";
+		failures.push({ ...request, [key]: value });
+		if (schema.enum) failures.push({ ...request, [key]: "VALUE-SENTINEL" });
+		if (schema.type === "integer") failures.push({ ...request, [key]: 0 }, { ...request, [key]: 1.5 });
+		if (schema.type === "string" && !schema.enum) failures.push({ ...request, [key]: "a".repeat(MAX_STRING_BYTES + 1) });
+		if (schema.type === "array") failures.push({ ...request, [key]: Array(101).fill(key === "fields" ? { name: "x", value: 1 } : "a") });
+	}
+	if (allowed.includes("body")) failures.push({ ...request, body: "B", bodyFile: "a.md" });
+	if (["issue-create", "pr-create", "issue-comment", "pr-comment", "release-create"].includes(request.kind as string)) {
+		failures.push(Object.fromEntries(Object.entries(request).filter(([key]) => !["body", "bodyFile"].includes(key))));
+	}
+	if (["issue-edit", "pr-edit", "release-notes"].includes(request.kind as string)) {
+		failures.push(Object.fromEntries(Object.entries(request).filter(([key]) => !["title", "body", "bodyFile"].includes(key))));
+	}
+	if (allowed.includes("createIfNone")) for (const editLast of [undefined, false]) failures.push({ ...request, createIfNone: true, ...(editLast === undefined ? {} : { editLast }) });
+	if (request.kind === "pr-review") for (const event of ["comment", "request-changes"]) failures.push({ ...request, event });
+	if (request.kind === "gist-edit") {
+		failures.push({ kind: "gist-edit", gistId: "abc" });
+		for (const operations of [{ files: ["a.md"], removeFiles: ["b.md"] }, { description: "D", files: ["a.md"] }, { description: "D", removeFiles: ["b.md"] }, { files: ["a.md", "b.md"] }, { removeFiles: ["a.md", "b.md"] }, { files: [] }]) {
+			failures.push({ kind: "gist-edit", gistId: "abc", ...operations });
+		}
+	}
+	if (request.kind === "api") for (const field of [{ name: "x" }, { name: "x", value: 1, file: "a.md" }]) failures.push({ ...request, fields: [field] });
+	if (allowed.includes("host")) failures.push({ ...request, host: "https://ghe.example.com" });
+	if (["gist-create", "check"].includes(request.kind as string)) failures.push({ ...request, files: [] });
+	return failures;
+}
+test("parity fixtures cover all 18 publish kinds", () => {
+	assert.equal(minimalCases.length, 18);
+	assert.deepEqual(minimalCases.map(request => request.kind), publishRequestSchema.properties.kind.enum);
+});
+for (const request of minimalCases) test(`${request.kind} preserves runtime rejection parity before admission`, async () => {
+	assert.deepEqual(validateRequest(request), request);
+	let registered: any;
+	publishExtension({ registerTool: (definition: unknown) => { registered = definition; } } as any, {
+		admit: () => assert.fail("invalid requests must not reach authority admission"),
+		candidate: async () => assert.fail("invalid requests must not reach candidate admission"),
+		send: async () => assert.fail("invalid requests must not reach publication"),
+	});
+	for (const [index, invalid] of parityFailures(request).entries()) {
+		assert.throws(() => validateRequest(invalid), error => {
+			assert.ok(error instanceof InvalidRequest, `${request.kind} fixture ${index}`);
+			assert.equal(error.message, "publish: invalid-request");
+			assert.ok(!error.detail?.includes("SENTINEL"));
+			return true;
+		});
+		const result = await registered.execute("id", invalid, undefined, undefined, {});
+		assert.equal(result.isError, true, `${request.kind} fixture ${index}`);
+		assert.equal(result.details.code, "invalid-request");
+		assert.match(result.content[0].text, /^publish: invalid-request/);
+		assert.ok(!JSON.stringify(result).includes("SENTINEL"));
+	}
 });
 
 for (const kind of ["issue-create", "pr-create"] as const) test(`${kind} accepts exactly the .github repository name`, () => {
@@ -111,16 +193,30 @@ test("per-string byte and item limits do not trust character counts", () => {
 	assert.throws(() => validateRequest({ kind: "api", endpoint: "repos/o/r", method: "POST", fields: Array.from({ length: 5 }, () => ({ name: "x", value: "a".repeat(MAX_STRING_BYTES) })) }), InvalidRequest);
 });
 
-test("schema exposes a strict per-kind object contract with no arbitrary selectors", () => {
+test("schema exposes one flat strict object; runtime owns per-kind contracts", () => {
 	assert.equal(publishRequestSchema.type, "object");
 	assert.equal(publishRequestSchema.additionalProperties, false);
-	assert.equal(publishRequestSchema.oneOf.length, 18);
-	for (const shape of publishRequestSchema.oneOf) {
-		assert.equal(shape.additionalProperties, false);
-		assert.ok(shape.allOf.some(rule => "not" in rule));
+	assert.deepEqual(publishRequestSchema.required, ["kind"]);
+	assert.equal((publishRequestSchema as any).oneOf, undefined);
+	assert.equal(publishRequestSchema.properties.kind.enum.length, 18);
+	for (const kind of publishRequestSchema.properties.kind.enum) {
+		const contract = kindContract(kind as PublishRequest["kind"]);
+		const required = contract.split(" requires: ")[1].split(";")[0].split(", ");
+		const optional = contract.split("; optional: ")[1].split(", ").filter(Boolean);
+		for (const key of [...required, ...optional]) assert.ok(key in publishRequestSchema.properties, `${kind}: ${key}`);
 	}
-	const create = publishRequestSchema.oneOf.find(shape => shape.properties.kind.const === "issue-create")!;
-	assert.ok(create.allOf.some(rule => JSON.stringify(rule) === JSON.stringify({ anyOf: [{ required: ["body"] }, { required: ["bodyFile"] }] })));
+	const inspect = (schema: any) => {
+		for (const keyword of ["oneOf", "allOf", "anyOf", "if", "then", "not", "description", "maxLength", "maxItems", "pattern"]) {
+			assert.ok(!(keyword in schema), keyword);
+		}
+		for (const property of Object.values(schema.properties ?? {})) inspect(property);
+		if (schema.items) inspect(schema.items);
+	};
+	inspect(publishRequestSchema);
+	assert.deepEqual((publishRequestSchema.properties as any).fields.items, {
+		type: "object", additionalProperties: false, required: ["name"],
+		properties: { name: { type: "string" }, value: { type: ["string", "number", "boolean", "null"] }, file: { type: "string" } },
+	});
 });
 
 test("check has capture sources but no gh command or authority argv", () => {
@@ -180,8 +276,9 @@ test("gist-edit plans exactly one single-valued gh operation (--add, --remove or
 	assert.deepEqual(gist({ removeFiles: ["old.md"] }), ["gist", "edit", "abc123", "--remove=old.md"]);
 	assert.deepEqual(gist({ description: "New" }), ["gist", "edit", "abc123", "--desc=New"]);
 	assert.deepEqual(gist({ files: ["file.md"] }), ["gist", "edit", "abc123", { payload: 0, use: "file", prefix: "--add=" }]);
-	const edit = publishRequestSchema.oneOf.find(shape => shape.properties.kind.const === "gist-edit")! as any;
-	assert.equal(edit.allOf.at(-1).oneOf.length, 3);
+	for (const operations of [{}, { files: ["a", "b"] }, { removeFiles: ["a", "b"] }, { files: ["a"], description: "D" }]) {
+		assert.throws(() => gist(operations), InvalidRequest);
+	}
 });
 
 test("validation details name only known fields and static contracts, never received values", () => {
@@ -222,8 +319,6 @@ test("issue-close maps the typed not-planned reason to gh's spelling", () => {
 });
 
 const hosted = { kind: "issue-comment", ...target, body: "Body" } as const;
-const hostSchema = (publishRequestSchema.properties as any).host;
-const schemaAccepts = (value: unknown) => typeof value === "string" && value.length <= hostSchema.maxLength && new RegExp(hostSchema.pattern, "u").test(value);
 const longest = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`;
 const acceptedHosts = ["ghe.example.com", "git.corp.example.co", "a1.b-2.example", longest];
 const hostileHosts: unknown[] = [
@@ -235,23 +330,21 @@ const hostileHosts: unknown[] = [
 	"--evil", "-", "", "github.com:443", "www.github.com", "api.github.com", "a.b.github.com", 1, 0, true, null, ["ghe.example.com"], { host: "ghe.example.com" },
 ];
 
-test("host accepts only strict lowercase dotted DNS names and the schema pattern accepts the same set", () => {
-	assert.equal(hostSchema.type, "string"); assert.equal(hostSchema.maxLength, 253); assert.equal(typeof hostSchema.pattern, "string");
+test("runtime host validation accepts only strict lowercase dotted DNS names", () => {
 	assert.equal(longest.length, 253);
 	for (const host of acceptedHosts) {
 		assert.deepEqual(validateRequest({ ...hosted, host }), { ...hosted, host }, host);
-		assert.equal(schemaAccepts(host), true, host);
 	}
 	for (const host of hostileHosts) {
 		assert.throws(() => validateRequest({ ...hosted, host }), InvalidRequest, JSON.stringify(host));
-		assert.equal(schemaAccepts(host), false, JSON.stringify(host));
 	}
 });
 
-test("host is offered only on repository kinds and api; gist, check and HOST/owner/repo syntax stay invalid", () => {
-	for (const shape of publishRequestSchema.oneOf as any[]) {
-		const kind = shape.properties.kind.const as string, expected = "repo" in shape.properties || kind === "api";
-		assert.equal("host" in shape.properties, expected, kind);
+test("runtime permits host only on repository kinds and api; gist, check and HOST/owner/repo syntax stay invalid", () => {
+	for (const request of minimalCases) {
+		const expected = "repo" in request || request.kind === "api";
+		if (expected) assert.equal((validateRequest({ ...request, host: "ghe.example.com" }) as any).host, "ghe.example.com");
+		else assert.throws(() => validateRequest({ ...request, host: "ghe.example.com" }), InvalidRequest);
 	}
 	for (const value of [
 		{ kind: "gist-create", files: ["a.md"], host: "ghe.example.com" },

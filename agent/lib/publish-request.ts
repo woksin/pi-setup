@@ -92,8 +92,8 @@ function apiField(value: unknown): boolean {
 	return own(value, "value") && primitive(value.value);
 }
 interface Property { validate: (value: unknown) => boolean; schema: RecordValue }
-const stringProperty = (validate: (value: unknown) => boolean = text): Property => ({ validate, schema: { type: "string", maxLength: MAX_STRING_BYTES } });
-const arrayProperty = (validate: (value: unknown) => boolean): Property => ({ validate: list(validate), schema: { type: "array", maxItems: 100, items: { type: "string", maxLength: MAX_STRING_BYTES } } });
+const stringProperty = (validate: (value: unknown) => boolean = text): Property => ({ validate, schema: { type: "string" } });
+const arrayProperty = (validate: (value: unknown) => boolean): Property => ({ validate: list(validate), schema: { type: "array", items: { type: "string" } } });
 const enumProperty = (...values: string[]): Property => ({ validate: enumeration(...values), schema: { type: "string", enum: values } });
 const properties: Record<string, Property> = {
 	repo: stringProperty(repo), number: { validate: number, schema: { type: "integer", minimum: 1 } },
@@ -103,16 +103,17 @@ const properties: Record<string, Property> = {
 	matchHeadCommit: stringProperty(value => text(value) && /^[a-fA-F0-9]{40}$/.test(value)),
 	event: enumProperty("approve", "comment", "request-changes"), strategy: enumProperty("merge", "squash", "rebase"),
 	reason: enumProperty("completed", "not-planned"), method: enumProperty("POST", "PATCH", "PUT", "DELETE"),
-	host: { validate: hostname, schema: { type: "string", maxLength: HOST_MAX_LENGTH, pattern: HOST_PATTERN } },
+	host: { validate: hostname, schema: { type: "string" } },
 };
 for (const name of ["labels", "assignees", "reviewers", "addLabels", "removeLabels", "addAssignees", "removeAssignees", "addReviewers", "removeReviewers"]) properties[name] = arrayProperty(value => text(value) && value.length > 0 && !/[\p{Cc}]/u.test(value));
 for (const name of ["draft", "editLast", "createIfNone", "deleteBranch", "auto", "prerelease", "public"]) properties[name] = { validate: bool, schema: { type: "boolean" } };
 properties.files = arrayProperty(filename);
 properties.removeFiles = arrayProperty(publicFilename);
-properties.fields = { validate: list(apiField), schema: { type: "array", maxItems: 100, items: { oneOf: [
-	{ type: "object", additionalProperties: false, required: ["name", "value"], properties: { name: { type: "string", pattern: "^[A-Za-z0-9_.\\[\\]]+$" }, value: { type: ["string", "number", "boolean", "null"], maxLength: MAX_STRING_BYTES } } },
-	{ type: "object", additionalProperties: false, required: ["name", "file"], properties: { name: { type: "string", pattern: "^[A-Za-z0-9_.\\[\\]]+$" }, file: { type: "string" } } },
-] } } };
+properties.fields = { validate: list(apiField), schema: { type: "array", items: {
+	type: "object", additionalProperties: false, required: ["name"], properties: {
+		name: { type: "string" }, value: { type: ["string", "number", "boolean", "null"] }, file: { type: "string" },
+	},
+} } };
 interface Contract { required: string[]; optional: string[] }
 const contract = (required: string, optional = ""): Contract => ({ required: required.split(" ").filter(Boolean), optional: optional.split(" ").filter(Boolean) });
 const body = "body bodyFile", edits = "title addLabels removeLabels addAssignees removeAssignees";
@@ -138,31 +139,19 @@ const REQUIRED_BODY_KINDS = ["issue-create", "pr-create", "issue-comment", "pr-c
 const EDIT_KINDS = ["issue-edit", "pr-edit", "release-notes"];
 /** `gh gist edit` takes single-valued --add/--remove/--desc, so one edit means exactly one operation with one value. */
 const GIST_EDIT_OPERATIONS = ["description", "files", "removeFiles"];
-function gistOperationSchema(key: string): RecordValue {
-	const others = GIST_EDIT_OPERATIONS.filter(other => other !== key).map(other => ({ required: [other] }));
-	const properties = key === "description" ? {} : { properties: { [key]: { minItems: 1, maxItems: 1 } } };
-	return { required: [key], ...properties, not: { anyOf: others } };
-}
-const requiredOne = (...keys: string[]) => ({ anyOf: keys.map(key => ({ required: [key] })) });
-function schemaConstraints(kind: string): RecordValue[] {
-	const constraints: RecordValue[] = [{ not: { required: ["body", "bodyFile"] } }];
-	if (REQUIRED_BODY_KINDS.includes(kind)) constraints.push(requiredOne("body", "bodyFile"));
-	if (EDIT_KINDS.includes(kind)) constraints.push(requiredOne("title", "body", "bodyFile"));
-	if (["gist-create", "check"].includes(kind)) constraints.push({ properties: { files: { minItems: 1 } } });
-	return [...constraints, ...conditionalSchema(kind)];
-}
-function conditionalSchema(kind: string): RecordValue[] {
-	if (kind === "pr-review") return [{ anyOf: [{ properties: { event: { const: "approve" } } }, ...requiredOne("body", "bodyFile").anyOf] }];
-	if (kind.endsWith("-comment")) return [{ if: { required: ["createIfNone"], properties: { createIfNone: { const: true } } }, then: { required: ["editLast"], properties: { editLast: { const: true } } } }];
-	if (kind === "gist-edit") return [{ oneOf: GIST_EDIT_OPERATIONS.map(key => gistOperationSchema(key)) }];
-	return [];
-}
 export const publishRequestSchema = { type: "object", additionalProperties: false, properties: {
 	kind: { type: "string", enum: Object.keys(contracts) }, ...Object.fromEntries(Object.entries(properties).map(([key, property]) => [key, property.schema])),
-}, required: ["kind"], oneOf: Object.entries(contracts).map(([kind, shape]) => ({
-	required: ["kind", ...shape.required], additionalProperties: false, type: "object", allOf: schemaConstraints(kind),
-	properties: Object.fromEntries(["kind", ...shape.required, ...shape.optional].map(key => [key, key === "kind" ? { const: kind } : properties[key].schema])),
-})) };
+}, required: ["kind"] };
+/** Compact required-field guidance generated from the runtime contracts. */
+export function kindSummary(): string {
+	const groups = new Map<string, string[]>();
+	for (const [kind, shape] of Object.entries(contracts)) {
+		const required = shape.required.join(",");
+		const kinds = groups.get(required) ?? [];
+		kinds.push(kind); groups.set(required, kinds);
+	}
+	return [...groups].map(([required, kinds]) => `${kinds.join("/")}:${required}`).join("; ");
+}
 /** Static contract text: never includes caller-supplied values or unknown field names. */
 export function kindContract(kind: PublishRequest["kind"]): string {
 	if (!own(contracts, kind)) return invalid();
