@@ -104,6 +104,15 @@ function concurrentNotice(scan: any) {
   return `${pending.length} worktrees in ${scan.repo} hold unshipped work (${pending.map((w: any) => w.branch).join(', ')}). Converge them into one candidate (\`pi-train concurrency\`) instead of separate PRs.`;
 }
 
+async function concurrencyDecision(segment: Segment, manifests: any[], repo: string): Promise<Decision> {
+  try {
+    const origin = repositoryKey(segment.git(segment.cwd, ['remote', 'get-url', 'origin']).trim());
+    if (origin !== repo) return {};
+    const warn = concurrentNotice(await repositoryScan(segment, manifests));
+    return warn ? { warn } : {};
+  } catch { return {}; }
+}
+
 function refusal(repo: string, train: string, head: string) {
   return `PR refused: ${repo} has open candidate ${train}. Deliver this branch with \`pi-train fold ${head}\`; the candidate ships as one PR (\`pi-train ship\`). Named exceptions: prefix \`PI_CANDIDATE_EXCEPTION=major\` or \`=urgent-fix\` and give the reason in your report.`;
 }
@@ -133,8 +142,7 @@ async function decidePR(segment: Segment, env: NodeJS.ProcessEnv, orchestrated: 
       : refusal(repo, trains[0].train, head);
     return orchestrated ? { warn: reason } : { block: reason };
   }
-  const warn = concurrentNotice(await repositoryScan(segment, manifests));
-  return warn ? { warn } : {};
+  return concurrencyDecision(segment, manifests, repo);
 }
 
 function publicationSegment(segment: Segment): Segment {
