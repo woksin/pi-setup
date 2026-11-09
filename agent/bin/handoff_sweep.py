@@ -10,17 +10,20 @@ Anything that cannot be read or classified is kept; an unreadable shared source
 import json
 import os
 import re
+import stat as statmod
+import time
 
 NAME = re.compile(r'^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-(\d+)'
                   r'(\.launch-prompt)?\.(md|json)$')
 LIVE_WINDOW_S = 2 * 86400
 PARSE_CAP = 8000
 TEXT_LIMIT = 1024 * 1024
-KEEP_DIR_ENTRIES = 400000
-KEEP_DEPTH = 6
-KEEP_SKIP_DIRS = {'node_modules', '.git', 'bin', 'obj', 'dist', 'packages', '.nuget', 'TestResults'}
-KEEP_TEXT_LIMIT = 256 * 1024
-KEEP_TEXT_SUFFIXES = ('.md', '.txt', '.json', '.log', '.yml', '.yaml')
+KEEP_DIR_ENTRIES = 200000
+KEEP_TOTAL_BYTES = 512 * 1024 ** 2
+KEEP_SECONDS = 8
+CHUNK = 1024 * 1024
+OVERLAP = 160
+REFERENCE = re.compile(rb'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-\d+(?:\.launch-prompt)?\.(?:md|json)')
 DAY = 86400
 
 
@@ -159,34 +162,69 @@ def raise_error(error):
     raise error
 
 
-def keep_entry_text(path, name):
-    parts = [name]
-    if os.path.islink(path):
-        parts.append(os.readlink(path))
-    if name.endswith(KEEP_TEXT_SUFFIXES) and os.path.isfile(path) and os.path.getsize(path) <= KEEP_TEXT_LIMIT:
-        parts.append(read_text(path))
-    return parts
+class KeepScan:
+    """Everything under <repo>/.ai-work/keep/ is searched byte-for-byte (any file type,
+    any depth, large files streamed in overlapping chunks) for handoff file names. Anything
+    not fully examined raises Unknown, so the caller keeps every candidate of the repo."""
 
+    def __init__(self, clock):
+        self.found, self.entries, self.bytes = set(), 0, 0
+        self.clock, self.deadline = clock, clock() + KEEP_SECONDS
 
-def keep_dir_text(handoffs_dir):
-    """Names, link targets and small text files under <repo>/.ai-work/keep/ (a reference there
-    protects a handoff); large or binary files are matched by name only,
-    and the walk stops at KEEP_DEPTH and skips build/vendor dirs."""
-    keep = os.path.join(os.path.dirname(handoffs_dir), 'keep')
-    if not os.path.lexists(keep):
-        return ''
-    parts, seen = [], 0
-    for directory, dirs, files in os.walk(keep, onerror=raise_error):
-        if directory[len(keep):].count(os.sep) >= KEEP_DEPTH:
-            dirs[:] = []
-        dirs[:] = [name for name in dirs if name not in KEEP_SKIP_DIRS]
-        parts.extend(dirs)
-        seen += len(files)
-        if seen > KEEP_DIR_ENTRIES:
+    def names(self, data):
+        self.found.update(match.decode('ascii') for match in REFERENCE.findall(data))
+
+    def budget(self):
+        if self.clock() > self.deadline:
+            raise Unknown('keep/ scan exceeded the time cap')
+        if self.entries > KEEP_DIR_ENTRIES:
             raise Unknown('keep/ has too many entries')
-        for name in files:
-            parts += keep_entry_text(os.path.join(directory, name), name)
-    return '\n'.join(parts)
+
+    def stream(self, path):
+        tail = b''
+        with open(path, 'rb') as stream:
+            while True:
+                chunk = stream.read(CHUNK)
+                if not chunk:
+                    return
+                self.bytes += len(chunk)
+                if self.bytes > KEEP_TOTAL_BYTES:
+                    raise Unknown('keep/ exceeds the total byte cap')
+                self.names(tail + chunk)
+                tail = chunk[-OVERLAP:]
+                self.budget()
+
+    def entry(self, directory, name, is_dir):
+        path = os.path.join(directory, name)
+        self.entries += 1
+        self.names(name.encode('utf-8', 'surrogateescape'))
+        if os.path.islink(path):
+            self.names(os.readlink(path).encode('utf-8', 'surrogateescape'))
+            if is_dir:
+                raise Unknown(f'symlinked directory not followed: {path}')
+        if not is_dir and os.path.islink(path) and not os.path.exists(path):
+            return  # dangling link: no content, its target text was searched above
+        if not is_dir:
+            if statmod.S_ISREG(os.stat(path).st_mode):  # fifo/socket/device store no content
+                self.stream(path)
+        self.budget()
+
+    def walk(self, keep):
+        for directory, dirs, files in os.walk(keep, onerror=raise_error):
+            for name in dirs:
+                self.entry(directory, name, True)
+            for name in files:
+                self.entry(directory, name, False)
+            self.budget()
+
+
+def keep_references(handoffs_dir, clock=time.monotonic):
+    """Set of handoff file names referenced under the repo keep/ tree; Unknown if incomplete."""
+    keep = os.path.join(os.path.dirname(handoffs_dir), 'keep')
+    scan = KeepScan(clock)
+    if os.path.lexists(keep):
+        scan.walk(keep)
+    return scan.found
 
 
 def folder_units(directory):
@@ -227,13 +265,13 @@ def protected_reason(members, directory, protect):
     return None
 
 
-def keep_reason(members, keep_text):
+def keep_reason(members, keep_names):
     """Last, lazy check: only reached for units that would otherwise be removed."""
     try:
-        text = keep_text()
+        names = keep_names()
     except (OSError, Unknown) as error:
         return f'keep/ scan incomplete, kept: {error}'
-    return 'referenced by keep/' if any(name in text for name, _ in members) else None
+    return 'referenced by keep/' if any(name in names for name, _ in members) else None
 
 
 def unit_reason(members, directory, protect, newest, cutoff):
@@ -246,7 +284,7 @@ def unit_reason(members, directory, protect, newest, cutoff):
         return 'within retention window'
     reasons = (protect['retained'](os.path.join(directory, name)) for name, _ in members)
     early = protected_reason(members, directory, protect) or next((r for r in reasons if r), None)
-    return early or keep_reason(members, protect['keep_text'])
+    return early or keep_reason(members, protect['keep_names'])
 
 
 def add_row(folder, row):
@@ -298,7 +336,7 @@ def plan_folder(directory, now, age_days, keep_newest, protect, retained):
         folder['skip'] = error
         return folder
     local = {'paths': protect['paths'], 'text': protect['lanes'], 'retained': retained,
-             'keep_text': memoised(lambda: keep_dir_text(directory))}
+             'keep_names': memoised(lambda: keep_references(directory))}
     top = newest_units(units, keep_newest)
     for key in sorted(units):
         members = sorted(units[key], key=lambda member: member[0])

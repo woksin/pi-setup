@@ -1692,7 +1692,14 @@ def plan_handoffs(ctx: Ctx, checkouts):
 
 
 def apply_handoff(row):
-    """Unlink one planned file unless it changed or became retained since planning."""
+    """Unlink one planned file unless it changed or became retained since planning.
+
+    Planning and apply run back to back in one process (apply_handoffs follows plan_handoffs
+    directly; the liveness, marker, lane-status and keep/ decisions are not re-derived). The
+    window is seconds, a live session writes new handoffs (changing the chain, never an old
+    unit) and the age/newest rules cannot flip; the per-file recheck covers the remaining
+    risk: a file rewritten since planning, a KEEP marker or an active path (delete_candidate).
+    """
     path = row["path"]
     try:
         st = os.lstat(path)

@@ -135,14 +135,85 @@ class HandoffSweepSpecs(unittest.TestCase):
 
     def scans_of_keep(self):
         calls = []
-        real_scan = SWEEP['plan'].__globals__['keep_dir_text']
+        real_scan = SWEEP['plan'].__globals__['keep_references']
 
         def counting(directory):
             calls.append(directory)
             return real_scan(directory)
-        SWEEP['plan'].__globals__['keep_dir_text'] = counting
-        self.addCleanup(SWEEP['plan'].__globals__.__setitem__, 'keep_dir_text', real_scan)
+        SWEEP['plan'].__globals__['keep_references'] = counting
+        self.addCleanup(SWEEP['plan'].__globals__.__setitem__, 'keep_references', real_scan)
         return calls
+
+    def set_global(self, name, value):
+        scope = SWEEP['plan'].__globals__
+        self.addCleanup(scope.__setitem__, name, scope[name])
+        scope[name] = value
+
+    def keep_file(self, relative, data):
+        path = self.repo / '.ai-work/keep' / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    def test_reference_in_large_keep_file_protects(self):
+        self.handoff(SID, 1, 40)
+        self.keep_file('notes.md', b'a' * (300 * 1024) + f' see {SID}-1.md'.encode() + b'b' * 1000)
+        result = self.plan(keep=0)
+        self.assertEqual(self.removed(result), [])
+        self.assertEqual(self.rows(result)[f'{SID}-1.md']['reason'], 'referenced by keep/')
+
+    def test_reference_split_across_chunk_boundary_is_found(self):
+        self.set_global('CHUNK', 64)
+        self.handoff(SID, 1, 40)
+        text = f'{SID}-1.md'.encode()
+        for offset in (1, 20, 63):
+            self.keep_file('notes.bin', b'x' * (64 - offset) + text + b'y' * 200)
+            self.assertEqual(self.removed(self.plan(keep=0)), [], offset)
+
+    def test_deep_and_vendor_dirs_are_searched_not_skipped(self):
+        self.handoff(SID, 1, 40)
+        self.keep_file('a/b/c/d/e/f/g/h/node_modules/x/note.txt', f'{SID}-1.md'.encode())
+        self.assertEqual(self.removed(self.plan(keep=0)), [])
+
+    def test_unexamined_keep_content_keeps_all_candidates(self):
+        self.handoff(SID, 1, 40)
+        self.handoff(SID, 2, 40)
+        keep = self.repo / '.ai-work/keep'
+        keep.mkdir()
+        (keep / 'linked').symlink_to(self.root)
+        result = self.plan(keep=0)
+        self.assertEqual(self.removed(result), [])
+        self.assertIn('symlinked directory not followed', self.rows(result)[f'{SID}-1.md']['reason'])
+
+    def test_scan_caps_keep_all_candidates(self):
+        self.handoff(SID, 1, 40)
+        self.keep_file('a.txt', b'x' * 500)
+        for name, value, cause in (('KEEP_TOTAL_BYTES', 100, 'total byte cap'),
+                                   ('KEEP_DIR_ENTRIES', 0, 'too many entries'),
+                                   ('KEEP_SECONDS', -1, 'time cap')):
+            self.set_global(name, value)
+            reason = self.rows(self.plan(keep=0))[f'{SID}-1.md']
+            self.assertEqual(reason['action'], 'keep', name)
+            self.assertIn(cause, reason['reason'])
+            self.set_global(name, SWEEP[name])
+
+    def test_dangling_link_is_searched_by_target_and_fifo_is_not_read(self):
+        self.handoff(SID, 1, 40)
+        keep = self.repo / '.ai-work/keep'
+        keep.mkdir()
+        (keep / 'old').symlink_to('/nonexistent/' + f'{SID}-1.md')
+        self.assertEqual(self.removed(self.plan(keep=0)), [])
+        (keep / 'old').unlink()
+        (keep / 'old').symlink_to('/nonexistent/other')
+        self.assertEqual(self.removed(self.plan(keep=0)), [f'{SID}-1.md'])
+        os.mkfifo(keep / 'pipe')
+        self.assertEqual(self.removed(self.plan(keep=0)), [f'{SID}-1.md'])
+
+    def test_unreadable_keep_file_keeps_candidates(self):
+        self.handoff(SID, 1, 40)
+        self.keep_file('secret.txt', b'x')
+        (self.repo / '.ai-work/keep/secret.txt').chmod(0)
+        self.addCleanup((self.repo / '.ai-work/keep/secret.txt').chmod, 0o644)
+        self.assertEqual(self.removed(self.plan(keep=0)), [])
 
     def test_keep_dir_is_not_scanned_without_removal_candidates(self):
         calls = self.scans_of_keep()
