@@ -213,6 +213,20 @@ class RestartBudgetTests(GuardianCase):
         self.assertIn('restarting Docker Desktop', self.log_text())
         self.assertIn('docker up after', self.log_text())
 
+    def test_restart_notices_are_passive_broadcasts(self):
+        messages = self.root / 'messages'
+        messages.mkdir()
+        self.extra_env['DOCKER_GUARDIAN_MESSAGES'] = str(messages)
+        self.run_guardian()
+        names = sorted(p.name for p in messages.iterdir())
+        self.assertFalse(any(name.startswith('ALL-') for name in names), names)
+        self.assertEqual(len(names), 2, names)
+        for event in ('restart', 'ok'):
+            matches = [name for name in names if name.startswith(f'BCAST-docker-guardian-{event}-')]
+            self.assertEqual(len(matches), 1, names)
+            self.assertRegex(matches[0], rf'^BCAST-docker-guardian-{event}-\d{{4}}\.md$')
+            self.assertIn('docker-guardian', (messages / matches[0]).read_text())
+
     def test_one_restart_per_twenty_minutes(self):
         recent = int(time.time()) - 600
         (self.state / 'restarts').write_text(f'{recent}\n')

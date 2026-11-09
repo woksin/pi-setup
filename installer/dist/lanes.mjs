@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 0b4d5b0586e477ea85dd0144c009e80bfbff8f9f7f032a89099ab6e20694531a
+// pi-setup-source-sha256: 0ccb811f35b4cb34f7b9540ca0d6d4e36a978b827dfa1e753f36372fef976eca
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -1318,6 +1318,21 @@ var FileBackend = class {
       try {
         writeFileSync3(path, m.body, { flag: "wx" });
         return { name, from: m.from, to: [m.to], topic: m.topic, at, path };
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+      }
+    }
+  }
+  async postPassive(m) {
+    if (!validTopic(m.topic)) throw new Error("invalid message name");
+    mkdirSync2(this.dir, { recursive: true });
+    const at = this.now();
+    for (let i = 1; ; i++) {
+      const name = messageName("", "BCAST", m.topic, at, i).replace(/^-to-/, "");
+      const path = join13(this.dir, name);
+      try {
+        writeFileSync3(path, m.body, { flag: "wx" });
+        return { name, from: "", to: ["BCAST"], topic: m.topic, at, path };
       } catch (e) {
         if (e.code !== "EEXIST") throw e;
       }
@@ -3869,9 +3884,15 @@ async function close(id, opts, c, root, ctx) {
   persistClosed(c, root, { id, reason: opts.reason || "", by: from, at });
   const line = closedLine(to, opts.reason, at);
   await backend.setStatus(id, line);
-  const message = await backend.send({ from, to: c.messages.broadcast, topic: `lane-closed-${id.toLowerCase()}`, body: closeBody(id, to, opts.reason, unread2) });
+  const topic = `lane-closed-${id.toLowerCase()}`;
+  const message = await backend.postPassive({ topic, body: closeBody(id, to, opts.reason, unread2) });
   ctx.out(`${id}: ${line}`);
   ctx.out(message.path);
+  if (to && to !== from) {
+    const wake = await backend.send({ from, to, topic, body: `Lane ${id} closed, pick up its work; details in ${message.name}
+` });
+    ctx.out(wake.path);
+  }
   ctx.out(hint);
   return 0;
 }

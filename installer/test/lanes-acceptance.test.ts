@@ -61,15 +61,29 @@ esac`);
     lanes(1, "idle-check"); assert.match(lanes(1, "resume-check").stdout, /MISSING watch:/);
     const configBefore = readFileSync(join(root, "lanes.json"), "utf8");
     lanes(3, "nudge", "L1", "hi");
-    lanes(0, "close", "L2", "--reassign-to", "L1", "--reason", "done", "--from", "L0");
+    const close = lanes(0, "close", "L2", "--reassign-to", "L1", "--reason", "done", "--from", "L0");
     assert.match(readFileSync(join(root, "messages/status/L2.status"), "utf8"), /^closed reassigned-to L1/);
-    assert.ok(readdirSync(join(root, "messages")).some((n) => n.includes("L0-to-ALL-lane-closed-l2-")));
+    const messages = join(root, "messages");
+    const names = readdirSync(messages);
+    const passive = names.find((n) => /^BCAST-lane-closed-l2-\d{4}\.md$/.test(n));
+    const wake = names.find((n) => /^L0-to-L1-lane-closed-l2-\d{4}\.md$/.test(n));
+    assert.ok(passive, names.join("\n")); assert.ok(wake, names.join("\n"));
+    assert.ok(!names.some((n) => n.startsWith("L0-to-ALL-") || n.startsWith("ALL-")));
+    assert.equal(readFileSync(join(messages, wake), "utf8"), `Lane L2 closed, pick up its work; details in ${passive}\n`);
+    assert.deepEqual(close.stdout.trim().split("\n").slice(1, 3), [join(messages, passive), join(messages, wake)]);
     assert.equal(readFileSync(path, "utf8"), before); assert.ok(existsSync(join(repos, ".worktrees", c.lanes[1].worktree)));
     const afterClose = JSON.parse(readFileSync(join(root, "lanes.json"), "utf8"));
     const closed = afterClose.lanes[1].closed;
     assert.deepEqual({ reason: closed.reason, by: closed.by }, { reason: "done", by: "L0" });
     assert.ok(Number.isFinite(Date.parse(closed.at))); delete afterClose.lanes[1].closed;
     assert.deepEqual(afterClose, JSON.parse(configBefore));
+    for (const args of [[], ["--reassign-to", "L0"]]) {
+      const previous = new Set(readdirSync(messages));
+      lanes(0, "close", "L2", "--from", "L0", ...args);
+      const added = readdirSync(messages).filter((n) => !previous.has(n));
+      assert.equal(added.length, 1, added.join("\n"));
+      assert.match(added[0], /^BCAST-lane-closed-l2-\d{4}(?:-\d+)?\.md$/);
+    }
     assert.doesNotMatch(readFileSync(box.log, "utf8").slice(installLogLength), /^(?:osascript|tmux|pi|pi-session) /m);
   } finally { rmSync(box.root, { recursive: true, force: true }); }
 });

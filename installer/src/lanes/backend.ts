@@ -9,6 +9,7 @@ export interface MessageRef { name: string; from: string; to: string[]; topic: s
 export interface LaneBackend {
   readonly name: string;
   send(m: { from: string; to: string; topic: string; body: string }): Promise<MessageRef & { path: string }>;
+  postPassive(m: { topic: string; body: string }): Promise<MessageRef & { path: string }>;
   inbox(lane: string, opts?: { groups?: string[]; aliases?: string[] }): Promise<MessageRef[]>;
   list(filter?: { from?: string; to?: string; limit?: number }): Promise<MessageRef[]>;
   setStatus(lane: string, line: string): Promise<void>;
@@ -34,6 +35,17 @@ export class FileBackend implements LaneBackend {
       const name = messageName(m.from, m.to, m.topic, at, i);
       const path = join(this.dir, name);
       try { writeFileSync(path, m.body, { flag: "wx" }); return { name, from: m.from, to: [m.to], topic: m.topic, at, path }; }
+      catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
+    }
+  }
+  async postPassive(m: { topic: string; body: string }): Promise<MessageRef & { path: string }> {
+    if (!validTopic(m.topic)) throw new Error("invalid message name");
+    mkdirSync(this.dir, { recursive: true });
+    const at = this.now();
+    for (let i = 1; ; i++) {
+      const name = messageName("", "BCAST", m.topic, at, i).replace(/^-to-/, "");
+      const path = join(this.dir, name);
+      try { writeFileSync(path, m.body, { flag: "wx" }); return { name, from: "", to: ["BCAST"], topic: m.topic, at, path }; }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
     }
   }

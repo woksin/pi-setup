@@ -58,8 +58,13 @@ export async function close(id: string, opts: Record<string, string>, c: Config,
   persistClosed(c, root, { id, reason: opts.reason || "", by: from, at });
   const line = closedLine(to, opts.reason, at);
   await backend.setStatus(id, line);
-  const message = await backend.send({ from, to: c.messages.broadcast, topic: `lane-closed-${id.toLowerCase()}`, body: closeBody(id, to, opts.reason, unread) });
+  const topic = `lane-closed-${id.toLowerCase()}`;
+  const message = await backend.postPassive({ topic, body: closeBody(id, to, opts.reason, unread) });
   ctx.out(`${id}: ${line}`); ctx.out(message.path);
+  if (to && to !== from) {
+    const wake = await backend.send({ from, to, topic, body: `Lane ${id} closed, pick up its work; details in ${message.name}\n` });
+    ctx.out(wake.path);
+  }
   ctx.out(hint);
   return 0;
 }

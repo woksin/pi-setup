@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 0b4d5b0586e477ea85dd0144c009e80bfbff8f9f7f032a89099ab6e20694531a
+// pi-setup-source-sha256: 0ccb811f35b4cb34f7b9540ca0d6d4e36a978b827dfa1e753f36372fef976eca
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -1735,6 +1735,21 @@ var init_backend = __esm({
           try {
             writeFileSync3(path2, m2.body, { flag: "wx" });
             return { name, from: m2.from, to: [m2.to], topic: m2.topic, at, path: path2 };
+          } catch (e) {
+            if (e.code !== "EEXIST") throw e;
+          }
+        }
+      }
+      async postPassive(m2) {
+        if (!validTopic(m2.topic)) throw new Error("invalid message name");
+        mkdirSync2(this.dir, { recursive: true });
+        const at = this.now();
+        for (let i2 = 1; ; i2++) {
+          const name = messageName("", "BCAST", m2.topic, at, i2).replace(/^-to-/, "");
+          const path2 = join14(this.dir, name);
+          try {
+            writeFileSync3(path2, m2.body, { flag: "wx" });
+            return { name, from: "", to: ["BCAST"], topic: m2.topic, at, path: path2 };
           } catch (e) {
             if (e.code !== "EEXIST") throw e;
           }
@@ -4531,9 +4546,15 @@ async function close(id, opts, c2, root, ctx) {
   persistClosed(c2, root, { id, reason: opts.reason || "", by: from, at });
   const line = closedLine(to, opts.reason, at);
   await backend.setStatus(id, line);
-  const message = await backend.send({ from, to: c2.messages.broadcast, topic: `lane-closed-${id.toLowerCase()}`, body: closeBody(id, to, opts.reason, unread2) });
+  const topic = `lane-closed-${id.toLowerCase()}`;
+  const message = await backend.postPassive({ topic, body: closeBody(id, to, opts.reason, unread2) });
   ctx.out(`${id}: ${line}`);
   ctx.out(message.path);
+  if (to && to !== from) {
+    const wake = await backend.send({ from, to, topic, body: `Lane ${id} closed, pick up its work; details in ${message.name}
+` });
+    ctx.out(wake.path);
+  }
   ctx.out(hint);
   return 0;
 }

@@ -5,6 +5,23 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/home.ts";
 import { FileBackend } from "../src/lanes/backend.ts";
 
+test("file backend posts passive notices exclusively without delivering to lane inboxes", async () => {
+  const dir = tempDir("lanes-passive");
+  const b = new FileBackend(dir, () => new Date(2026, 0, 1, 12, 0));
+  const first = await b.postPassive({ topic: "lane-closed-l2", body: "closed\n" });
+  const second = await b.postPassive({ topic: "lane-closed-l2", body: "again\n" });
+  assert.equal(first.name, "BCAST-lane-closed-l2-1200.md");
+  assert.equal(second.name, "BCAST-lane-closed-l2-1200-2.md");
+  assert.equal(readFileSync(first.path, "utf8"), "closed\n");
+  assert.equal(readFileSync(second.path, "utf8"), "again\n");
+  assert.ok((await b.list()).every((m) => m.from === "" && m.to.join() === "BCAST"));
+  assert.equal((await b.list()).length, 2);
+  assert.deepEqual(await b.inbox("L1"), []);
+  writeFileSync(join(dir, "L1-inbox.marker"), "");
+  assert.deepEqual(await b.unread("L1"), []);
+  await assert.rejects(() => b.postPassive({ topic: "../bad", body: "x" }));
+});
+
 test("file backend collision safety, recipient rules, filters and status", async () => {
   const dir = tempDir("lanes-messages");
   const b = new FileBackend(dir, () => new Date(2026, 0, 1, 12, 0));
