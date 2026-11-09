@@ -45,7 +45,7 @@ Write the parent handoff at 150k context tokens and reset by 220k; 400k is a har
 
 ## Inbox SLA
 Only send actionable coordination: deliveries, blocker changes, questions/decisions or new relevant safety holds. No unchanged status, ACK-of-ACK or cc messages. ALL is reserved for truly global safety holds; keep targeted critical alerts.
-- Watch with `INBOX_DIR=<messages dir> ~/.pi/agent/bin/inbox-watch <ID> [GROUP]` (one `job_watch`, interval 120, timeoutSeconds 300, quietTimeouts 12; no custom find/ls checks) and re-arm it after every hit.
+- Watch with `INBOX_DIR=<messages dir> ~/.pi/agent/bin/inbox-watch <ID> [GROUP]` (one `job_watch`, interval 120, timeoutSeconds 300, quietTimeouts 12; no custom find/ls checks) and re-arm it after every hit. A lane with an armed inbox watch is never tty-nudged for inbox files.
 - Acknowledge each action-needed delivery, redelivery or question within one wake cycle. Do not acknowledge information-only or ALL/FYI messages; address replies only to the named owner. Never leave a delivery unanswered while you start other work.
 - On timeout, only re-arm silently. Renew waiting-on leases locally without messaging. Notify once on becoming blocked, then only on material state change, lease expiry or explicit request; no hourly "still waiting" messages.
 - Lanes address you, not `<L0 id>`. Forward to `<L0 id>` only what you cannot decide.

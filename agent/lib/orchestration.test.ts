@@ -4,7 +4,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { boundedSelect, guardSelect, isOrchestrated, orchLog, postAllNotice } from "./orchestration.ts";
+import { boundedSelect, guardSelect, isOrchestrated, orchLog, postBroadcastNotice } from "./orchestration.ts";
 
 let dir: string;
 let env: NodeJS.ProcessEnv;
@@ -42,15 +42,17 @@ test("orchLog appends JSON lines and never throws", () => {
 	assert.doesNotThrow(() => orchLog("x", "y", "z", { ...env, PI_GUARD_DECISIONS_LOG: join(dir, "file", "sub", "log") }));
 });
 
-test("postAllNotice writes ALL-guard-<guard>-<HHMM>.md only when the board exists, never overwriting", () => {
+test("postBroadcastNotice writes BCAST-guard-<guard>-<HHMM>.md only when the board exists, never overwriting", () => {
 	const at = new Date(2026, 9, 20, 3, 18);
-	assert.equal(postAllNotice("cratis", "x", env, at), undefined);
+	assert.equal(postBroadcastNotice("cratis", "x", env, at), undefined);
 	mkdirSync(env.PI_ORCH_MESSAGES_DIR!, { recursive: true });
-	const first = postAllNotice("cratis", "hello", env, at)!;
-	const second = postAllNotice("cratis", "again", env, at)!;
-	assert.equal(first, join(env.PI_ORCH_MESSAGES_DIR!, "ALL-guard-cratis-0318.md"));
-	assert.equal(second, join(env.PI_ORCH_MESSAGES_DIR!, "ALL-guard-cratis-0318-2.md"));
+	const first = postBroadcastNotice("cratis", "hello", env, at)!;
+	const second = postBroadcastNotice("cratis", "again", env, at)!;
+	assert.equal(first, join(env.PI_ORCH_MESSAGES_DIR!, "BCAST-guard-cratis-0318.md"));
+	assert.equal(second, join(env.PI_ORCH_MESSAGES_DIR!, "BCAST-guard-cratis-0318-2.md"));
 	assert.match(readFileSync(first, "utf8"), /hello/);
+	assert.equal(postBroadcastNotice("cratis", "x", env, new Date(2026, 9, 20, 3, 19), true), join(env.PI_ORCH_MESSAGES_DIR!, "BCAST-guard-cratis-0319-act.md"));
+	assert.equal(postBroadcastNotice("cratis", "x", env, new Date(2026, 9, 20, 3, 19), true), join(env.PI_ORCH_MESSAGES_DIR!, "BCAST-guard-cratis-0319-2-act.md"));
 	assert.deepEqual(readdirSync(env.PI_ORCH_MESSAGES_DIR!).filter(f => f.endsWith(".tmp")), []);
 });
 
@@ -65,7 +67,7 @@ test("boundedSelect passes a ≤60 s timeout and resolves even when the UI never
 	assert.deepEqual(await boundedSelect({ select: async () => undefined }, "t", ["a"], 5000), { choice: undefined, timedOut: false });
 });
 
-test("guardSelect timeout resolves to the default, logs it, and posts an ALL notice in orchestration only", async () => {
+test("guardSelect timeout resolves to the default, logs it, and posts a passive BCAST notice in orchestration only", async () => {
 	const hung = { select: () => new Promise<string | undefined>(() => {}) };
 	mkdirSync(env.PI_ORCH_MESSAGES_DIR!, { recursive: true });
 	const outside = await guardSelect(hung, "cratis", "Run it?", ["No", "Yes"], "deny", { env, cwd: "/elsewhere", ms: 20 });
@@ -75,7 +77,7 @@ test("guardSelect timeout resolves to the default, logs it, and posts an ALL not
 	assert.equal(inside.timedOut, true);
 	const notices = readdirSync(env.PI_ORCH_MESSAGES_DIR!);
 	assert.equal(notices.length, 1);
-	assert.match(notices[0], /^ALL-guard-cratis-\d{4}\.md$/);
+	assert.match(notices[0], /^BCAST-guard-cratis-\d{4}\.md$/);
 	assert.match(readFileSync(join(env.PI_ORCH_MESSAGES_DIR!, notices[0]), "utf8"), /resolved to: deny[\s\S]*Run it\?/);
 	assert.equal(readFileSync(env.PI_GUARD_DECISIONS_LOG!, "utf8").trim().split("\n").length, 2);
 });

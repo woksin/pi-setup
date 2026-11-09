@@ -13,8 +13,8 @@ Commands:
   clear LANE | get LANE | list
   suppressed LANE   exit 0 for parked (even after assessment), or if a waiting-on/barred-by line has until in the future (nudgers skip), else exit 1
                     (prints "expired" when such a line has expired)
-  close LANE --reassign-to LANE2 [--reason "..."]   status `closed` + ALL-lane-closed-<LANE>-<HHMM>.md in INBOX_DIR
-                    listing LANE's unread inbox files (*-to-<LANE>-* newer than <LANE>-inbox.marker, see inbox-watch).
+  close LANE --reassign-to LANE2 [--reason "..."]   status `closed` + passive BCAST-lane-closed-<LANE>-<HHMM>.md in INBOX_DIR
+                    (plus a waking PISETUP-to-LANE2-lane-closed-<LANE>-<HHMM>.md for LANE2) listing LANE's unread inbox files (*-to-<LANE>-* newer than <LANE>-inbox.marker, see inbox-watch).
                     No message file is moved or edited.
 Exit: 0 ok, 1 negative answer (suppressed/get), 2 usage or I/O error.
 """
@@ -200,7 +200,7 @@ def cmd_close(a, now):
     atomic_write(path_for(lane), line + "\n")
     print(f"{lane}: {line}")
     if not inbox:
-        print("INBOX_DIR not set: no ALL- message posted", file=sys.stderr)
+        print("INBOX_DIR not set: no notice posted", file=sys.stderr)
         return 0
     body = [f"Lane {lane} is closed. Reassigned to {to}." + (f" Reason: {clean(a.reason)}" if a.reason else ""), "",
             f"{to}: pick up the work and any unread messages of {lane}. No message file was moved or edited.", ""]
@@ -211,9 +211,13 @@ def cmd_close(a, now):
         body += [f"- {n}" for n in unread]
     else:
         body.append(f"Unread inbox files of {lane}: none.")
-    name = f"ALL-lane-closed-{lane}-{time.strftime('%H%M', time.localtime(now))}.md"
+    hhmm = time.strftime('%H%M', time.localtime(now))
+    name = f"BCAST-lane-closed-{lane}-{hhmm}.md"
+    wake = f"PISETUP-to-{to}-lane-closed-{lane}-{hhmm}.md"
     atomic_write(os.path.join(inbox, name), "\n".join(body) + "\n")
+    atomic_write(os.path.join(inbox, wake), f"Lane {lane} closed, pick up its work; details in {name}\n")
     print(f"posted {name}")
+    print(f"posted {wake}")
     return 0
 
 

@@ -95,6 +95,18 @@ test("a -act BCAST file wakes like ALL", async () => {
 	assert.deepEqual(r.out, ["BCAST-hold-1200-act.md"]);
 });
 
+test("a targeted PISETUP wake file wakes only its recipient lane", async () => {
+	const dir = fresh();
+	assert.equal((await run(dir, "L2")).code, 1);
+	assert.equal((await run(dir, "L3")).code, 1);
+	await sleep(2100);
+	put(dir, "PISETUP-to-L2-lane-closed-L1-1200.md", 10);
+	assert.equal((await run(dir, "L3")).code, 1);
+	const r = await run(dir, "L2");
+	assert.equal(r.code, 0);
+	assert.deepEqual(r.out, ["PISETUP-to-L2-lane-closed-L1-1200.md"]);
+});
+
 test("a BCAST file older than the TTL is never reported", async () => {
 	const dir = await armed();
 	put(dir, "BCAST-old-1200.md", 25 * 3600);

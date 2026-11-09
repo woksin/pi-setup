@@ -94,9 +94,16 @@ class T(unittest.TestCase):
         self.assertTrue(ls.read_line("A1").startswith("closed reassigned-to B at "))
         self.assertEqual(self.run_ls("suppressed", "A1")[0], 1)
         new = [f for f in os.listdir(self.inbox) if f not in before]
-        self.assertEqual(len(new), 1)
-        self.assertRegex(new[0], r"^ALL-lane-closed-A1-\d{4}\.md$")
-        body = open(os.path.join(self.inbox, new[0])).read()
+        self.assertEqual(len(new), 2)
+        self.assertFalse([n for n in os.listdir(self.inbox) if n.startswith("ALL-")])
+        bc = [n for n in new if n.startswith("BCAST-")]
+        wake = [n for n in new if n.startswith("PISETUP-to-B-")]
+        self.assertEqual(len(bc), 1)
+        self.assertEqual(len(wake), 1)
+        self.assertRegex(bc[0], r"^BCAST-lane-closed-A1-\d{4}\.md$")
+        self.assertRegex(wake[0], r"^PISETUP-to-B-lane-closed-A1-\d{4}\.md$")
+        self.assertIn(bc[0], open(os.path.join(self.inbox, wake[0])).read())
+        body = open(os.path.join(self.inbox, bc[0])).read()
         self.assertIn("Reassigned to B", body)
         self.assertIn("- L0-to-A1-new.md", body)
         self.assertIn("- X-to-A1.md", body)
@@ -106,7 +113,7 @@ class T(unittest.TestCase):
 
     def test_close_no_marker_and_no_inbox(self):
         self.assertEqual(self.run_ls("close", "A1", "--reassign-to", "B")[0], 0)
-        body = open(os.path.join(self.inbox, [f for f in os.listdir(self.inbox) if f.startswith("ALL-")][0])).read()
+        body = open(os.path.join(self.inbox, [f for f in os.listdir(self.inbox) if f.startswith("BCAST-")][0])).read()
         self.assertIn("marker does not exist", body)
         del os.environ["INBOX_DIR"]
         rc, _, err = self.run_ls("close", "C1", "--reassign-to", "B")
