@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { nativeHookInstalled, parsePushes, trainPushDecision } from './train-guard.ts';
-import { protectedItems, pushBlock } from './train-push.mjs';
+import { protectedItems, pushBlock, stdinGuard } from './train-push.mjs';
 import { main } from './pi-train.mjs';
-import { listManifests, manifestPath, repoKey, saveManifest } from './train-manifest.mjs';
+import { listManifests, loadManifest, manifestPath, repoKey, saveManifest } from './train-manifest.mjs';
 import extension from '../extensions/train-guard.ts';
 import { setGuards } from './guards.ts';
 
@@ -217,6 +217,58 @@ test('real push decision ignores unrelated corruption and blocks a non-directory
   assert.deepEqual(await trainPushDecision('git push origin main', f.repo, { ...f.env, PI_TRAIN_DIR: join(f.root, 'missing') }), { notices: [] });
 });
 
+test('mixed-case repo keys find existing stores and protect pushes without folding branch case', async t => {
+  const f = await fixture(t), mixedRepo = f.key.toUpperCase();
+  const oldDir = join(f.env.PI_TRAIN_DIR, mixedRepo.replace('/', '__'));
+  await rename(join(f.env.PI_TRAIN_DIR, f.key.replace('/', '__')), oldDir);
+  const path = join(oldDir, 'train_test.json');
+  await saveManifest(path, { ...f.manifest, repo: mixedRepo });
+  await saveManifest(join(oldDir, 'stray.json'), { ...f.manifest, repo: 42 });
+  assert.equal(repoKey(`git@github.com:${mixedRepo}.git`), f.key);
+  assert.equal(manifestPath(f.env, f.key, 'train/test'), path);
+  assert.equal((await loadManifest(path)).repo, f.key);
+  assert.equal((await listManifests(f.env, mixedRepo)).length, 2);
+  assert.match(pushBlock(protectedItems([{ manifest: { ...f.manifest, repo: mixedRepo } }], f.key), ['fix/folded'])!, /Push refused/);
+  assert.equal(pushBlock(protectedItems([{ manifest: f.manifest }], mixedRepo), ['FIX/FOLDED']), undefined);
+  const git: typeof fakeGit = (cwd, args) => args[0] === 'remote'
+    ? `https://github.com/${args.includes('--push') ? mixedRepo : f.key}.git` : fakeGit(cwd, args);
+  assert.match((await trainPushDecision('git push origin fix/folded', '/work', f.env, git)).reason!, /Push refused/);
+  const input = `refs/heads/fix/folded ${'a'.repeat(40)} refs/heads/fix/folded ${'0'.repeat(40)}`;
+  assert.equal(await stdinGuard(f.ctx, mixedRepo, input), 1);
+  assert.equal(await f.invoke('hook', 'install'), 0);
+  const hook = spawnSync(join(f.repo, '.git/hooks/pre-push'), ['origin', `https://github.com/${mixedRepo}.git`], { cwd: f.repo, env: f.env, input, encoding: 'utf8' });
+  assert.equal(hook.status, 1, hook.stderr);
+  assert.match(hook.stderr, /Push refused/);
+});
+
+for (const failure of ['corrupt manifest', 'unsupported manifest', 'non-directory repo', 'non-directory home']) {
+  test(`native hook blocks ${failure} with the in-pi repair message`, async t => {
+    const f = await fixture(t);
+    assert.equal(await f.invoke('hook', 'install'), 0);
+    if (failure === 'corrupt manifest') await writeFile(f.path, '{broken');
+    if (failure === 'unsupported manifest') await saveManifest(f.path, { ...f.manifest, v: 999 });
+    if (failure.startsWith('non-directory')) {
+      const path = failure === 'non-directory home' ? f.env.PI_TRAIN_DIR : join(f.env.PI_TRAIN_DIR, f.key.replace('/', '__'));
+      await rename(path, `${path}.saved`); await writeFile(path, 'not a directory');
+    }
+    const decision = await trainPushDecision('git push origin fix/folded', f.repo, f.env);
+    const result = native({ cwd: f.repo, args: ['push', 'origin', 'fix/folded'], env: f.env });
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(decision.reason!), result.stderr);
+    assert.match(result.stderr, /repair or remove/);
+    assert.doesNotMatch(result.stderr, /push allowed/);
+    assert.equal(f.git({ cwd: f.repo, args: ['ls-remote', f.origin, 'refs/heads/fix/folded'] }), '');
+  });
+}
+
+test('corrupt native store does not allow a wrong-branch override or an additional unapproved branch', async t => {
+  const f = await fixture(t); await writeFile(f.path, '{broken');
+  const ref = (branch: string) => `refs/heads/${branch} ${'a'.repeat(40)} refs/heads/${branch} ${'0'.repeat(40)}`;
+  assert.equal(await stdinGuard({ ...f.ctx, env: { ...f.env, PI_TRAIN_ALLOW_PUSH: 'other' } }, f.key, ref('fix/folded')), 1);
+  assert.equal(await stdinGuard({ ...f.ctx, env: { ...f.env, PI_TRAIN_ALLOW_PUSH: 'fix/folded' } }, f.key, `${ref('fix/folded')}\n${ref('other')}`), 1);
+  assert.equal(await stdinGuard(f.ctx, f.key, `refs/heads/fix/folded ${'0'.repeat(40)} refs/heads/fix/folded ${'a'.repeat(40)}`), 0);
+});
+
 test('corrupt-store exact-branch hook escape remains allowed without adding an in-pi bypass', async t => {
   const f = await fixture(t);
   assert.equal(await f.invoke('hook', 'install'), 0);
@@ -272,13 +324,11 @@ test('extension allows unparseable pushes without accessing a missing headless U
   assert.equal(result, undefined);
 });
 
-for (const failure of ['corrupt manifest', 'unsupported manifest', 'missing origin', 'missing node', 'missing runner']) {
+for (const failure of ['missing origin', 'missing node', 'missing runner']) {
   test(`hook fails open with a notice on ${failure}`, async t => {
     const f = await fixture(t), hook = join(f.repo, '.git/hooks/pre-push');
     assert.equal(await f.invoke('hook', 'install'), 0, f.errors.join('\n'));
     let env = f.env;
-    if (failure === 'corrupt manifest') await writeFile(f.path, '{broken');
-    if (failure === 'unsupported manifest') await saveManifest(f.path, { ...f.manifest, v: 999 });
     if (failure === 'missing origin') f.git({ cwd: f.repo, args: ['remote', 'remove', 'origin'] });
     if (failure === 'missing runner') {
       const installed = await readFile(hook, 'utf8');

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { tokenizeShell } from './issue-work.ts';
 import { listManifests, repoKey } from './train-manifest.mjs';
-import { protectedItems, pushBlock } from './train-push.mjs';
+import { protectedItems, pushBlock, unreadablePush } from './train-push.mjs';
 
 type Git = (cwd: string, args: string[]) => string;
 type Push = { cwd: string; remote: string; refs: string[]; all: boolean; delete: boolean };
@@ -226,7 +226,7 @@ export async function trainPushDecision(command: string, cwd: string, env = proc
   for (const repo of new Set(pushes.map(push => push.repo).filter(Boolean))) {
     try { manifests.push(...await (deps.listManifests ?? listManifests)(env, repo)); }
     catch (error) {
-      return { reason: `Train guard: ${repo} manifests unreadable (${(error as Error).message}); repair or remove the unreadable file or storage path before pushing.`, notices };
+      return { reason: unreadablePush(repo, error), notices };
     }
   }
   const reason = blockedPush(manifests, pushes);

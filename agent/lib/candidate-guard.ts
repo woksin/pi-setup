@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import { tokenizeShell } from './issue-work.ts';
-import { listManifests, repoKey } from './train-manifest.mjs';
+import { listManifests, normalizeRepo, repoKey } from './train-manifest.mjs';
 import { scanRepository } from './train-concurrency.mjs';
 import { nativeGuardGit, changedDirectory, commandTokens } from './train-guard.ts';
 import { parseCli, toGhPlan, validateRequest } from './publish-request.ts';
@@ -116,7 +116,7 @@ function unreadableDecision(segment: Segment, context: { repo: string; head: str
 }
 
 function openCandidates(manifests: Awaited<ReturnType<typeof listManifests>>, repo: string) {
-  return manifests.map(entry => entry.manifest).filter(m => m.repo === repo && m.state === 'open');
+  return manifests.map(entry => entry.manifest).filter(m => normalizeRepo(m.repo) === normalizeRepo(repo) && m.state === 'open');
 }
 
 async function decidePR(segment: Segment, env: NodeJS.ProcessEnv, orchestrated: boolean): Promise<Decision> {
