@@ -55,6 +55,7 @@ EXEMPT = {
     "agent/bin/disk_growth_probe.py": "internal; reads a JSON request on stdin",
     "agent/bin/test_disk_growth.py": "test",
     "agent/bin/test_lane_status.py": "test",
+    "agent/bin/test_phase_status.py": "test",
     "agent/bin/test_retain.py": "test",
     "agent/bin/test_session_watchdog.py": "test",
     "tools/skills.test.mjs": "test",

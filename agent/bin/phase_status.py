@@ -20,7 +20,9 @@ def active_phases(text):
     for line in lines:
         match = ACTIVE.match(line)
         if match:
-            cwd = re.search(r'\bcwd=(.+?)\s*$', match['head'])
+            # The label comes first and may itself contain "pid=.. cwd=.."; the real
+            # fields are the last ones, so take the final match (greedy prefix).
+            cwd = re.search(r'^.*\bpid=\S+ cwd=(.+?)\s*$', match['head'])
             state = match['state']
             draining = state.startswith('draining')
             pids = match['pids']

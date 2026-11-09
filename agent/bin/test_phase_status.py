@@ -48,6 +48,10 @@ class ParseTests(unittest.TestCase):
         phase = self.one(line("orphan-group"))
         self.assertEqual((phase["state"], phase["orphan"], phase["pids"]), ("orphan-group", True, []))
 
+    def test_label_with_decoy_cwd_uses_the_real_cwd(self):
+        text = f"pi-phase: test x pid=1 cwd=/tmp/decoy pid=7 cwd={CWD} elapsed=12s running"
+        self.assertEqual(phase_status.active_phases(text)[0]["cwd"], CWD)
+
     def test_unknown_or_malformed_state_is_unknown(self):
         for state in ("zombie", "draining", "draining pids=", "draining pids=x", "draining pids=1 bogus"):
             self.assertIsNone(phase_status.active_phases(line(state)), state)
