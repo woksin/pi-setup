@@ -144,6 +144,15 @@ test("recent ended delivery prevents assignment; idle repo selection and start-l
   result = await f.who("--issue", "example/alpha#42"); assert.equal(result.report.suggest.target, null); assert.equal(result.report.suggest.rule, "delivered");
   result = await f.who("--repo", "example/missing"); assert.equal(result.code, 1); assert.equal(result.report.suggest.rule, "start-lane");
 });
+test("issue filtering preserves same-repo idle suggestions for lanes unrelated to the issue", async () => {
+  const f = fixture(); f.lease();
+  const unfiltered = await f.who();
+  const idle = unfiltered.report.rows.find((r: any) => r.lane === "W1");
+  assert.equal(idle.state, "idle"); assert.equal(idle.pid, 701); assert.equal(idle.issue, null);
+  const { code, report } = await f.who("--issue", "example/alpha#42");
+  assert.equal(code, 1); assert.deepEqual(report.rows, []);
+  assert.equal(report.suggest.target, "W1"); assert.equal(report.suggest.rule, "idle-in-repo");
+});
 test("process timeout, thrown probe and unreadable cwd remain unknown, never stopped", async () => {
   for (const failure of ["timeout", "throw", "cwd"]) {
     const f = fixture();

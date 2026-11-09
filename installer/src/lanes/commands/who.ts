@@ -21,7 +21,7 @@ export async function who(args: string[], opts: Record<string, string>, c: Confi
   const selection = { repo: opts.repo, issue: opts.issue === undefined ? undefined : parseIssue(opts.issue) };
   const now = ctx.now(); const input = await readRoster(c, root, ctx); const registry = indexRosterRegistry(input.register.events);
   const roster = buildRoster(input, now, registry);
-  const rows = filterRows(roster.rows, selection); const suggest = suggestTarget(rows, { ...input, registry }, selection, now);
+  const rows = filterRows(roster.rows, selection); const suggest = suggestTarget(roster.rows, { ...input, registry }, selection, now);
   if (opts.json) ctx.out(JSON.stringify({ at: now.toISOString(), rows, sources: roster.sources, suggest }, null, 2));
   else {
     for (const row of rows) ctx.out(humanRow(row));

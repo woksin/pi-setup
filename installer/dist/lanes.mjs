@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 922e40bb29c5d1ebc0167e8b1f7507e4f6d3c93ac3589444142168adc6dd321e
+// pi-setup-source-sha256: e2b7d0a0b96dffebadf645b1380eb5462d9fd758d5d83ac1c81ac43f7d62cba5
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -4688,7 +4688,7 @@ async function who(args, opts, c, root, ctx) {
   const registry3 = indexRosterRegistry(input.register.events);
   const roster = buildRoster(input, now, registry3);
   const rows = filterRows(roster.rows, selection);
-  const suggest = suggestTarget(rows, { ...input, registry: registry3 }, selection, now);
+  const suggest = suggestTarget(roster.rows, { ...input, registry: registry3 }, selection, now);
   if (opts.json) ctx.out(JSON.stringify({ at: now.toISOString(), rows, sources: roster.sources, suggest }, null, 2));
   else {
     for (const row of rows) ctx.out(humanRow(row));
