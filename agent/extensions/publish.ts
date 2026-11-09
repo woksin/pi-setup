@@ -3,7 +3,7 @@ import { assessPublication, identity } from "../lib/lane-policy.ts";
 import { publicationDecision } from "../lib/candidate-guard.ts";
 import { publish } from "../lib/publisher.ts";
 import type { PublishResult } from "../lib/publisher.ts";
-import { InvalidRequest, parseCli, publishRequestSchema, validateRequest } from "../lib/publish-request.ts";
+import { InvalidRequest, kindSummary, parseCli, publishRequestSchema, validateRequest } from "../lib/publish-request.ts";
 import { isOrchestrated, orchLog } from "../lib/orchestration.ts";
 
 export interface PublishServices {
@@ -47,7 +47,7 @@ async function executePublication(value: unknown, signal: AbortSignal | undefine
 }
 export default function publishExtension(pi: ExtensionAPI, services: PublishServices = {}) {
 	pi.registerTool({
-		name: "publish", label: "Publish", description: "Publish GitHub text from typed fields after authority admission and exact captured-byte scanning. Prefer bodyFile created with write. No shell, scan override or arbitrary gh flags. Optional host (repository kinds and api only) targets a GitHub Enterprise host such as ghe.example.com; default github.com. A GitHub Enterprise host needs a stored `gh auth login --hostname HOST` credential; env tokens are never sent to it.",
+		name: "publish", label: "Publish", description: "Publish GitHub text from typed fields after authority admission and exact captured-byte scanning. Prefer bodyFile created with write. No shell, scan override or arbitrary gh flags. Optional host (repository kinds and api only) targets GitHub Enterprise; default github.com. It needs a stored `gh auth login --hostname HOST` credential; env tokens are never sent to it. Required fields: " + kindSummary(),
 		parameters: publishRequestSchema as any,
 		execute: (_id: string, value: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) => executePublication(value, signal, ctx, services),
 	} as any);
