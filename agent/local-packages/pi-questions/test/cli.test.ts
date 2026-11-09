@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { readItem } from "../src/store.ts";
 import { fileURLToPath } from "node:url";
-import { answerItem } from "../src/actions.ts";
+import { answerItem, commentItem } from "../src/actions.ts";
 import { main } from "../src/cli.ts";
 import { gitRepo, RESEARCH_FLAGS, tempDir } from "./helpers.ts";
 
@@ -57,6 +57,18 @@ test("wait exits 1 while open, then 0 once answered", t => {
 	assert.equal(many.code, 0);
 	assert.equal(many.out, "Q-2 is open\nQ-1 is answered: done now");
 	assert.equal(run("wait", "Q-9").code, 2);
+});
+
+test("get shows every comment, not the compact tool default", t => {
+	const root = tempDir(t);
+	const home = join(root, "home");
+	const repo = gitRepo(join(root, "r"), "git@github.com:acme/alpha.git");
+	const run = cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "s1" }, repo);
+	assert.equal(run("ask", ...RESEARCH_FLAGS, "--kind", "question", "--title", "Many comments").code, 0);
+	for (let i = 1; i <= 8; i++) commentItem(home, "Q-1", { kind: "user" } as any, `note number ${i}`);
+	const out = run("get", "Q-1").out;
+	assert.doesNotMatch(out, /earlier comment/);
+	for (let i = 1; i <= 8; i++) assert.match(out, new RegExp(`note number ${i}\\b`));
 });
 
 test("list output: default scope, --all with the asker lane, and warnings", t => {
