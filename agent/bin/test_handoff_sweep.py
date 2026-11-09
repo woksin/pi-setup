@@ -133,6 +133,44 @@ class HandoffSweepSpecs(unittest.TestCase):
         (self.repo / '.ai-work/keep').mkdir()
         self.assertEqual(self.removed(self.plan(keep=0)), [f'{SID}-1.md'])
 
+    def scans_of_keep(self):
+        calls = []
+        real_scan = SWEEP['plan'].__globals__['keep_dir_text']
+
+        def counting(directory):
+            calls.append(directory)
+            return real_scan(directory)
+        SWEEP['plan'].__globals__['keep_dir_text'] = counting
+        self.addCleanup(SWEEP['plan'].__globals__.__setitem__, 'keep_dir_text', real_scan)
+        return calls
+
+    def test_keep_dir_is_not_scanned_without_removal_candidates(self):
+        calls = self.scans_of_keep()
+        (self.repo / '.ai-work/keep').mkdir()
+        self.handoff(SID, 1, 1)
+        self.handoff(SID, 2, 40)
+        self.assertEqual(self.removed(self.plan(keep=1)), [])
+        self.assertEqual(calls, [])
+
+    def test_keep_dir_is_scanned_once_for_many_candidates(self):
+        calls = self.scans_of_keep()
+        (self.repo / '.ai-work/keep').mkdir()
+        for n in (1, 2, 3):
+            self.handoff(SID, n, 40)
+        self.assertEqual(len(self.removed(self.plan(keep=0))), 3)
+        self.assertEqual(len(calls), 1)
+
+    def test_keep_dir_scan_failure_keeps_all_candidates_of_that_repo(self):
+        for n in (1, 2):
+            self.handoff(SID, n, 40)
+        keep = self.repo / '.ai-work/keep'
+        keep.mkdir()
+        keep.chmod(0)
+        self.addCleanup(keep.chmod, 0o755)
+        result = self.plan(keep=0)
+        self.assertEqual(self.removed(result), [])
+        self.assertIn('keep/ scan incomplete', self.rows(result)[f'{SID}-1.md']['reason'])
+
     def test_corrupt_status_for_chain_keeps_it(self):
         self.handoff(SID, 1, 40)
         (self.status / f'{SID}.json').write_text('{')

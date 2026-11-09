@@ -223,8 +223,17 @@ def protected_reason(members, directory, protect):
     if paths & protect['paths']:
         return 'referenced by a live session or relaunch marker'
     if any(name in protect['text'] for name, _ in members):
-        return 'referenced by lane status or keep/'
+        return 'referenced by lane status'
     return None
+
+
+def keep_reason(members, keep_text):
+    """Last, lazy check: only reached for units that would otherwise be removed."""
+    try:
+        text = keep_text()
+    except (OSError, Unknown) as error:
+        return f'keep/ scan incomplete, kept: {error}'
+    return 'referenced by keep/' if any(name in text for name, _ in members) else None
 
 
 def unit_reason(members, directory, protect, newest, cutoff):
@@ -236,7 +245,8 @@ def unit_reason(members, directory, protect, newest, cutoff):
     if max(stat.st_mtime for _, stat in members) >= cutoff:
         return 'within retention window'
     reasons = (protect['retained'](os.path.join(directory, name)) for name, _ in members)
-    return protected_reason(members, directory, protect) or next((r for r in reasons if r), None)
+    early = protected_reason(members, directory, protect) or next((r for r in reasons if r), None)
+    return early or keep_reason(members, protect['keep_text'])
 
 
 def add_row(folder, row):
@@ -263,6 +273,23 @@ def unit_rows(members, directory, reason, age_days):
                'reason': reason or f'older than {age_days:g} days'}
 
 
+def memoised(compute):
+    """Run compute once; replay its result or its Unknown/OSError failure on later calls."""
+    cache = []
+
+    def get():
+        if not cache:
+            try:
+                cache.append((compute(), None))
+            except (OSError, Unknown) as error:
+                cache.append((None, error))
+        value, error = cache[0]
+        if error:
+            raise error
+        return value
+    return get
+
+
 def plan_folder(directory, now, age_days, keep_newest, protect, retained):
     folder = {'path': directory, 'files': 0, 'bytes': 0, 'kept': 0, 'kept_reasons': {},
               'rows': [], 'skip': None}
@@ -270,12 +297,8 @@ def plan_folder(directory, now, age_days, keep_newest, protect, retained):
     if error:
         folder['skip'] = error
         return folder
-    try:
-        text = protect['lanes'] + '\n' + keep_dir_text(directory)
-    except (OSError, Unknown) as error:
-        folder['skip'] = f'keep/ unreadable, folder kept: {error}'
-        return folder
-    local = {'paths': protect['paths'], 'text': text, 'retained': retained}
+    local = {'paths': protect['paths'], 'text': protect['lanes'], 'retained': retained,
+             'keep_text': memoised(lambda: keep_dir_text(directory))}
     top = newest_units(units, keep_newest)
     for key in sorted(units):
         members = sorted(units[key], key=lambda member: member[0])
