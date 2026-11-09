@@ -7,6 +7,7 @@ import { deliveries, foldRegistry, holding, issueKey, ownershipOf, readIssueRegi
 import { runningPiChecked } from "./processes.ts";
 import { idleMinutes } from "./sessions.ts";
 import { parseStatus, suppressed } from "./status-line.ts";
+import { checkRegistrations, joinRegistration, launchedRows, readRegistrations, registrationState, type CheckedRegistration } from "./registration.ts";
 
 export const HEARTBEAT_STALE_MIN = 15;
 interface Heartbeat { pid: number; id?: string; sessionId?: string; at: string; state?: string }
@@ -24,7 +25,7 @@ export interface RegistryIndex {
 }
 export interface RosterRow {
   [heldClaims]?: RowIssue[];
-  lane: string; identity: "registered" | "orch" | "unregistered" | "message-only"; repo: string | null;
+  lane: string; identity: "registered" | "orch" | "unregistered" | "message-only" | "launched"; repo: string | null;
   worktree: string | null; branch: string | null; issue: { repo: string; number: number; state: string; holder: boolean } | null;
   state: string; idleMinutes: number | null; contextUse: null; pid: number | null; sessionId: string | null;
   lastInbound: { name: string; ageMin: number } | null; lastOutbound: { name: string; ageMin: number } | null;
@@ -34,13 +35,14 @@ export interface RosterInputs {
   lanes: Seed[]; processes: Awaited<ReturnType<typeof runningPiChecked>>; register: RegisterData;
   heartbeats: Heartbeat[]; sessions: OrchSession[]; statuses: Map<string, string>; messages: MessageRef[];
   idle: Map<string, number | null>; sources: Record<string, Source>; broadcast: string;
+  registrations?: CheckedRegistration[];
 }
 export interface Roster { rows: RosterRow[]; sources: Record<string, Source> }
 export interface Selection { repo?: string; issue?: { repo?: string; number: number } }
 export interface Suggestion { target: string | null; rule: string; reason: string }
 interface SuggestionContext { input: RosterInputs; selection: Selection; now: Date; registry: RegistryIndex }
 
-function readJsonDir<T>(dir: string, valid: (value: any) => boolean): { values: T[]; source: Source } {
+export function readJsonDir<T>(dir: string, valid: (value: any) => boolean): { values: T[]; source: Source } {
   try {
     const names = readdirSync(dir).filter(n => n.endsWith(".json")); const values: T[] = []; let skipped = 0;
     for (const name of names) {
@@ -79,6 +81,7 @@ function rosterSeeds(c: Config, root: string, ctx: LanesCtx): Seed[] {
 }
 export async function readRoster(c: Config, root: string, ctx: LanesCtx, register?: RegisterData): Promise<RosterInputs> {
   const data = register ?? await readIssueRegister(ctx); const processes = await runningPiChecked(ctx);
+  const registrations = readRegistrations(root);
   const orch = join(ctx.home, ".pi/orch");
   const heartbeats = readJsonDir<Heartbeat>(join(orch, "heartbeats"), v => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
   const sessions = readJsonDir<OrchSession>(join(orch, "sessions"), v => v && Number.isInteger(v.pid) && (v.id === undefined || typeof v.id === "string"));
@@ -87,10 +90,10 @@ export async function readRoster(c: Config, root: string, ctx: LanesCtx, registe
   const statuses = readStatuses(statusDir); const messages = await readMessages(c, root, ctx);
   const lanes = rosterSeeds(c, root, ctx); const idle = new Map<string, number | null>();
   for (const cwd of new Set([...lanes.map(l => l.cwd), ...rosterProcesses(processes.procs, data).map(p => p.cwd)])) idle.set(cwd, idleMinutes(cwd, ctx) ?? null);
-  return { lanes, processes, register: data, heartbeats: heartbeats.values, sessions: sessions.values, statuses: statuses.values,
+  return { lanes, processes, registrations: checkRegistrations(registrations.values, processes, ctx), register: data, heartbeats: heartbeats.values, sessions: sessions.values, statuses: statuses.values,
     messages: messages.values, idle, broadcast: c.messages.broadcast, sources: { lanes: { status: "ok", count: lanes.length },
       processes: { status: processes.ok ? "ok" : "error", count: processes.procs.length, ...(!processes.ok ? { detail: "process discovery unavailable or incomplete" } : {}) },
-      ...data.sources, heartbeats: heartbeats.source, sessions: sessions.source, assignments: assignments.source,
+      ...data.sources, registrations: registrations.source, heartbeats: heartbeats.source, sessions: sessions.source, assignments: assignments.source,
       "status-files": statuses.source, messages: messages.source } };
 }
 /** Only identity-verified, current leases participate; a reused pid must not name a recipient. */
@@ -136,6 +139,7 @@ function processRows(input: RosterInputs): RosterRow[] {
     if (matched && matched.pid === null) { matched.pid = p.pid; continue; }
     rows.push(unregisteredProcess(p, input));
   }
+  launchedRows(rows, input, id => emptyRow(id, "launched"));
   return rows;
 }
 export function indexRosterRegistry(events: RegistryEvent[]): RegistryIndex {
@@ -212,8 +216,11 @@ function stateOf(row: RosterRow, input: RosterInputs, now: Date): string {
   if (line) row.evidence.push("status-file");
   const h = heartbeatFor(row.pid, input); const heartbeatFresh = heartbeatEvidence(row, h, now);
   if (seed?.retired || parseStatus(line).kind === "closed") return "retired";
-  if (discoveryUnknown(row, input, heartbeatFresh)) return "unknown";
-  const live = row.pid !== null || row.evidence.includes("lease") || heartbeatFresh;
+  const registered = row.evidence.includes("registration");
+  const live = row.pid !== null || row.evidence.includes("lease") || heartbeatFresh || registered;
+  const ended = registrationState(row, input);
+  if (ended) return ended;
+  if (!registered && discoveryUnknown(row, input, heartbeatFresh)) return "unknown";
   if (!live) return seed ? "stopped" : "unknown";
   return activeState(row, line, h, now);
 }
@@ -274,6 +281,7 @@ export function buildRoster(input: RosterInputs, now: Date, registry = indexRost
   const messages = indexMessages(input.messages, now);
   const rows = processRows(input); messageRows(rows, input, messages);
   for (const row of rows) {
+    joinRegistration(row, input);
     if (row.pid !== null) row.evidence.push("process");
     const sessions = rowSessions(row, input); joinIssue(row, sessions, input, registry);
     row.idleMinutes = input.idle.get(row.worktree ?? "") ?? null;

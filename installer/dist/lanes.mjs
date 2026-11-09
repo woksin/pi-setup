@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: e2b7d0a0b96dffebadf645b1380eb5462d9fd758d5d83ac1c81ac43f7d62cba5
+// pi-setup-source-sha256: 02b5767b75ba8cea7d3b50cf290ae85b8c0903ca9c37c5f0b9a586644cf123cd
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -201,6 +201,7 @@ function validate(value, root = process.cwd(), home = homedir2()) {
   require2(c.repos && typeof c.repos === "object" && !Array.isArray(c.repos) && Object.values(c.repos).every(text2), "repos");
   require2(c.messages && text2(c.messages.dir), "messages.dir");
   require2(c.messages && typeof c.messages.broadcast === "string" && validId(c.messages.broadcast), "messages.broadcast");
+  require2(c.messages.ackMinutes === void 0 || Number.isInteger(c.messages.ackMinutes) && c.messages.ackMinutes > 0, "messages.ackMinutes");
   if (c.messages.retention !== void 0) {
     const r = c.messages.retention;
     require2(r && typeof r === "object" && !Array.isArray(r), "messages.retention");
@@ -2906,8 +2907,8 @@ function needsOrchestrator(plan, opts) {
 
 // src/lanes/commands/resume.ts
 import { createHash as createHash5 } from "node:crypto";
-import { join as join34, resolve as resolve9 } from "node:path";
-import { existsSync as existsSync13, statSync as statSync9 } from "node:fs";
+import { join as join37, resolve as resolve9 } from "node:path";
+import { existsSync as existsSync13, statSync as statSync10 } from "node:fs";
 
 // src/lanes/commands/start.ts
 import { existsSync as existsSync11, statSync as statSync7 } from "node:fs";
@@ -3160,8 +3161,8 @@ function rejectRetired(id, c) {
 // src/lanes/commands/run.ts
 import { spawn as spawn2 } from "node:child_process";
 import { constants as constants2 } from "node:os";
-import { existsSync as existsSync12, statSync as statSync8 } from "node:fs";
-import { join as join33 } from "node:path";
+import { existsSync as existsSync12, statSync as statSync9 } from "node:fs";
+import { join as join36 } from "node:path";
 
 // src/lanes/admission.ts
 import { lstatSync as lstatSync5, mkdirSync as mkdirSync10, readFileSync as readFileSync15, readdirSync as readdirSync11, renameSync as renameSync5, rmdirSync, unlinkSync as unlinkSync4, writeFileSync as writeFileSync8 } from "node:fs";
@@ -3339,233 +3340,18 @@ async function admit(ctx, request2, beforeLaunch) {
   };
 }
 
-// src/lanes/commands/run.ts
-function nativeSpawn(exe, args, options) {
-  const child = spawn2(exe, args, { ...options, stdio: "inherit", shell: false });
-  const done = new Promise((resolve11, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve11({ code, signal }));
-  });
-  return { pid: child.pid ?? 0, done, signal: (signal) => {
-    child.kill(signal);
-  } };
-}
-async function run(id, opts, c, root, ctx, beforeLaunch) {
-  const target = laneTarget(id, c, root, ctx);
-  if (target.lane?.retired) throw new Error(`lane ${id} is retired; add a fresh lane instead`);
-  if (!opts["from-handoff"] && parseStatus(await backendFor(c, ctx, root).status(target.id)).kind === "closed") throw new Error(`lane ${id} is closed`);
-  const prompt = expand(target.coordinator ? c.coordinator.prompt : target.lane.prompt, c, root, ctx.home);
-  if (!existsSync12(target.cwd) || !statSync8(target.cwd).isDirectory()) throw new Error(`cwd not found: ${target.cwd}`);
-  if (!existsSync12(prompt) || !statSync8(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
-  let wrapper = ctx.which(c.launch.wrapper);
-  if (!wrapper) {
-    wrapper = ctx.which("pi");
-    if (!wrapper) throw new Error("pi not found");
-    ctx.err("pi-session not found; starting pi directly (no relaunch after a context handoff)");
-  }
-  if (!target.coordinator || !c.launch.preapproveMcp) await preapprove(ctx, target.cwd, c.launch.preapproveMcp);
-  const lease = await admit(ctx, {
-    root: ctx.realpath(root),
-    cwd: ctx.realpath(target.cwd),
-    id: target.id,
-    pool: target.coordinator || ["repo-orch", "sub-orch"].includes(target.lane?.role ?? "") ? "orchestration" : "worker"
-  }, beforeLaunch);
-  const env = { ...ctx.env };
-  for (const name of c.launch.unsetEnv) delete env[name];
-  const messages2 = expand(c.messages.dir, c, root, ctx.home);
-  Object.assign(env, { PI_ORCH_ID: target.id, LANES_DIR: root, INBOX_DIR: messages2, LANE_STATUS_DIR: join33(messages2, "status") });
-  let child;
-  try {
-    child = (ctx.spawnInherited ?? nativeSpawn)(wrapper, [`@${prompt}`], { cwd: target.cwd, env });
-  } catch (e) {
-    await lease.release();
-    throw e;
-  }
-  let settled = false;
-  const outcome = child.done.then((value) => {
-    settled = true;
-    return { value };
-  }, (error) => {
-    settled = true;
-    return { error };
-  });
-  let verified;
-  const identity2 = new Promise((resolve11) => {
-    verified = resolve11;
-  });
-  const handlers = /* @__PURE__ */ new Map();
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-    const handler = () => {
-      void identity2.then(async (start2) => {
-        if (settled) return;
-        if (start2) {
-          const rows = await inventory2(ctx);
-          if (settled) return;
-          const row = rows.find((r) => r.pid === child.pid);
-          if (row?.start === start2) {
-            child.signal(signal);
-            return;
-          }
-        }
-        ctx.err("admission cancellation identity uncertain; child not signalled, lease retained until confirmed exit");
-      }).catch((e) => ctx.err(e.message));
-    };
-    handlers.set(signal, handler);
-    process.on(signal, handler);
-  }
-  let result2;
-  try {
-    try {
-      verified((await lease.child(child.pid)).start);
-    } catch (e) {
-      verified(void 0);
-      ctx.err(e.message);
-    }
-    const completed = await outcome;
-    if ("error" in completed) throw completed.error;
-    result2 = completed.value;
-  } finally {
-    settled = true;
-    verified(void 0);
-    for (const [signal, handler] of handlers) process.off(signal, handler);
-    try {
-      await lease.release();
-    } catch (e) {
-      ctx.err(e.message);
-    }
-  }
-  if (result2.signal) {
-    if (!ctx.spawnInherited) process.kill(process.pid, result2.signal);
-    return 128 + (constants2.signals[result2.signal] ?? 0);
-  }
-  return result2.code ?? 1;
-}
+// src/lanes/registration.ts
+import { mkdirSync as mkdirSync11, readFileSync as readFileSync18, renameSync as renameSync6, writeFileSync as writeFileSync9 } from "node:fs";
+import { randomUUID as randomUUID5 } from "node:crypto";
+import { join as join35 } from "node:path";
 
-// src/lanes/commands/resume.ts
-async function startCommand(id, opts, env) {
-  if (opts["from-handoff"]) return fromHandoff({ id, opts }, env);
-  return start(id, opts, env.c, env.root, env.ctx);
-}
-async function runCommand(id, opts, env) {
-  if (!opts["from-handoff"]) {
-    if (opts["handoff-digest"]) throw new UsageError("--handoff-digest requires --from-handoff");
-    return run(id, opts, env.c, env.root, env.ctx);
-  }
-  if (opts["handoff-digest"] && handoffDigest(id, env.ctx.realpath(filePath(opts["from-handoff"], env)), env) !== opts["handoff-digest"]) throw new Error("handoff launch changed; request a fresh start/resume");
-  const prepared = await prepareHandoff({ id, opts }, env);
-  if (opts["handoff-digest"] && opts["handoff-digest"] !== prepared.digest) throw new Error("handoff launch changed; request a fresh start/resume");
-  return run(id, prepared.opts, prepared.next, env.root, env.ctx, async () => {
-    await verifyWorktree(prepared.snapshot, env);
-    const current = { ...env, c: loadConfig(env.root) };
-    if (handoffDigest(id, prepared.path, current) !== prepared.digest) throw new Error("handoff launch changed; request a fresh start/resume");
-    saveConfig(env.root, prepared.next);
-  });
-}
-async function resume(args, opts, env) {
-  return fromHandoff({ id: args[0], opts: { ...opts, "from-handoff": args[0] } }, env);
-}
-function filePath(value, env) {
-  return env.c.lanes.some((lane) => lane.id === value) ? join34(env.root, ".state/handoffs", `${value}.md`) : resolve9(env.ctx.cwd, value);
-}
-function sourceLane(snapshot, env) {
-  const { c, ctx, root } = env;
-  const lanes = c.lanes.filter((lane) => lane.repo === snapshot.repo && lane.branch === snapshot.branch);
-  const source = lanes.find((lane) => ctx.realpath(laneDir(lane, c, root, ctx)) === ctx.realpath(snapshot.worktree));
-  if (!source) throw new UsageError("handoff does not match a configured lane worktree");
-  return source;
-}
-function restoreLane(input, env) {
-  const { c } = env;
-  const { id, path, source } = input;
-  validateTarget({ id, source }, env);
-  return { ...source, id, prompt: path, retired: false, parent: activeParent(source, env) };
-}
-function validateTarget({ id, source }, { c }) {
-  if (!validNewId(id) || [c.coordinator.id, "ALL", c.messages.broadcast].includes(id)) {
-    throw new UsageError("invalid lane id");
-  }
-  if (id !== source.id && c.lanes.some((lane) => lane.id === id)) throw new UsageError("resume target lane already exists");
-}
-function activeParent(source, { c }) {
-  const parent = effectiveParent(source, c);
-  if (parent === c.coordinator.id) return parent;
-  if (c.lanes.some((lane) => lane.id === parent && !lane.retired)) return parent;
-  return c.coordinator.id;
-}
-async function verifyWorktree(snapshot, env) {
-  requireWorktree(snapshot.worktree);
-  const head = await env.ctx.run(
-    "git",
-    ["--no-optional-locks", "-C", snapshot.worktree, "rev-parse", "HEAD"],
-    { timeoutMs: 4e3 }
-  );
-  if (head.code || head.timedOut) throw new Error("handoff HEAD changed");
-  if (head.stdout.trim() !== snapshot.head) throw new Error("handoff HEAD changed");
-  await warnDirtyDrift(snapshot, env);
-}
-async function dirtyTree(snapshot, { ctx }) {
-  const args = ["--no-optional-locks", "-C", snapshot.worktree];
-  const status2 = await ctx.run("git", [...args, "status", "--porcelain=v1", "--untracked-files=all", "-z"], { timeoutMs: 4e3 });
-  requireProbe(status2, "dirty paths unavailable");
-  const diff = await ctx.run("git", [...args, "diff", "--binary", "HEAD"], { timeoutMs: 4e3 });
-  requireProbe(diff, "dirty digest unavailable");
-  const paths = changedPaths(status2.stdout);
-  return { paths, digest: treeDigest({ cwd: snapshot.worktree, paths, status: status2.stdout, diff: diff.stdout }) };
-}
-async function warnDirtyDrift(snapshot, env) {
-  try {
-    const current = await dirtyTree(snapshot, env);
-    if (JSON.stringify(current.paths) !== JSON.stringify([...snapshot.paths].sort())) {
-      env.ctx.err("Warning: handoff dirty paths changed; continuing with the preserved worktree");
-    }
-    if (current.digest !== snapshot.digest) {
-      env.ctx.err("Warning: handoff dirty digest changed or missing; continuing with the preserved worktree");
-    }
-  } catch (e) {
-    env.ctx.err(`Warning: could not compare handoff dirty paths/digest: ${e.message}; continuing`);
-  }
-}
-function handoffDigest(id, path, { c, root, ctx }, file = readContext(path)) {
-  return createHash5("sha256").update(JSON.stringify({
-    id,
-    root: ctx.realpath(root),
-    c,
-    path: ctx.realpath(path),
-    handoff: file.digest,
-    cwd: ctx.realpath(file.snapshot.worktree)
-  })).digest("hex");
-}
-async function prepareHandoff(input, env) {
-  const { c, root, ctx } = env;
-  const requested = filePath(input.opts["from-handoff"], env);
-  const file = readContext(requested);
-  const path = ctx.realpath(requested);
-  const digest = handoffDigest(input.id, path, env, file);
-  const source = sourceLane(file.snapshot, env);
-  await verifyWorktree(file.snapshot, env);
-  const restored = restoreLane({ id: input.id, path, source }, env);
-  const lanes = c.lanes.filter((lane) => lane.id !== input.id).concat(restored);
-  const next = { ...c, lanes };
-  validate(next, root, ctx.home);
-  if (handoffDigest(input.id, path, env) !== digest) throw new Error("handoff launch changed; request a fresh start/resume");
-  const opts = { ...input.opts, "from-handoff": path, "handoff-digest": digest };
-  return { next, opts, path, digest, snapshot: file.snapshot };
-}
-async function fromHandoff(input, env) {
-  const prepared = await prepareHandoff(input, env);
-  return start(input.id, prepared.opts, prepared.next, env.root, env.ctx);
-}
-function requireWorktree(path) {
-  if (!existsSync13(path) || !statSync9(path).isDirectory()) throw new Error("handoff worktree missing");
-}
-
-// src/lanes/commands/send.ts
-import { readFileSync as readFileSync18 } from "node:fs";
-import { resolve as resolve10 } from "node:path";
+// src/lanes/roster.ts
+import { readFileSync as readFileSync17, readdirSync as readdirSync13, statSync as statSync8 } from "node:fs";
+import { join as join34 } from "node:path";
 
 // src/lanes/issue-register.ts
 import { readFileSync as readFileSync16, readdirSync as readdirSync12 } from "node:fs";
-import { join as join35 } from "node:path";
+import { join as join33 } from "node:path";
 var RECENT_DAYS = 14;
 var DAY_MS = 864e5;
 var REPO_RE = /^(?!\.+\/)[A-Za-z0-9_.-]+\/(?!\.+$)[A-Za-z0-9_.-]+$/;
@@ -3700,7 +3486,7 @@ function readLeases(path) {
     let skipped = 0;
     for (const name of names) {
       try {
-        const parsed = parseLeases([readFileSync16(join35(path, name), "utf8")]);
+        const parsed = parseLeases([readFileSync16(join33(path, name), "utf8")]);
         leases2.push(...parsed);
         if (!parsed.length) skipped++;
       } catch {
@@ -3731,9 +3517,9 @@ async function probeLeases(leases2, ctx) {
   return sessionLiveness(leases2, (pid) => alive3.has(pid), (pid) => starts.get(pid));
 }
 async function readIssueRegister(ctx) {
-  const dir = join35(ctx.piAgentDir, "issue-work");
-  const registry3 = readRegistry(join35(dir, "registry.jsonl"));
-  const { leases: leases2, source } = readLeases(join35(dir, "sessions"));
+  const dir = join33(ctx.piAgentDir, "issue-work");
+  const registry3 = readRegistry(join33(dir, "registry.jsonl"));
+  const { leases: leases2, source } = readLeases(join33(dir, "sessions"));
   for (const lease of leases2) if (lease.cwd) {
     try {
       lease.cwd = ctx.realpath(lease.cwd);
@@ -3744,8 +3530,6 @@ async function readIssueRegister(ctx) {
 }
 
 // src/lanes/roster.ts
-import { readFileSync as readFileSync17, readdirSync as readdirSync13, statSync as statSync10 } from "node:fs";
-import { join as join36 } from "node:path";
 var HEARTBEAT_STALE_MIN = 15;
 var heldClaims = /* @__PURE__ */ Symbol("held claims");
 function readJsonDir(dir, valid) {
@@ -3755,7 +3539,7 @@ function readJsonDir(dir, valid) {
     let skipped = 0;
     for (const name of names) {
       try {
-        const value = JSON.parse(readFileSync17(join36(dir, name), "utf8"));
+        const value = JSON.parse(readFileSync17(join34(dir, name), "utf8"));
         if (valid(value)) values.push(value);
         else skipped++;
       } catch {
@@ -3774,7 +3558,7 @@ function readStatuses(dir) {
     let skipped = 0;
     for (const name of names) {
       try {
-        values.set(name.slice(0, -7), readFileSync17(join36(dir, name), "utf8").split(/\r?\n/)[0]);
+        values.set(name.slice(0, -7), readFileSync17(join34(dir, name), "utf8").split(/\r?\n/)[0]);
       } catch {
         skipped++;
       }
@@ -3786,7 +3570,7 @@ function readStatuses(dir) {
 }
 async function readMessages(c, root, ctx) {
   try {
-    statSync10(expand(c.messages.dir, c, root, ctx.home));
+    statSync8(expand(c.messages.dir, c, root, ctx.home));
     const values = await backendFor(c, ctx, root).list();
     return { values, source: { status: "ok", count: values.length } };
   } catch (e) {
@@ -3809,11 +3593,12 @@ function rosterSeeds(c, root, ctx) {
 async function readRoster(c, root, ctx, register) {
   const data = register ?? await readIssueRegister(ctx);
   const processes = await runningPiChecked(ctx);
-  const orch = join36(ctx.home, ".pi/orch");
-  const heartbeats = readJsonDir(join36(orch, "heartbeats"), (v) => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
-  const sessions = readJsonDir(join36(orch, "sessions"), (v) => v && Number.isInteger(v.pid) && (v.id === void 0 || typeof v.id === "string"));
-  const assignments = readJsonDir(join36(orch, "assignments"), (v) => v && typeof v === "object");
-  const statusDir = ctx.env.LANE_STATUS_DIR || (c.messages.dir ? join36(expand(c.messages.dir, c, root, ctx.home), "status") : join36(ctx.piAgentDir, "lane-status"));
+  const registrations = readRegistrations(root);
+  const orch = join34(ctx.home, ".pi/orch");
+  const heartbeats = readJsonDir(join34(orch, "heartbeats"), (v) => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
+  const sessions = readJsonDir(join34(orch, "sessions"), (v) => v && Number.isInteger(v.pid) && (v.id === void 0 || typeof v.id === "string"));
+  const assignments = readJsonDir(join34(orch, "assignments"), (v) => v && typeof v === "object");
+  const statusDir = ctx.env.LANE_STATUS_DIR || (c.messages.dir ? join34(expand(c.messages.dir, c, root, ctx.home), "status") : join34(ctx.piAgentDir, "lane-status"));
   const statuses = readStatuses(statusDir);
   const messages2 = await readMessages(c, root, ctx);
   const lanes = rosterSeeds(c, root, ctx);
@@ -3822,6 +3607,7 @@ async function readRoster(c, root, ctx, register) {
   return {
     lanes,
     processes,
+    registrations: checkRegistrations(registrations.values, processes, ctx),
     register: data,
     heartbeats: heartbeats.values,
     sessions: sessions.values,
@@ -3833,6 +3619,7 @@ async function readRoster(c, root, ctx, register) {
       lanes: { status: "ok", count: lanes.length },
       processes: { status: processes.ok ? "ok" : "error", count: processes.procs.length, ...!processes.ok ? { detail: "process discovery unavailable or incomplete" } : {} },
       ...data.sources,
+      registrations: registrations.source,
       heartbeats: heartbeats.source,
       sessions: sessions.source,
       assignments: assignments.source,
@@ -3903,6 +3690,7 @@ function processRows(input) {
     }
     rows.push(unregisteredProcess(p, input));
   }
+  launchedRows(rows, input, (id) => emptyRow(id, "launched"));
   return rows;
 }
 function indexRosterRegistry(events) {
@@ -3992,8 +3780,11 @@ function stateOf(row, input, now) {
   const h = heartbeatFor2(row.pid, input);
   const heartbeatFresh = heartbeatEvidence(row, h, now);
   if (seed?.retired || parseStatus(line).kind === "closed") return "retired";
-  if (discoveryUnknown(row, input, heartbeatFresh)) return "unknown";
-  const live = row.pid !== null || row.evidence.includes("lease") || heartbeatFresh;
+  const registered = row.evidence.includes("registration");
+  const live = row.pid !== null || row.evidence.includes("lease") || heartbeatFresh || registered;
+  const ended = registrationState(row, input);
+  if (ended) return ended;
+  if (!registered && discoveryUnknown(row, input, heartbeatFresh)) return "unknown";
   if (!live) return seed ? "stopped" : "unknown";
   return activeState(row, line, h, now);
 }
@@ -4011,11 +3802,11 @@ function indexMessage(index, key, message) {
 }
 function messageEndpoints(to) {
   const parts = to.split("-");
-  const endpoints = /* @__PURE__ */ new Set([to]);
+  const endpoints2 = /* @__PURE__ */ new Set([to]);
   for (let start2 = 0; start2 < parts.length; start2++) for (let end = start2 + 1; end <= parts.length; end++) {
-    endpoints.add(parts.slice(start2, end).join("-"));
+    endpoints2.add(parts.slice(start2, end).join("-"));
   }
-  return endpoints;
+  return endpoints2;
 }
 function indexMessages(messages2, now) {
   const index = { inbound: /* @__PURE__ */ new Map(), outbound: /* @__PURE__ */ new Map(), identities: /* @__PURE__ */ new Set() };
@@ -4054,6 +3845,7 @@ function buildRoster(input, now, registry3 = indexRosterRegistry(input.register.
   const rows = processRows(input);
   messageRows(rows, input, messages2);
   for (const row of rows) {
+    joinRegistration(row, input);
     if (row.pid !== null) row.evidence.push("process");
     const sessions = rowSessions(row, input);
     joinIssue(row, sessions, input, registry3);
@@ -4126,7 +3918,317 @@ function suggestTarget(rows, input, selection, now) {
   return candidates.length ? { target: candidates[0].lane, rule: "idle-in-repo", reason: "longest idle lane in repository (ties by lane id; workers before repo orchestrator)" } : { target: null, rule: "start-lane", reason: `no live lane for ${repo ?? "matching repositories"}` };
 }
 
+// src/lanes/registration.ts
+var registrationDir = (root) => join35(root, ".state/roster");
+function registrationPath(root, id) {
+  if (!validId(id)) throw new Error("invalid registration id");
+  return join35(registrationDir(root), `${id}.json`);
+}
+function writeRegistration(root, record2) {
+  const path = registrationPath(root, record2.id);
+  const dir = registrationDir(root);
+  mkdirSync11(dir, { recursive: true });
+  const tmp = join35(dir, `.${record2.id}-${randomUUID5()}.tmp`);
+  writeFileSync9(tmp, `${JSON.stringify(record2)}
+`, { flag: "wx" });
+  renameSync6(tmp, path);
+}
+function retireRegistration(root, id, at) {
+  const record2 = JSON.parse(readFileSync18(registrationPath(root, id), "utf8"));
+  writeRegistration(root, { ...record2, retiredAt: at });
+}
+function parseableAt(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+function validRegistration(value) {
+  if (!value || typeof value.id !== "string" || typeof value.cwd !== "string") return false;
+  if (!Number.isInteger(value.pid) || value.pid <= 0 || !parseableAt(value.startedAt)) return false;
+  return value.retiredAt === void 0 || parseableAt(value.retiredAt);
+}
+function readRegistrations(root) {
+  return readJsonDir(registrationDir(root), validRegistration);
+}
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function checkRegistrations(records, processes, ctx) {
+  const cwds = new Set(processes.procs.map((p) => p.cwd));
+  return records.map((record2) => {
+    let cwd = record2.cwd;
+    try {
+      cwd = ctx.realpath(cwd);
+    } catch {
+    }
+    const alive3 = !record2.retiredAt && (ctx.pidAlive ?? pidAlive)(record2.pid) && (cwds.has(cwd) || !processes.ok);
+    return { ...record2, cwd, alive: Boolean(alive3) };
+  });
+}
+function launchedRows(rows, input, empty) {
+  for (const record2 of input.registrations ?? []) {
+    if (rows.some((r) => r.lane === record2.id)) continue;
+    const detected = record2.alive && rows.find((r) => r.identity === "unregistered" && r.worktree === record2.cwd);
+    if (detected) {
+      detected.lane = record2.id;
+      detected.identity = "launched";
+      detected.notes = detected.notes.filter((note) => note !== "identity unavailable: unregistered");
+    } else rows.push({ ...empty(record2.id), worktree: record2.cwd });
+  }
+}
+function joinRegistration(row, input) {
+  const record2 = input.registrations?.find((r) => r.id === row.lane);
+  if (!record2) return;
+  row.worktree ??= record2.cwd;
+  if (record2.alive) row.evidence.push("registration");
+  else row.notes.push(record2.retiredAt ? `session ended ${record2.retiredAt}` : "registration stale (no exit recorded)");
+}
+function registrationState(row, input) {
+  const record2 = input.registrations?.find((r) => r.id === row.lane);
+  if (!record2 || record2.alive) return void 0;
+  return record2.retiredAt && !input.lanes.some((l) => l.id === row.lane) ? "retired" : "stopped";
+}
+
+// src/lanes/commands/run.ts
+function nativeSpawn(exe, args, options) {
+  const child = spawn2(exe, args, { ...options, stdio: "inherit", shell: false });
+  const done = new Promise((resolve11, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => resolve11({ code, signal }));
+  });
+  return { pid: child.pid ?? 0, done, signal: (signal) => {
+    child.kill(signal);
+  } };
+}
+async function run(id, opts, c, root, ctx, beforeLaunch) {
+  const target = laneTarget(id, c, root, ctx);
+  if (target.lane?.retired) throw new Error(`lane ${id} is retired; add a fresh lane instead`);
+  if (!opts["from-handoff"] && parseStatus(await backendFor(c, ctx, root).status(target.id)).kind === "closed") throw new Error(`lane ${id} is closed`);
+  const prompt = expand(target.coordinator ? c.coordinator.prompt : target.lane.prompt, c, root, ctx.home);
+  if (!existsSync12(target.cwd) || !statSync9(target.cwd).isDirectory()) throw new Error(`cwd not found: ${target.cwd}`);
+  if (!existsSync12(prompt) || !statSync9(prompt).isFile()) throw new Error(`prompt not found: ${prompt}`);
+  let wrapper = ctx.which(c.launch.wrapper);
+  if (!wrapper) {
+    wrapper = ctx.which("pi");
+    if (!wrapper) throw new Error("pi not found");
+    ctx.err("pi-session not found; starting pi directly (no relaunch after a context handoff)");
+  }
+  if (!target.coordinator || !c.launch.preapproveMcp) await preapprove(ctx, target.cwd, c.launch.preapproveMcp);
+  const lease = await admit(ctx, {
+    root: ctx.realpath(root),
+    cwd: ctx.realpath(target.cwd),
+    id: target.id,
+    pool: target.coordinator || ["repo-orch", "sub-orch"].includes(target.lane?.role ?? "") ? "orchestration" : "worker"
+  }, beforeLaunch);
+  const env = { ...ctx.env };
+  for (const name of c.launch.unsetEnv) delete env[name];
+  const messages2 = expand(c.messages.dir, c, root, ctx.home);
+  Object.assign(env, { PI_ORCH_ID: target.id, LANES_DIR: root, INBOX_DIR: messages2, LANE_STATUS_DIR: join36(messages2, "status") });
+  let child;
+  try {
+    child = (ctx.spawnInherited ?? nativeSpawn)(wrapper, [`@${prompt}`], { cwd: target.cwd, env });
+  } catch (e) {
+    await lease.release();
+    throw e;
+  }
+  let settled = false;
+  const outcome = child.done.then((value) => {
+    settled = true;
+    return { value };
+  }, (error) => {
+    settled = true;
+    return { error };
+  });
+  if (child.pid > 0) {
+    try {
+      writeRegistration(root, { id: target.id, pid: child.pid, cwd: target.cwd, startedAt: ctx.now().toISOString() });
+    } catch (e) {
+      ctx.err(`registration: ${e.message}`);
+    }
+  }
+  let verified;
+  const identity2 = new Promise((resolve11) => {
+    verified = resolve11;
+  });
+  const handlers = /* @__PURE__ */ new Map();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    const handler = () => {
+      void identity2.then(async (start2) => {
+        if (settled) return;
+        if (start2) {
+          const rows = await inventory2(ctx);
+          if (settled) return;
+          const row = rows.find((r) => r.pid === child.pid);
+          if (row?.start === start2) {
+            child.signal(signal);
+            return;
+          }
+        }
+        ctx.err("admission cancellation identity uncertain; child not signalled, lease retained until confirmed exit");
+      }).catch((e) => ctx.err(e.message));
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  let result2;
+  try {
+    try {
+      verified((await lease.child(child.pid)).start);
+    } catch (e) {
+      verified(void 0);
+      ctx.err(e.message);
+    }
+    const completed = await outcome;
+    if ("error" in completed) throw completed.error;
+    result2 = completed.value;
+  } finally {
+    settled = true;
+    verified(void 0);
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+    if (child.pid > 0) {
+      try {
+        retireRegistration(root, target.id, ctx.now().toISOString());
+      } catch (e) {
+        ctx.err(`registration: ${e.message}`);
+      }
+    }
+    try {
+      await lease.release();
+    } catch (e) {
+      ctx.err(e.message);
+    }
+  }
+  if (result2.signal) {
+    if (!ctx.spawnInherited) process.kill(process.pid, result2.signal);
+    return 128 + (constants2.signals[result2.signal] ?? 0);
+  }
+  return result2.code ?? 1;
+}
+
+// src/lanes/commands/resume.ts
+async function startCommand(id, opts, env) {
+  if (opts["from-handoff"]) return fromHandoff({ id, opts }, env);
+  return start(id, opts, env.c, env.root, env.ctx);
+}
+async function runCommand(id, opts, env) {
+  if (!opts["from-handoff"]) {
+    if (opts["handoff-digest"]) throw new UsageError("--handoff-digest requires --from-handoff");
+    return run(id, opts, env.c, env.root, env.ctx);
+  }
+  if (opts["handoff-digest"] && handoffDigest(id, env.ctx.realpath(filePath(opts["from-handoff"], env)), env) !== opts["handoff-digest"]) throw new Error("handoff launch changed; request a fresh start/resume");
+  const prepared = await prepareHandoff({ id, opts }, env);
+  if (opts["handoff-digest"] && opts["handoff-digest"] !== prepared.digest) throw new Error("handoff launch changed; request a fresh start/resume");
+  return run(id, prepared.opts, prepared.next, env.root, env.ctx, async () => {
+    await verifyWorktree(prepared.snapshot, env);
+    const current = { ...env, c: loadConfig(env.root) };
+    if (handoffDigest(id, prepared.path, current) !== prepared.digest) throw new Error("handoff launch changed; request a fresh start/resume");
+    saveConfig(env.root, prepared.next);
+  });
+}
+async function resume(args, opts, env) {
+  return fromHandoff({ id: args[0], opts: { ...opts, "from-handoff": args[0] } }, env);
+}
+function filePath(value, env) {
+  return env.c.lanes.some((lane) => lane.id === value) ? join37(env.root, ".state/handoffs", `${value}.md`) : resolve9(env.ctx.cwd, value);
+}
+function sourceLane(snapshot, env) {
+  const { c, ctx, root } = env;
+  const lanes = c.lanes.filter((lane) => lane.repo === snapshot.repo && lane.branch === snapshot.branch);
+  const source = lanes.find((lane) => ctx.realpath(laneDir(lane, c, root, ctx)) === ctx.realpath(snapshot.worktree));
+  if (!source) throw new UsageError("handoff does not match a configured lane worktree");
+  return source;
+}
+function restoreLane(input, env) {
+  const { c } = env;
+  const { id, path, source } = input;
+  validateTarget({ id, source }, env);
+  return { ...source, id, prompt: path, retired: false, parent: activeParent(source, env) };
+}
+function validateTarget({ id, source }, { c }) {
+  if (!validNewId(id) || [c.coordinator.id, "ALL", c.messages.broadcast].includes(id)) {
+    throw new UsageError("invalid lane id");
+  }
+  if (id !== source.id && c.lanes.some((lane) => lane.id === id)) throw new UsageError("resume target lane already exists");
+}
+function activeParent(source, { c }) {
+  const parent = effectiveParent(source, c);
+  if (parent === c.coordinator.id) return parent;
+  if (c.lanes.some((lane) => lane.id === parent && !lane.retired)) return parent;
+  return c.coordinator.id;
+}
+async function verifyWorktree(snapshot, env) {
+  requireWorktree(snapshot.worktree);
+  const head = await env.ctx.run(
+    "git",
+    ["--no-optional-locks", "-C", snapshot.worktree, "rev-parse", "HEAD"],
+    { timeoutMs: 4e3 }
+  );
+  if (head.code || head.timedOut) throw new Error("handoff HEAD changed");
+  if (head.stdout.trim() !== snapshot.head) throw new Error("handoff HEAD changed");
+  await warnDirtyDrift(snapshot, env);
+}
+async function dirtyTree(snapshot, { ctx }) {
+  const args = ["--no-optional-locks", "-C", snapshot.worktree];
+  const status2 = await ctx.run("git", [...args, "status", "--porcelain=v1", "--untracked-files=all", "-z"], { timeoutMs: 4e3 });
+  requireProbe(status2, "dirty paths unavailable");
+  const diff = await ctx.run("git", [...args, "diff", "--binary", "HEAD"], { timeoutMs: 4e3 });
+  requireProbe(diff, "dirty digest unavailable");
+  const paths = changedPaths(status2.stdout);
+  return { paths, digest: treeDigest({ cwd: snapshot.worktree, paths, status: status2.stdout, diff: diff.stdout }) };
+}
+async function warnDirtyDrift(snapshot, env) {
+  try {
+    const current = await dirtyTree(snapshot, env);
+    if (JSON.stringify(current.paths) !== JSON.stringify([...snapshot.paths].sort())) {
+      env.ctx.err("Warning: handoff dirty paths changed; continuing with the preserved worktree");
+    }
+    if (current.digest !== snapshot.digest) {
+      env.ctx.err("Warning: handoff dirty digest changed or missing; continuing with the preserved worktree");
+    }
+  } catch (e) {
+    env.ctx.err(`Warning: could not compare handoff dirty paths/digest: ${e.message}; continuing`);
+  }
+}
+function handoffDigest(id, path, { c, root, ctx }, file = readContext(path)) {
+  return createHash5("sha256").update(JSON.stringify({
+    id,
+    root: ctx.realpath(root),
+    c,
+    path: ctx.realpath(path),
+    handoff: file.digest,
+    cwd: ctx.realpath(file.snapshot.worktree)
+  })).digest("hex");
+}
+async function prepareHandoff(input, env) {
+  const { c, root, ctx } = env;
+  const requested = filePath(input.opts["from-handoff"], env);
+  const file = readContext(requested);
+  const path = ctx.realpath(requested);
+  const digest = handoffDigest(input.id, path, env, file);
+  const source = sourceLane(file.snapshot, env);
+  await verifyWorktree(file.snapshot, env);
+  const restored = restoreLane({ id: input.id, path, source }, env);
+  const lanes = c.lanes.filter((lane) => lane.id !== input.id).concat(restored);
+  const next = { ...c, lanes };
+  validate(next, root, ctx.home);
+  if (handoffDigest(input.id, path, env) !== digest) throw new Error("handoff launch changed; request a fresh start/resume");
+  const opts = { ...input.opts, "from-handoff": path, "handoff-digest": digest };
+  return { next, opts, path, digest, snapshot: file.snapshot };
+}
+async function fromHandoff(input, env) {
+  const prepared = await prepareHandoff(input, env);
+  return start(input.id, prepared.opts, prepared.next, env.root, env.ctx);
+}
+function requireWorktree(path) {
+  if (!existsSync13(path) || !statSync10(path).isDirectory()) throw new Error("handoff worktree missing");
+}
+
 // src/lanes/commands/send.ts
+import { readFileSync as readFileSync19 } from "node:fs";
+import { resolve as resolve10 } from "node:path";
 async function send(args, opts, c, root, ctx) {
   let [to, topic, file] = args;
   const from = opts.from || ctx.env.PI_ORCH_ID;
@@ -4139,7 +4241,7 @@ async function send(args, opts, c, root, ctx) {
   if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
   const refusal = await guardIssue(to, opts, { c, root, ctx });
   if (refusal) return refusal;
-  let body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync18(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+  let body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync19(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
   if (!body.trim()) throw new UsageError("empty message body");
   if (opts.force !== void 0) body = `Ownership override (--force): ${opts.force}
 
@@ -4270,12 +4372,12 @@ async function nudge(id, text2, opts, c, root, ctx) {
 }
 
 // src/lanes/commands/resume-check.ts
-import { existsSync as existsSync14, readFileSync as readFileSync19, statSync as statSync12 } from "node:fs";
-import { join as join38 } from "node:path";
+import { existsSync as existsSync14, readFileSync as readFileSync20, statSync as statSync12 } from "node:fs";
+import { join as join39 } from "node:path";
 
 // src/lanes/joblogs.ts
 import { closeSync as closeSync2, openSync as openSync2, readSync, readdirSync as readdirSync14, statSync as statSync11 } from "node:fs";
-import { join as join37 } from "node:path";
+import { join as join38 } from "node:path";
 function parseWatches(text2) {
   return text2.split(/\r?\n/).flatMap((line) => {
     const [tag, label, until2, interval, ...check] = line.split("|");
@@ -4300,7 +4402,7 @@ function liveWatch(jobs, watch2, now) {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   for (const date of [now, yesterday]) {
-    const dir = join37(jobs, day(date));
+    const dir = join38(jobs, day(date));
     let names;
     try {
       names = readdirSync14(dir);
@@ -4309,7 +4411,7 @@ function liveWatch(jobs, watch2, now) {
       throw e;
     }
     for (const name of names.filter((n) => n.endsWith(".log"))) {
-      const path = join37(dir, name);
+      const path = join38(dir, name);
       const stat2 = statSync11(path);
       if (!stat2.isFile() || !chunk(path, Math.min(4096, stat2.size), 0).split("\n")[0].includes(watch2.check)) continue;
       const tail = chunk(path, Math.min(65536, stat2.size), Math.max(0, stat2.size - 65536));
@@ -4343,12 +4445,12 @@ async function resumeCheck(c, root, ctx) {
   const now = ctx.now();
   let bad = false;
   ctx.out(`date: ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`);
-  const watches = join38(root, "coordinator/WATCHES.md");
+  const watches = join39(root, "coordinator/WATCHES.md");
   if (!existsSync14(watches)) {
     ctx.out("MISSING coordinator/WATCHES.md");
     bad = true;
-  } else for (const w of parseWatches(readFileSync19(watches, "utf8"))) {
-    if (liveWatch(join38(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
+  } else for (const w of parseWatches(readFileSync20(watches, "utf8"))) {
+    if (liveWatch(join39(ctx.piAgentDir, "jobs"), w, now)) ctx.out(`OK      watch: ${w.label}`);
     else {
       ctx.out(`MISSING watch: ${w.label} -> job_watch until=${w.until} interval=${w.interval} check from coordinator/WATCHES.md`);
       bad = true;
@@ -4364,19 +4466,19 @@ async function resumeCheck(c, root, ctx) {
     if (old.length) bad = true;
     else ctx.out("OK      inbox: no unread backlog");
   }
-  const path = join38(root, "coordinator/NOW.md");
+  const path = join39(root, "coordinator/NOW.md");
   if (!existsSync14(path)) {
     ctx.out("MISSING coordinator/NOW.md");
     bad = true;
   } else {
-    await livePrs(readFileSync19(path, "utf8"), ctx);
+    await livePrs(readFileSync20(path, "utf8"), ctx);
     const age2 = Math.floor((now.getTime() - statSync12(path).mtimeMs) / 6e4);
     if (age2 > 90) {
       ctx.out(`STALE   NOW.md not updated for ${age2} min`);
       bad = true;
     }
   }
-  const questions = join38(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
+  const questions = join39(ctx.piAgentDir, "local-packages/pi-questions/dist/cli.js");
   if (existsSync14(questions)) {
     const r = await ctx.run(process.execPath, [questions, "list", "--all"], { timeoutMs: 15e3 });
     for (const line of r.stdout.split("\n").filter((s) => /^Q-\d+/.test(s))) ctx.out(`OPEN    ${line}`);
@@ -4385,8 +4487,8 @@ async function resumeCheck(c, root, ctx) {
 }
 
 // src/lanes/commands/green-prs.ts
-import { existsSync as existsSync15, mkdirSync as mkdirSync11, readFileSync as readFileSync20, writeFileSync as writeFileSync9 } from "node:fs";
-import { join as join39 } from "node:path";
+import { existsSync as existsSync15, mkdirSync as mkdirSync12, readFileSync as readFileSync21, writeFileSync as writeFileSync10 } from "node:fs";
+import { join as join40 } from "node:path";
 
 // src/lanes/stale-check.ts
 var completedCheck = (check) => check.status === "completed" && ["success", "skipped", "neutral"].includes(check.conclusion);
@@ -4487,15 +4589,15 @@ async function greenPrs(opts, c, root, ctx) {
     }
   }
   refs.sort();
-  const ack = join39(root, ".state/green-ack");
+  const ack = join40(root, ".state/green-ack");
   if (opts.ack) {
-    mkdirSync11(join39(root, ".state"), { recursive: true });
-    writeFileSync9(ack, refs.length ? `${refs.join("\n")}
+    mkdirSync12(join40(root, ".state"), { recursive: true });
+    writeFileSync10(ack, refs.length ? `${refs.join("\n")}
 ` : "");
     ctx.out(`acked ${refs.length}`);
     return 0;
   }
-  const previous = opts.new && existsSync15(ack) ? readFileSync20(ack, "utf8").split(/\r?\n/) : [];
+  const previous = opts.new && existsSync15(ack) ? readFileSync21(ack, "utf8").split(/\r?\n/) : [];
   const output = opts.new ? refs.filter((r) => !previous.includes(r)) : refs;
   if (output.length) ctx.out(await annotatedRefs(output, details, ctx));
   return opts.new && !output.length ? 1 : 0;
@@ -4698,6 +4800,115 @@ async function who(args, opts, c, root, ctx) {
   return rows.length ? 0 : 1;
 }
 
+// src/lanes/commands/unacked.ts
+import { statSync as statSync13 } from "node:fs";
+import { join as join41 } from "node:path";
+var ACK_MINUTES_DEFAULT = 30;
+var LOOKBACK_MS = 14 * 864e5;
+function endpoints(token, known) {
+  if (known.has(token)) return [token];
+  const parts = token.split("-");
+  const result2 = [];
+  for (let start2 = 0; start2 < parts.length; ) {
+    let end = parts.length;
+    while (end > start2 && !known.has(parts.slice(start2, end).join("-"))) end--;
+    if (end === start2) return [token];
+    result2.push(parts.slice(start2, end).join("-"));
+    start2 = end;
+  }
+  return result2;
+}
+function directedMessages(messages2, lanes) {
+  const reserved = /* @__PURE__ */ new Set(["", "ALL", "BCAST", lanes.broadcast, ...lanes.groups]);
+  const known = /* @__PURE__ */ new Set([...lanes.rows.filter((r) => r.identity !== "message-only").map((r) => r.lane), ...messages2.map((m) => m.from), ...reserved]);
+  const cache = /* @__PURE__ */ new Map();
+  const recipients = (token) => {
+    if (!cache.has(token)) cache.set(token, endpoints(token, known).filter((id) => !reserved.has(id)));
+    return cache.get(token);
+  };
+  return messages2.filter((m) => !reserved.has(m.from)).map((message) => ({
+    message,
+    recipients: [...new Set(message.to.flatMap(recipients))].filter((id) => id !== message.from)
+  }));
+}
+var pair = (from, to) => `${from}\0${to}`;
+function lastReplies(directed) {
+  const lastSent = /* @__PURE__ */ new Map();
+  for (const { message, recipients } of directed) for (const to of recipients) {
+    const key = pair(message.from, to);
+    lastSent.set(key, Math.max(lastSent.get(key) ?? -Infinity, message.at.getTime()));
+  }
+  return lastSent;
+}
+function recipientState(row) {
+  return { state: row?.state ?? "unknown", identity: row?.identity ?? "message-only", pid: row?.pid ?? null };
+}
+function pendingRow(message, to, age2, evidence) {
+  return {
+    name: message.name,
+    from: message.from,
+    to,
+    topic: message.topic,
+    ageMin: Math.floor(age2 / 6e4),
+    state: (evidence.marker ?? -Infinity) > message.at.getTime() ? "read-no-reply" : "unread",
+    recipient: recipientState(evidence.recipient)
+  };
+}
+function classifyDirected(input) {
+  const { directed, now, minutes } = input;
+  const lastSent = lastReplies(directed);
+  const rows = [];
+  const roster = new Map(input.lanes.rows.map((row) => [row.lane, row]));
+  for (const { message, recipients } of directed) {
+    const at = message.at.getTime();
+    const age2 = now.getTime() - at;
+    if (age2 < minutes * 6e4 || age2 > LOOKBACK_MS) continue;
+    for (const to of recipients) {
+      if ((lastSent.get(pair(to, message.from)) ?? -Infinity) <= at) rows.push(pendingRow(message, to, age2, { marker: input.markers.get(to), recipient: roster.get(to) }));
+    }
+  }
+  const timestamps = new Map(directed.map(({ message }) => [message.name, message.at.getTime()]));
+  return rows.sort((a, b) => timestamps.get(a.name) - timestamps.get(b.name) || a.name.localeCompare(b.name) || a.to.localeCompare(b.to));
+}
+function readMarkers(dir, directed) {
+  const markers = /* @__PURE__ */ new Map();
+  for (const id of new Set(directed.flatMap((m) => m.recipients))) {
+    try {
+      const stat2 = statSync13(join41(dir, `${id}-inbox.marker`));
+      if (!stat2.isFile()) throw new Error(`invalid inbox marker for ${id}`);
+      markers.set(id, stat2.mtimeMs);
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+    }
+  }
+  return markers;
+}
+function humanRow2(row, markers) {
+  const recipient2 = `${row.recipient.state}(${row.recipient.pid ?? "-"})`;
+  return `${row.ageMin}m  ${row.from}->${row.to} ${row.topic} ${row.state} recipient=${recipient2}${markers.has(row.to) ? "" : " (no marker)"}`;
+}
+async function unacked(args, opts, c, root, ctx) {
+  if (args.length) throw new UsageError("unacked takes no positional arguments");
+  const minutes = opts.minutes === void 0 ? c.messages.ackMinutes ?? ACK_MINUTES_DEFAULT : Number(opts.minutes);
+  const now = ctx.now();
+  const input = await readRoster(c, root, ctx);
+  if (input.sources.messages.status !== "ok") {
+    ctx.err(`messages ${input.sources.messages.status}: ${input.sources.messages.detail ?? "unavailable"}`);
+    return 2;
+  }
+  const roster = buildRoster(input, now);
+  const lanes = { rows: roster.rows, groups: c.lanes.flatMap((l) => l.group ? [l.group] : []), broadcast: c.messages.broadcast };
+  const directed = directedMessages(input.messages, lanes);
+  const markers = readMarkers(expand(c.messages.dir, c, root, ctx.home), directed);
+  const rows = classifyDirected({ directed, markers, lanes, now, minutes });
+  if (opts.json) ctx.out(JSON.stringify({ at: now.toISOString(), minutes, rows, sources: roster.sources }, null, 2));
+  else {
+    for (const row of rows) ctx.out(humanRow2(row, markers));
+    humanSources(roster.sources, ctx);
+  }
+  return rows.length ? 0 : 1;
+}
+
 // src/lanes/main.ts
 var HELP = `Usage: lanes [--dir root] <command> [options]
   adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
@@ -4709,6 +4920,7 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
   resume <ID> [--terminal backend]
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
   who [--repo R] [--issue N|OWNER/REPO#N] [--json]
+  unacked [--json] [--minutes N]
   status [--all]
   messages prune [--dry-run] [--json] [--legacy [--legacy-age hours] [--apply]]
   idle-check [--minutes n]
@@ -4757,6 +4969,7 @@ var OPTIONS = {
   resume: ["terminal"],
   send: ["m", "from", "direct", "issue", "force"],
   who: ["repo", "issue", "json"],
+  unacked: ["json", "minutes"],
   status: ["all"],
   messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"],
@@ -4846,6 +5059,7 @@ function validateInvocation({ command, positional, opts }) {
     who: [0, 0],
     status: [0, 0],
     messages: [1, 1],
+    unacked: [0, 0],
     "idle-check": [0, 0],
     nudge: [2, 2],
     "resume-check": [0, 0],
@@ -4876,6 +5090,7 @@ async function dispatch(input, env) {
     messages: () => messagesPrune(opts, c, root, ctx),
     send: () => send(args, opts, c, root, ctx),
     who: () => who(args, opts, c, root, ctx),
+    unacked: () => unacked(args, opts, c, root, ctx),
     "idle-check": () => idleCheck(opts, c, root, ctx),
     nudge: () => nudge(args[0], args[1], opts, c, root, ctx),
     "resume-check": () => resumeCheck(c, root, ctx),
@@ -4901,7 +5116,8 @@ function errorCode({ e, command }) {
     "close",
     "reap",
     "snooze",
-    "handoff"
+    "handoff",
+    "unacked"
   ].includes(command) ? 2 : 1;
 }
 async function main(argv, ctx) {

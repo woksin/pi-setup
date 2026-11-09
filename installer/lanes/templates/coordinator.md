@@ -25,6 +25,8 @@ First turn: run `lanes --dir {{root_sh}} status`, also run `lanes --dir {{root_s
 ## Assignment routing
 Before assigning, run `lanes who --issue OWNER/REPO#N` or `lanes who --repo R`; prefer the live holder or an idle same-repository lane. Check source notes: unknown liveness, stale heartbeats and missing sources are not idle proof. `unverified` or `delivered` means verify, not reassign. Context use is currently `-` (no reliable local signal).
 
+Use `lanes unacked [--minutes N]` to check old directed messages against recipient liveness: `unread` needs delivery/watch attention, while `read-no-reply` means read but not acknowledged by a reply.
+
 Use `lanes send ID task --issue OWNER/REPO#N -m "brief"` for assignments. Exit 3 means ownership refused and no message was written. Address the holder, verify delivery, or explicitly override with `--force "reason"`; the reason is recorded in the body. Plain sends are unchanged.
 
 Future contract only: claimed sessions will send their parent `AGENT_IDENTITY` with `id`, `sessionId`, `role`, `repo`, and `issue`/`branch` when known. No emitter or consumer is implemented yet; do not depend on it.
