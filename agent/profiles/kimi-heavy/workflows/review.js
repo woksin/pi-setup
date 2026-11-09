@@ -1,6 +1,9 @@
 /**
  * review.js — cross-provider review with adversarial verification.
+ * Enforces all argument/round/deep-mode rules before spending reviewer tokens,
+ * and reuses caller-carried full passing verdicts for identical committed scope.
  *
+ * profile:begin summary
  * Full mode (default): Claude Opus 5.5 (`reviewer`) and GPT-6.1 Sol (`sol-reviewer`, high)
  * review independently; each one's findings are then checked by the OTHER provider,
  * which tries to refute them. Only findings that survive are reported as confirmed.
@@ -11,6 +14,11 @@
  * Sol, for both its review and its verification of Opus's findings. Reserve it for
  * security-sensitive, concurrency/algorithmic or large cross-cutting changes — it costs
  * considerably more OpenAI budget.
+ * profile:end summary
+ *
+ * GENERATED PER PROFILE: this file is the source. Every agent/profiles/<name>/workflows/review.js is
+ * rendered from it by tools/sync-review-workflow.mjs using tools/review-profiles.json; only the
+ * profile:begin/profile:end blocks differ. Edit the source and the config, then regenerate.
  *
  * Security lens (every mode): one extra reviewer from the provider that did NOT write the work reviews only
  * trust boundaries (caller-controlled input, authn/authz, tenancy, secure defaults, fail-closed, host parity,
@@ -40,9 +48,15 @@
  *                        `git diff <since>..HEAD` (the fixes) and whether `prior` findings are resolved.
  *   prior?:   string   — the previous round's blocking findings (and any you dismissed, with the reason),
  *                        so reviewers check those instead of hunting for new edge cases in unchanged code.
- *   round?:   number   — review round for this work item (1 = first). Rounds above 3 are refused unless
+ *   round:    number   — review round for this work item (1 = first). Rounds above 3 are refused unless
  *                        force: true — at that point make a structural fix or ask the user.
  *   force?:   boolean  — override the round cap.
+ *   deepReason?: "security" | "algorithmic" | "concurrency" | "cross-cutting"
+ *   deepJustification?: string — required one-line justification when deep is true.
+ *   headSha?: string — full HEAD SHA for cache reuse (sandbox has no git/fs access).
+ *   baseSha?: string — full base SHA; required to use caller-carried cachedReview.
+ *   cachedReview?: object — previous passing result, unchanged; its slim receipt (reviewCacheKey, reviewers,
+ *                        runtimeCallCount) is validated, see INSTALL.md for cache limitations.
  * }
  *
  * Gate: only BLOCKING findings fail a review — critical/major issues a maintainer would block merge on
@@ -57,71 +71,125 @@
  * Transitional (pi-setup#87): a reviewer with no record at all (session started before model-provenance
  * was installed) is reported as `unavailable (pre-update session)`, does not block and never makes
  * the result reusable from cache; remove once no pre-update sessions remain.
- * The result is kept compact (blocking findings in full, advisory as one-liners) so the parent's
- * notification is not truncated. A failed,
- * missing or incomplete review is never a pass — gate merges on `passed === true`, not on an
- * empty `confirmed` list.
+ * Two result shapes, both built to fit the parent's notification, which cuts the pretty-printed JSON at
+ * 4000 chars (every field is clipped and sanitised, every list capped; the test bound is 3900):
+ *   - passed: verdict, reviewCacheKey (when reusable) and a slim receipt per run {label, agentType, expected,
+ *     effective, ok}, then capped advisory/coverage lines. The key and receipt come first and are never trimmed.
+ *   - not passed: verdict, blocking findings (capped, then an explicit `…N more` entry; blockingCount is the real
+ *     count), unverified, incomplete, one-line reviewers; never carries a cache key.
+ * A cache hit validates the slim receipt only (unique labels, allowed roles, required lanes, exact
+ * runtimeCallCount, every run ok on its current pinned model); full provenance was verified when the receipt
+ * was issued. A failed, missing or incomplete review is never a pass — gate merges on `passed === true`,
+ * not on an empty `confirmed` list.
  *
  * Run: "run the review workflow on the changes in git diff main...HEAD"
  */
 export const meta = {
   name: 'review',
+  // profile:begin meta
   description: 'Cross-provider code/work review (Opus 5.5 + GPT-6.1 Sol; GPT-6 Astra with deep: true); only blocking findings gate, verified by the other provider',
-  whenToUse: 'Reviewing a diff, a change set, a document or a plan before it is merged or published',
+  whenToUse: 'Reviewing a diff, change set, document or plan before it is merged or published; pass author, round and full SHAs.',
   phases: [
     { title: 'Review', detail: 'Opus 5.5 and GPT-6.1 Sol (Astra in deep mode) review independently, plus a cross-provider security lens' },
     { title: 'Verify', detail: 'each finding is challenged by the other provider' },
   ],
+  // profile:end meta
 }
 
-// The SubagentWorkflow tool can deliver args as a JSON string rather than an object.
-const input = typeof args === "string" ? JSON.parse(args) : args
-
-const target = input?.target
-if (!target) {
-  return { passed: false, error: 'Missing args.target — say what to review (a diff range, paths, or a document).' }
-}
-const context = input?.context ? `\n\nIntent / spec of the work:\n${input.context}` : ''
-const quick = input?.quick === true
-if (quick && input?.author !== 'claude' && input?.author !== 'gpt') {
-  return { passed: false, error: 'Quick mode needs args.author: "claude" or "gpt" (who wrote the work), so the review goes to the other provider.' }
-}
-const author = input?.author === 'gpt' ? 'gpt' : 'claude'
-const deep = input?.deep === true
-if (quick && deep) {
-  return { passed: false, error: 'quick and deep cannot be combined — deep is a full review with GPT-6 Astra.' }
-}
-
-const since = typeof input?.since === 'string' && input.since.trim() ? input.since.trim() : null
-const prior = typeof input?.prior === 'string' && input.prior.trim() ? input.prior.trim() : null
-if (input?.round !== undefined && !(Number.isInteger(input.round) && input.round >= 1)) {
-  return { passed: false, error: `round must be a positive integer, got ${JSON.stringify(input.round)}.` }
-}
-if ((since || prior) && input?.round === undefined) {
-  return { passed: false, error: 'Follow-up reviews (since/prior) must pass an explicit round (2 or 3).' }
-}
-if (since && !prior) {
-  return {
-    passed: false,
-    error: 'since needs prior: pass the previous round\'s blocking findings (and any dismissed, with the reason) ' +
-      'so unresolved issues in unchanged code are still checked.',
-  }
-}
-const round = input?.round ?? 1
-if (round > 3 && input?.force !== true) {
-  return {
-    passed: false,
-    error: `Round ${round} refused: the review cap is 3 rounds per work item. Findings that keep coming back mean ` +
-      'the approach needs a structural fix (sweep the whole class of issue) or a decision from the user. ' +
-      'Pass force: true only after one of those.',
-  }
-}
-
+// profile:begin routing
 // Pinned models, not provider labels. Keep synchronized with agent frontmatter.
 const AGENT_MODELS = {
   reviewer: 'anthropic/claude-opus-5-5',
   'sol-reviewer': 'openai-codex/gpt-6.1-sol',
   'second-opinion': 'openai-codex/gpt-6-astra',
+}
+// Review sides in lane order; the first side is the default author side. Lane, security and verify labels derive from the keys.
+const ROUTING = {
+  claude: { agentType: 'reviewer', name: 'Opus 5.5', reviewEffort: 'high' },
+  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
+}
+// Sides that run on a different agent in deep mode.
+const DEEP_ROUTING = {
+  gpt: { agentType: 'second-opinion', name: 'GPT-6 Astra' },
+}
+const QUICK_ROUTING = {
+  claude: { agentType: 'reviewer', name: 'Opus 5.5' },
+  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
+}
+// Accepted args.author values -> the side that wrote the work.
+const AUTHOR_SIDES = { claude: 'claude', gpt: 'gpt' }
+// Who checks `side`'s findings when the work was written by `author` (outside deep mode); null = always the other side.
+const SAME_AUTHOR_VERIFIER = { side: 'claude', author: 'gpt', agentType: 'second-opinion', name: 'GPT-6 Astra' }
+// profile:end routing
+
+// Validate everything before phase()/agent(), including stringified tool arguments.
+let input
+const problems = []
+try { input = typeof args === 'string' ? JSON.parse(args) : args }
+catch { problems.push('args must be valid JSON.') }
+if (!input || typeof input !== 'object' || Array.isArray(input)) {
+  problems.push('args must be an object.')
+  input = {}
+}
+const text = value => typeof value === 'string' && value.trim().length > 0
+const sha = value => typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value)
+if (!text(input.target)) problems.push('Missing or invalid args.target (NOT repo/base/since) — say what to review (a diff range, paths, or a document).')
+if (input.context !== undefined && typeof input.context !== 'string') problems.push('context must be a string.')
+for (const key of ['quick', 'deep', 'force']) {
+  if (input[key] !== undefined && typeof input[key] !== 'boolean') problems.push(`${key} must be a boolean.`)
+}
+const SIDES = Object.keys(ROUTING)
+const authorNames = Object.keys(AUTHOR_SIDES).map(name => `"${name}"`).join(', ')
+const knownAuthor = typeof input.author === 'string' && Object.hasOwn(AUTHOR_SIDES, input.author)
+if (input.author !== undefined && !knownAuthor) problems.push(`author must be one of ${authorNames}.`)
+const quick = input.quick === true
+const deep = input.deep === true
+// The side that wrote the work (default: the first side).
+const author = knownAuthor ? AUTHOR_SIDES[input.author] : SIDES[0]
+if (quick && !knownAuthor) problems.push(`Quick mode needs args.author: one of ${authorNames} (who wrote the work).`)
+if (quick && deep) problems.push('quick and deep cannot be combined — deep is a full review with GPT-6 Astra.')
+if (deep && !['security', 'algorithmic', 'concurrency', 'cross-cutting'].includes(input.deepReason)) {
+  problems.push('deep: true needs deepReason: security, algorithmic, concurrency, or cross-cutting.')
+}
+if (deep && (!text(input.deepJustification) || /[\r\n\u2028\u2029]/.test(input.deepJustification))) {
+  problems.push('deep: true needs a non-empty, one-line deepJustification.')
+}
+if (!deep && (input.deepReason !== undefined || input.deepJustification !== undefined)) problems.push('deepReason/deepJustification require deep: true.')
+for (const key of ['since', 'prior']) {
+  if (input[key] !== undefined && !text(input[key])) problems.push(key === 'prior'
+    ? 'prior must be a single non-empty string (join findings with newlines), not an array.'
+    : 'since must be a non-empty string.')
+}
+const since = text(input.since) ? input.since.trim() : null
+const prior = text(input.prior) ? input.prior.trim() : null
+if (!(Number.isInteger(input.round) && input.round >= 1)) problems.push('round is required and must be a positive integer (1 for the first whole-change review).')
+const round = input.round
+if (since && !prior) problems.push('since needs prior: pass the previous round\'s blocking findings and any dismissed findings with the reason.')
+if ((since || prior) && round === 1) problems.push('Follow-up reviews (since/prior) require round 2 or later, after a whole-change review.')
+if (round > 3 && input.force !== true) problems.push(`Round ${round} refused: the review cap is 3. Make a structural fix or ask the user; only then pass force: true.`)
+if (input.headSha !== undefined && !sha(input.headSha)) problems.push('headSha must be the full current HEAD SHA when supplied (workflow scripts cannot read git or files).')
+if (input.baseSha !== undefined && !sha(input.baseSha)) problems.push('baseSha must be the full base commit SHA, not a moving ref.')
+if (input.cachedReview !== undefined && (!input.cachedReview || typeof input.cachedReview !== 'object' || Array.isArray(input.cachedReview))) problems.push('cachedReview must be a previous review result object.')
+if (input.cachedReview !== undefined && input.baseSha === undefined) problems.push('cachedReview requires baseSha so a changed base cannot reuse a verdict.')
+const reviewExample = '{"target":"git diff <baseSha>..<headSha> in <abs repo path>","context":"<intent, issue #>","author":"gpt","round":1,"headSha":"<full HEAD SHA>","baseSha":"<full base SHA>"}'
+const followUpExample = 'Round 2+: add "since":"<full SHA reviewed last>","prior":"<ONE string: blocking/unverified findings + dismissed findings with reasons>","round":2.'
+const shaHelp = 'Replace placeholders first: resolve SHAs with git rev-parse (40 hex for SHA-1, 64 for SHA-256), not short SHAs or moving refs; author is "claude" or "gpt".'
+if (problems.length) return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}\nCopy-paste example: ${reviewExample}\n${followUpExample}\n${shaHelp}`, problems }
+
+const target = input.target
+const context = input.context ? `\n\nIntent / spec of the work:\n${input.context}` : ''
+// No fs/Node globals in the workflow realm. The caller carries the previous result unchanged;
+// never pretend that the script has checked the working tree or persisted a cross-session cache.
+// Compact FNV-1a/128 identity, not authentication. Do not echo the potentially huge
+// target/spec back in every notification just to transport a cache lookup key.
+const fingerprint = value => {
+  let hash = 144066263297769815596495629667062367629n
+  const mask = (1n << 128n) - 1n
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    for (const byte of [code & 255, code >>> 8]) hash = ((hash ^ BigInt(byte)) * 309485009821345068724781371n) & mask
+  }
+  return hash.toString(16).padStart(32, '0')
 }
 const runtimeRuns = []
 const runtimeProblems = []
@@ -181,16 +249,144 @@ const reviewAgent = async (prompt, opts, name) => {
   return res
 }
 const runtimeReviewers = () => runtimeRuns.sort((a, b) => a.label.localeCompare(b.label))
-const trimRuntimeDetails = res => {
-  if (!res.reviewers) return
-  res.reviewers = res.reviewers.map(({ switches, ...run }) => run.ok ? run : { ...run, switches })
-}
-const compactRuntimeRuns = (res, oversized) => {
-  if (!oversized || !res.reviewers) return
-  res.reviewers = res.reviewers.map(run =>
-    `${run.label}: ${run.effective.join(', ') || 'no runtime model record'}; expected ${run.expected}; ${run.ok ? 'ok' : 'INCOMPLETE'}`)
-}
+// A receipt is only issued when every run carried a full, valid provenance record (checked here, not on reuse).
+const reusableRun = run => { const p = { ...run, models: run?.effective }; return run?.ok === true && runtimeAvailable(p, runtimeModels(p)) }
 // End runtime recording.
+
+// Routing derived from the profile block: lanes, security lens and verifiers are keyed by side.
+const other = side => (side === SIDES[0] ? SIDES[1] : SIDES[0])
+const REVIEWERS = Object.fromEntries(SIDES.map(side => [side, (deep && DEEP_ROUTING[side]) || ROUTING[side]]))
+const QUICK_REVIEWERS = QUICK_ROUTING
+// Who checks the findings reported by `side`: normally the other side; a same-author verifier
+// overrides it (e.g. Sol must not judge findings against Sol-written work).
+const verifierFor = side =>
+  SAME_AUTHOR_VERIFIER && side === SAME_AUTHOR_VERIFIER.side && author === SAME_AUTHOR_VERIFIER.author && !deep
+    ? SAME_AUTHOR_VERIFIER : REVIEWERS[other(side)]
+// The security lens runs on the side that did NOT write the work.
+const secSide = other(author)
+
+// Cache identities include the pinned routing, not just caller-supplied diff identity.
+const cacheKey = 'review-v4-coverage:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
+  mode: deep ? 'deep' : 'full', author, context: input.context ?? '', routing: AGENT_MODELS, lanes: [ROUTING, DEEP_ROUTING, SAME_AUTHOR_VERIFIER],
+  runtimeStamp: RUNTIME_STAMP, deepReason: input.deepReason ?? null, deepJustification: input.deepJustification ?? null }))
+// Allowed receipt roles. The security lane is verified by the side that did not review it.
+const cacheAgentTypes = {}
+for (const side of SIDES) {
+  cacheAgentTypes[`review:${side}`] = REVIEWERS[side].agentType
+  cacheAgentTypes[`verify:${side}-by-${other(side)}`] = verifierFor(side).agentType
+}
+cacheAgentTypes[`review:security-${secSide}`] = REVIEWERS[secSide].agentType
+cacheAgentTypes[`verify:security-${secSide}-by-${other(secSide)}`] = verifierFor(secSide).agentType
+
+// ---- result shape: bounded by construction, never measured-then-shrunk ----
+const isBlocking = f => f.blocking === true && (f.severity === 'critical' || f.severity === 'major')
+const clip = (t, n) => (typeof t === 'string' && t.length > n ? t.slice(0, n) + '…' : t)
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g
+// Result text is clipped, then reduced to characters JSON.stringify never escapes, so the caps below are exact.
+const shown = (t, n) => clip(typeof t === 'string' ? t : '', n)
+  .replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/"/g, "'").replace(/\\/g, '/').replace(LONE_SURROGATE, '?')
+const oneLine = (f, n = 110) => shown(`(${f.severity}) ${f.location}: ${f.problem}`, n)
+// Security holes found in touched code that predate the change: surfaced separately so they are never lost
+// in the advisory list. The caller tracks them (private advisory for exploitable ones).
+const preExisting = list => list.filter(f => typeof f.problem === 'string' && f.problem.startsWith('PRE-EXISTING:')).map(f => oneLine(f))
+const full = f => ({
+  severity: shown(f.severity, 10), location: shown(f.location, 70), problem: shown(f.problem, 160), fix: shown(f.fix, 80),
+  ...(f.foundBy ? { foundBy: shown(f.foundBy, 40) } : {}), ...(f.note ? { note: shown(f.note, 80) } : {}),
+})
+const capped = (items, cap, show, more) => {
+  const out = items.slice(0, cap).map(show)
+  if (items.length > cap) out.push(more(items.length - cap))
+  return out
+}
+const lines = (items, cap, n) => capped(items.filter(item => typeof item === 'string'), cap, item => shown(item, n), k => `…${k} more`)
+const nextStep = passed =>
+  passed
+    ? 'Passed. Fix cheap advisory items in the same change if you like; do not start another review round for them.'
+    : round >= 3
+      ? 'Not passed at the round cap. Make a structural fix for the whole class of issue or ask the user; do not loop.'
+      : `Fix the blocking findings, commit, then rerun with headSha: <new full HEAD SHA>, since: ${input.headSha ?? '<HEAD SHA reviewed now>'}, prior: <blocking list>, round: ${round + 1}.`
+// Slim receipt: only the provenance-verified fields. Session, timestamps and counts are not carried.
+const slimRun = run => ({
+  label: shown(run?.label, 40), agentType: shown(run?.agentType, 20), expected: shown(run?.expected, 40),
+  effective: Array.isArray(run?.effective) ? run.effective.slice(0, 2).map(model => shown(model, 40)) : [], ok: run?.ok === true,
+  ...(run?.provenance === 'unavailable (pre-update session)' ? { provenance: run.provenance } : {}),
+})
+const runLine = run => `${shown(run?.label, 40) || 'invalid record'}: ${run?.ok === true ? 'ok' : 'INCOMPLETE'}`
+const RUNS_MAX = 6
+// Passed: verdict, cache key and receipt first. Not passed: verdict, blocking, unverified, incomplete first.
+const buildResult = r => {
+  const out = { mode: r.mode, round, passed: r.passed, complete: r.complete, blockingCount: r.blockingCount, unverifiedCount: r.unverifiedCount, next: r.next }
+  if (r.cached !== undefined) out.cached = r.cached
+  if (r.reviewedBy) out.reviewedBy = shown(r.reviewedBy, 40)
+  if (r.reviewCacheKey) out.reviewCacheKey = r.reviewCacheKey
+  if (r.passed) {
+    const runs = r.reviewers.slice(0, RUNS_MAX)
+    out.runtimeCallCount = runs.length
+    out.reviewers = runs.map(slimRun)
+    out.blocking = []
+    out.unverified = []
+    out.incomplete = []
+    out.coverageNotes = lines(r.coverageNotes, 3, 150)
+    out.advisory = lines(r.advisory, 4, 110)
+    out.preExistingSecurity = lines(r.preExisting, 3, 110)
+    out.summaries = r.summaries.slice(0, 3).map(s => ({ by: shown(s.by, 30), summary: shown(s.summary, 70) }))
+  } else {
+    out.blocking = capped(r.blocking, 3, full, k => `…${k} more blocking findings omitted (blockingCount=${r.blockingCount})`)
+    out.unverified = capped(r.unverified, 2, f => oneLine(f, 140), k => `…${k} more unverified findings omitted (unverifiedCount=${r.unverifiedCount})`)
+    out.incomplete = lines(r.incomplete, 4, 170)
+    out.reviewers = capped(r.reviewers, RUNS_MAX, runLine, k => `…${k} more runs`)
+    out.advisory = lines(r.advisory, 2, 100)
+    out.preExistingSecurity = lines(r.preExisting, 1, 100)
+  }
+  out.rejectedCount = r.rejectedCount ?? 0
+  return out
+}
+
+// Cache hit: validate the slim receipt only. Full provenance was verified when the receipt was issued;
+// the key is identity, not authentication. Still enforced: unique labels, allowed roles, the required
+// review and security lanes, an exact runtimeCallCount, and every run ok on its current pinned model.
+const receiptRoleOk = run => run !== null && typeof run === 'object' && typeof run.label === 'string' &&
+  Object.hasOwn(cacheAgentTypes, run.label) && run.agentType === cacheAgentTypes[run.label] && run.ok === true
+const receiptModelOk = run => {
+  const pinned = AGENT_MODELS[run.agentType]
+  return run.expected === pinned && Array.isArray(run.effective) && run.effective.length > 0 && run.effective.every(model => model === pinned)
+}
+const receiptProblems = receipt => {
+  const runs = Array.isArray(receipt.reviewers) ? receipt.reviewers : []
+  const labels = new Set(runs.map(run => run?.label))
+  const required = [...SIDES.map(side => `review:${side}`), `review:security-${secSide}`]
+  const problems = []
+  if (runs.length !== receipt.runtimeCallCount || labels.size !== runs.length || !required.every(label => labels.has(label))) {
+    problems.push('Cached review: no runtime model record (incomplete reviewer/verifier coverage)')
+  }
+  for (const run of runs) {
+    if (!receiptRoleOk(run)) problems.push('Cached review: no runtime model record (invalid reviewer role or status)')
+    else if (!receiptModelOk(run)) {
+      const models = Array.isArray(run.effective) ? run.effective.map(model => shown(String(model), 40)).join(', ') : ''
+      problems.push(`Cached review: ${run.label} ran on ${models || 'no runtime model record'}, not ${AGENT_MODELS[run.agentType]}`)
+    }
+  }
+  return problems
+}
+const cached = input.cachedReview
+if (!quick && !since && !prior && input.headSha && input.baseSha && cached?.reviewCacheKey === cacheKey &&
+    cached.passed === true && cached.complete === true && cached.mode === (deep ? 'deep' : 'full') &&
+    cached.blockingCount === 0 && cached.unverifiedCount === 0 &&
+    Array.isArray(cached.incomplete) && cached.incomplete.length === 0 &&
+    Array.isArray(cached.blocking) && cached.blocking.length === 0 &&
+    Array.isArray(cached.unverified) && cached.unverified.length === 0) {
+  const problems = receiptProblems(cached)
+  const mode = deep ? 'deep' : 'full'
+  if (problems.length === 0) {
+    const strings = value => (Array.isArray(value) ? value.filter(item => typeof item === 'string') : [])
+    const summaries = Array.isArray(cached.summaries) ? cached.summaries.filter(s => s && typeof s.by === 'string' && typeof s.summary === 'string') : []
+    return buildResult({ mode, passed: true, complete: true, blockingCount: 0, unverifiedCount: 0, next: nextStep(true), cached: true,
+      reviewCacheKey: cacheKey, reviewers: cached.reviewers.slice().sort((a, b) => a.label.localeCompare(b.label)),
+      coverageNotes: strings(cached.coverageNotes), advisory: strings(cached.advisory), preExisting: strings(cached.preExistingSecurity), summaries })
+  }
+  return buildResult({ mode, passed: false, complete: false, blockingCount: 0, unverifiedCount: 0, next: runtimeNext, cached: false,
+    incomplete: problems, reviewers: Array.isArray(cached.reviewers) ? cached.reviewers : [], blocking: [], unverified: [], advisory: [], preExisting: [] })
+}
 
 const COVERAGE = 'Set coverage honestly: complete = every file and section of the requested scope was examined for your lens, ' +
   'even if some verification (browser run, build, test run, network lookup) could not be run; ' +
@@ -262,22 +458,6 @@ const VERDICTS = {
   required: ['verdicts'],
 }
 
-const REVIEWERS = {
-  claude: { agentType: 'reviewer', name: 'Opus 5.5', reviewEffort: 'high' },
-  gpt: deep
-    ? { agentType: 'second-opinion', name: 'GPT-6 Astra' }
-    : { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
-}
-const QUICK_REVIEWERS = {
-  claude: { agentType: 'reviewer', name: 'Opus 5.5' },
-  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
-}
-const other = side => (side === 'claude' ? 'gpt' : 'claude')
-const ASTRA = { agentType: 'second-opinion', name: 'GPT-6 Astra' }
-// Who checks the findings reported by `side`. Sol must not judge findings against Sol-written work.
-const verifierFor = side =>
-  side === 'claude' && author === 'gpt' && !deep ? ASTRA : REVIEWERS[other(side)]
-
 const scope = since
   ? `\n\nThis is follow-up round ${round}. Review ONLY the changes in \`git diff ${since}..HEAD\` (the fixes since the ` +
     'last review) and whether the earlier findings below are resolved. Do not re-review unchanged code or hunt for ' +
@@ -338,52 +518,6 @@ const securityPrompt =
   COVERAGE + ' Required security checks are the trust-boundary read of every touched path and the hostile-case spec check ' +
   'listed above, plus any checks the target/brief names as required (secret scan, dependency audit). Unrunnable other checks stay notes.'
 
-const isBlocking = f => f.blocking === true && (f.severity === 'critical' || f.severity === 'major')
-const clip = (t, n) => (typeof t === 'string' && t.length > n ? t.slice(0, n) + '…' : t)
-const oneLine = f => clip(`(${f.severity}) ${f.location}: ${f.problem}`, 160)
-// Security holes found in touched code that predate the change: surfaced separately so they are never lost
-// in the advisory list. The caller tracks them (private advisory for exploitable ones).
-const preExisting = list => list.filter(f => typeof f.problem === 'string' && f.problem.startsWith('PRE-EXISTING:')).slice(0, 5).map(oneLine)
-const full = f => ({
-  severity: f.severity, location: clip(f.location, 120), problem: clip(f.problem, 300), fix: clip(f.fix, 160),
-  ...(f.foundBy ? { foundBy: f.foundBy } : {}), ...(f.note ? { note: clip(f.note, 160) } : {}),
-})
-// Keep the serialized result under the parent notification limit (~4000 chars) without ever dropping
-// gate status or the count of blockers: shrink detail step by step, then fall back to one-liners and counts.
-const fit = (res, budget = 3600) => {
-  if (!res.coverageNotes?.length) delete res.coverageNotes
-  const size = () => JSON.stringify(res).length
-  if (size() <= budget) return res
-  trimRuntimeDetails(res)
-  if (res.coverageNotes) res.coverageNotes = res.coverageNotes.map(n => clip(n, 160))
-  res.advisory = res.advisory ? res.advisory.slice(0, 3).concat(res.advisory.length > 3 ? [`…${res.advisory.length - 3} more`] : []) : res.advisory
-  if (res.summaries) res.summaries = res.summaries.map(s => ({ by: s.by, summary: clip(s.summary, 150) }))
-  if (size() <= budget) return res
-  for (const key of ['blocking', 'unverified']) if (Array.isArray(res[key])) res[key] = res[key].map(f => oneLine(f))
-  if (size() <= budget) return res
-  for (const key of ['blocking', 'unverified']) {
-    if (Array.isArray(res[key]) && res[key].length > 6) {
-      const n = res[key].length
-      res[key] = res[key].slice(0, 6).concat([`…${n - 6} more (rerun or ask the reviewer for the rest)`])
-    }
-  }
-  res.advisory = Array.isArray(res.advisory) ? [`${res.advisory.length} advisory items omitted for size`] : res.advisory
-  compactRuntimeRuns(res, size() > budget)
-  return res
-}
-const ADVISORY_MAX = 10
-const advisoryList = list => {
-  const out = list.slice(0, ADVISORY_MAX).map(oneLine)
-  if (list.length > ADVISORY_MAX) out.push(`…and ${list.length - ADVISORY_MAX} more`)
-  return out
-}
-const nextStep = passed =>
-  passed
-    ? 'Passed. Fix cheap advisory items in the same change if you like; do not start another review round for them.'
-    : round >= 3
-      ? 'Not passed at the round cap. Make a structural fix for the whole class of issue or ask the user; do not loop.'
-      : `Fix the blocking findings, commit, then rerun with since: <HEAD sha reviewed now>, prior: <blocking list>, round: ${round + 1}.`
-
 phase('Review')
 
 if (quick) {
@@ -404,21 +538,19 @@ if (quick) {
     if (cp) incomplete.push(cp)
   }
   const passedQ = blocking.length === 0 && incomplete.length === 0
-  return fit({
-    mode: 'quick', round, passed: passedQ, complete: incomplete.length === 0, incomplete,
+  return buildResult({
+    mode: 'quick', passed: passedQ, complete: incomplete.length === 0, incomplete,
     coverageNotes: [...coverageNotesFor(r.name, res), ...coverageNotesFor(`${r.name} (security)`, sec)],
-    reviewers: runtimeReviewers(), reviewedBy: r.name, blockingCount: blocking.length,
-    summary: clip(res.summary, 400), securitySummary: clip(sec.summary, 300),
-    blocking: blocking.map(full), preExistingSecurity: preExisting(all), advisory: advisoryList(all.filter(f => !isBlocking(f))),
+    reviewers: runtimeReviewers(), reviewedBy: r.name, blockingCount: blocking.length, unverifiedCount: 0,
+    summaries: [{ by: r.name, summary: res.summary }], blocking, unverified: [], preExisting: preExisting(all),
+    advisory: all.filter(f => !isBlocking(f)).map(f => oneLine(f)),
     next: runtimeProblems.length ? runtimeNext : nextStep(passedQ),
   })
 }
 
 // The security lens runs on the provider that did NOT write the work and is verified by the other provider.
-const secSide = other(author)
 const LANES = [
-  { key: 'claude', side: 'claude', reviewer: REVIEWERS.claude, prompt: reviewPrompt },
-  { key: 'gpt', side: 'gpt', reviewer: REVIEWERS.gpt, prompt: reviewPrompt },
+  ...SIDES.map(side => ({ key: side, side, reviewer: REVIEWERS[side], prompt: reviewPrompt })),
   { key: `security-${secSide}`, side: secSide, reviewer: { ...REVIEWERS[secSide], name: `${REVIEWERS[secSide].name} (security)` }, prompt: securityPrompt },
 ]
 const results = await pipeline(
@@ -483,15 +615,20 @@ for (const r of results.filter(Boolean)) {
   if (cp) incomplete.push(cp)
   coverageNotes.push(...coverageNotesFor(by, r))
   if (r.findings.some(isBlocking) && !r.verdicts) incomplete.push(`verification of ${by}'s findings failed`)
-  summaries.push({ by, summary: clip(r.summary, 400) })
+  summaries.push({ by, summary: r.summary })
+  // Exactly one verdict per blocking finding: a verdict for any other index is untrusted output, so the lane is incomplete.
+  if (r.verdicts && r.verdicts.some(v => !Number.isInteger(v?.index) || !r.findings[v.index] || !isBlocking(r.findings[v.index])))
+    incomplete.push(`verification of ${by}'s findings returned a verdict for an unknown finding`)
   const checker = verifierFor(r.side).name
   r.findings.forEach((f, i) => {
     const item = { ...f, foundBy: by }
     if (!isBlocking(f)) return advisory.push(item)
-    const verdict = r.verdicts ? r.verdicts.find(v => v.index === i) : null
+    // Missing, duplicate (identical or contradictory) verdicts leave the finding unverified.
+    const matches = r.verdicts ? r.verdicts.filter(v => v?.index === i) : []
+    const verdict = matches.length === 1 ? matches[0] : null
     // Fail closed: anything not positively refuted or positively downgraded keeps blocking.
     if (!verdict || verdict.status === 'uncertain' || !['blocks', 'not-blocking', 'refuted'].includes(verdict.status))
-      unverified.push({ ...item, note: verdict ? verdict.reason : 'no verdict' })
+      unverified.push({ ...item, note: verdict ? verdict.reason : matches.length > 1 ? 'duplicate verdicts' : 'no verdict' })
     else if (verdict.status === 'blocks') confirmed.push({ ...item, confirmedBy: checker, note: verdict.reason })
     else if (verdict.status === 'not-blocking') advisory.push({ ...item, severity: 'minor', downgradedBy: checker })
     else rejected.push({ ...item, rejectedBy: checker, reason: verdict.reason })
@@ -507,23 +644,12 @@ const passed = complete && confirmed.length === 0 && unverified.length === 0
 log(`${confirmed.length} blocking, ${advisory.length} advisory, ${rejected.length} rejected, ${unverified.length} unverified — ${passed ? 'PASSED' : 'NOT PASSED'}`)
 if (!complete) log(`Incomplete: ${incomplete.join('; ')}`)
 
-return fit({
-  mode: deep ? 'deep' : 'full',
-  round,
-  passed,
-  complete,
-  incomplete,
-  coverageNotes,
-  reviewers: runtimeReviewers(),
-  blockingCount: confirmed.length,
-  unverifiedCount: unverified.length,
-  target: clip(target, 160),
-  summaries,
-  blocking: confirmed.map(full),
-  unverified: unverified.map(full),
-  advisory: advisoryList(advisory),
-  preExistingSecurity: preExisting(advisory),
-  rejected: rejected.map(f => clip(`${f.location}: ${f.problem} — refuted: ${f.reason}`, 160)).slice(0, 3),
-  rejectedCount: rejected.length,
+const advisoryLines = advisory.map(f => oneLine(f))
+const reusable = passed && !since && !prior && input.headSha && input.baseSha && runtimeReviewers().every(reusableRun)
+const verdict = buildResult({
+  mode: deep ? 'deep' : 'full', passed, ...(reusable ? { reviewCacheKey: cacheKey } : {}), complete, incomplete, coverageNotes, reviewers: runtimeReviewers(),
+  blockingCount: confirmed.length, unverifiedCount: unverified.length, summaries,
+  blocking: confirmed, unverified, advisory: advisoryLines, preExisting: preExisting(advisory), rejectedCount: rejected.length,
   next: runtimeProblems.length ? runtimeNext : nextStep(passed),
 })
+return verdict
