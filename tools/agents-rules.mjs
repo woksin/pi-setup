@@ -34,23 +34,39 @@ function sentences(paragraph) {
 }
 
 // Splits markdown into [{section, text}] paragraphs, skipping headings and managed marker blocks.
+const MARKER = /^<!-- pi-(?:setup|profile):[\w:-]+:(start|end)/;
+
+function flushParagraph(st, out) {
+  if (st.current) out.push(st.current);
+  st.current = null;
+}
+
+// Handles marker, fence and heading lines. Returns "skip" (inside a managed block), "control" or "body".
+function lineKind(st, line) {
+  const marker = MARKER.exec(line);
+  if (marker) { st.inBlock = marker[1] === "start"; return "control"; }
+  if (st.inBlock) return "skip";
+  if (/^\s*```/.test(line)) { st.fence = !st.fence; return "control"; }
+  const heading = st.fence ? null : /^#{1,6}\s+(.*)$/.exec(line);
+  if (heading) { st.section = slug(heading[1]); return "control"; }
+  return "body";
+}
+
+function addBodyLine(st, out, line) {
+  if (st.fence) { if (line.trim()) out.push({ section: st.section, text: line.trim(), literal: true }); return; }
+  if (!line.trim()) { flushParagraph(st, out); return; }
+  if (isBullet(line) || !st.current) { flushParagraph(st, out); st.current = { section: st.section, text: stripMarker(line).trim() }; }
+  else st.current.text += " " + line.trim();
+}
+
 function paragraphs(markdown) {
-  const out = [];
-  let section = "preamble", inBlock = false, fence = false, current = null;
-  const flush = () => { if (current) out.push(current); current = null; };
+  const out = [], st = { section: "preamble", inBlock: false, fence: false, current: null };
   for (const line of markdown.split("\n")) {
-    if (/^<!-- pi-(?:setup|profile):[\w:-]+:start/.test(line)) { flush(); inBlock = true; continue; }
-    if (/^<!-- pi-(?:setup|profile):[\w:-]+:end/.test(line)) { flush(); inBlock = false; continue; }
-    if (inBlock) continue;
-    if (/^\s*```/.test(line)) { flush(); fence = !fence; continue; }
-    if (fence) { if (line.trim()) out.push({ section, text: line.trim(), literal: true }); continue; }
-    const heading = /^#{1,6}\s+(.*)$/.exec(line);
-    if (heading) { flush(); section = slug(heading[1]); continue; }
-    if (!line.trim()) { flush(); continue; }
-    if (isBullet(line) || !current) { flush(); current = { section, text: stripMarker(line).trim() }; }
-    else current.text += " " + line.trim();
+    const kind = lineKind(st, line);
+    if (kind === "control") flushParagraph(st, out);
+    else if (kind === "body") addBodyLine(st, out, line);
   }
-  flush();
+  flushParagraph(st, out);
   return out;
 }
 
@@ -94,78 +110,105 @@ function hints(unit, corpusUnits) {
   return corpusUnits.map((c) => ({ c, score: jaccard(mine, words(c.text)) })).sort((a, b) => b.score - a.score).slice(0, 3);
 }
 
-export function check(root) {
+const skillPath = (name) => `skills/${name}/SKILL.md`;
+const label = (entry) => entry.id ?? entry.ids;
+
+function loadContext(root) {
   const config = readJson(root, `${RULES_DIR}/config.json`);
-  const baseline = readJson(root, `${RULES_DIR}/baseline.json`);
-  const map = readJson(root, `${RULES_DIR}/map.json`, []);
-  const errors = [], lost = [], files = new Map(), mapped = [], removed = [];
-  const agentsPath = config.agents ?? "agent/AGENTS.md";
-  const skillPath = (name) => `skills/${name}/SKILL.md`;
+  const files = new Map();
   const load = (rel) => {
     if (!files.has(rel)) files.set(rel, existsSync(join(root, rel)) ? readFileSync(join(root, rel), "utf8") : null);
     return files.get(rel);
   };
+  const agentsPath = config.agents ?? "agent/AGENTS.md";
   if (load(agentsPath) === null) throw new Error(`missing ${agentsPath}`);
   const allowed = new Set([agentsPath, ...config.skills.map(skillPath)]);
   const corpus = new Map([...allowed].filter((p) => load(p) !== null).map((p) => [p, corpusOf(load(p))]));
+  return {
+    config, load, agentsPath, allowed, corpus, errors: [],
+    baseline: readJson(root, `${RULES_DIR}/baseline.json`),
+    map: readJson(root, `${RULES_DIR}/map.json`, []),
+  };
+}
 
-  for (const name of config.skills) {
-    const text = load(skillPath(name));
-    if (text === null) { errors.push(`skill ${name}: ${skillPath(name)} is missing`); continue; }
-    const fm = /^---\n([\s\S]*?)\n---/.exec(text)?.[1] ?? "";
-    if (!new RegExp(`^name:\\s*${name}\\s*$`, "m").test(fm) || !/^description:\s*\S/m.test(fm)) errors.push(`skill ${name}: invalid frontmatter (name/description)`);
-    if (!load(agentsPath).includes(`\`${name}\``)) errors.push(`${agentsPath} does not name skill \`${name}\` (a moved procedure must not be orphaned)`);
-  }
+function checkSkill(ctx, name) {
+  const text = ctx.load(skillPath(name));
+  if (text === null) { ctx.errors.push(`skill ${name}: ${skillPath(name)} is missing`); return; }
+  const fm = /^---\n([\s\S]*?)\n---/.exec(text)?.[1] ?? "";
+  if (!new RegExp(`^name:\\s*${name}\\s*$`, "m").test(fm) || !/^description:\s*\S/m.test(fm)) ctx.errors.push(`skill ${name}: invalid frontmatter (name/description)`);
+  if (!ctx.load(ctx.agentsPath).includes(`\`${name}\``)) ctx.errors.push(`${ctx.agentsPath} does not name skill \`${name}\` (a moved procedure must not be orphaned)`);
+}
 
-  const byId = new Map(baseline.map((u) => [u.id, u]));
-  const entryFor = new Map();
-  for (const entry of map) {
+function validateEntry(ctx, entry) {
+  const { errors, allowed, corpus, agentsPath } = ctx;
+  if (!["reworded", "merged", "removed", "moved-core"].includes(entry.kind)) errors.push(`map: ${label(entry)} has unknown kind ${entry.kind}`);
+  if (!entry.reason) errors.push(`map: ${label(entry)} needs a reason`);
+  if (entry.kind === "removed") return;
+  if (!allowed.has(entry.to)) errors.push(`map: ${label(entry)} points to ${entry.to}, which is not ${agentsPath} or a configured skill`);
+  else if (entry.kind !== "moved-core" && !corpus.get(entry.to)?.includes(normalize(entry.new ?? ""))) errors.push(`map: stale entry ${label(entry)}: new text not found in ${entry.to}`);
+}
+
+// Validates every map entry and returns Map<unit id, entry>.
+function indexMap(ctx) {
+  const known = new Set(ctx.baseline.map((u) => u.id)), entryFor = new Map();
+  for (const entry of ctx.map) {
     for (const id of entry.ids ?? [entry.id]) {
-      if (!byId.has(id)) errors.push(`map: id ${id} is not in the baseline`);
-      else if (entryFor.has(id)) errors.push(`map: duplicate id ${id}`);
+      if (!known.has(id)) ctx.errors.push(`map: id ${id} is not in the baseline`);
+      else if (entryFor.has(id)) ctx.errors.push(`map: duplicate id ${id}`);
       else entryFor.set(id, entry);
     }
-    if (!["reworded", "merged", "removed", "moved-core"].includes(entry.kind)) errors.push(`map: ${entry.id ?? entry.ids} has unknown kind ${entry.kind}`);
-    if (!entry.reason) errors.push(`map: ${entry.id ?? entry.ids} needs a reason`);
-    if (entry.kind !== "removed") {
-      if (!allowed.has(entry.to)) errors.push(`map: ${entry.id ?? entry.ids} points to ${entry.to}, which is not ${agentsPath} or a configured skill`);
-      else if (entry.kind !== "moved-core" && !corpus.get(entry.to)?.includes(normalize(entry.new ?? ""))) errors.push(`map: stale entry ${entry.id ?? entry.ids}: new text not found in ${entry.to}`);
-    }
+    validateEntry(ctx, entry);
   }
+  return entryFor;
+}
 
-  const pinnedSections = new Set(config.pinnedSections ?? []);
-  const pinPattern = new RegExp(config.pinnedPattern ?? DEFAULT_PIN, "i");
-  let exact = 0;
-  const exactFiles = {};
-  for (const unit of baseline) {
-    const norm = normalize(unit.text);
-    const pinned = pinnedSections.has(unit.section) || pinPattern.test(norm);
-    const entry = entryFor.get(unit.id);
-    if (entry) {
-      if (entry.kind === "removed") { removed.push({ unit, entry }); continue; }
-      if (!allowed.has(entry.to)) continue;
-      if (entry.kind === "moved-core") {
-        if (!corpus.get(entry.to)?.includes(norm)) errors.push(`map: moved-core ${unit.id} is not verbatim in ${entry.to}`);
-      } else {
-        const normNew = normalize(entry.new ?? ""), dropped = new Set((entry.droppedTokens ?? []).map(normalize));
-        const missing = constraintTokens(unit.text).filter((t) => !hasToken(normNew, t) && !dropped.has(t));
-        if (missing.length) errors.push(`map: ${unit.id} drops constraint token(s) [${missing.join(", ")}]; keep them or list droppedTokens with a reason`);
-        if (pinned && entry.to !== agentsPath) errors.push(`map: pinned ${unit.id} reworded into ${entry.to}; keep it in ${agentsPath} or use kind moved-core with the verbatim text`);
-      }
-      mapped.push({ unit, entry });
-      continue;
-    }
-    const where = [...corpus].find(([, text]) => text.includes(norm))?.[0];
-    if (!where) { lost.push(unit); continue; }
-    if (pinned && where !== agentsPath) { errors.push(`pinned ${unit.id} (${unit.section}) is only in ${where}; hard constraints stay in ${agentsPath} (or map it as moved-core with a reason)`); continue; }
-    exact++;
-    exactFiles[where] = (exactFiles[where] ?? 0) + 1;
+// Verifies a mapped unit; returns true when it counts as mapped.
+function verifyMapped(ctx, unit, entry, pinned) {
+  const { errors, corpus, agentsPath } = ctx;
+  if (!ctx.allowed.has(entry.to)) return false;
+  if (entry.kind === "moved-core") {
+    if (!corpus.get(entry.to)?.includes(normalize(unit.text))) errors.push(`map: moved-core ${unit.id} is not verbatim in ${entry.to}`);
+    return true;
   }
+  const normNew = normalize(entry.new ?? ""), dropped = new Set((entry.droppedTokens ?? []).map(normalize));
+  const missing = constraintTokens(unit.text).filter((t) => !hasToken(normNew, t) && !dropped.has(t));
+  if (missing.length) errors.push(`map: ${unit.id} drops constraint token(s) [${missing.join(", ")}]; keep them or list droppedTokens with a reason`);
+  if (pinned && entry.to !== agentsPath) errors.push(`map: pinned ${unit.id} reworded into ${entry.to}; keep it in ${agentsPath} or use kind moved-core with the verbatim text`);
+  return true;
+}
 
-  const corpusUnits = [...corpus.keys()].flatMap((p) => splitUnits(load(p)).map((u) => ({ ...u, file: p })));
-  const details = lost.map((unit) => ({ unit, hints: hints(unit, corpusUnits) }));
-  const summary = `agents-rules: ${baseline.length} units, ${exact} exact, ${mapped.length} mapped, ${removed.length} removed, ${lost.length} lost`;
-  return { ok: !errors.length && !lost.length, errors, lost: details, mapped, removed, exact, exactFiles, total: baseline.length, summary };
+function isPinned(config, unit) {
+  const pattern = new RegExp(config.pinnedPattern ?? DEFAULT_PIN, "i");
+  return (config.pinnedSections ?? []).includes(unit.section) || pattern.test(normalize(unit.text));
+}
+
+// Classifies one baseline unit into the tally: mapped, removed, lost or exact (with its file).
+function classifyUnit(ctx, unit, entry, tally) {
+  if (entry?.kind === "removed") { tally.removed.push({ unit, entry }); return; }
+  const pinned = isPinned(ctx.config, unit);
+  if (entry) {
+    if (verifyMapped(ctx, unit, entry, pinned)) tally.mapped.push({ unit, entry });
+    return;
+  }
+  const norm = normalize(unit.text);
+  const where = [...ctx.corpus].find(([, text]) => text.includes(norm))?.[0];
+  if (!where) tally.lost.push(unit);
+  else if (pinned && where !== ctx.agentsPath) ctx.errors.push(`pinned ${unit.id} (${unit.section}) is only in ${where}; hard constraints stay in ${ctx.agentsPath} (or map it as moved-core with a reason)`);
+  else { tally.exact++; tally.exactFiles[where] = (tally.exactFiles[where] ?? 0) + 1; }
+}
+
+export function check(root) {
+  const ctx = loadContext(root);
+  ctx.config.skills.forEach((name) => checkSkill(ctx, name));
+  const entryFor = indexMap(ctx);
+  const tally = { lost: [], mapped: [], removed: [], exact: 0, exactFiles: {} };
+  for (const unit of ctx.baseline) classifyUnit(ctx, unit, entryFor.get(unit.id), tally);
+
+  const corpusUnits = [...ctx.corpus.keys()].flatMap((p) => splitUnits(ctx.load(p)).map((u) => ({ ...u, file: p })));
+  const lost = tally.lost.map((unit) => ({ unit, hints: hints(unit, corpusUnits) }));
+  const { mapped, removed, exact, exactFiles } = tally;
+  const summary = `agents-rules: ${ctx.baseline.length} units, ${exact} exact, ${mapped.length} mapped, ${removed.length} removed, ${lost.length} lost`;
+  return { ok: !ctx.errors.length && !lost.length, errors: ctx.errors, lost, mapped, removed, exact, exactFiles, total: ctx.baseline.length, summary };
 }
 
 function printResult(result, report) {
