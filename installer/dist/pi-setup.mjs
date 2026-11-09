@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: ef37314d00447b2487a5224af3041a207ceba959082fc1b1dffffa1f1b874a81
+// pi-setup-source-sha256: 66716138c28880307f956723919e19cdcc3eff64e528fe2e5e892bdc22dcb307
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -4267,9 +4267,10 @@ function checkRegistrations(records, processes, ctx) {
   });
 }
 function launchedRows(rows, input, empty) {
-  for (const record3 of input.registrations ?? []) {
+  const registrations = [...input.registrations ?? []].sort((a2, b) => Number(b.alive) - Number(a2.alive));
+  for (const record3 of registrations) {
     if (rows.some((r2) => r2.lane === record3.id)) continue;
-    const detected = rows.find((r2) => r2.identity === "unregistered" && r2.worktree === record3.cwd);
+    const detected = record3.alive && rows.find((r2) => r2.identity === "unregistered" && r2.worktree === record3.cwd);
     if (detected) {
       detected.lane = record3.id;
       detected.identity = "launched";

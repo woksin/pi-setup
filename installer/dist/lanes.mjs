@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: ef37314d00447b2487a5224af3041a207ceba959082fc1b1dffffa1f1b874a81
+// pi-setup-source-sha256: 66716138c28880307f956723919e19cdcc3eff64e528fe2e5e892bdc22dcb307
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -3682,9 +3682,10 @@ function checkRegistrations(records, processes, ctx) {
   });
 }
 function launchedRows(rows, input, empty) {
-  for (const record2 of input.registrations ?? []) {
+  const registrations = [...input.registrations ?? []].sort((a, b) => Number(b.alive) - Number(a.alive));
+  for (const record2 of registrations) {
     if (rows.some((r) => r.lane === record2.id)) continue;
-    const detected = rows.find((r) => r.identity === "unregistered" && r.worktree === record2.cwd);
+    const detected = record2.alive && rows.find((r) => r.identity === "unregistered" && r.worktree === record2.cwd);
     if (detected) {
       detected.lane = record2.id;
       detected.identity = "launched";

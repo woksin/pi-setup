@@ -73,9 +73,10 @@ export function checkRegistrations(records: Registration[], processes: RosterInp
   });
 }
 export function launchedRows(rows: RosterRow[], input: RosterInputs, empty: (id: string) => RosterRow): void {
-  for (const record of input.registrations ?? []) {
+  const registrations = [...(input.registrations ?? [])].sort((a, b) => Number(b.alive) - Number(a.alive));
+  for (const record of registrations) {
     if (rows.some(r => r.lane === record.id)) continue;
-    const detected = rows.find(r => r.identity === "unregistered" && r.worktree === record.cwd);
+    const detected = record.alive && rows.find(r => r.identity === "unregistered" && r.worktree === record.cwd);
     if (detected) {
       detected.lane = record.id; detected.identity = "launched";
       detected.notes = detected.notes.filter(note => note !== "identity unavailable: unregistered");

@@ -9,7 +9,7 @@ import { defaults, saveConfig } from "../src/lanes/config.ts";
 import { run } from "../src/lanes/commands/run.ts";
 import { main } from "../src/lanes/main.ts";
 import { pidAlive, registrationState } from "../src/lanes/registration.ts";
-import { readRoster } from "../src/lanes/roster.ts";
+import { buildRoster, readRoster } from "../src/lanes/roster.ts";
 
 function fixture() {
   const home = tempDir("lanes-registration"); const lines: string[] = []; const errors: string[] = [];
@@ -102,19 +102,42 @@ for (const orch of [true, false]) test(`live unseeded registration merges with $
   assert.equal(rows.length, 1); assert.equal(rows[0].lane, "EXTRA"); assert.equal(rows[0].pid, 701);
   assert.equal(rows[0].identity, orch ? "orch" : "launched"); assert.ok(rows[0].evidence.includes("registration"));
 });
-for (const retired of [true, false]) for (const seeded of [true, false]) for (const evidence of ["process", "heartbeat", "lease"]) test(`${retired ? "ended" : "stale"} registration cannot override ${evidence} liveness (${seeded ? "configured" : "launched"})`, async () => {
-  const f = fixture(); const id = seeded ? "L0" : "EXTRA"; const at = f.ctx.now().toISOString();
+for (const retired of [true, false]) for (const evidence of ["process", "heartbeat", "lease"]) test(`${retired ? "ended" : "stale"} registration cannot override ${evidence} liveness of a configured lane`, async () => {
+  const f = fixture(); const id = "L0"; const at = f.ctx.now().toISOString();
   f.put(id, { id, pid: 20, cwd: f.home, startedAt: at, ...(retired ? { retiredAt: at } : {}) });
   f.ctx.run = async (_name, args) => ({ code: 0, stdout: args.includes("-axo") ? evidence === "lease" ? "" : "701 pi" : args.includes("lstart=") ? "synthetic start" : "701", stderr: "", timedOut: false });
   f.ctx.readCwd = async () => f.home;
-  // Unconfigured records must join an independently discovered anonymous process, not add a stopped duplicate.
-  if (!seeded) { f.c.coordinator.cwd = join(f.home, "coordinator"); saveConfig(f.home, f.c); }
   if (evidence === "heartbeat") { mkdirSync(join(f.home, ".pi/orch/heartbeats"), { recursive: true }); writeFileSync(join(f.home, ".pi/orch/heartbeats/p701.json"), JSON.stringify({ pid: 701, at, state: "working" })); }
   if (evidence === "lease") { mkdirSync(join(f.home, "agent/issue-work/sessions"), { recursive: true }); writeFileSync(join(f.home, "agent/issue-work/sessions/worker.json"), JSON.stringify({ sessionId: "worker", pid: 701, startedAt: at, procStart: "synthetic start", cwd: f.home })); }
   const rows = (await f.who()).rows.filter((r: any) => r.worktree === f.home);
   assert.equal(rows.length, 1); const row = rows[0]; assert.equal(row.lane, id); assert.equal(row.pid, 701);
   assert.equal(row.state, evidence === "heartbeat" ? "working" : "idle");
   assert.ok(row.notes.includes(retired ? `session ended ${at}` : "registration stale (no exit recorded)"));
+});
+for (const retired of [true, false]) for (const liveFirst of [true, false]) test(`live registration owns a shared-cwd Pi ahead of ${retired ? "ended" : "stale"} history (${liveFirst ? "live first" : "old first"} input)`, async () => {
+  const f = fixture(); const cwd = join(f.home, "shared"); const at = f.ctx.now().toISOString();
+  f.ctx.pidAlive = pid => pid === 21;
+  f.ctx.run = async () => ({ code: 0, stdout: "701 pi", stderr: "", timedOut: false }); f.ctx.readCwd = async () => cwd;
+  f.put("A-OLD", { id: "A-OLD", pid: 20, cwd, startedAt: at, ...(retired ? { retiredAt: at } : {}) });
+  f.put("B-LIVE", { id: "B-LIVE", pid: 21, cwd, startedAt: at });
+  const input = await readRoster(f.c, f.home, f.ctx);
+  input.registrations!.sort((a, b) => liveFirst ? b.id.localeCompare(a.id) : a.id.localeCompare(b.id));
+  const before = input.registrations!.map(r => r.id);
+  const rows = buildRoster(input, f.ctx.now()).rows.filter(r => r.worktree === cwd);
+  assert.deepEqual(rows.map(r => ({ lane: r.lane, pid: r.pid, state: r.state })).sort((a, b) => a.lane.localeCompare(b.lane)), [
+    { lane: "A-OLD", pid: null, state: retired ? "retired" : "stopped" }, { lane: "B-LIVE", pid: 701, state: "idle" },
+  ]);
+  assert.ok(rows.find(r => r.lane === "A-OLD")!.notes.includes(retired ? `session ended ${at}` : "registration stale (no exit recorded)"));
+  assert.deepEqual(input.registrations!.map(r => r.id), before);
+});
+for (const retired of [true, false]) test(`a ${retired ? "retired" : "stale"} registration never labels a later anonymous Pi at its cwd`, async () => {
+  const f = fixture(); const cwd = join(f.home, "shared"); const at = f.ctx.now().toISOString();
+  f.ctx.run = async () => ({ code: 0, stdout: "701 pi", stderr: "", timedOut: false }); f.ctx.readCwd = async () => cwd;
+  f.put("A-OLD", { id: "A-OLD", pid: 20, cwd, startedAt: at, ...(retired ? { retiredAt: at } : {}) });
+  const rows = (await f.who()).rows.filter((r: any) => r.worktree === cwd);
+  assert.equal(rows.length, 2);
+  const processRow = rows.find((r: any) => r.pid === 701); assert.equal(processRow.identity, "unregistered"); assert.equal(processRow.lane, "unregistered-p701");
+  const old = rows.find((r: any) => r.lane === "A-OLD"); assert.equal(old.pid, null); assert.equal(old.state, retired ? "retired" : "stopped");
 });
 for (const evidence of ["lease", "heartbeat(fresh)"]) test(`registrationState defers to independent ${evidence} evidence without a process PID`, async () => {
   const f = fixture(); const at = f.ctx.now().toISOString(); f.put("L0", { id: "L0", pid: 20, cwd: f.home, startedAt: at, retiredAt: at });
