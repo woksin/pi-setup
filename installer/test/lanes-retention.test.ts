@@ -10,6 +10,7 @@ import { FileBackend } from "../src/lanes/backend.ts";
 import { backendOwnedName } from "../src/lanes/backend-files.ts";
 import { main } from "../src/lanes/main.ts";
 import { prune } from "../src/lanes/retention.ts";
+import { writeRegistration } from "../src/lanes/registration.ts";
 
 const DAY = 86400000;
 const NOW = new Date("2026-02-01T12:00:00Z");
@@ -46,6 +47,26 @@ test("new retention defaults and absent retention keeps files", () => {
   assert.deepEqual(prune(f.c, f.root, f.ctx), { ...empty, kept: 1 }); assert.ok(existsSync(path));
 });
 
+for (const mode of ["archive", "delete", "keep", "absent"] as const) test(`prune expires only retired roster records using ${mode} retention and respects dry-run`, async () => {
+  const f = fixture(); f.r.maxAgeDays = 3; if (mode === "absent") delete f.c.messages.retention; else f.r.mode = mode;
+  const days = mode === "absent" ? 14 : 3; const at = (age: number) => new Date(NOW.getTime() - age * DAY).toISOString();
+  for (const [id, age] of [["OLD", days + 1], ["BOUNDARY", days], ["YOUNG", 1], ["ACTIVE", undefined]] as const) {
+    writeRegistration(f.root, { id, pid: 20, cwd: f.root, startedAt: at(100), ...(age === undefined ? {} : { retiredAt: at(age) }) });
+  }
+  const dir = join(f.root, ".state/roster"); writeFileSync(join(dir, "broken.json"), "invalid JSON");
+  const external = join(f.root, "external.json"); writeFileSync(external, JSON.stringify({ id: "EXTERNAL", pid: 20, cwd: f.root, startedAt: at(100), retiredAt: at(100) })); symlinkSync(external, join(dir, "EXTERNAL.json"));
+  saveConfig(f.root, f.c); assert.equal(await main(["messages", "prune", "--dry-run", "--json"], f.ctx), 0);
+  assert.deepEqual(JSON.parse(f.out.at(-1)!), empty); assert.ok(existsSync(join(dir, "OLD.json")));
+  assert.equal(await main(["messages", "prune", "--json"], f.ctx), 0);
+  assert.deepEqual(JSON.parse(f.out.at(-1)!), empty); assert.equal(existsSync(join(dir, "OLD.json")), false);
+  for (const name of ["BOUNDARY.json", "YOUNG.json", "ACTIVE.json", "broken.json", "EXTERNAL.json"]) assert.ok(existsSync(join(dir, name)));
+  assert.ok(existsSync(external));
+});
+test("prune refuses a symlinked registration directory", () => {
+  const f = fixture(); const elsewhere = join(f.root, "elsewhere"); mkdirSync(elsewhere); mkdirSync(join(f.root, ".state")); symlinkSync(elsewhere, join(f.root, ".state/roster"));
+  writeFileSync(join(elsewhere, "OLD.json"), JSON.stringify({ id: "OLD", pid: 20, cwd: f.root, startedAt: "2020-01-01T00:00:00Z", retiredAt: "2020-01-01T00:00:00Z" }));
+  assert.throws(() => prune(f.c, f.root, f.ctx), /not a regular directory/); assert.ok(existsSync(join(elsewhere, "OLD.json")));
+});
 test("retention validation names each malformed key and defaults archiveDir", () => {
   const f = fixture();
   for (const value of [null, [], "archive"]) assert.throws(() => validate({ ...f.c, messages: { ...f.c.messages, retention: value } }), (e) => e instanceof UsageError && /messages.retention/.test(e.message));

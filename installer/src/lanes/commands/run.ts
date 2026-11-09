@@ -9,6 +9,7 @@ import { laneTarget } from "../sessions.ts";
 import { preapprove } from "../preapprove.ts";
 import { backendFor } from "../backend.ts";
 import { parseStatus } from "../status-line.ts";
+import { retireRegistration, writeRegistration } from "../registration.ts";
 
 function nativeSpawn(exe: string, args: string[], options: { cwd: string; env: Record<string, string | undefined> }): InheritedChild {
   const child = spawn(exe, args, { ...options, stdio: "inherit", shell: false });
@@ -43,6 +44,10 @@ export async function run(id: string, opts: Record<string, string>, c: Config, r
   // Attach rejection handling before probing identity (a failed executable may exit immediately).
   let settled = false;
   const outcome = child.done.then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
+  if (child.pid > 0) {
+    try { writeRegistration(root, { id: target.id, pid: child.pid, cwd: target.cwd, startedAt: ctx.now().toISOString() }); }
+    catch (e) { ctx.err(`registration: ${(e as Error).message}`); }
+  }
   let verified!: (start: string | undefined) => void;
   // A signal received while lease.child is probing waits for that exact verification.
   // Failed verification resolves undefined: a later inventory cannot invent an identity.
@@ -72,6 +77,10 @@ export async function run(id: string, opts: Record<string, string>, c: Config, r
   } finally {
     settled = true; verified(undefined);
     for (const [signal, handler] of handlers) process.off(signal, handler);
+    if (child.pid > 0) {
+      try { retireRegistration(root, target.id, ctx.now().toISOString()); }
+      catch (e) { ctx.err(`registration: ${(e as Error).message}`); }
+    }
     try { await lease.release(); } catch (e) { ctx.err((e as Error).message); }
   }
   if (result.signal) {

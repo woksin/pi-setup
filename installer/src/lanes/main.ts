@@ -16,6 +16,7 @@ import { close } from "./commands/close.ts";
 import { messagesPrune } from "./retention.ts";
 import { status } from "./commands/status.ts";
 import { who } from "./commands/who.ts";
+import { unacked } from "./commands/unacked.ts";
 
 export const HELP = `Usage: lanes [--dir root] <command> [options]
   adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
@@ -27,6 +28,7 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
   resume <ID> [--terminal backend]
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
   who [--repo R] [--issue N|OWNER/REPO#N] [--json]
+  unacked [--json] [--minutes N] [--hours N] [--include-retired]
   status [--all]
   messages prune [--dry-run] [--json] [--legacy [--legacy-age hours] [--apply]]
   idle-check [--minutes n]
@@ -61,6 +63,7 @@ const OPTIONS: Record<string, string[]> = {
   add: ["repo", "issue", "goal", "group", "branch", "base", "path",
     "orchestrator", "orchestrator-id", "no-orchestrator"],
   run: ["from-handoff", "handoff-digest"], start: ["terminal", "from-handoff"], resume: ["terminal"], send: ["m", "from", "direct", "issue", "force"], who: ["repo", "issue", "json"],
+  unacked: ["json", "minutes", "hours", "include-retired"],
   status: ["all"], messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"],
   handoff: ["to", "accept", "from"], reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
@@ -68,7 +71,7 @@ const OPTIONS: Record<string, string[]> = {
   close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"],
 };
 const FLAGS = ["write", "preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all",
-  "no-orchestrator", "inactive", "clear", "apply", "accept", "legacy"];
+  "no-orchestrator", "inactive", "clear", "apply", "accept", "legacy", "include-retired"];
 interface Invocation { command: string; positional: string[]; opts: Record<string, string> }
 interface CommandEnv { c: Config; root: string; ctx: LanesCtx }
 interface ParsePosition { argv: string[]; index: number }
@@ -120,17 +123,18 @@ function validateInvocation({ command, positional, opts }: Invocation): void {
   validateOptions({ command, opts });
   const bounds: Record<string, [number, number]> = {
     adopt: [0, 0], init: [0, 1], add: [1, 1], run: [1, 1], start: [1, 1], resume: [1, 1], send: [2, 3], who: [0, 0], status: [0, 0], messages: [1, 1],
-    "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], handoff: [1, 1],
+    unacked: [0, 0], "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], handoff: [1, 1],
     reap: [0, 1], snooze: [1, 1], close: [opts.inactive ? 0 : 1, 1],
   };
   validateBounds(positional, bounds[command]);
   if (command === "messages" && positional[0] !== "prune") throw new UsageError(HELP);
-  validateMinutes(opts.minutes);
+  validateIntegerOption(opts.minutes, "minutes");
+  validateIntegerOption(opts.hours, "hours");
 }
-function validateMinutes(minutes: string | undefined): void {
-  if (minutes === undefined) return;
-  if (invalidMinutes(minutes)) {
-    throw new UsageError("--minutes must be a positive integer");
+function validateIntegerOption(value: string | undefined, option: string): void {
+  if (value === undefined) return;
+  if (invalidMinutes(value)) {
+    throw new UsageError(`--${option} must be a positive integer`);
   }
 }
 async function dispatch(input: Invocation, env: CommandEnv): Promise<number> {
@@ -140,6 +144,7 @@ async function dispatch(input: Invocation, env: CommandEnv): Promise<number> {
     run: () => runCommand(args[0], opts, env),
     resume: () => resume(args, opts, env),
     messages: () => messagesPrune(opts, c, root, ctx), send: () => send(args, opts, c, root, ctx), who: () => who(args, opts, c, root, ctx),
+    unacked: () => unacked(args, opts, c, root, ctx),
     "idle-check": () => idleCheck(opts, c, root, ctx), nudge: () => nudge(args[0], args[1], opts, c, root, ctx),
     "resume-check": () => resumeCheck(c, root, ctx), "green-prs": () => greenPrs(opts, c, root, ctx),
     handoff: () => handoff(args, opts, env), snooze: () => snooze(args, opts, env),
@@ -154,7 +159,7 @@ function closeCommand({ positional, opts }: Invocation, env: CommandEnv): Promis
 }
 function errorCode({ e, command }: { e: unknown; command: string }): number {
   return e instanceof UsageError || ["idle-check", "nudge", "resume-check", "green-prs", "close", "reap",
-    "snooze", "handoff"].includes(command) ? 2 : 1;
+    "snooze", "handoff", "unacked"].includes(command) ? 2 : 1;
 }
 export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
   let command = "";

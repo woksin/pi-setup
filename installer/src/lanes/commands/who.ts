@@ -11,7 +11,7 @@ function humanRow(row: RosterRow): string {
   const outbound = row.lastOutbound ? `${row.lastOutbound.name} (${row.lastOutbound.ageMin}m)` : "-";
   return `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${issue} ${row.state} idle=${row.idleMinutes ?? "-"}m ctx=- pid=${row.pid ?? "-"} session=${row.sessionId ?? "-"} branch=${row.branch ?? "-"} cwd=${row.worktree ?? "-"} in=${inbound} out=${outbound} ${row.evidence.join(",")}${notes}`;
 }
-function humanSources(sources: Record<string, Source>, ctx: LanesCtx): void {
+export function humanSources(sources: Record<string, Source>, ctx: LanesCtx): void {
   for (const [name, source] of Object.entries(sources)) {
     if (source.status !== "ok" || source.detail) ctx.out(`source: ${name} ${source.status}${source.detail ? ` — ${source.detail}` : ""}`);
   }

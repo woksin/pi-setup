@@ -15,6 +15,7 @@ export interface LanesCtx {
   env: Record<string, string | undefined>; platform: string; home: string; cwd: string; now(): Date;
   run: Runner; which(name: string): string | undefined; out(line: string): void; err(line: string): void;
   sleep?(ms: number): Promise<void>;
+  pidAlive?(pid: number): boolean;
   processInventory?(): Promise<ProcessSample[]>;
   admissionInventory?(): Promise<AdmissionProcess[]>;
   spawnInherited?(exe: string, args: string[], options: { cwd: string; env: Record<string, string | undefined> }): InheritedChild;
