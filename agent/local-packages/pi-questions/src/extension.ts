@@ -9,7 +9,7 @@ import * as actions from "./actions.ts";
 import { completeDecide, completeIds, completeQ, parseAnswer, parseClose, parseDecide, parseDefer, parseQ, parseQuestions } from "./commands.ts";
 import { Deliverer, pending, type Entry, type LiveSession } from "./delivery.ts";
 import { possibleDuplicates } from "./dedup.ts";
-import { renderCandidates, renderItem, renderList, renderRecord, statusText, noticeText } from "./format.ts";
+import { renderCandidates, renderItem, statusLine, renderList, renderRecord, statusText, noticeText } from "./format.ts";
 import { laneOf, liveness, orchHome, repoOf, userName } from "./identity.ts";
 import { laneWarnings } from "./lane-warnings.ts";
 import { clearLane, setLane } from "./lanes.ts";
@@ -82,7 +82,7 @@ const PARAMETERS = {
 		distinctFrom: { ...strList, description: "ask: ids of every duplicate candidate, to create anyway" },
 		status: { type: "string", enum: ["open", "answered", "decided", "deferred", "withdrawn", "superseded", "closed", "all"] },
 		repo: { type: "string", description: "Owner/Name" },
-		all: { type: "boolean", description: "list: every repo, with the asker lane on each item" },
+		all: { type: "boolean", description: "list: every repo, with the asker lane on each item; get: show all comments" },
 		mine: { type: "boolean", description: "list: only your own items" },
 		query: str,
 		tag: str,
@@ -322,7 +322,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 					if (typeof v !== "string" || !v.trim()) throw new Error(`${name} is required`);
 					return v.trim();
 				};
-				const one = (item: Item, head: string) => text(`${head}\n${renderItem(item, now)}`, { item });
+				const one = (item: Item, head: string) => text(`${head}\n${statusLine(item)}`, { item });
 
 				switch (action) {
 					case "ask": {
@@ -354,7 +354,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 					}
 					case "get": {
 						const item = actions.getItem(home, need(params.id, "id"));
-						return text(params.format === "record" ? renderRecord(item) : renderItem(item, now, possibleDuplicates(listItems(home).items).get(item.id)), { item });
+						return text(params.format === "record" ? renderRecord(item) : renderItem(item, now, possibleDuplicates(listItems(home).items).get(item.id), !!params.all), { item });
 					}
 					case "search": {
 						const { items, warnings } = listItems(home);

@@ -35,12 +35,17 @@ export async function loadManifest(path, branch) {
 
 async function entries(path) {
   try { return await readdir(path); }
-  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; }
+}
+
+async function repoDirs(home) {
+  try { return (await readdir(home, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name); }
+  catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; }
 }
 
 export async function listManifests(env, repo) {
   const home = trainHome(env);
-  const dirs = repo ? [repo.replace('/', '__')] : await entries(home);
+  const dirs = repo ? [repo.replace('/', '__')] : await repoDirs(home);
   const result = [];
   for (const dir of dirs) {
     for (const name of await entries(join(home, dir))) {

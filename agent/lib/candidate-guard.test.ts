@@ -205,3 +205,23 @@ test('extension: block, exception, orchestrated result warning chains after real
   assert.equal(await handler(event, ctx), undefined);
   assert.equal(await train.handlers.get('tool_result')![0](resultEvent), undefined);
 });
+
+test('GHE repositories are host-qualified: a github.com candidate never refuses or warns a same-named GHE PR', async t => {
+  const f = await fixture(t);
+  const solo = (origin: string) => (_cwd: string, args: string[]) => args[0] === 'remote' ? origin
+    : args[0] === 'worktree' ? 'worktree /repo\nbranch refs/heads/fix/local\n\n' : gitOutput(args);
+  const context = { cwd: '/repo', env: f.env, git: solo('git@github.com:acme/widget.git') };
+  const request = { kind: 'pr-create', repo: 'acme/widget', head: 'fix/local', title: 'Title', body: 'Safe' };
+  assert.deepEqual(await publicationDecision({ ...request, host: 'ghe.example.com' }, context), {});
+  assert.match((await publicationDecision({ ...request, host: 'github.com' }, context)).block!, /PR refused: acme\/widget/);
+  assert.match((await publicationDecision(request, context)).block!, /PR refused: acme\/widget/);
+  const decide = (command: string, origin = 'git@github.com:acme/widget.git') => prCreateDecision(command, '/repo', f.env, solo(origin));
+  assert.deepEqual(await decide('pi-publish pr-create --repo acme/widget --host ghe.example.com --head fix/local --title T --body Safe'), {});
+  assert.deepEqual(await decide('gh pr create -R ghe.example.com/acme/widget --head fix/local'), {});
+  assert.deepEqual(await decide('gh pr create --head fix/local', 'https://ghe.example.com/acme/widget.git'), {});
+  for (const command of ['gh pr create -R acme/widget --head fix/local', 'gh pr create -R github.com/acme/widget --head fix/local', 'gh pr create -R https://github.com/acme/widget --head fix/local', 'gh pr create -R www.github.com/acme/widget --head fix/local', 'gh pr create -R https://www.github.com/acme/widget --head fix/local'])
+    assert.match((await decide(command)).block!, /PR refused: acme\/widget/, command);
+  // scp-style and ssh:// remotes may be SSH aliases for github.com: they keep the plain owner/repo key.
+  for (const origin of ['git@ghe.example.com:acme/widget.git', 'git@github.com-work:acme/widget.git', 'ssh://git@ghe.example.com/acme/widget.git', 'https://github.com/acme/widget.git'])
+    assert.match((await decide('gh pr create --head fix/local', origin)).block!, /PR refused: acme\/widget/, origin);
+});

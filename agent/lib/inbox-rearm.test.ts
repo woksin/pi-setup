@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync, readFileSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import inboxRearm, { lostInboxWatch, parkedStatus } from "../extensions/inbox-rearm.ts";
+import inboxRearm, { lostInboxWatch, parkedStatus, withQuietTimeouts } from "../extensions/inbox-rearm.ts";
 
 const params = { check: "INBOX_DIR=/tmp/inbox ~/.pi/agent/bin/inbox-watch --alias R-AI L1 GROUP", until: "success", intervalSeconds: 120, timeoutSeconds: 3600, cwd: "/tmp/lane", label: "L1 inbox" };
 const message = (m: object) => ({ type: "message", message: m });
@@ -183,4 +183,13 @@ test("settlement is continued once with exact call; no polling, duplicate loop o
 		if (oldLane === undefined) delete process.env.PI_LANE_ID; else process.env.PI_LANE_ID = oldLane;
 		if (oldOrch === undefined) delete process.env.PI_ORCH_ID; else process.env.PI_ORCH_ID = oldOrch;
 	}
+});
+
+test("suggested re-arm call gains quietTimeouts only when the window fits the 60-minute lease", () => {
+	const at = (timeoutSeconds: number, extra = {}) => withQuietTimeouts({ ...params, timeoutSeconds, ...extra });
+	assert.equal(at(300).quietTimeouts, 12);
+	assert.equal(at(1800).quietTimeouts, 2);
+	assert.equal(at(100).quietTimeouts, 24);
+	assert.equal(at(3600).quietTimeouts, undefined);
+	assert.equal(at(300, { quietTimeouts: 3 }).quietTimeouts, 3);
 });

@@ -9,5 +9,11 @@
     "keep": 15,
     "batchTokens": 30000,
     "scope": "subagents"
+  },
+  "delegationNudge": {
+    "enabled": true,
+    "scope": "main",
+    "thresholdBytes": 40000,
+    "thresholdCalls": 12
   }
 }

@@ -81,11 +81,68 @@ test("CLI help is standalone and parsed requests use only shared publisher core"
 	assert.equal((await cliMain(["--help", "issue-create"], { send })).exitCode, 2);
 	assert.equal((await cliMain(["check", "--file", "a", "--method", "POST"], { send })).exitCode, 2);
 });
-for (const [code, expected] of [["invalid-request", 2], ["scan-refused", 3], ["payload-unreadable", 4], ["cleanup-failed", 4], ["gh-failed", 5], ["gh-timeout", 5], ["cancelled", 130]] as const) test(`CLI fixed exit for ${code}`, async () => {
+for (const [code, expected] of [["invalid-request", 2], ["scan-refused", 3], ["payload-unreadable", 4], ["payload-not-found", 4], ["payload-symlink", 4], ["payload-not-file", 4], ["payload-permission", 4], ["cleanup-failed", 4], ["gh-failed", 5], ["gh-timeout", 5], ["host-unauthenticated", 5], ["cancelled", 130]] as const) test(`CLI fixed exit for ${code}`, async () => {
 	const result = await cliMain(["check", "--file", "a"], { send: async () => outcome(code) });
 	assert.deepEqual(result, { text: `publish: ${code}`, exitCode: expected });
 });
+test("tool and CLI render safe validation details without echoing unknown keys or values", async () => {
+	const registered = tool({ admit: () => { assert.fail("validate first"); } });
+	for (const input of [
+		{ kind: "issue-comment", body: "VALUE-SENTINEL" },
+		{ kind: "gist-create", files: ["a"], repo: "VALUE-SENTINEL" },
+		{ kind: "check", files: ["a"], "sk-KEY-SENTINEL": "VALUE-SENTINEL" },
+		{ kind: "issue-close", repo: "owner/repo", number: 1, reason: "VALUE-SENTINEL" },
+		{ kind: "KIND-SENTINEL" },
+	]) {
+		const result = await registered.execute("id", input, undefined, undefined, context);
+		assert.equal(result.details.code, "invalid-request"); assert.equal(typeof result.details.detail, "string");
+		assert.equal(result.content[0].text, `publish: invalid-request\ndetail: ${result.details.detail}`);
+		assert.ok(!JSON.stringify(result).includes("SENTINEL"));
+	}
+	const cli = await cliMain(["issue-comment", "--body", "VALUE-SENTINEL"]);
+	assert.equal(cli.exitCode, 2); assert.match(cli.text, /^publish: invalid-request\ndetail: missing: repo, number/);
+	assert.ok(!cli.text.includes("SENTINEL"));
+	const missingBody = await cliMain(["pr-create", "--repo", "owner/repo", "--title", "VALUE-SENTINEL"]);
+	assert.match(missingBody.text, /pr-create needs body or bodyFile/); assert.ok(!missingBody.text.includes("SENTINEL"));
+});
+
+test("publisher detail is rendered after the unchanged first line and included in tool details", async () => {
+	const detail = "exit=1 category=rate-limit; retry once, then stop";
+	const send: typeof publish = async () => ({ ...outcome("gh-failed"), detail });
+	const result = await tool({ ...allowed, send }).execute("id", request, undefined, undefined, context);
+	assert.equal(result.content[0].text, `publish: gh-failed\ndetail: ${detail}`);
+	assert.deepEqual(result.details, { code: "gh-failed", detail });
+	assert.deepEqual(await cliMain(["check", "--file", "a"], { send }), { text: `publish: gh-failed\ndetail: ${detail}`, exitCode: 5 });
+});
+
 test("bin help smoke does not publish or show raw paths", () => {
 	const text = execFileSync(process.execPath, [new URL("../bin/pi-publish", import.meta.url).pathname, "--help"], { encoding: "utf8" });
 	assert.equal(text, PUBLISH_HELP);
+});
+
+test("hosted request: schema offers host, both admissions see it intact, denial still blocks, hostile host fails before admission", async () => {
+	const hosted = { ...request, host: "ghe.example.com" }, seen: unknown[] = [];
+	const registered = tool({ ...allowed,
+		admit: value => { seen.push(value); }, candidate: async value => { seen.push(value); return {}; },
+		send: async value => { seen.push(value); return outcome(); },
+	});
+	assert.ok(registered.parameters.properties.host);
+	assert.match(registered.description, /host/); assert.match(registered.description, /gh auth login --hostname/);
+	assert.equal((await registered.execute("id", hosted, undefined, undefined, context)).details.code, "published");
+	assert.equal(seen.length, 3); for (const value of seen) assert.deepEqual(value, hosted);
+	let sends = 0;
+	const denied = tool({ ...allowed, admit: () => "private-value", send: async () => { sends++; return outcome(); } });
+	assert.equal((await denied.execute("id", hosted, undefined, undefined, context)).details.code, "admission-denied"); assert.equal(sends, 0);
+	const strict = tool({ admit: () => { assert.fail("must validate first"); }, send: async () => { assert.fail("must not send"); } });
+	for (const host of ["https://ghe.example.com", "GHE.example.com", "ghe.example.com:8443", "127.0.0.1", "ghe"])
+		assert.equal((await strict.execute("id", { ...request, host }, undefined, undefined, context)).details.code, "invalid-request", host);
+});
+
+test("CLI --host reaches the publisher with the host; help documents it", async () => {
+	let seen: unknown;
+	const result = await cliMain(["issue-comment", "--repo", "owner/repo", "--host", "ghe.example.com", "--number", "39", "--body-file", "private-value.md"], { send: async value => { seen = value; return outcome("host-unauthenticated"); } });
+	assert.deepEqual(seen, { ...request, host: "ghe.example.com" });
+	assert.deepEqual(result, { text: "publish: host-unauthenticated", exitCode: 5 });
+	assert.equal((await cliMain(["issue-comment", "--repo", "owner/repo", "--host", "https://ghe.example.com", "--number", "39", "--body", "B"], { send: async () => assert.fail("must not send") })).exitCode, 2);
+	assert.match(PUBLISH_HELP, /--host HOST/); assert.match(PUBLISH_HELP, /gh auth login --hostname HOST/);
 });

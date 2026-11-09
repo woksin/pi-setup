@@ -86,7 +86,7 @@ Each component needs a unique nonempty `id`, `kind` (`build` or `test`) and a ca
 | Tool | Purpose | Help | Source |
 |---|---|---|---|
 | `pi-train` | Manages a release train: fold several PRs into one branch, check status and ship it. See [Release trains](../README.md#release-trains). | `pi-train --help` | [source](../agent/bin/pi-train) |
-| `pi-publish` | Posts issue, PR and comment text through a secret scan. Normally used from inside pi. | `pi-publish --help` | [source](../agent/bin/pi-publish) |
+| `pi-publish` | Posts issue, PR and comment text through a secret scan, on github.com or a GitHub Enterprise host (`--host`). Normally used from inside pi. | `pi-publish --help` | [source](../agent/bin/pi-publish) |
 
 ## Lanes and messaging (opt-in)
 
@@ -116,6 +116,21 @@ Lanes are several coordinated sessions. See [Lanes](../README.md#parallel-sessio
 | `secret-sweep` | Daily read-only gitleaks sweep. Reports contain metadata, never the matched values. | `secret-sweep --help` | [source](../agent/bin/secret-sweep) |
 | `ai-work-lifecycle` | Creates, tracks and cleans temporary task outputs under `.ai-work/`. See the [README](../tools/ai-work-lifecycle/README.md) and [REFERENCE](../tools/ai-work-lifecycle/REFERENCE.md). | `ai-work-lifecycle --help` | [source](../tools/ai-work-lifecycle/ai-work-lifecycle.py) |
 | `sweep-known-roots` | Sweeps registered `ai-work-lifecycle` tasks across known repositories (dry run by default). Installed as a script, not on PATH; pi-setup does not schedule it, so run it yourself. | `python3 ~/.local/share/ai-work-lifecycle/sweep-known-roots.py --help` | [source](../tools/ai-work-lifecycle/sweep-known-roots.py) |
+
+## Prompt floor
+
+The `prompt-floor` extension measures the fixed prompt each turn starts from (system prompt sections, context files, tool schemas), shows `floor ~NNk` in the status bar (`!` above `warnTokens`) and compacts the project-skill listing. `/floor` prints the sections, context files and the ten largest tools. Token figures are estimates (`12700 + 0.338 × bytes`, a regression over real first turns).
+
+- **Log:** one JSON line per session start and per change in `~/.pi/agent/logs/prompt-floor.jsonl` (`PI_FLOOR_LOG` overrides): sizes in bytes per section, context file and top tools, skill counts. No prompt text.
+- **Skill compaction:** skills from the project scope (for example a `.pi/skills` symlink to a large corpus) are listed once in a `repo_skills` section as `name | hint | path` instead of Pi's full per-skill XML. The path is relative to the cwd when it resolves to the same file, otherwise absolute, and can be passed to `read`; `/skill:<name>` is unaffected. Global, agent and package skills keep Pi's normal listing. In a Cratis worktree with 150 skills the listing drops from about 67 KB to 23 KB.
+- **Config:** optional `~/.pi/agent/prompt-floor.json` (`PI_FLOOR_FILE` overrides); a missing file means the defaults shown. Not installed by pi-setup.
+
+```json
+{ "warnTokens": 100000, "skills": { "projectMode": "compact", "keepFull": [], "descChars": 80, "maxBytes": 24000 } }
+```
+
+- `skills.keepFull`: name globs that keep the full listing (also `PI_FLOOR_FULL_SKILLS=a,b-*`). `skills.maxBytes`: when exceeded, hints shrink step by step; a skill is never dropped.
+- **Off switch:** `PI_FLOOR=off` or `skills.projectMode: "full"` restores Pi's listing; the meter keeps running.
 
 ## Installer
 

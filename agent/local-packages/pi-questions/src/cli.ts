@@ -54,7 +54,7 @@ export function main(argv: string[], env: Record<string, string | undefined>, io
 				const { values, positionals } = parseArgs({ args: rest, options: { record: { type: "boolean" } }, allowPositionals: true });
 				if (!positionals[0]) throw new Error("get needs an id");
 				const item = actions.getItem(home, positionals[0]);
-				io.out(values.record ? renderRecord(item) : renderItem(item, Date.now(), possibleDuplicates(listItems(home).items).get(item.id)));
+				io.out(values.record ? renderRecord(item) : renderItem(item, Date.now(), possibleDuplicates(listItems(home).items).get(item.id), true));
 				return 0;
 			}
 			case "wait": {

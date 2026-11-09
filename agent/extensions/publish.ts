@@ -3,7 +3,7 @@ import { assessPublication, identity } from "../lib/lane-policy.ts";
 import { publicationDecision } from "../lib/candidate-guard.ts";
 import { publish } from "../lib/publisher.ts";
 import type { PublishResult } from "../lib/publisher.ts";
-import { parseCli, publishRequestSchema, validateRequest } from "../lib/publish-request.ts";
+import { InvalidRequest, parseCli, publishRequestSchema, validateRequest } from "../lib/publish-request.ts";
 import { isOrchestrated, orchLog } from "../lib/orchestration.ts";
 
 export interface PublishServices {
@@ -13,18 +13,25 @@ export interface PublishServices {
 	env?: NodeJS.ProcessEnv;
 	root?: (cwd: string) => string | undefined;
 }
-function fixed(code: string) {
-	return { content: [{ type: "text" as const, text: `publish: ${code}` }], details: { code }, isError: true };
+function fixed(code: string, detail?: string) {
+	return { content: [{ type: "text" as const, text: `publish: ${code}` + (detail ? `\ndetail: ${detail}` : "") }], details: { code, ...(detail ? { detail } : {}) }, isError: true };
+}
+function invalidResult(error: unknown) {
+	return fixed("invalid-request", error instanceof InvalidRequest ? error.detail : undefined);
+}
+function publicationDetails(result: PublishResult) {
+	return { code: result.code, ...(result.detail ? { detail: result.detail } : {}), ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}) };
 }
 function rendered(result: PublishResult): string {
-	if (!result.diagnostics) return result.text;
+	const text = result.text + (result.detail ? `\ndetail: ${result.detail}` : "");
+	if (!result.diagnostics) return text;
 	const { source, findings, count } = result.diagnostics;
 	const lines = findings.map(finding => `${source}: line ${finding.line} ${finding.kind}`);
-	return [result.text, ...lines, `findings: ${count}`].join("\n");
+	return [text, ...lines, `findings: ${count}`].join("\n");
 }
 async function executePublication(value: unknown, signal: AbortSignal | undefined, ctx: ExtensionContext, services: PublishServices) {
 	let request;
-	try { request = validateRequest(value); } catch { return fixed("invalid-request"); }
+	try { request = validateRequest(value); } catch (error) { return invalidResult(error); }
 	try {
 		const actor = { cwd: ctx.cwd, session: ctx.sessionManager.getSessionId() };
 		if ((services.admit ?? assessPublication)(request, actor)) return fixed("admission-denied");
@@ -35,32 +42,35 @@ async function executePublication(value: unknown, signal: AbortSignal | undefine
 		const result = await (services.send ?? publish)(request, { cwd: ctx.cwd, repoRoot: (services.root ?? (cwd => identity(cwd)?.root))(ctx.cwd), signal });
 		const warning = candidate.warn ? "\npublish: candidate-warning" : "";
 		return { content: [{ type: "text" as const, text: rendered(result) + warning }],
-			details: { code: result.code, ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}) }, isError: result.isError };
+			details: publicationDetails(result), isError: result.isError };
 	} catch { return fixed("adapter-failed"); }
 }
 export default function publishExtension(pi: ExtensionAPI, services: PublishServices = {}) {
 	pi.registerTool({
-		name: "publish", label: "Publish", description: "Publish GitHub text from typed fields after authority admission and exact captured-byte scanning. Prefer bodyFile created with write. No shell, scan override or arbitrary gh flags.",
+		name: "publish", label: "Publish", description: "Publish GitHub text from typed fields after authority admission and exact captured-byte scanning. Prefer bodyFile created with write. No shell, scan override or arbitrary gh flags. Optional host (repository kinds and api only) targets a GitHub Enterprise host such as ghe.example.com; default github.com. A GitHub Enterprise host needs a stored `gh auth login --hostname HOST` credential; env tokens are never sent to it.",
 		parameters: publishRequestSchema as any,
 		execute: (_id: string, value: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) => executePublication(value, signal, ctx, services),
 	} as any);
 }
 export const PUBLISH_HELP = [
-	"Usage: pi-publish KIND --repo OWNER/REPO --number N --body-file FILE ...",
+	"Usage: pi-publish KIND --repo OWNER/REPO [--host HOST] --number N --body-file FILE ...",
 	"       pi-publish check --file FILE",
 	"Publish GitHub issue and PR text (create, comment, edit, close, reopen) through the same typed validator and captured-byte scanner as the pi publish tool.",
 	"Shell lane/candidate admission is separate. Use the publish tool from pi where possible.",
+	"Payload errors name the resolved path; gh errors give exit code and category.",
+	"--host HOST targets a GitHub Enterprise host (default github.com). It needs a stored `gh auth login --hostname HOST` credential; env tokens are never sent to it.",
 	"",
 	"Examples:",
 	"  pi-publish --help                      # this text, nothing is published",
 	"  pi-publish check --file body.md        # scan a body file; publishes nothing",
 	"  pi-publish issue-comment --repo OWNER/REPO --number 39 --body-file body.md   # state-changing: posts a comment",
+	"  pi-publish issue-comment --repo OWNER/REPO --host ghe.example.com --number 39 --body-file body.md   # same, on a GitHub Enterprise host",
 	"Exit codes:",
 	"  0 ok",
 	"  2 invalid request",
 	"  3 secret scan refused the body",
 	"  4 payload unreadable, cleanup failed or adapter failed",
-	"  5 gh unavailable, failed, timed out or over the output limit",
+	"  5 gh unavailable, failed, timed out or over the output limit, or the --host is not authenticated in gh",
 	"  130 cancelled",
 	"See also: docs/reference.md, README.md",
 	"",
@@ -70,12 +80,12 @@ function exitCode(result: PublishResult): number {
 	if (result.code === "invalid-request") return 2;
 	if (result.code === "scan-refused") return 3;
 	if (result.code === "cancelled") return 130;
-	return ["gh-unavailable", "gh-failed", "gh-timeout", "gh-output-limit"].includes(result.code) ? 5 : 4;
+	return ["gh-unavailable", "gh-failed", "gh-timeout", "gh-output-limit", "host-unauthenticated"].includes(result.code) ? 5 : 4;
 }
 /** Trusted script/human adapter; Pi's shell hooks provide CLI authority admission, as for raw gh. */
 export async function cliMain(argv: readonly string[], options: { signal?: AbortSignal; send?: typeof publish } = {}): Promise<{ text: string; exitCode: number }> {
 	let request;
-	try { request = parseCli(argv); } catch { return { text: "publish: invalid-request", exitCode: 2 }; }
+	try { request = parseCli(argv); } catch (error) { return { text: invalidResult(error).content[0].text, exitCode: 2 }; }
 	if (request.kind === "help") return { text: PUBLISH_HELP, exitCode: 0 };
 	try {
 		const cwd = process.cwd();

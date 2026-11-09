@@ -116,7 +116,7 @@ def _calls(msg):
 
 
 def analyse(path):
-    """Return None (idle/unknown) or dict(kind, record_id, since, tool, args, timeout, last_ts)."""
+    """Return None (idle/unknown) or dict(kind, record_id, since, tool, timeout, last_ts)."""
     for nbytes in TAIL_STEPS:
         recs, whole = read_tail_records(path, nbytes)
         msgs = _msgs(recs)
@@ -147,7 +147,7 @@ def analyse(path):
         if ts is None:
             return None
         return {"kind": "no-reply", "record_id": last.get("id"), "since": ts, "tool": None,
-                "args": "", "timeout": None, "last_ts": ts}
+                "timeout": None, "last_ts": ts}
     return None
 
 
@@ -160,14 +160,10 @@ def _pending(asst, pending):
     timeout = None
     if c.get("name") == "bash" and isinstance(args, dict) and isinstance(args.get("timeout"), (int, float)):
         timeout = float(args["timeout"])
-    try:
-        args_s = json.dumps(args, ensure_ascii=False)
-    except (TypeError, ValueError):
-        args_s = str(args)
     cmds = [a["command"] for a in (p.get("arguments") for p in pending)
             if isinstance(a, dict) and isinstance(a.get("command"), str) and "pi-phase run" in a["command"]]
     return {"kind": "tool", "record_id": c.get("id") or asst.get("id"), "since": ts, "tool": c.get("name"),
-            "args": args_s[:200], "timeout": timeout, "last_ts": ts, "phase_cmds": cmds}
+            "timeout": timeout, "last_ts": ts, "phase_cmds": cmds}
 
 
 def threshold(info):
@@ -254,7 +250,7 @@ def queue_wait(info, pid, cwd, entries, ppids, now):
 
 
 def queue_text(w):
-    parts = [w["label"] or "?", "running" if w["status"] == "running" else "queued"]
+    parts = ["running" if w["status"] == "running" else "queued"]
     if w["waited"] is not None:
         parts.append(human(w["waited"]))
     if w["rank"] is not None:
@@ -507,13 +503,14 @@ def notify(suffix, title, text, messages_dir, dry_run):
         print(f"[dry-run] WOULD NOTIFY ({suffix}): {title}\n{text}\n")
         return
     if messages_dir and os.path.isdir(messages_dir):
-        # Only stuck-session notices go to every lane; host-level notices go to L0 through PISETUP.
-        prefix = "ALL" if suffix == "stuck" else "PISETUP-to-L0"
-        try:
-            with open(os.path.join(messages_dir, f"{prefix}-session-watchdog-{time.strftime('%H%M')}-{suffix}.md"), "w") as f:
-                f.write(text + "\n")
-        except OSError as e:
-            log(f"message file failed: {e}")
+        # Stuck notices also go to every lane as a passive BCAST (no wake); L0 is always woken through PISETUP.
+        prefixes = ("BCAST", "PISETUP-to-L0") if suffix == "stuck" else ("PISETUP-to-L0",)
+        for prefix in prefixes:
+            try:
+                with open(os.path.join(messages_dir, f"{prefix}-session-watchdog-{time.strftime('%H%M')}-{suffix}.md"), "w") as f:
+                    f.write(text + "\n")
+            except OSError as e:
+                log(f"message file failed: {e}")
     short = text.replace("\\", " ").replace('"', "'")[:230]
     try:
         subprocess.run(["osascript", "-e", f'display notification "{short}" with title "session-watchdog"'],
@@ -569,7 +566,7 @@ def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS,
     def describe(items):
         lines = []
         for key, sid, name, cwd, info, age in items:
-            what = (f"tool call `{info['tool']}` {info['args']} has no result" if info["kind"] == "tool"
+            what = (f"tool call `{info['tool']}` has no result" if info["kind"] == "tool"
                     else "no assistant response to the last user message/tool result (in-flight request?)")
             lines.append(f"- session {sid}" + (f" ({name})" if name else "") + f"\n  cwd: {cwd}\n  pending: {what}\n  for: {human(age)}")
             notified[key] = now

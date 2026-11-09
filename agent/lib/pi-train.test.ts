@@ -8,7 +8,7 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { main, realContext } from './pi-train.mjs';
 import { cancellable, isBot, RUN_FIELDS } from './train-gh.mjs';
-import { loadManifest, manifestPath, repoKey, saveManifest, withManifestLock } from './train-manifest.mjs';
+import { loadManifest, manifestPath, repoKey, listManifests, saveManifest, withManifestLock } from './train-manifest.mjs';
 import { copyBullets, extractBullets, renderNotes } from './train-notes.mjs';
 import { shipLabel } from './train-ship-pr.mjs';
 import { publish } from './publisher.ts';
@@ -640,6 +640,16 @@ test('manifest rejects unknown major version and slug collisions; repo forms sha
   await assert.rejects(loadManifest(f.path, 'train_test'), /collision/);
   await saveManifest(f.path, { ...f.manifest, v: 2 });
   assert.equal(await f.invoke('status'), 1);
+});
+
+test('listManifests ignores stray files in the trains home and in a repo slot', async t => {
+  const f = await setup(t);
+  const home = f.ctx.env.PI_TRAIN_DIR;
+  await writeFile(join(home, 'config.json'), '{}');
+  assert.equal((await listManifests(f.ctx.env)).length, 1);
+  await writeFile(join(home, 'stray__file'), '');
+  assert.deepEqual(await listManifests(f.ctx.env, 'stray/file'), []);
+  assert.deepEqual(await listManifests({ ...f.ctx.env, PI_TRAIN_DIR: join(home, 'config.json') }), []);
 });
 
 test('manifest lock serialises concurrent read-modify-writes and reclaims stale locks', async t => {

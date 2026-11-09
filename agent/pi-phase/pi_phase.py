@@ -4332,6 +4332,7 @@ def bounded(value, name, approved):
 def queue_timeout_note(timeout):
     note(f"queue timeout ({timeout:g}s); command not started")
     note("not a failed command/test attempt. Do not loop short requeues; check pi-phase status once.")
+    note("Run long queue waits in a background job; do not rerun in the foreground.")
     note("If a retry is appropriate, retry once in the background (job_start if available, otherwise a background agent) "
          "with an explicit queue-sized budget (e.g. --queue-timeout 2400; keep a larger budget if appropriate).")
     note("The outer deadline must cover queue + execution + cleanup. Admission is not guaranteed; "
@@ -4426,7 +4427,7 @@ def run(args, state, configuration, output=None):
         if args.priority != "normal":
             raise ValueError("ci does not queue; --priority must be normal")
         if not all((args.repo, args.pr, args.commit)):
-            raise ValueError("ci requires --repo, --pr, and --commit (explicit watcher identity)")
+            raise ValueError("ci requires --repo OWNER/REPO, --pr NUMBER and --commit SHA (explicit watcher identity)")
     elif any((args.repo, args.pr, args.commit)):
         raise ValueError("--repo/--pr/--commit only apply to ci")
     withheld = scrub_process_environment()
@@ -4872,8 +4873,33 @@ See also: docs/reference.md, agent/pi-phase/README.md, cratis-local-run --help
 """
 
 
+BUILD_LIKE_KINDS = ("lint", "format", "pack", "restore", "typecheck", "compile")
+RUN_USAGE = "pi-phase run --kind build|test|integration --label LABEL --timeout SECONDS -- COMMAND"
+
+
+class PhaseParser(argparse.ArgumentParser):
+    """Adds the minimal valid command to run's usage errors (exit code stays 2)."""
+
+    def error(self, message):
+        if self.prog.endswith(" run"):
+            if "argument --kind: invalid choice" in message and any(f"'{kind}'" in message for kind in BUILD_LIKE_KINDS):
+                message += "\nlint, format, pack, restore, typecheck and compile use --kind build"
+            elif "required" in message:
+                message += f"\nminimal command: {RUN_USAGE}"
+        super().error(message)
+
+
+RUN_DESCRIPTION = f"""Common usage:
+  {RUN_USAGE}
+  optional: --log FILE --tail N (log the output, print the last N lines)
+  lint, format, pack and restore use --kind build; --kind ci needs --repo, --pr and --commit
+  timeouts above 600s need --approved-long-timeout (explicit user approval)
+  exit 75 = queue timeout: check `pi-phase status`, do not rerun in the foreground
+"""
+
+
 def main(argv=None, *, state=None, configuration=None):
-    parser = argparse.ArgumentParser(description="Bounded, cooperative local phase runner",
+    parser = PhaseParser(description="Bounded, cooperative local phase runner",
                                      formatter_class=argparse.RawDescriptionHelpFormatter, epilog=HELP_EPILOG)
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("status", help="show leases, queue and priority grant (never command arguments)")
@@ -4908,7 +4934,8 @@ def main(argv=None, *, state=None, configuration=None):
     duration.add_argument("--uses", type=int, help="1-20 uses, expires after 60 minutes (default 1)")
     duration.add_argument("--minutes", type=int, help="unlimited uses for 1-480 minutes")
     commands.add_parser("revoke-priority", help="revoke high priority approval")
-    runner = commands.add_parser("run", help="run a single explicit command in one phase")
+    runner = commands.add_parser("run", help="run a single explicit command in one phase", description=RUN_DESCRIPTION,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     runner.add_argument("--kind", choices=("build", "test", "integration", "ci"), required=True)
     runner.add_argument("--label", required=True)
     runner.add_argument("--stack", type=stack_name, help="override inferred ledger stack")

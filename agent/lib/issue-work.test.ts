@@ -323,7 +323,7 @@ test("list refreshes stale cache entries and flags GitHub anomalies", async () =
 	writeFileSync(join(dir, "registry.jsonl"), `${JSON.stringify(ev({ repo: "o/r", issue: 5, state: "in-progress", sessionId: "gone" }))}\ngarbage\n`);
 	issueState = "CLOSED";
 	const text = await list(d);
-	assert.match(text, /github: CLOSED, no status block/);
+	assert.match(text, /^o\/r#5 \[In progress\] Title · gone ended\/in-progress · 2h ago$/m);
 	assert.match(text, /! session ended while holding In progress/);
 	assert.match(text, /! closed on GitHub but registry state is in-progress/);
 	calls = [];
@@ -517,7 +517,7 @@ test("no new activity ignores updatedAt and label/assignee order; snapshots pers
 	now = "2026-10-08T13:00:00.000Z";
 	issueLabels.reverse(); issueAssignees.reverse();
 	const text = await check(deps(), session(), { repo: "O/R", issue: 5 });
-	assert.match(text, /No new comments or changes since 1h ago\.$/);
+	assert.match(text, /^No new activity on O\/R#5 since 1h ago\.$/);
 	assert.equal(seenRecords().length, 1, "case-insensitive issue key");
 	assert.deepEqual(seenRecords()[0], { sources: { issueComments: { checkedAt: now, seenIds: [] } }, state: "OPEN", title: "Title", bodyHash: seenRecords()[0].bodyHash,
 		labels: ["bug", "urgent"], assignees: ["a", "b"] });
@@ -535,8 +535,8 @@ test("check lists unseen comments at or after checkedAt, including comments by t
 	const text = await check(deps(), session(), { repo: "o/r", issue: 5 });
 	assert.match(text, /Issue comment — woksin \[UNKNOWN\] \(outside author\) \(you\) \(30m ago\):\n    ```\n    New\n    comment/);
 	assert.match(text, /Exactly at cutoff/);
-	assert.doesNotMatch(text, /Older comment|No new comments|recent activity/);
-	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new comments or changes/);
+	assert.doesNotMatch(text, /Older comment|No new activity|recent activity/);
+	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5/);
 });
 
 test("check surfaces label and state changes", async () => {
@@ -563,7 +563,7 @@ test("check ignores edits confined to the agent status block", async () => {
 	await check(deps(), session(), { repo: "o/r", issue: 5 });
 	issueBody = issueBody.replace("Paused — waiting", "In review").replace("- item", "- different remaining work");
 	now = "2026-10-08T13:00:00.000Z";
-	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new comments or changes since 1h ago/);
+	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5 since 1h ago/);
 });
 
 test("successful claim keeps the pre-fetch watermark and ignores its own assignment and first status block", async () => {
@@ -579,7 +579,7 @@ test("successful claim keeps the pre-fetch watermark and ignores its own assignm
 	assert.equal(seenRecords()[0].sources.issueComments.checkedAt, "2026-10-08T12:00:00.000Z");
 	assert.deepEqual(seenRecords()[0].assignees, ["woksin"]);
 	now = "2026-10-08T12:02:00.000Z";
-	assert.match(await check(d, session(), { repo: "o/r", issue: 5 }), /No new comments or changes since 2m ago/);
+	assert.match(await check(d, session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5 since 2m ago/);
 });
 
 test("done is gated by new activity, records it as seen, then passes on retry", async () => {
@@ -648,7 +648,7 @@ test("activity fetch failure does not block claim; the original issue fetch stil
 	assert.equal(existsSync(join(dir, "seen")), false, "failed checks do not acknowledge unread activity");
 });
 
-test("PR fetch failure does not block done or advance its activity watermark", async () => {
+test("PR fetch failure refuses done and does not advance its activity watermark", async () => {
 	const d = deps();
 	await appendEvent(d, ev({ issue: 5, pr: "https://github.com/o/r/pull/2" }));
 	await check(d, session(), { repo: "o/r", issue: 5 });
@@ -659,13 +659,14 @@ test("PR fetch failure does not block done or advance its activity watermark", a
 		return fakeRun(cmd, args, opts);
 	} };
 	const text = await update(failing, session(), { repo: "o/r", issue: 5, state: "done" });
-	assert.match(text, /Updated o\/r#5 to Done/);
 	assert.match(text, /Could not check for new activity: offline/);
+	assert.match(text, /Not applied: done needs a successful activity check/);
+	assert.equal(githubWrites().length, 0);
 	assert.equal(seenRecords()[0].sources.issueComments.checkedAt, "2026-10-08T12:00:00.000Z");
 	assert.match(await check(d, session(), { repo: "o/r", issue: 5 }), /Still needs attention/);
 });
 
-test("identity fetch failure does not block done and is reported without acknowledging unseen activity", async () => {
+test("identity fetch failure refuses done and is reported without acknowledging unseen activity", async () => {
 	await check(deps(), session(), { repo: "o/r", issue: 5 });
 	issueComments = [comment("person", "2026-10-08T12:30:00Z", "New input")];
 	now = "2026-10-08T13:00:00.000Z";
@@ -674,8 +675,9 @@ test("identity fetch failure does not block done and is reported without acknowl
 		return fakeRun(cmd, args, opts);
 	} };
 	const text = await update(d, session(), { repo: "o/r", issue: 5, state: "done" });
-	assert.match(text, /Updated o\/r#5 to Done/);
 	assert.match(text, /Could not check for new activity: identity unavailable/);
+	assert.match(text, /Not applied: done needs a successful activity check/);
+	assert.equal(githubWrites().length, 0);
 	assert.equal(seenRecords()[0].sources.issueComments.checkedAt, "2026-10-08T12:00:00.000Z");
 	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /New input/);
 });
@@ -770,7 +772,7 @@ test("a comment posted between the fetch and the status write remains new on the
 	assert.doesNotMatch(await claim(d, session(), { repo: "o/r", issue: 5 }), /Arrived during claim/);
 	assert.equal(seenRecords()[0].sources.issueComments.checkedAt, "2026-10-08T12:00:00.000Z");
 	assert.match(await check(d, session(), { repo: "o/r", issue: 5 }), /Arrived during claim/);
-	assert.match(await check(d, session(), { repo: "o/r", issue: 5 }), /No new comments or changes/);
+	assert.match(await check(d, session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5/);
 });
 
 test("GitHub timestamps, not an ahead-of-GitHub local clock, determine the watermark", async () => {
@@ -798,7 +800,7 @@ test("same-second comment IDs are reported once and only the watermark bucket is
 	assert.match(text, /Same-second arrival/);
 	assert.doesNotMatch(text, /Already fetched/);
 	assert.deepEqual(seenRecords()[0].sources.issueComments.seenIds, ["Issue comment:one", "Issue comment:two"]);
-	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new comments or changes/);
+	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5/);
 	issueComments.push(comment("person", "2026-10-08T12:01:00Z", "Later bucket", "three"));
 	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /Later bucket/);
 	assert.deepEqual(seenRecords()[0].sources.issueComments.seenIds, ["Issue comment:three"]);
@@ -823,7 +825,7 @@ test("each source has its own watermark and same-second reviews and inline comme
 	assert.match(text, /New tied review/);
 	assert.match(text, /New tied inline/);
 	assert.doesNotMatch(text, /Old review|Old inline|Old PR comment/);
-	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new comments or changes/);
+	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5/);
 });
 
 test("submitting a previously fetched draft review is new even when its ID is unchanged", async () => {
@@ -832,7 +834,7 @@ test("submitting a previously fetched draft review is new even when its ID is un
 	await check(deps(), session(), { repo: "o/r", issue: 5 });
 	prReviews[0] = { ...prReviews[0], submittedAt: "2026-10-08T11:30:00Z", state: "CHANGES_REQUESTED", body: "Submitted" };
 	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /PR review CHANGES_REQUESTED[^\n]*\n    ```\n    Submitted/);
-	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new comments or changes/);
+	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5/);
 });
 
 for (const withIds of [false, true]) test(`legacy single-watermark records migrate to every source (IDs=${withIds})`, async () => {
@@ -860,7 +862,7 @@ for (const withIds of [false, true]) test(`legacy single-watermark records migra
 	assert.match(text, /since 1h ago/);
 	assert.equal("checkedAt" in seenRecords()[0], false, "no shared cursor is persisted");
 	for (const cursor of Object.values(seenRecords()[0].sources) as any[]) assert.equal(cursor.checkedAt, newTime);
-	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new comments or changes/);
+	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5/);
 });
 
 test("dot-only repo segments and PR paths are rejected before any GitHub calls", async () => {
@@ -1009,7 +1011,7 @@ test("activity arriving between source fetches remains new even when a later sou
 	assert.match(text, /PR comment arrived after fetch/);
 	assert.match(text, /Review arrived after fetch/);
 	assert.doesNotMatch(text, /Fetched review|Fetched inline/);
-	assert.match(await check(d, session(), { repo: "o/r", issue: 5 }), /No new comments or changes/);
+	assert.match(await check(d, session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5/);
 });
 
 test("empty sources use their GitHub updatedAt when the local clock is ahead", async () => {
@@ -1070,7 +1072,7 @@ test("inline comments drafted earlier become new on review submission via numeri
 	assert.doesNotMatch(text, /Already submitted inline/);
 	assert.equal(seenRecords()[0].sources.inlineComments.checkedAt, "2026-10-08T12:00:00.000Z");
 	assert.ok(calls.findIndex((c) => c.args[1] === "repos/o/r/pulls/2/reviews") < calls.findIndex((c) => c.args[1] === "repos/o/r/pulls/2/comments"));
-	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new comments or changes/);
+	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5/);
 	prInlineComments.push({ id: 3, pull_request_review_id: 100, user: { login: "reviewer" }, created_at: "2026-10-08T12:01:00Z", body: "Created after submission" });
 	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /Created after submission/);
 	assert.equal(seenRecords()[0].sources.inlineComments.checkedAt, "2026-10-08T12:01:00.000Z");
@@ -1089,7 +1091,7 @@ test("missing and unmatched review IDs never borrow another inline comment's sub
 	const text = await check(deps(), session(), { repo: "o/r", issue: 5 });
 	assert.match(text, /Matching review reference/);
 	assert.doesNotMatch(text, /No review reference|Unknown review reference/);
-	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new comments or changes/);
+	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5/);
 });
 
 for (const state of ["COMMENTED", "PENDING"]) test(`a later ${state} review does not hide an outstanding changes-requested gate`, async () => {
@@ -1407,4 +1409,115 @@ test("update with plan writes the Plan field to GitHub", async () => {
 	issueBody = `Body\n\n<!-- agent-status:start -->\n## Status\n**State:** In progress\n**Branch:** feat/x\n**Scope:** s\n<!-- agent-status:end -->`;
 	await update(deps(), session(), { repo: "o/r", issue: 5, state: "in-progress", plan: "Approach X" });
 	assert.match(calls.find((c) => c.cmd === "python3")!.file!, /\*\*Scope:\*\* s\n\*\*Plan:\*\* Approach X/);
+});
+
+test("an unchanged issue body is not reprinted; a changed body or new comment prints with the untrusted warning", async () => {
+	issueBody = "Original requirements";
+	const first = await check(deps(), session(), { repo: "o/r", issue: 5 });
+	assert.match(first, /- Issue body — [^\n]*\n[\s\S]*Original requirements/);
+	assert.match(first, /untrusted data/);
+	now = "2026-10-08T13:00:00.000Z";
+	const quiet = await check(deps(), session(), { repo: "o/r", issue: 5 });
+	assert.equal(quiet, "No new activity on o/r#5 since 1h ago.");
+	issueComments = [comment("person", "2026-10-08T13:00:00Z", "New remark")];
+	const remark = await check(deps(), session(), { repo: "o/r", issue: 5 });
+	assert.match(remark, /New remark/);
+	assert.match(remark, /untrusted data/);
+	assert.doesNotMatch(remark, /Issue body —|Original requirements/);
+	issueBody = "Edited requirements";
+	const edited = await check(deps(), session(), { repo: "o/r", issue: 5 });
+	assert.match(edited, /Issue body changed outside the agent status block/);
+	assert.match(edited, /- Issue body — [^\n]*\n[\s\S]*Edited requirements/);
+	assert.match(edited, /untrusted data/);
+	assert.equal(await check(deps(), session("other", 112), { repo: "o/r", issue: 5 }).then((t) => /- Issue body —/.test(t)), true, "another session's first look still shows the body");
+});
+
+test("the no-plan reminder is shown once per session and issue", async () => {
+	const d = { ...deps(), findPlan: async () => undefined };
+	assert.match(await claim(d, session(), { repo: "o/r", issue: 5 }), /No plan found/);
+	assert.doesNotMatch(await claim(d, session(), { repo: "o/r", issue: 5 }), /No plan found/);
+	assert.match(await claim(d, session(), { repo: "o/r", issue: 6 }), /No plan found/);
+});
+
+test("list is one compact row per issue, without URLs, capped at 40 with a filter hint", async () => {
+	const d = deps();
+	for (let issue = 1; issue <= 43; issue++) await appendEvent(d, ev({ repo: "o/r", issue, state: "paused", note: "n".repeat(120), ts: new Date(Date.parse(now) - issue * 1000).toISOString() }));
+	const text = await list(d, { fetch: false });
+	const lines = text.split("\n");
+	assert.equal(lines.filter((l) => /^o\/r#\d+ /.test(l)).length, 40);
+	assert.equal(lines.at(-1), "… 3 more (filter with repo/state)");
+	assert.doesNotMatch(text, /https:\/\//);
+	assert.match(lines[0], /^o\/r#1 \[Paused\] · s1 ended\/paused · \d+s ago$/);
+	assert.equal(lines[1], `  note: ${"n".repeat(79)}…`);
+	assert.doesNotMatch(await list(d, { fetch: false, repo: "o/r", state: "paused", all: true }).then((t) => t.split("\n").slice(0, 1).join()), /more/);
+});
+
+test("list keeps rows with anomalies visible beyond the cap", async () => {
+	const d = deps();
+	for (let issue = 1; issue <= 45; issue++) await appendEvent(d, ev({ repo: "o/r", issue, state: issue === 45 ? "in-progress" : "paused", ts: new Date(Date.parse(now) - issue * 1000).toISOString() }));
+	const text = await list(d, { fetch: false });
+	assert.match(text, /^o\/r#45 \[In progress\].*\n {2}! session ended while holding In progress/m);
+});
+
+const RATE_LIMIT = Object.assign(new Error("Command failed: gh issue view"), { stderr: "GraphQL: API rate limit already exceeded for user ID 1." });
+const RESET = 1791460800;
+function rateLimited(opts: { rest: boolean }): Runner {
+	return async (cmd, args, o) => {
+		if (cmd === "gh" && args[0] === "issue" && args[1] === "view") throw RATE_LIMIT;
+		if (cmd === "gh" && args[0] === "api" && args[1] === "rate_limit") return { stdout: JSON.stringify({ resources: { graphql: { remaining: 0, reset: RESET }, core: { remaining: 10, reset: RESET + 1 } } }), stderr: "" };
+		if (cmd === "gh" && args[0] === "api" && args[1] === "repos/o/r/issues/5") {
+			if (!opts.rest) throw Object.assign(new Error("Command failed"), { stderr: "HTTP 403: API rate limit exceeded" });
+			return { stdout: JSON.stringify({ title: "REST title", html_url: "https://github.com/o/r/issues/5", state: "open", body: "REST body", user: { login: "opener" }, author_association: "OWNER", labels: [{ name: "bug" }], assignees: [{ login: "a" }], updated_at: now }), stderr: "" };
+		}
+		return fakeRun(cmd, args, o);
+	};
+}
+
+test("GraphQL rate limit falls back to the REST issue endpoint", async () => {
+	const text = await check({ ...deps(), run: rateLimited({ rest: true }) }, session(), { repo: "o/r", issue: 5 });
+	assert.match(text, /^Activity on o\/r#5 /);
+	assert.match(text, /REST body/);
+	assert.equal(seenRecords()[0].title, "REST title");
+	assert.deepEqual(seenRecords()[0].labels, ["bug"]);
+	const out = await claim({ ...deps(), run: rateLimited({ rest: true }), findPlan: async () => "/p" }, session(), { repo: "o/r", issue: 5 });
+	assert.match(out, /Claimed o\/r#5 "REST title"/);
+});
+
+test("when REST is rate limited too, a short error names the reset time", async () => {
+	const text = await check({ ...deps(), run: rateLimited({ rest: false }) }, session(), { repo: "o/r", issue: 5 });
+	assert.equal(text, `Could not check for new activity: GitHub rate limited; retry after ${new Date(RESET * 1000).toISOString()}.`);
+	await assert.rejects(claim({ ...deps(), run: rateLimited({ rest: false }) }, session(), { repo: "o/r", issue: 5 }), /GitHub rate limited; retry after/);
+	assert.equal(existsSync(join(dir, "seen")), false, "a failed fetch is not recorded");
+});
+
+test("done is not applied when the activity check was rate limited, even if the REST issue fallback works", async () => {
+	const base = rateLimited({ rest: true });
+	const run: Runner = async (cmd, args, o) => {
+		if (cmd === "gh" && args[0] === "pr" && args[1] === "view") throw RATE_LIMIT;
+		return base(cmd, args, o);
+	};
+	const calls: string[][] = [];
+	const text = await update({ ...deps(), run: async (c, a, o) => { calls.push([c, ...a]); return run(c, a, o); } }, session(), { repo: "o/r", issue: 5, state: "done", pr: "https://github.com/o/r/pull/9" });
+	assert.match(text, /^Could not check for new activity: GitHub rate limited; retry after /);
+	assert.match(text, /Not applied: done needs a successful activity check/);
+	assert.equal(calls.some((c) => c.includes("issue-status.py") || c.join(" ").includes("edit")), false, "nothing was written");
+});
+
+test("done is refused for a nonexistent PR URL and when offline, but in-progress still applies", async () => {
+	const missing: Deps = { ...deps(), run: async (cmd, args, o) => {
+		if (cmd === "gh" && args[0] === "pr" && args[1] === "view") throw Object.assign(new Error("Command failed"), { stderr: "GraphQL: Could not resolve to a PullRequest (HTTP 404)" });
+		return fakeRun(cmd, args, o);
+	} };
+	const text = await update(missing, session(), { repo: "o/r", issue: 5, state: "done", pr: "https://github.com/o/r/pull/99999" });
+	assert.match(text, /^Could not check for new activity: .*Could not resolve/);
+	assert.match(text, /Not applied: done needs a successful activity check; fix the cause/);
+	assert.equal(githubWrites().length, 0);
+	const offline: Deps = { ...deps(), run: async (cmd, args, o) => {
+		if (cmd === "gh" && args[0] === "api" && args[1] !== "user") throw new Error("offline");
+		return fakeRun(cmd, args, o);
+	} };
+	const off = await update(offline, session(), { repo: "o/r", issue: 5, state: "done" });
+	assert.match(off, /Not applied: done needs a successful activity check/);
+	assert.equal(githubWrites().length, 0);
+	assert.match(await update(missing, session(), { repo: "o/r", issue: 5, state: "in-progress", pr: "https://github.com/o/r/pull/99999" }), /Updated o\/r#5 to In progress/);
 });

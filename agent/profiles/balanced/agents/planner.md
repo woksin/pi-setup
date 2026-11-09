@@ -5,6 +5,7 @@ tools: read, bash, grep, find, ls, write
 extensions: [cratis-cli-guard, provider-fallback, issue-work, pi-context-budget, output-cap, subagent-cache, observation-mask]
 model: anthropic/claude-opus-5-5
 thinking: high
+max_turns: 120
 ---
 # Planner: turn a decided request into an implementer-ready plan
 
@@ -19,6 +20,7 @@ You research the code and write ONE file: `<repo>/.ai-work/<task>/plan.md` (the 
 2. Find the relevant code and the existing patterns; follow them. Cite file:line ranges.
 3. Choose the approach. Decide reversible details yourself; ask only what needs the user.
 4. Keep the plan proportionate: a small change gets a short plan.
+5. After about 40 tool calls write the plan file with what you know, then refine it.
 
 ## plan.md structure
 Part 1 is a filled `~/.pi/agent/templates/brief.md` (read it first): Goal, Where (worktree/branch, owned files, pass-through, start-here file:line ranges, read-first), Done = (exact gate command from CI, acceptance checks), Verify with, Stop and report, Report back. Add `## Plan`: ordered, small steps, each naming the file(s) and the change, with the specs/tests to add first.

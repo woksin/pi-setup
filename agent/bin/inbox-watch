@@ -10,6 +10,11 @@
 # with GROUP-/ALL-); messages the lane or an alias sent are skipped.
 # Aliases: --alias NAME (repeatable) or INBOX_ALIASES=R-AI,R-Studio.
 # INBOX_DIR overrides user.json's orchMessagesDir, then ~/.pi/agent/inbox.
+# Burst coalescing: when the newest unseen file is under INBOX_SETTLE_SECONDS (15; 0
+# disables) old, wait for a quiet window, at most INBOX_SETTLE_MAX_SECONDS (45). A name with
+# an uppercase URGENT or STOP token (X-URGENT-y.md, A-to-ALL-STOP-x.md) returns at once.
+# BCAST-*.md are passive: they never wake a lane and are listed (once, until
+# INBOX_PASSIVE_TTL_HOURS, 24) with its next real wake; BCAST-*-act.md wakes like ALL.
 # Marker advances to scan START only after output, so concurrent edits stay new.
 # Its JSON content baselines initial files; unchanged initial files stay silent.
 set -eu
@@ -23,6 +28,10 @@ Options:
 Environment:
   INBOX_ALIASES  comma-separated aliases (same as --alias)
   INBOX_DIR      inbox directory (default: ~/.pi/agent/inbox)
+  INBOX_SETTLE_SECONDS      quiet window before reporting a burst (default 15, 0 = off)
+  INBOX_SETTLE_MAX_SECONDS  cap on that wait (default 45)
+  INBOX_PASSIVE_TTL_HOURS   BCAST-* files older than this are dropped (default 24)
+Names: URGENT/STOP tokens skip the wait; BCAST-* files never wake, only ride along.
 Examples:
   inbox-watch L15              # first run creates the marker and exits 1
   inbox-watch --alias R-AI L15 team   # changes the marker after printing names
@@ -226,10 +235,11 @@ if [[ ! -e $mark && ! -L $mark ]]; then
     initial_files record && set_mark || { printf 'inbox-watch: cannot create marker\n' >&2; exit 2; }
     exit 1
 fi
+if [[ ! -e $mark && ! -L $mark ]]; then
+    initial_files record && set_mark || { printf 'inbox-watch: cannot create marker\n' >&2; exit 2; }
+    exit 1
+fi
 args=(. -maxdepth 1 -type f -name '*.md')
-# The filter compares file ctime with the marker mtime obtained from a no-follow descriptor.
-find "${args[@]}" -print > "$listing" || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
-initial_files filter || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
 me=("$lane" ${aliases[@]+"${aliases[@]}"})
 # has LIST ID: LIST is "-a-b-c-"; ID may itself contain dashes (R-AI).
 has() { [[ $1 == *"-$2-"* ]]; }
@@ -274,16 +284,53 @@ inbound() {
     for id in "${me[@]}" ALL ${group:+"$group"}; do has "$rcpts" "$id" && return 0; done
     return 1
 }
-found=0
-while IFS= read -r path; do
-    name=${path#./}
-    [[ $name == *-inbox.marker ]] && continue
-    inbound "$name" || continue
-    printf '%s\n' "$name"
-    found=1
-done < "$listing"
-if (( found )); then
-    set_mark || { printf 'inbox-watch: cannot update marker\n' >&2; exit 2; }
-    exit 0
-fi
-exit 1
+settle=${INBOX_SETTLE_SECONDS:-15}
+settle_max=${INBOX_SETTLE_MAX_SECONDS:-45}
+ttl_minutes=$(( ${INBOX_PASSIVE_TTL_HOURS:-24} * 60 ))
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+# Fills real (wake), passive (BCAST, listed with the next real wake) and urgent.
+# Re-touching $start first means the later set_mark never skips a file written meanwhile.
+collect() {
+    touch "$start"
+    # The filter compares file ctime with the marker mtime obtained from a no-follow descriptor.
+    find "${args[@]}" -print > "$listing" || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
+    initial_files filter || { printf 'inbox-watch: scan failed\n' >&2; exit 2; }
+    real=(); passive=(); urgent=0; newest=0
+    local path name base m
+    while IFS= read -r path; do
+        name=${path#./}
+        [[ $name == *-inbox.marker ]] && continue
+        if [[ $name == BCAST-* ]]; then
+            if [[ $name != *-act.md ]]; then
+                [[ -n $(find "$path" -maxdepth 0 -mmin "-$ttl_minutes" 2>/dev/null) ]] && passive+=("$name")
+                continue
+            fi
+        else
+            inbound "$name" || continue
+        fi
+        real+=("$name")
+        base=${name%.md}
+        [[ $base =~ (^|-)(URGENT|STOP)(-|$) ]] && urgent=1
+        m=$(mtime "$path"); (( m > newest )) && newest=$m
+    done < "$listing"
+    return 0
+}
+collect
+# Only passive files: stay silent and leave them unseen for the next real wake.
+(( ${#real[@]} )) || exit 1
+began=$SECONDS
+while (( ! urgent && settle > 0 )); do
+    age=$(( $(date +%s) - newest - 1 ))   # whole-second mtime may overstate the age by 1 s
+    (( age < 0 )) && age=0
+    elapsed=$(( SECONDS - began ))
+    (( age >= settle || elapsed >= settle_max )) && break
+    wait_for=$(( settle - age ))
+    (( wait_for > settle_max - elapsed )) && wait_for=$(( settle_max - elapsed ))
+    (( wait_for < 1 )) && wait_for=1
+    sleep "$wait_for"
+    collect
+    (( ${#real[@]} )) || exit 1
+done
+printf '%s\n' "${real[@]}" ${passive[@]+"${passive[@]}"}
+set_mark || { printf 'inbox-watch: cannot update marker\n' >&2; exit 2; }
+exit 0
