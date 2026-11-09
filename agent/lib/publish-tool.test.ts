@@ -81,10 +81,40 @@ test("CLI help is standalone and parsed requests use only shared publisher core"
 	assert.equal((await cliMain(["--help", "issue-create"], { send })).exitCode, 2);
 	assert.equal((await cliMain(["check", "--file", "a", "--method", "POST"], { send })).exitCode, 2);
 });
-for (const [code, expected] of [["invalid-request", 2], ["scan-refused", 3], ["payload-unreadable", 4], ["cleanup-failed", 4], ["gh-failed", 5], ["gh-timeout", 5], ["cancelled", 130]] as const) test(`CLI fixed exit for ${code}`, async () => {
+for (const [code, expected] of [["invalid-request", 2], ["scan-refused", 3], ["payload-unreadable", 4], ["payload-not-found", 4], ["payload-symlink", 4], ["payload-not-file", 4], ["payload-permission", 4], ["cleanup-failed", 4], ["gh-failed", 5], ["gh-timeout", 5], ["cancelled", 130]] as const) test(`CLI fixed exit for ${code}`, async () => {
 	const result = await cliMain(["check", "--file", "a"], { send: async () => outcome(code) });
 	assert.deepEqual(result, { text: `publish: ${code}`, exitCode: expected });
 });
+test("tool and CLI render safe validation details without echoing unknown keys or values", async () => {
+	const registered = tool({ admit: () => { assert.fail("validate first"); } });
+	for (const input of [
+		{ kind: "issue-comment", body: "VALUE-SENTINEL" },
+		{ kind: "gist-create", files: ["a"], repo: "VALUE-SENTINEL" },
+		{ kind: "check", files: ["a"], "sk-KEY-SENTINEL": "VALUE-SENTINEL" },
+		{ kind: "issue-close", repo: "owner/repo", number: 1, reason: "VALUE-SENTINEL" },
+		{ kind: "KIND-SENTINEL" },
+	]) {
+		const result = await registered.execute("id", input, undefined, undefined, context);
+		assert.equal(result.details.code, "invalid-request"); assert.equal(typeof result.details.detail, "string");
+		assert.equal(result.content[0].text, `publish: invalid-request\ndetail: ${result.details.detail}`);
+		assert.ok(!JSON.stringify(result).includes("SENTINEL"));
+	}
+	const cli = await cliMain(["issue-comment", "--body", "VALUE-SENTINEL"]);
+	assert.equal(cli.exitCode, 2); assert.match(cli.text, /^publish: invalid-request\ndetail: missing: repo, number/);
+	assert.ok(!cli.text.includes("SENTINEL"));
+	const missingBody = await cliMain(["pr-create", "--repo", "owner/repo", "--title", "VALUE-SENTINEL"]);
+	assert.match(missingBody.text, /pr-create needs body or bodyFile/); assert.ok(!missingBody.text.includes("SENTINEL"));
+});
+
+test("publisher detail is rendered after the unchanged first line and included in tool details", async () => {
+	const detail = "exit=1 category=rate-limit; retry once, then stop";
+	const send: typeof publish = async () => ({ ...outcome("gh-failed"), detail });
+	const result = await tool({ ...allowed, send }).execute("id", request, undefined, undefined, context);
+	assert.equal(result.content[0].text, `publish: gh-failed\ndetail: ${detail}`);
+	assert.deepEqual(result.details, { code: "gh-failed", detail });
+	assert.deepEqual(await cliMain(["check", "--file", "a"], { send }), { text: `publish: gh-failed\ndetail: ${detail}`, exitCode: 5 });
+});
+
 test("bin help smoke does not publish or show raw paths", () => {
 	const text = execFileSync(process.execPath, [new URL("../bin/pi-publish", import.meta.url).pathname, "--help"], { encoding: "utf8" });
 	assert.equal(text, PUBLISH_HELP);

@@ -30,9 +30,10 @@ export type PublishRequest =
 
 export class InvalidRequest extends Error {
 	readonly code = "invalid-request";
-	constructor() { super("publish: invalid-request"); }
+	readonly detail?: string;
+	constructor(detail?: string) { super("publish: invalid-request"); if (detail) this.detail = detail; }
 }
-const invalid = (): never => { throw new InvalidRequest(); };
+const invalid = (detail?: string): never => { throw new InvalidRequest(detail); };
 const own = (object: object, key: string) => Object.prototype.hasOwnProperty.call(object, key);
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): value is RecordValue {
@@ -149,14 +150,33 @@ export const publishRequestSchema = { type: "object", additionalProperties: fals
 	required: ["kind", ...shape.required], additionalProperties: false, type: "object", allOf: schemaConstraints(kind),
 	properties: Object.fromEntries(["kind", ...shape.required, ...shape.optional].map(key => [key, key === "kind" ? { const: kind } : properties[key].schema])),
 })) };
+/** Static contract text: never includes caller-supplied values or unknown field names. */
+export function kindContract(kind: PublishRequest["kind"]): string {
+	if (!own(contracts, kind)) return invalid();
+	const shape = contracts[kind];
+	const body = REQUIRED_BODY_KINDS.includes(kind) ? "; body or bodyFile" : "";
+	const edit = EDIT_KINDS.includes(kind) ? "; at least one of title/body/bodyFile for edits" : "";
+	return `${kind} requires: ${shape.required.join(", ")}${body}${edit}; optional: ${shape.optional.join(", ")}`;
+}
+function unknownFieldsDetail(keys: string[], kind: PublishRequest["kind"]): string {
+	const known = keys.filter(key => own(properties, key)), count = keys.length - known.length;
+	return [known.length ? `unknown field for ${kind}: ${known.join(", ")}` : "", count ? `unknown fields: ${count}` : ""].filter(Boolean).join("; ");
+}
 function validateShape(input: RecordValue): void {
-	if (typeof input.kind !== "string" || !own(contracts, input.kind)) invalid();
-	const shape = contracts[input.kind as PublishRequest["kind"]];
+	const suppliedKind = input.kind;
+	if (typeof suppliedKind !== "string" || !own(contracts, suppliedKind)) invalid(`kind must be one of: ${Object.keys(contracts).join(", ")}`);
+	const kind = suppliedKind as PublishRequest["kind"];
+	const shape = contracts[kind], contract = kindContract(kind);
 	const allowed = new Set(["kind", ...shape.required, ...shape.optional]);
-	if (Object.keys(input).some(key => !allowed.has(key))) invalid();
-	if (shape.required.some(key => !own(input, key))) invalid();
+	const unknown = Object.keys(input).filter(key => !allowed.has(key));
+	if (unknown.length) invalid(`${unknownFieldsDetail(unknown, kind)}; ${contract}`);
+	const missing = shape.required.filter(key => !own(input, key));
+	if (missing.length) invalid(`missing: ${missing.join(", ")}; ${contract}`);
 	for (const key of Object.keys(input).filter(key => key !== "kind")) {
-		if (!properties[key].validate(input[key])) invalid();
+		if (!properties[key].validate(input[key])) {
+			const values = properties[key].schema.enum as string[] | undefined;
+			invalid(`invalid value: ${key}${values ? `; allowed: ${values.join(", ")}` : ""}; ${contract}`);
+		}
 	}
 }
 function needsBody(input: RecordValue): boolean {
@@ -165,8 +185,9 @@ function needsBody(input: RecordValue): boolean {
 }
 function validateBody(input: RecordValue): void {
 	const hasBody = own(input, "body") || own(input, "bodyFile");
-	if (own(input, "body") && own(input, "bodyFile")) invalid();
-	if (needsBody(input) && !hasBody) invalid();
+	const kind = input.kind as PublishRequest["kind"], contract = kindContract(kind);
+	if (own(input, "body") && own(input, "bodyFile")) invalid(`body and bodyFile are mutually exclusive; ${contract}`);
+	if (needsBody(input) && !hasBody) invalid(`${kind} needs body or bodyFile; ${contract}`);
 	if (input.createIfNone === true && input.editLast !== true) invalid();
 }
 function validateEdit(input: RecordValue): void {
@@ -202,7 +223,7 @@ export function validateRequest(value: unknown): PublishRequest {
 		const detached = JSON.parse(encoded);
 		validateShape(detached); validateBody(detached); validateChanges(detached);
 		return freeze(detached) as PublishRequest;
-	} catch { throw new InvalidRequest(); }
+	} catch (error) { throw error instanceof InvalidRequest ? error : new InvalidRequest(); }
 }
 
 export interface PayloadSource { label: string; source: { text: string } | { file: string }; basename?: string }
@@ -318,5 +339,5 @@ export function parseCli(argv: readonly string[]): PublishRequest | { kind: "hel
 		const result: RecordValue = { kind: argv[0] };
 		for (let index = 1; index < argv.length;) index += cliOption({ result, argv, index });
 		return validateRequest(result);
-	} catch { throw new InvalidRequest(); }
+	} catch (error) { throw error instanceof InvalidRequest ? error : new InvalidRequest(); }
 }

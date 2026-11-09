@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { constants, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
@@ -32,7 +32,8 @@ function code(result: PublishResult, expected: string) {
 	assert.equal(result.code, expected);
 	assert.equal(result.text, expected === "published" ? "published" : expected === "scan-clean" ? "scan clean" : `publish: ${expected}`);
 	assert.equal(result.isError, !["published", "scan-clean"].includes(expected));
-	assert.doesNotMatch(JSON.stringify(result), /private-value|source\.md|trusted\/gh|stderr/);
+	assert.doesNotMatch(JSON.stringify(result), /private-value|trusted\/gh|stderr/);
+	if (!["invalid-request", "gh-failed", "payload-not-found", "payload-symlink", "payload-not-file", "payload-permission", "payload-too-large"].includes(expected)) assert.equal(result.detail, undefined);
 }
 
 test("real descriptor capture, permissions, exact BOM/newlines, forced host and sanitized success", () => fixture(async root => {
@@ -130,7 +131,7 @@ for (const pathType of ["directory", "symlink", "fifo", "missing"] as const) tes
 	let spawns = 0, snapshots = 0;
 	const mocks = adapters(() => { spawns++; return new Child(); });
 	mocks.io!.mkdtemp = async () => { snapshots++; throw new Error("private-value"); };
-	code(await publish({ ...base, bodyFile: source }, safeContext, mocks), "payload-unreadable");
+	code(await publish({ ...base, bodyFile: source }, safeContext, mocks), ({ directory: "payload-not-file", symlink: "payload-symlink", fifo: "payload-not-file", missing: "payload-not-found" })[pathType]);
 	assert.equal(spawns, 0); assert.equal(snapshots, 0);
 }));
 
@@ -139,7 +140,7 @@ test("nonregular and initially oversized descriptors close without any read", as
 		let reads = 0;
 		const file = fakeHandle({ ...options, read: async () => { reads++; return { bytesRead: 0 }; } });
 		const mocks = adapters(); mocks.io!.open = async () => file.handle;
-		code(await publish({ kind: "check", files: ["source.md"] }, safeContext, mocks), options.regular === false ? "payload-unreadable" : "payload-too-large");
+		code(await publish({ kind: "check", files: ["source.md"] }, safeContext, mocks), options.regular === false ? "payload-not-file" : "payload-too-large");
 		assert.equal(reads, 0); assert.equal(file.closes(), 1);
 	}
 });
@@ -300,6 +301,110 @@ test("executable resolution refuses relative, nonregular and nonexecutable candi
 test("output exactly at each stream limit is discarded without rejecting success", async () => {
 	const mocks = adapters(() => { const child = new Child(); queueMicrotask(() => { child.stdout.write(Buffer.alloc(256 * 1024)); child.stderr.write(Buffer.alloc(256 * 1024)); child.finish(); }); return child; });
 	code(await publish({ ...base, body: "Safe" }, safeContext, mocks), "published");
+});
+
+for (const [errno, expected] of [
+	["ENOENT", "payload-not-found"], ["ENOTDIR", "payload-not-found"], ["ELOOP", "payload-symlink"],
+	["EISDIR", "payload-not-file"], ["EACCES", "payload-permission"], ["EPERM", "payload-permission"],
+	["EIO", "payload-unreadable"], ["toString", "payload-unreadable"], [undefined, "payload-unreadable"],
+] as const) test(`open errno ${errno} uses only whitelisted code and caller path`, async () => {
+	const mocks = adapters(); let opened = "";
+	mocks.io!.open = async path => { opened = path; throw Object.assign(new Error("private-value"), { code: errno, path: "private-value" }); };
+	const result = await publish({ ...base, bodyFile: "draft.md" }, { ...safeContext, cwd: "/workspace/project" }, mocks);
+	code(result, expected); assert.equal(opened, "/workspace/project/draft.md");
+	assert.equal(result.detail, expected === "payload-unreadable" ? undefined : "/workspace/project/draft.md");
+});
+
+test("capture details abbreviate only the home component, sanitize and bound caller paths", async () => {
+	const mocks = adapters(); mocks.io!.open = async () => { throw Object.assign(new Error("private-value"), { code: "ENOENT" }); };
+	for (const [cwd, expected] of [["/home/person/project", "~/project/draft.md"], ["/home/person-other", "/home/person-other/draft.md"], ["/work/\u200b\n", "/work/??/draft.md"]]) {
+		const result = await publish({ ...base, bodyFile: "draft.md" }, { home: "/home/person", cwd }, mocks);
+		assert.equal(result.detail, expected);
+	}
+	const result = await publish({ ...base, bodyFile: "a".repeat(400) }, { ...safeContext, cwd: "/workspace" }, mocks);
+	assert.equal(result.detail?.length, 300);
+});
+
+test("oversize descriptors name the resolved caller path; read and close errno remain generic", async () => {
+	const mocks = adapters(); mocks.io!.open = async () => fakeHandle({ size: MAX_STRING_BYTES + 1 }).handle;
+	const result = await publish({ ...base, bodyFile: "draft.md" }, safeContext, mocks);
+	assert.equal(result.detail, resolve("draft.md"));
+	for (const operation of ["read", "close"] as const) {
+		const file = fakeHandle(); file.handle[operation] = async () => { throw Object.assign(new Error("private-value"), { code: "ENOENT" }); };
+		mocks.io!.open = async () => file.handle;
+		const failed = await publish({ ...base, bodyFile: "draft.md" }, safeContext, mocks);
+		code(failed, "payload-unreadable"); assert.equal(failed.detail, undefined);
+	}
+});
+
+for (const [message, category, advice] of [
+	["gh: API rate limit exceeded (HTTP 403)", "rate-limit", "retry once, then stop"],
+	["HTTP 403 secondary rate limit", "rate-limit", "retry once, then stop"],
+	["HTTP 429", "rate-limit", "retry once, then stop"],
+	["HTTP 403 Forbidden", "auth", "do not retry; check gh auth status"],
+	["gh: Not Found (HTTP 404)", "not-found", "do not retry; fix the request (repo, number, fields)"],
+	["HTTP 401: Bad credentials", "auth", "do not retry; check gh auth status"],
+	["HTTP 422: Validation Failed", "validation", "do not retry; fix the request (repo, number, fields)"],
+	["error connecting: connection reset to api.github.com", "network", "retry once, then stop"],
+	["HTTP 503 Service Unavailable", "network", "retry once, then stop"],
+	["dial tcp: no such host", "network", "retry once, then stop"],
+	["TLS handshake timed out", "network", "retry once, then stop"],
+	["unexpected failure", "unclassified", "do not retry blindly"],
+] as const) test(`gh stderr classifies ${category} without retaining any received text`, async () => {
+	const mocks = adapters(() => {
+		const child = new Child(); queueMicrotask(() => {
+			child.stdout.write("HTTP 401: Bad credentials");
+			child.stderr.emit("data", Buffer.from(message.slice(0, 8)));
+			child.stderr.emit("data", message.slice(8) + " private-value PAYLOAD-SENTINEL"); child.finish(1);
+		}); return child;
+	});
+	const result = await publish({ ...base, body: "PAYLOAD-SENTINEL" }, safeContext, mocks);
+	code(result, "gh-failed"); assert.equal(result.detail, `exit=1 category=${category}; ${advice}`);
+	assert.ok(!JSON.stringify(result).includes("PAYLOAD-SENTINEL"));
+});
+
+for (const termination of ["signal", "spawn", "child-error", "stream-error"] as const) test(`gh ${termination} has a value-free unclassified detail`, async () => {
+	const mocks = adapters(() => {
+		if (termination === "spawn") throw new Error("private-value");
+		const child = new Child(); queueMicrotask(() => {
+			child.stderr.write("HTTP 403 API rate limit exceeded private-value");
+			if (termination === "child-error") child.emit("error", new Error("private-value"));
+			if (termination === "stream-error") child.stderr.emit("error", new Error("private-value"));
+			child.finish(null);
+		}); return child;
+	});
+	const result = await publish({ ...base, body: "Safe" }, safeContext, mocks);
+	code(result, "gh-failed");
+	assert.equal(result.detail, termination === "signal" ? "exit=none category=rate-limit; retry once, then stop" : "exit=none category=unclassified; do not retry blindly");
+});
+
+test("streaming UTF-8 stderr decoding handles split characters and a split category", async () => {
+	const mocks = adapters(() => {
+		const child = new Child(); queueMicrotask(() => {
+			const bytes = Buffer.from("é HTTP 422 Validation Failed private-value");
+			for (const byte of bytes) child.stderr.emit("data", Buffer.from([byte]));
+			child.finish(3);
+		}); return child;
+	});
+	const result = await publish({ ...base, body: "Safe" }, safeContext, mocks);
+	code(result, "gh-failed"); assert.equal(result.detail, "exit=3 category=validation; do not retry; fix the request (repo, number, fields)");
+});
+
+test("successful gh exit never exposes or classifies stderr", async () => {
+	const mocks = adapters(() => {
+		const child = new Child(); queueMicrotask(() => { child.stderr.write("HTTP 401 private-value"); child.finish(0); }); return child;
+	});
+	code(await publish({ ...base, body: "Safe" }, safeContext, mocks), "published");
+});
+
+test("gh classification retains only the first 16 KiB and ignores stdout", async () => {
+	const mocks = adapters(() => {
+		const child = new Child(); queueMicrotask(() => {
+			child.stdout.write("HTTP 401"); child.stderr.write("x".repeat(16 * 1024)); child.stderr.write("HTTP 401 private-value"); child.finish(7);
+		}); return child;
+	});
+	const result = await publish({ ...base, body: "Safe" }, safeContext, mocks);
+	assert.equal(result.detail, "exit=7 category=unclassified; do not retry blindly");
 });
 
 test("unsupported operations fail validation before any IO", async () => {
