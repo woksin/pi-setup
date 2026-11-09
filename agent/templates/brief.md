@@ -26,6 +26,7 @@ Investigation budget: for any question needing more than ~5 reads/searches or ~2
 - [ ] The Tier 1 gate `<exact command, e.g. .ai-work/ci-local.sh>` exits 0 (whole-solution build with CI's configuration and warnings, lint, all non-integration tests). Affected-project commands are for iterating only, never completion evidence. If a Tier 1 part genuinely cannot run here, name it and say what ran instead.
 - [ ] Candidate delivery instead (repo has an open `pi-train` candidate): targeted checks `<command>` exit 0 and the branch is delivered with `pi-train fold <branch>`; the candidate owner runs Tier 1 once.
 - [ ] <acceptance check: failing-first spec now passes / behaviour X observable via Y>.
+- [ ] Every changed file at Code Health >= 9.5 (`code_health_score`), with a before/after table in the report; any exception named with a reason.
 - [ ] Diff limited to the owned files; no unrelated reformatting or renames. Work only in this repository and issue; report anything else instead of doing it.
 - [ ] Every claim of "done" is backed by a check you ran on the final code state; a report without a run check is "unverified", not done.
 - [ ] The deliverable is the change in the repository, not notes about it. Decide reversible implementation details yourself and record the choice in the report; ask only for decisions the brief reserves.

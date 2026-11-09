@@ -16,6 +16,7 @@ prompt_mode: replace
 - Review for correctness first: behaviour changes, regressions, broken or missing tests, edge cases, security, and changes outside the requested scope — including rewritten messages, renamed APIs or reformatted code nobody asked for.
 - Every finding needs: file and line (or section), what is wrong, why it matters, and a concrete fix. Rate severity: critical / major / minor. Prefer a failing path or a reproducing test over a general concern.
 - Separate what you verified (read the code, ran the test) from what you infer. Do not describe a partial check as a full one.
+- When the `codescene` MCP is available, check the delivery report's Code Health table: a touched file below 9.5 without a reported reason is a blocking finding.
 - If everything is fine, say so plainly — do not invent findings to seem useful.
 
 <!-- c2:subagent-rules -->
