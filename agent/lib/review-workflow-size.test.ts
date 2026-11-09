@@ -21,13 +21,13 @@ function loadFit(path: string): (res: Record<string, unknown>, budget?: number) 
 
 for (const path of files) {
   // The test sandbox installs agent/ only; profile copies are checked in the repo checkout.
-  test(`${path}: fit measures the arranged result including reviewerLines`, { skip: !existsSync(new URL(path, root)) }, () => {
+  test(`${path}: fit measures the pretty-printed arranged result`, { skip: !existsSync(new URL(path, root)) }, () => {
     const fit = loadFit(path);
     const reviewers = Array.from({ length: 12 }, (_, i) => ({ label: `review:long-label-number-${i}`, effective: ["provider/some-long-model-name"], ok: true, expected: "provider/some-long-model-name", assistants: 3 }));
     const blocking = Array.from({ length: 6 }, (_, i) => `(major) file${i}.ts:1: ${"x".repeat(120)}`);
-    const budget = 2800; // reachable only when reviewerLines are counted while shrinking
+    const budget = 2800; // reachable only by dropping reviewerLines or compacting reviewers
     const out = fit({ passed: false, blocking, reviewers: structuredClone(reviewers) }, budget);
-    assert.ok(Array.isArray(out.reviewerLines));
-    assert.ok(JSON.stringify(out).length <= budget, `result ${JSON.stringify(out).length} > ${budget}`);
+    assert.ok(JSON.stringify(out, null, 2).length <= budget, "pretty-printed length");
+    assert.ok(out.reviewerLines === undefined || Array.isArray(out.reviewerLines));
   });
 }
