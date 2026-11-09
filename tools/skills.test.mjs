@@ -633,35 +633,3 @@ test("a passing full result with security-lane verification is reused for either
     }
   }
 });
-
-// anthropic-heavy, kimi-heavy, openai-heavy and openai-only ship legacy review.js copies (no validation/cache layer); syncing them is tracked separately.
-const legacyReviewProfiles = ["anthropic-heavy", "kimi-heavy", "openai-heavy", "openai-only"];
-const currentReviewFiles = reviewFiles.filter(file => !legacyReviewProfiles.some(name => file.includes(`/${name}/`)));
-for (const file of currentReviewFiles) {
-  test(`${file}: findings and verdict come first, provenance last, one line per reviewer`, async () => {
-    for (const args of [base, { ...base, quick: true }, { ...base, deep: true, deepReason: "security", deepJustification: "auth change" }]) {
-      const { result } = await runReview(args, { file, override: args.deep ? withClaims : undefined });
-      const keys = Object.keys(result);
-      assert.deepEqual(keys.slice(0, 2), ["passed", "complete"]);
-      assert.ok(keys.indexOf("blocking") < keys.indexOf("reviewers"), "blocking before provenance");
-      assert.ok(keys.indexOf("next") < keys.indexOf("reviewers"), "next before provenance");
-      assert.deepEqual(keys.slice(keys.indexOf("reviewers")), args.quick ? ["reviewers"] : ["reviewers", "reviewCacheKey"]);
-      assert.equal(result.reviewerLines.length, result.reviewers.length);
-      assert.match(result.reviewerLines[0], /^\S.*: \S+ ok turns=3$/);
-      assert.ok(JSON.stringify(result).indexOf('"reviewers"') > JSON.stringify(result).indexOf('"blocking"'));
-    }
-  });
-
-  test(`${file}: invalid arguments get a short reply without unrelated help`, async () => {
-    const { result } = await runReview({ round: 1, author: "gpt" }, { file });
-    assert.equal(result.passed, false);
-    assert.ok(result.problems.length >= 1);
-    assert.ok(result.error.length <= 600, `error is ${result.error.length} chars`);
-    assert.ok(!/Round 2\+|Replace placeholders/.test(result.error));
-    assert.match(result.error, /Example: \{"target"/);
-    const sha = await runReview({ ...base, headSha: "abc" }, { file });
-    assert.match(sha.result.error, /Replace placeholders/);
-    const follow = await runReview({ ...base, since: "c".repeat(40) }, { file });
-    assert.match(follow.result.error, /Round 2\+/);
-  });
-}

@@ -129,11 +129,7 @@ if (input.cachedReview !== undefined && input.baseSha === undefined) problems.pu
 const reviewExample = '{"target":"git diff <baseSha>..<headSha> in <abs repo path>","context":"<intent, issue #>","author":"gpt","round":1,"headSha":"<full HEAD SHA>","baseSha":"<full base SHA>"}'
 const followUpExample = 'Round 2+: add "since":"<full SHA reviewed last>","prior":"<ONE string: blocking/unverified findings + dismissed findings with reasons>","round":2.'
 const shaHelp = 'Replace placeholders first: resolve SHAs with git rev-parse (40 hex for SHA-1, 64 for SHA-256), not short SHAs or moving refs; author is "claude" or "gpt".'
-if (problems.length) {
-  const all = problems.join('\n')
-  const help = [/since needs prior|Follow-up reviews|round is required|Round \d+ refused/.test(all) ? followUpExample : '', /headSha|baseSha/.test(all) ? shaHelp : ''].filter(Boolean)
-  return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}\nExample: ${reviewExample}${help.map(h => '\n' + h).join('')}`, problems }
-}
+if (problems.length) return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}\nCopy-paste example: ${reviewExample}\n${followUpExample}\n${shaHelp}`, problems }
 
 const target = input.target
 const context = input.context ? `\n\nIntent / spec of the work:\n${input.context}` : ''
@@ -225,23 +221,6 @@ const compactRuntimeRuns = (res, oversized) => {
 }
 // End runtime recording.
 
-// Verdict and findings first, provenance last: a consumer that cuts the result at its size limit loses provenance, not findings.
-const LEAD_KEYS = ['passed', 'complete', 'mode', 'round', 'blockingCount', 'unverifiedCount', 'reviewerLines', 'blocking', 'unverified', 'incomplete',
-  'advisory', 'preExistingSecurity', 'rejected', 'rejectedCount', 'summaries', 'coverageNotes', 'next', 'target', 'runtimeCallCount']
-const reviewerLine = run => typeof run === 'string' ? run
-  : `${run.label}: ${run.effective.join(', ') || 'no runtime model record'} ${run.ok ? 'ok' : 'INCOMPLETE'}${run.assistants ? ` turns=${run.assistants}` : ''}`
-const arrange = res => {
-  if (!Array.isArray(res.reviewers)) return res
-  const { reviewers, reviewCacheKey, reviewerLines, ...rest } = res
-  const withLines = { ...rest, reviewerLines: reviewers.map(reviewerLine) }
-  const out = {}
-  for (const key of LEAD_KEYS) if (key in withLines) out[key] = withLines[key]
-  for (const key of Object.keys(withLines)) if (!(key in out)) out[key] = withLines[key]
-  out.reviewers = reviewers
-  if (reviewCacheKey !== undefined) out.reviewCacheKey = reviewCacheKey
-  return out
-}
-
 // Cache identities include the pinned routing, not just caller-supplied diff identity.
 const cacheKey = 'review-v3-coverage:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
   mode: deep ? 'deep' : 'full', author, context: input.context ?? '', routing: AGENT_MODELS, runtimeStamp: RUNTIME_STAMP,
@@ -285,10 +264,10 @@ if (!quick && !since && !prior && input.headSha && input.baseSha && cached?.revi
     Array.isArray(cached.blocking) && cached.blocking.length === 0 &&
     Array.isArray(cached.unverified) && cached.unverified.length === 0) {
   checkCachedCoverage(cached)
-  if (runtimeProblems.length === 0) return arrange({ ...cached, reviewers: runtimeReviewers(), cached: true })
+  if (runtimeProblems.length === 0) return { ...cached, reviewers: runtimeReviewers(), cached: true }
   const { reviewCacheKey, ...uncertified } = cached
-  return arrange({ ...uncertified, cached: false, passed: false, complete: false, incomplete: runtimeProblems,
-    reviewers: runtimeReviewers(), next: runtimeNext })
+  return { ...uncertified, cached: false, passed: false, complete: false, incomplete: runtimeProblems,
+    reviewers: runtimeReviewers(), next: runtimeNext }
 }
 
 const COVERAGE = 'Set coverage honestly: complete = every file and section of the requested scope was examined for your lens, ' +
@@ -449,11 +428,9 @@ const full = f => ({
 })
 // Keep the serialized result under the parent notification limit (~4000 chars) without ever dropping
 // gate status or the count of blockers: shrink detail step by step, then fall back to one-liners and counts.
-const fit = (res, budget = 3600) => arrange(fitSize(res, budget))
-const fitSize = (res, budget) => {
+const fit = (res, budget = 3600) => {
   if (!res.coverageNotes?.length) delete res.coverageNotes
-  // Measure the arranged result: arrange adds reviewerLines after this budget check would otherwise run.
-  const size = () => JSON.stringify(arrange(res)).length
+  const size = () => JSON.stringify(res).length
   if (size() <= budget) return res
   trimRuntimeDetails(res)
   if (res.coverageNotes) res.coverageNotes = res.coverageNotes.map(n => clip(n, 160))
