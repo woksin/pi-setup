@@ -129,11 +129,7 @@ if (input.cachedReview !== undefined && input.baseSha === undefined) problems.pu
 const reviewExample = '{"target":"git diff <baseSha>..<headSha> in <abs repo path>","context":"<intent, issue #>","author":"gpt","round":1,"headSha":"<full HEAD SHA>","baseSha":"<full base SHA>"}'
 const followUpExample = 'Round 2+: add "since":"<full SHA reviewed last>","prior":"<ONE string: blocking/unverified findings + dismissed findings with reasons>","round":2.'
 const shaHelp = 'Replace placeholders first: resolve SHAs with git rev-parse (40 hex for SHA-1, 64 for SHA-256), not short SHAs or moving refs; author is "claude" or "gpt".'
-if (problems.length) {
-  const all = problems.join('\n')
-  const help = [/since needs prior|Follow-up reviews|round is required|Round \d+ refused/.test(all) ? followUpExample : '', /headSha|baseSha/.test(all) ? shaHelp : ''].filter(Boolean)
-  return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}\nExample: ${reviewExample}${help.map(h => '\n' + h).join('')}`, problems }
-}
+if (problems.length) return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}\nCopy-paste example: ${reviewExample}\n${followUpExample}\n${shaHelp}`, problems }
 
 const target = input.target
 const context = input.context ? `\n\nIntent / spec of the work:\n${input.context}` : ''
@@ -225,25 +221,6 @@ const compactRuntimeRuns = (res, oversized) => {
 }
 // End runtime recording.
 
-// Verdict and findings first, provenance last: a consumer that cuts the result at its size limit loses provenance, not findings.
-const LEAD_KEYS = ['passed', 'complete', 'mode', 'round', 'blockingCount', 'unverifiedCount', 'reviewerLines', 'blocking', 'unverified', 'incomplete',
-  'advisory', 'preExistingSecurity', 'rejected', 'rejectedCount', 'summaries', 'coverageNotes', 'next', 'target', 'runtimeCallCount']
-// A reuse-slimmed run (see fit) omits expected/effective: both are derivable from agentType and modelCounts.
-const runModels = run => run.effective ?? Object.keys(run.modelCounts ?? {})
-const reviewerLine = run => typeof run === 'string' ? run
-  : `${run.label}: ${runModels(run).join(', ') || 'no runtime model record'} ${run.ok ? 'ok' : 'INCOMPLETE'}${run.assistants ? ` turns=${run.assistants}` : ''}`
-const arrange = (res, lines = true) => {
-  if (!Array.isArray(res.reviewers)) return res
-  const { reviewers, reviewCacheKey, reviewerLines, ...rest } = res
-  const withLines = lines ? { ...rest, reviewerLines: reviewers.map(reviewerLine) } : rest
-  const out = {}
-  for (const key of LEAD_KEYS) if (key in withLines) out[key] = withLines[key]
-  for (const key of Object.keys(withLines)) if (!(key in out)) out[key] = withLines[key]
-  out.reviewers = reviewers
-  if (reviewCacheKey !== undefined) out.reviewCacheKey = reviewCacheKey
-  return out
-}
-
 // Cache identities include the pinned routing, not just caller-supplied diff identity.
 const cacheKey = 'review-v3-coverage:' + fingerprint(JSON.stringify({ target, headSha: input.headSha, baseSha: input.baseSha ?? null,
   mode: deep ? 'deep' : 'full', author, context: input.context ?? '', routing: AGENT_MODELS, runtimeStamp: RUNTIME_STAMP,
@@ -258,7 +235,7 @@ const cacheAgentTypes = {
   // The security lane is verified by the author side (the provider that is not reviewing it).
   [`verify:security-${secSide}-by-${secSide === 'claude' ? 'gpt' : 'claude'}`]: secSide === 'claude' ? (deep || author === 'gpt' ? 'second-opinion' : 'sol-reviewer') : 'reviewer',
 }
-const cachedProvenance = run => ({ ...run, models: run ? runModels(run) : undefined })
+const cachedProvenance = run => ({ ...run, models: run?.effective })
 const reusableRun = run => runtimeAvailable(cachedProvenance(run), runtimeModels(cachedProvenance(run)))
 const completeCacheCoverage = (cached, runs) => {
   const labels = new Set(runs.map(run => run?.label))
@@ -287,10 +264,10 @@ if (!quick && !since && !prior && input.headSha && input.baseSha && cached?.revi
     Array.isArray(cached.blocking) && cached.blocking.length === 0 &&
     Array.isArray(cached.unverified) && cached.unverified.length === 0) {
   checkCachedCoverage(cached)
-  if (runtimeProblems.length === 0) return arrange({ ...cached, reviewers: runtimeReviewers(), cached: true })
+  if (runtimeProblems.length === 0) return { ...cached, reviewers: runtimeReviewers(), cached: true }
   const { reviewCacheKey, ...uncertified } = cached
-  return arrange({ ...uncertified, cached: false, passed: false, complete: false, incomplete: runtimeProblems,
-    reviewers: runtimeReviewers(), next: runtimeNext })
+  return { ...uncertified, cached: false, passed: false, complete: false, incomplete: runtimeProblems,
+    reviewers: runtimeReviewers(), next: runtimeNext }
 }
 
 const COVERAGE = 'Set coverage honestly: complete = every file and section of the requested scope was examined for your lens, ' +
@@ -449,42 +426,19 @@ const full = f => ({
   severity: f.severity, location: clip(f.location, 120), problem: clip(f.problem, 300), fix: clip(f.fix, 160),
   ...(f.foundBy ? { foundBy: f.foundBy } : {}), ...(f.note ? { note: clip(f.note, 160) } : {}),
 })
-// The workflow notification shows JSON.stringify(result, null, 2) (workflowResultText) and cuts that text at 4000 characters
-// (formatWorkflowNotification: `result.length > 4000 ? result.slice(0, 4000) + '...(truncated)'`) in
-// @tintinweb/pi-subagents dist/workflow/task.js. So measure exactly that: the pretty-printed final result including
-// reviewCacheKey, against 4000 minus a 100 character safety margin.
-const RESULT_BUDGET = 4000 - 100
-// Shrink in an order that keeps cache reuse: display-only material first (target echo, notes, summaries, advisory), then
-// redundant run fields (expected/effective, re-derived on reuse), the reviewerLines duplicate, summaries and refuted findings,
-// then finding detail, and
-// only as a last resort compact reviewers to strings (which cannot be reused).
-// Gate status and the count of blockers are never dropped. reviewCacheKey is decided by the caller from the full runs.
-const fit = (res, budget = RESULT_BUDGET) => {
+// Keep the serialized result under the parent notification limit (~4000 chars) without ever dropping
+// gate status or the count of blockers: shrink detail step by step, then fall back to one-liners and counts.
+const fit = (res, budget = 3600) => {
   if (!res.coverageNotes?.length) delete res.coverageNotes
-  let lines = true
-  const view = () => arrange(res, lines)
-  const size = () => JSON.stringify(view(), null, 2).length
-  if (size() <= budget) return view()
-  const reusable = res.reviewCacheKey !== undefined
-  if (!reusable) trimRuntimeDetails(res)
-  if (typeof res.target === 'string') res.target = clip(res.target, 60)
+  const size = () => JSON.stringify(res).length
+  if (size() <= budget) return res
+  trimRuntimeDetails(res)
   if (res.coverageNotes) res.coverageNotes = res.coverageNotes.map(n => clip(n, 160))
   res.advisory = res.advisory ? res.advisory.slice(0, 3).concat(res.advisory.length > 3 ? [`…${res.advisory.length - 3} more`] : []) : res.advisory
   if (res.summaries) res.summaries = res.summaries.map(s => ({ by: s.by, summary: clip(s.summary, 150) }))
-  if (Array.isArray(res.rejected) && res.rejected.length > 1) res.rejected = res.rejected.slice(0, 1) // rejectedCount keeps the total
-  if (size() <= budget) return view()
-  // Reusable runs stay reusable when slimmed: expected and effective are re-derived from agentType and modelCounts on reuse.
-  const fullRuns = res.reviewers
-  if (reusable) res.reviewers = res.reviewers.map(({ expected, effective, ...run }) => run)
-  if (size() <= budget) return view()
-  lines = false
-  if (size() <= budget) return view()
-  // Display-only and non-gating: reviewer summaries and refuted findings (rejectedCount keeps the total).
-  delete res.summaries
-  if (Array.isArray(res.rejected)) res.rejected = []
-  if (size() <= budget) return view()
+  if (size() <= budget) return res
   for (const key of ['blocking', 'unverified']) if (Array.isArray(res[key])) res[key] = res[key].map(f => oneLine(f))
-  if (size() <= budget) return view()
+  if (size() <= budget) return res
   for (const key of ['blocking', 'unverified']) {
     if (Array.isArray(res[key]) && res[key].length > 6) {
       const n = res[key].length
@@ -492,12 +446,8 @@ const fit = (res, budget = RESULT_BUDGET) => {
     }
   }
   res.advisory = Array.isArray(res.advisory) ? [`${res.advisory.length} advisory items omitted for size`] : res.advisory
-  if (size() > budget && Array.isArray(res.reviewers)) {
-    res.reviewers = fullRuns
-    compactRuntimeRuns(res, true)
-    delete res.reviewCacheKey // compacted runs lose provenance and cannot be reused
-  }
-  return view()
+  compactRuntimeRuns(res, size() > budget)
+  return res
 }
 const ADVISORY_MAX = 10
 const advisoryList = list => {
@@ -634,8 +584,6 @@ const passed = complete && confirmed.length === 0 && unverified.length === 0
 log(`${confirmed.length} blocking, ${advisory.length} advisory, ${rejected.length} rejected, ${unverified.length} unverified — ${passed ? 'PASSED' : 'NOT PASSED'}`)
 if (!complete) log(`Incomplete: ${incomplete.join('; ')}`)
 
-// Reusability comes from the full runs, before fit may compact them for display.
-const reusable = passed && !since && !prior && input.headSha && input.baseSha && runtimeReviewers().every(reusableRun)
 const verdict = fit({
   mode: deep ? 'deep' : 'full',
   round,
@@ -655,7 +603,7 @@ const verdict = fit({
   rejected: rejected.map(f => clip(`${f.location}: ${f.problem} — refuted: ${f.reason}`, 160)).slice(0, 3),
   rejectedCount: rejected.length,
   next: runtimeProblems.length ? runtimeNext : nextStep(passed),
-  // Only complete, passing, whole-change full reviews are eligible for reuse.
-  ...(reusable ? { reviewCacheKey: cacheKey } : {}),
 })
+// Only complete, passing, whole-change full reviews are eligible for reuse.
+if (passed && !since && !prior && input.headSha && input.baseSha && verdict.reviewers.every(reusableRun)) verdict.reviewCacheKey = cacheKey
 return verdict
