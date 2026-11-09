@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 0b4d5b0586e477ea85dd0144c009e80bfbff8f9f7f032a89099ab6e20694531a
+// pi-setup-source-sha256: bff81daaeed20896bdcdfb272600696e44358e8e27a14df6a25d224d209efdf7
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -419,6 +419,12 @@ function messageName(from, to, topic, at, collision = 1) {
 function parseMessageName(name) {
   if (!name.endsWith(".md")) return void 0;
   const tokens = name.replace(/^(?:\d+-)+/, "").slice(0, -3).split("-");
+  const parsed = parseDirected(tokens);
+  if (parsed || tokens[0] !== "BCAST") return parsed;
+  const topic = tokens.slice(1).join("-").replace(/-[0-9]{4}(?:-[0-9]+)?$/, "");
+  return topic ? { from: "", to: ["BCAST"], topic } : void 0;
+}
+function parseDirected(tokens) {
   const k = tokens.findIndex((t2) => t2 === "to" || t2 === "from");
   const start2 = k < 0 ? 0 : k + 1;
   let end = start2;
@@ -1735,6 +1741,21 @@ var init_backend = __esm({
           try {
             writeFileSync3(path2, m2.body, { flag: "wx" });
             return { name, from: m2.from, to: [m2.to], topic: m2.topic, at, path: path2 };
+          } catch (e) {
+            if (e.code !== "EEXIST") throw e;
+          }
+        }
+      }
+      async postPassive(m2) {
+        if (!validTopic(m2.topic)) throw new Error("invalid message name");
+        mkdirSync2(this.dir, { recursive: true });
+        const at = this.now();
+        for (let i2 = 1; ; i2++) {
+          const name = messageName("", "BCAST", m2.topic, at, i2).replace(/^-to-/, "");
+          const path2 = join14(this.dir, name);
+          try {
+            writeFileSync3(path2, m2.body, { flag: "wx" });
+            return { name, from: "", to: ["BCAST"], topic: m2.topic, at, path: path2 };
           } catch (e) {
             if (e.code !== "EEXIST") throw e;
           }
@@ -4531,9 +4552,15 @@ async function close(id, opts, c2, root, ctx) {
   persistClosed(c2, root, { id, reason: opts.reason || "", by: from, at });
   const line = closedLine(to, opts.reason, at);
   await backend.setStatus(id, line);
-  const message = await backend.send({ from, to: c2.messages.broadcast, topic: `lane-closed-${id.toLowerCase()}`, body: closeBody(id, to, opts.reason, unread2) });
+  const topic = `lane-closed-${id.toLowerCase()}`;
+  const message = await backend.postPassive({ topic, body: closeBody(id, to, opts.reason, unread2) });
   ctx.out(`${id}: ${line}`);
   ctx.out(message.path);
+  if (to && to !== from) {
+    const wake = await backend.send({ from, to, topic, body: `Lane ${id} closed, pick up its work; details in ${message.name}
+` });
+    ctx.out(wake.path);
+  }
   ctx.out(hint);
   return 0;
 }

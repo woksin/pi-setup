@@ -4,6 +4,37 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/home.ts";
 import { FileBackend } from "../src/lanes/backend.ts";
+import { parseMessageName } from "../src/lanes/names.ts";
+
+test("file backend posts passive notices exclusively without delivering to lane inboxes", async () => {
+  const dir = tempDir("lanes-passive");
+  const b = new FileBackend(dir, () => new Date(2026, 0, 1, 12, 0));
+  const first = await b.postPassive({ topic: "lane-closed-l2", body: "closed\n" });
+  const second = await b.postPassive({ topic: "lane-closed-l2", body: "again\n" });
+  assert.equal(first.name, "BCAST-lane-closed-l2-1200.md");
+  assert.equal(second.name, "BCAST-lane-closed-l2-1200-2.md");
+  assert.equal(readFileSync(first.path, "utf8"), "closed\n");
+  assert.equal(readFileSync(second.path, "utf8"), "again\n");
+  assert.ok((await b.list()).every((m) => m.from === "" && m.to.join() === "BCAST"));
+  assert.equal((await b.list()).length, 2);
+  assert.deepEqual(await b.inbox("L1"), []);
+  writeFileSync(join(dir, "L1-inbox.marker"), "");
+  assert.deepEqual(await b.unread("L1"), []);
+  await assert.rejects(() => b.postPassive({ topic: "../bad", body: "x" }));
+  for (const id of ["r-to", "r-from"]) {
+    const closed = await b.postPassive({ topic: `lane-closed-${id}`, body: "closed\n" });
+    const again = await b.postPassive({ topic: `lane-closed-${id}`, body: "again\n" });
+    assert.equal(again.name, `BCAST-lane-closed-${id}-1200-2.md`);
+    for (const name of [closed.name, again.name]) {
+      assert.deepEqual(parseMessageName(name), { from: "", to: ["BCAST"], topic: `lane-closed-${id}` });
+    }
+  }
+  assert.equal((await b.list()).length, 6);
+  // A lane id BCAST stays an ordinary sender or recipient of directed messages.
+  assert.deepEqual(parseMessageName("BCAST-to-L1-note-1200.md"), { from: "BCAST", to: ["L1"], topic: "note" });
+  assert.deepEqual(parseMessageName("L1-to-BCAST-note-1200.md"), { from: "L1", to: ["BCAST"], topic: "note" });
+  assert.deepEqual(parseMessageName("BCAST-lane-closed-l2-1200.md"), { from: "", to: ["BCAST"], topic: "lane-closed-l2" });
+});
 
 test("file backend collision safety, recipient rules, filters and status", async () => {
   const dir = tempDir("lanes-messages");

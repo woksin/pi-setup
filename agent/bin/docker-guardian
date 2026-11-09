@@ -41,7 +41,7 @@ MSG=${DOCKER_GUARDIAN_MESSAGES:-}
 now=$(date +%s); ts=$(date '+%Y-%m-%d %H:%M:%S')
 log(){ echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 announce(){ # $1 file-suffix, $2 text
-  [ -n "$MSG" ] && [ -d "$MSG" ] && printf '%s\n' "$2" > "$MSG/ALL-docker-guardian-$(date +%H%M)-$1.md"
+  [ -n "$MSG" ] && [ -d "$MSG" ] && printf '%s\n' "$2" > "$MSG/BCAST-docker-guardian-$1-$(date +%H%M).md"
   osascript -e "display notification \"$2\" with title \"docker-guardian\"" >/dev/null 2>&1 || true
 }
 # run with deadline: dl SECONDS cmd...
@@ -403,7 +403,7 @@ fi
 echo $now >> "$S/restarts"; echo 0 > "$S/fails"
 log "restarting Docker Desktop"
 why="was unresponsive for ~6 min"; [ "${PLANNED:-0}" = 1 ] && why="is idle and has a planned settings change (more VM memory)"
-announce restart "docker-guardian ($(date +%H:%M)): Docker Desktop $why and is being restarted automatically. Docker phases running now will fail; rerun them once ALL-docker-guardian-*-ok appears. Non-Docker work is unaffected."
+announce restart "docker-guardian ($(date +%H:%M)): Docker Desktop $why and is being restarted automatically. Docker phases running now will fail; rerun them once the docker-guardian \`ok\` notice appears (or \`docker ps\` answers). Non-Docker work is unaffected."
 dl 60 osascript -e 'quit app "Docker"' >/dev/null 2>&1
 for i in $(seq 1 30); do pgrep -qf 'com.docker.backend' || break; sleep 2; done
 pkill -f 'com.docker.backend' 2>/dev/null; pkill -f '/Applications/Docker.app/Contents/MacOS/Docker' 2>/dev/null; sleep 3
