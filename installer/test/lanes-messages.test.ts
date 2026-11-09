@@ -30,6 +30,10 @@ test("file backend posts passive notices exclusively without delivering to lane 
     }
   }
   assert.equal((await b.list()).length, 6);
+  // A lane id BCAST stays an ordinary sender or recipient of directed messages.
+  assert.deepEqual(parseMessageName("BCAST-to-L1-note-1200.md"), { from: "BCAST", to: ["L1"], topic: "note" });
+  assert.deepEqual(parseMessageName("L1-to-BCAST-note-1200.md"), { from: "L1", to: ["BCAST"], topic: "note" });
+  assert.deepEqual(parseMessageName("BCAST-lane-closed-l2-1200.md"), { from: "", to: ["BCAST"], topic: "lane-closed-l2" });
 });
 
 test("file backend collision safety, recipient rules, filters and status", async () => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 16bc052ac03c455a47faf86e8e7f0fc31f5e30271870b12af474652368a80769
+// pi-setup-source-sha256: bff81daaeed20896bdcdfb272600696e44358e8e27a14df6a25d224d209efdf7
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -110,10 +110,12 @@ function messageName(from, to, topic, at, collision = 1) {
 function parseMessageName(name) {
   if (!name.endsWith(".md")) return void 0;
   const tokens = name.replace(/^(?:\d+-)+/, "").slice(0, -3).split("-");
-  if (tokens[0] === "BCAST") {
-    const topic2 = tokens.slice(1).join("-").replace(/-[0-9]{4}(?:-[0-9]+)?$/, "");
-    return topic2 ? { from: "", to: ["BCAST"], topic: topic2 } : void 0;
-  }
+  const parsed = parseDirected(tokens);
+  if (parsed || tokens[0] !== "BCAST") return parsed;
+  const topic = tokens.slice(1).join("-").replace(/-[0-9]{4}(?:-[0-9]+)?$/, "");
+  return topic ? { from: "", to: ["BCAST"], topic } : void 0;
+}
+function parseDirected(tokens) {
   const k = tokens.findIndex((t) => t === "to" || t === "from");
   const start2 = k < 0 ? 0 : k + 1;
   let end = start2;

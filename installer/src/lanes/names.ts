@@ -14,11 +14,14 @@ export function messageName(from: string, to: string, topic: string, at: Date, c
 export function parseMessageName(name: string): { from: string; to: string[]; topic: string } | undefined {
   if (!name.endsWith(".md")) return undefined;
   const tokens = name.replace(/^(?:\d+-)+/, "").slice(0, -3).split("-");
+  const parsed = parseDirected(tokens);
+  if (parsed || tokens[0] !== "BCAST") return parsed;
   // Passive broadcasts carry no sender; their topic may contain lane ids such as r-to or r-from.
-  if (tokens[0] === "BCAST") {
-    const topic = tokens.slice(1).join("-").replace(/-[0-9]{4}(?:-[0-9]+)?$/, "");
-    return topic ? { from: "", to: ["BCAST"], topic } : undefined;
-  }
+  const topic = tokens.slice(1).join("-").replace(/-[0-9]{4}(?:-[0-9]+)?$/, "");
+  return topic ? { from: "", to: ["BCAST"], topic } : undefined;
+}
+
+function parseDirected(tokens: string[]): { from: string; to: string[]; topic: string } | undefined {
   const k = tokens.findIndex(t => t === "to" || t === "from");
   const start = k < 0 ? 0 : k + 1;
   let end = start;
