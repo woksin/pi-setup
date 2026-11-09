@@ -615,14 +615,19 @@ for (const r of results.filter(Boolean)) {
   coverageNotes.push(...coverageNotesFor(by, r))
   if (r.findings.some(isBlocking) && !r.verdicts) incomplete.push(`verification of ${by}'s findings failed`)
   summaries.push({ by, summary: r.summary })
+  // Exactly one verdict per blocking finding: a verdict for any other index is untrusted output, so the lane is incomplete.
+  if (r.verdicts && r.verdicts.some(v => !Number.isInteger(v?.index) || !r.findings[v.index] || !isBlocking(r.findings[v.index])))
+    incomplete.push(`verification of ${by}'s findings returned a verdict for an unknown finding`)
   const checker = verifierFor(r.side).name
   r.findings.forEach((f, i) => {
     const item = { ...f, foundBy: by }
     if (!isBlocking(f)) return advisory.push(item)
-    const verdict = r.verdicts ? r.verdicts.find(v => v.index === i) : null
+    // Missing, duplicate (identical or contradictory) verdicts leave the finding unverified.
+    const matches = r.verdicts ? r.verdicts.filter(v => v?.index === i) : []
+    const verdict = matches.length === 1 ? matches[0] : null
     // Fail closed: anything not positively refuted or positively downgraded keeps blocking.
     if (!verdict || verdict.status === 'uncertain' || !['blocks', 'not-blocking', 'refuted'].includes(verdict.status))
-      unverified.push({ ...item, note: verdict ? verdict.reason : 'no verdict' })
+      unverified.push({ ...item, note: verdict ? verdict.reason : matches.length > 1 ? 'duplicate verdicts' : 'no verdict' })
     else if (verdict.status === 'blocks') confirmed.push({ ...item, confirmedBy: checker, note: verdict.reason })
     else if (verdict.status === 'not-blocking') advisory.push({ ...item, severity: 'minor', downgradedBy: checker })
     else rejected.push({ ...item, rejectedBy: checker, reason: verdict.reason })

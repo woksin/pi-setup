@@ -718,3 +718,25 @@ test("transitional runs without provenance pass but never receive a receipt key"
   assert.equal(run.result.passed, true);
   assert.equal(run.result.reviewCacheKey, undefined);
 });
+
+// ---- exactly one verdict per blocking finding; anything else fails closed ----
+const verdictCases = {
+  "duplicate contradictory verdict": [{ index: 0, status: "refuted", reason: "r" }, { index: 0, status: "blocks", reason: "b" }],
+  "duplicate identical verdict": [{ index: 0, status: "refuted", reason: "r" }, { index: 0, status: "refuted", reason: "r" }],
+  "extra verdict for an unknown finding": [{ index: 0, status: "refuted", reason: "r" }, { index: 7, status: "refuted", reason: "r" }],
+  "missing verdict": [],
+};
+for (const file of reviewFiles) {
+  for (const [name, verdicts] of Object.entries(verdictCases)) {
+    test(`${file}: ${name} is never a pass and never cacheable`, async () => {
+      const run = await runReview(base, { file, override: (opts, res) => {
+        if (opts.label.startsWith("review:")) res.findings = [blockingClaim(0)];
+        else res.verdicts = verdicts;
+        return res;
+      } });
+      assert.equal(run.result.passed, false);
+      assert.equal(run.result.reviewCacheKey, undefined);
+      assert.ok(run.result.unverifiedCount > 0 || run.result.complete === false);
+    });
+  }
+}
