@@ -826,7 +826,7 @@ interface ActivityPr { state: string; mergedAt?: string | null; updatedAt?: stri
 interface FetchedSource { beforeCall: string; updatedAt?: string; items: ActivityItem[] }
 interface ActivityData { sources: Partial<Record<ActivitySource, FetchedSource>>; issue?: ActivityIssue; pr?: ActivityPr; login?: string; error?: string }
 interface ActivityItem { id: string; kind: string; author: string; association: string; time: string; body: string; reviewState?: string }
-interface ActivityCheck { text: string; hasNew: boolean; unresolved?: boolean; data?: IssueData; seen?: SeenRecord; login?: string }
+interface ActivityCheck { text: string; hasNew: boolean; unresolved?: boolean; failed?: boolean; data?: IssueData; seen?: SeenRecord; login?: string }
 
 // Independent files avoid read/modify/write races between sessions or different issues.
 const seenFile = (d: Deps, s: SessionInfo, repo: string, issue: number) => join(paths(d).seen,
@@ -1049,7 +1049,7 @@ async function inspectActivity(d: Deps, s: SessionInfo, repo: string, issue: num
 	const latest = events.slice().reverse().find((e) => typeof e.pr === "string" && PR_RE.test(e.pr));
 	pr = pr ?? latest?.pr;
 	const data = await fetchActivity(d, repo, issue, pr);
-	if (data.error) return { text: `Could not check for new activity: ${data.error}`, hasNew: false, data: data.issue };
+	if (data.error) return { text: `Could not check for new activity: ${data.error}`, hasNew: false, failed: true, data: data.issue };
 	const now = d.now?.() ?? new Date();
 	const seen = snapshot(data, pr);
 	const comments = commentsSince(data, previous, pr);
@@ -1227,6 +1227,8 @@ export async function update(d: Deps, s: SessionInfo, a: UpdateArgs): Promise<st
 	if (a.pr && !PR_RE.test(a.pr)) throw new Error("pr must be a full GitHub pull request URL");
 	const now = () => (d.now?.() ?? new Date());
 	const activity = await inspectActivity(d, s, a.repo, a.issue, a.pr);
+	// Fail closed: closing without a successful activity check would skip the gate.
+	if (a.state === "done" && activity.failed) return `${activity.text}\nNot applied: done needs a successful activity check; fix the cause (e.g. the PR URL) or retry.`;
 	if (a.state === "done" && (activity.hasNew || activity.unresolved))
 		return `${activity.text}\n${activity.unresolved ? RECENT_GATE : ACTIVITY_GATE}${await recordActivity(d, s, a.repo, a.issue, activity)}`;
 	const fetched = activity.data ?? await step("gh issue view", () => fetchIssue(d, a.repo, a.issue));
