@@ -1,0 +1,167 @@
+{
+  "defaults": {
+    "models": {
+      "reviewer": "anthropic/claude-opus-5-5",
+      "sol-reviewer": "openai-codex/gpt-6.1-sol",
+      "second-opinion": "openai-codex/gpt-6-astra"
+    },
+    "sides": {
+      "claude": { "agentType": "reviewer", "name": "Opus 5.5" },
+      "gpt": { "agentType": "sol-reviewer", "name": "GPT-6.1 Sol" }
+    },
+    "deepSides": {
+      "gpt": { "agentType": "second-opinion", "name": "GPT-6 Astra" }
+    },
+    "quickSides": {
+      "claude": { "agentType": "reviewer", "name": "Opus 5.5" },
+      "gpt": { "agentType": "sol-reviewer", "name": "GPT-6.1 Sol" }
+    },
+    "authors": { "claude": "claude", "gpt": "gpt" },
+    "sameAuthorVerifier": { "side": "claude", "author": "gpt", "agentType": "second-opinion", "name": "GPT-6 Astra" },
+    "description": "Cross-provider code/work review (Opus 5.5 + GPT-6.1 Sol; GPT-6 Astra with deep: true); only blocking findings gate, verified by the other provider",
+    "whenToUse": "Reviewing a diff, change set, document or plan before it is merged or published; pass author, round and full SHAs.",
+    "phases": [
+      { "title": "Review", "detail": "Opus 5.5 and GPT-6.1 Sol (Astra in deep mode) review independently, plus a cross-provider security lens" },
+      { "title": "Verify", "detail": "each finding is challenged by the other provider" }
+    ],
+    "fullSummary": [
+      "Full mode (default): Claude Opus 5.5 (`reviewer`) and GPT-6.1 Sol (`sol-reviewer`, high)",
+      "review independently; each one's findings are then checked by the OTHER provider,",
+      "which tries to refute them. Only findings that survive are reported as confirmed.",
+      "The Opus review runs at the reviewer agent's medium effort (Opus 5.5 medium >= xhigh, Oct 2026);",
+      "verification runs at each agent's default effort."
+    ],
+    "deepSummary": [
+      "Deep mode (`deep: true`): the GPT side uses GPT-6 Astra (`second-opinion`, high) instead of",
+      "Sol, for both its review and its verification of Opus's findings. Reserve it for",
+      "security-sensitive, concurrency/algorithmic or large cross-cutting changes — it costs",
+      "considerably more OpenAI budget."
+    ]
+  },
+  "profiles": {
+    "balanced": {},
+    "balanced-openai": {},
+    "lean": {},
+    "balanced-anthropic": {
+      "models": {
+        "reviewer": "anthropic/claude-opus-5-5",
+        "sol-reviewer": "anthropic/claude-sonnet-5-5",
+        "second-opinion": "anthropic/claude-opus-5-5"
+      },
+      "sides": {
+        "claude": { "agentType": "reviewer", "name": "Opus 5.5" },
+        "gpt": { "agentType": "sol-reviewer", "name": "Sonnet 5.5" }
+      },
+      "deepSides": {
+        "gpt": { "agentType": "second-opinion", "name": "Opus 5.5 high" }
+      },
+      "quickSides": {
+        "claude": { "agentType": "reviewer", "name": "Opus 5.5" },
+        "gpt": { "agentType": "sol-reviewer", "name": "Sonnet 5.5" }
+      },
+      "sameAuthorVerifier": { "side": "claude", "author": "gpt", "agentType": "second-opinion", "name": "Opus 5.5 high" },
+      "description": "Two-model code/work review on Anthropic models (Opus 5.5 + Sonnet 5.5; Opus 5.5 high with deep: true); only blocking findings gate, verified by the other model",
+      "phases": [
+        { "title": "Review", "detail": "Opus 5.5 and Sonnet 5.5 (Opus 5.5 high in deep mode) review independently, plus a security lens from the non-author side" },
+        { "title": "Verify", "detail": "each finding is challenged by the other model" }
+      ],
+      "fullSummary": [
+        "Full mode (default, balanced-anthropic profile): Claude Opus 5.5 (`reviewer`) and Claude Sonnet 5.5 (`sol-reviewer`)",
+        "review independently; each one's findings are then checked by the OTHER model,",
+        "which tries to refute them. Only findings that survive are reported as confirmed.",
+        "The Opus review runs at the reviewer agent's medium effort (Opus 5.5 medium >= xhigh, Oct 2026);",
+        "verification runs at each agent's default effort."
+      ],
+      "deepSummary": [
+        "Deep mode (`deep: true`): the second side uses Opus 5.5 high (`second-opinion`) instead of",
+        "Sonnet, for both its review and its verification of Opus's findings. Reserve it for",
+        "security-sensitive, concurrency/algorithmic or large cross-cutting changes."
+      ]
+    },
+    "anthropic-heavy": {
+      "sides": {
+        "claude": { "agentType": "reviewer", "name": "Opus 5.5", "reviewEffort": "high" },
+        "gpt": { "agentType": "sol-reviewer", "name": "GPT-6.1 Sol" }
+      },
+      "fullSummary": [
+        "Full mode (default): Claude Opus 5.5 (`reviewer`) and GPT-6.1 Sol (`sol-reviewer`, high)",
+        "review independently; each one's findings are then checked by the OTHER provider,",
+        "which tries to refute them. Only findings that survive are reported as confirmed.",
+        "The Opus review runs at high effort (the reviewer agent defaults to medium);",
+        "verification runs at each agent's default effort."
+      ]
+    },
+    "kimi-heavy": {
+      "sides": {
+        "claude": { "agentType": "reviewer", "name": "Opus 5.5", "reviewEffort": "high" },
+        "gpt": { "agentType": "sol-reviewer", "name": "GPT-6.1 Sol" }
+      },
+      "fullSummary": [
+        "Full mode (default): Claude Opus 5.5 (`reviewer`) and GPT-6.1 Sol (`sol-reviewer`, high)",
+        "review independently; each one's findings are then checked by the OTHER provider,",
+        "which tries to refute them. Only findings that survive are reported as confirmed.",
+        "The Opus review runs at high effort (the reviewer agent defaults to medium);",
+        "verification runs at each agent's default effort."
+      ]
+    },
+    "openai-heavy": {
+      "sides": {
+        "claude": { "agentType": "reviewer", "name": "Opus 5.5", "reviewEffort": "high" },
+        "gpt": { "agentType": "second-opinion", "name": "GPT-6 Astra", "reviewEffort": "xhigh" }
+      },
+      "deepSides": {
+        "gpt": { "agentType": "second-opinion", "name": "GPT-6 Astra", "reviewEffort": "xhigh" }
+      },
+      "description": "Cross-provider code/work review (Opus 5.5 + GPT-6 Astra), blocking findings verified by the other provider",
+      "phases": [
+        { "title": "Review", "detail": "Opus 5.5 and GPT-6 Astra review independently, plus a cross-provider security lens" },
+        { "title": "Verify", "detail": "each finding is challenged by the other provider" }
+      ],
+      "fullSummary": [
+        "Full mode (default, openai-heavy profile): Claude Opus 5.5 (`reviewer`) and GPT-6 Astra (`second-opinion`, xhigh)",
+        "review independently; each one's findings are then checked by the OTHER provider,",
+        "which tries to refute them. Only findings that survive are reported as confirmed.",
+        "The Opus review runs at high effort (the reviewer agent defaults to medium);",
+        "verification runs at each agent's default effort."
+      ]
+    },
+    "openai-only": {
+      "models": {
+        "reviewer": "openai-codex/gpt-6-astra",
+        "sol-reviewer": "openai-codex/gpt-6.1-sol",
+        "second-opinion": "openai-codex/gpt-6-astra"
+      },
+      "sides": {
+        "sol": { "agentType": "sol-reviewer", "name": "GPT-6.1 Sol", "reviewEffort": "high" },
+        "astra": { "agentType": "reviewer", "name": "GPT-6 Astra", "reviewEffort": "high" }
+      },
+      "deepSides": {
+        "astra": { "agentType": "second-opinion", "name": "GPT-6 Astra", "reviewEffort": "xhigh" }
+      },
+      "quickSides": {
+        "sol": { "agentType": "sol-reviewer", "name": "GPT-6.1 Sol", "reviewEffort": "high" },
+        "astra": { "agentType": "reviewer", "name": "GPT-6 Astra", "reviewEffort": "high" }
+      },
+      "authors": { "sol": "sol", "astra": "astra", "gpt": "sol", "claude": "sol" },
+      "sameAuthorVerifier": null,
+      "description": "OpenAI-only independent Sol/Astra review with adversarial cross-model verification",
+      "whenToUse": "Review a whole change before merge; quick mode for iteration, deep mode for hard reasoning",
+      "phases": [
+        { "title": "Review", "detail": "Sol and Astra review independently, plus a cross-model security lens" },
+        { "title": "Verify", "detail": "the other OpenAI model challenges blocking findings" }
+      ],
+      "fullSummary": [
+        "Full mode (default, openai-only profile): GPT-6.1 Sol (`sol-reviewer`, high) and GPT-6 Astra (`reviewer`, high)",
+        "review independently; each one's findings are then checked by the OTHER model,",
+        "which tries to refute them. Cross-model, NOT cross-provider: all agents are pinned to openai-codex.",
+        "author: sol or astra; legacy gpt/claude authors count as Sol-written, so Astra reviews them.",
+        "Verification runs at each agent's default effort."
+      ],
+      "deepSummary": [
+        "Deep mode (`deep: true`): the Astra side uses `second-opinion` (xhigh) for both its review and",
+        "its verification of Sol's findings. Reserve it for security-sensitive, concurrency/algorithmic",
+        "or large cross-cutting changes."
+      ]
+    }
+  }
+}
