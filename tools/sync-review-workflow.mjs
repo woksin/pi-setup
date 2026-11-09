@@ -55,7 +55,13 @@ const targets = [[sourceFile, render(source, config.defaults)]]
 for (const [name, over] of Object.entries(config.profiles)) {
   targets.push([path.join(root, 'agent/profiles', name, 'workflows/review.js'), render(source, merge(config.defaults, over))])
 }
-const check = process.argv.includes('--check')
+const args = process.argv.slice(2)
+if (args.length > 1 || (args.length === 1 && args[0] !== '--check')) {
+  const help = args.length === 1 && (args[0] === '-h' || args[0] === '--help')
+  ;(help ? console.log : console.error)('Usage: node tools/sync-review-workflow.mjs [--check]')
+  process.exit(help ? 0 : 2)
+}
+const check = args[0] === '--check'
 let stale = 0
 for (const [file, text] of targets) {
   const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null
