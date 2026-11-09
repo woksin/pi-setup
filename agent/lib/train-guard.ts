@@ -222,10 +222,13 @@ export async function trainPushDecision(command: string, cwd: string, env = proc
   const unparsedText = await unparsedNotice(unparsed, { env, git, deps });
   if (unparsedText) notices.push(unparsedText);
   if (!pushes.some(push => push.repo)) return { notices };
-  try {
-    const manifests = await (deps.listManifests ?? listManifests)(env);
-    const reason = blockedPush(manifests, pushes);
-    if (reason) return { reason, notices };
-  } catch (error) { notices.push(`Train guard: manifests unavailable; push allowed (${(error as Error).message}).`); }
-  return { notices };
+  const manifests = [];
+  for (const repo of new Set(pushes.map(push => push.repo).filter(Boolean))) {
+    try { manifests.push(...await (deps.listManifests ?? listManifests)(env, repo)); }
+    catch (error) {
+      return { reason: `Train guard: ${repo} manifests unreadable (${(error as Error).message}); repair or remove the unreadable file or storage path before pushing.`, notices };
+    }
+  }
+  const reason = blockedPush(manifests, pushes);
+  return reason ? { reason, notices } : { notices };
 }

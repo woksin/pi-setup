@@ -46,6 +46,49 @@ test('typed and CLI PR create share head/repo, candidate and trusted exception r
   assert.ok(!JSON.stringify(invalid).includes('private-value'));
 });
 
+test('unrelated corrupt manifests cannot disable candidate PR decisions or add unreadable gate notices', async t => {
+  const f = await fixture(t), path = manifestPath(f.env, 'evil/other', 'train/broken');
+  await mkdir(dirname(path), { recursive: true }); await writeFile(path, '{broken');
+  assert.match((await f.decide()).block!, /PR refused/);
+  const context = { cwd: '/repo', env: f.env, git: f.git };
+  assert.match((await publicationDecision({ kind: 'pr-create', repo: 'acme/widget', title: 'T', body: 'Safe' }, context)).block!, /PR refused/);
+  const notice = await gateRunNotice('pi-phase run --kind test -- full-gate', '/repo', f.env, f.git);
+  assert.match(notice!, /open candidate/); assert.doesNotMatch(notice!, /unreadable/);
+  f.manifest.state = 'released'; await saveManifest(manifestPath(f.env, 'acme/widget', 'train/test'), f.manifest);
+  const solo = (_cwd: string, args: string[]) => args[0] === 'worktree' ? 'worktree /repo\nbranch refs/heads/fix/local\n\n' : gitOutput(args);
+  assert.deepEqual(await prCreateDecision('gh pr create', '/repo', f.env, solo), {});
+});
+
+test('corrupt target manifests block PRs including candidate heads, warn for orchestration and log trusted exceptions', async t => {
+  const f = await fixture(t), path = manifestPath(f.env, 'acme/widget', 'train/test');
+  await writeFile(path, '{broken');
+  const request = { kind: 'pr-create', repo: 'acme/widget', title: 'T', body: 'Safe' };
+  const context = { cwd: '/repo', env: f.env, git: f.git };
+  for (const decision of [await f.decide(), await f.decide('gh pr create --head train/test'),
+    await f.decide('pi-publish pr-create --repo acme/widget --title T --body Safe'), await publicationDecision(request, context)]) {
+    assert.match(decision.block!, /acme\/widget.*manifests unreadable/i);
+    assert.ok(decision.block!.includes(path)); assert.match(decision.block!, /repair or remove/i);
+    assert.equal(decision.warn, undefined);
+  }
+  for (const decision of [await f.decide('gh pr create', true), await publicationDecision(request, { ...context, orchestrated: true })]) {
+    assert.match(decision.warn!, /manifests unreadable/); assert.equal(decision.block, undefined);
+  }
+  for (const decision of [await f.decide('PI_CANDIDATE_EXCEPTION=major gh pr create'),
+    await publicationDecision(request, { ...context, env: { ...f.env, PI_CANDIDATE_EXCEPTION: 'major' } })]) {
+    assert.match(decision.log!, /exception major.*manifests unreadable/); assert.equal(decision.block, undefined);
+  }
+  assert.match((await gateRunNotice('pi-phase run --kind test -- full-gate', '/repo', f.env, f.git))!, /manifests unreadable/);
+});
+
+test('candidate decisions block a non-directory trains home but allow missing storage', async t => {
+  const f = await fixture(t, false), home = f.env.PI_TRAIN_DIR;
+  const solo = (_cwd: string, args: string[]) => args[0] === 'worktree' ? 'worktree /repo\nbranch refs/heads/fix/local\n\n' : gitOutput(args);
+  assert.deepEqual(await prCreateDecision('gh pr create', '/repo', f.env, solo), {});
+  await writeFile(home, 'not a directory');
+  const decision = await prCreateDecision('gh pr create', '/repo', f.env, solo);
+  assert.ok(decision.block?.includes(home)); assert.match(decision.block!, /repair or remove/i);
+});
+
 test('.github publication reaches candidate policy without another repo parser rejecting it', async t => {
   const f = await fixture(t), repo = 'validorg/.github';
   const manifest = { ...f.manifest, repo };

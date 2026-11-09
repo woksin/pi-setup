@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { nativeHookInstalled, parsePushes, trainPushDecision } from './train-guard.ts';
 import { protectedItems, pushBlock } from './train-push.mjs';
 import { main } from './pi-train.mjs';
-import { manifestPath, repoKey, saveManifest } from './train-manifest.mjs';
+import { listManifests, manifestPath, repoKey, saveManifest } from './train-manifest.mjs';
 import extension from '../extensions/train-guard.ts';
 import { setGuards } from './guards.ts';
 
@@ -135,6 +135,97 @@ async function fixture(t: any) {
     run: (program: string, args: string[]) => { assert.equal(program, 'git'); return native({ cwd: args[1], args: args.slice(2), env }); } };
   return { root, repo, origin, env, key, manifest, path, git, ctx, errors, output, invoke: (...args: string[]) => main(args, ctx) };
 }
+
+test('manifest listing reads only the target repository and preserves unfiltered errors', async t => {
+  const f = await fixture(t), other = manifestPath(f.env, 'other/repo', 'train/broken');
+  await mkdir(join(f.env.PI_TRAIN_DIR, 'other__repo'));
+  await writeFile(other, '{broken');
+  assert.deepEqual(await listManifests(f.env, f.key), [{ path: f.path, manifest: f.manifest }]);
+  await assert.rejects(listManifests(f.env), error => error instanceof Error && error.message.includes(other));
+  assert.deepEqual(await listManifests(f.env, 'missing/repo'), []);
+  for (const text of ['not json', '{"v":2}', '{"v":']) {
+    await writeFile(f.path, text);
+    await assert.rejects(listManifests(f.env, f.key), error => error instanceof Error && error.message.includes(f.path));
+  }
+});
+
+test('manifest listing distinguishes missing stores from paths that are not directories', async t => {
+  const f = await fixture(t), home = join(f.root, 'new-store'), env = { PI_TRAIN_DIR: home };
+  for (const repo of [undefined, 'acme/widget']) assert.deepEqual(await listManifests(env, repo), []);
+  await writeFile(home, 'not a directory');
+  for (const repo of [undefined, 'acme/widget']) {
+    await assert.rejects(listManifests(env, repo), error => error instanceof Error && error.message.includes(home));
+  }
+  await rm(home); await mkdir(home);
+  await writeFile(join(home, 'acme__widget'), 'not a directory');
+  await assert.rejects(listManifests(env, 'acme/widget'), /acme__widget/);
+  assert.deepEqual(await listManifests(env), []); // Non-directory entries are ignored on the all-repos scan.
+});
+
+test('invalid repo keys never inspect storage or escape the trains home', async t => {
+  const f = await fixture(t), env = { PI_TRAIN_DIR: f.path };
+  for (const repo of ['ghe.example/acme/widget', '../x/y', 'a/b/c']) {
+    assert.deepEqual(await listManifests(env, repo), []);
+  }
+});
+
+test('push loads each unique target repo and blocks unreadable target manifests', async () => {
+  const env = {}, calls: any[] = [];
+  const list = async (actual: any, repo?: string) => {
+    calls.push([actual, repo]);
+    if (repo === 'acme/widget') throw new Error('/store/acme__widget/broken.json');
+    return [];
+  };
+  const decision = await trainPushDecision('git push origin fix/a', '/work', env, fakeGit, { listManifests: list });
+  assert.deepEqual(calls, [[env, 'acme/widget']]);
+  assert.match(decision.reason!, /acme\/widget.*\/store\/acme__widget\/broken.json.*repair or remove/i);
+  calls.length = 0;
+  const safe = async (actual: any, repo?: string) => {
+    calls.push([actual, repo]);
+    if (repo !== 'acme/widget') throw new Error('unrelated store must not be read');
+    return [];
+  };
+  assert.deepEqual(await trainPushDecision('git push origin fix/a; git push origin fix/b', '/work', env, fakeGit, { listManifests: safe }), { notices: [] });
+  assert.deepEqual(calls, [[env, 'acme/widget']]);
+});
+
+for (const broken of ['acme/widget', 'other/repo']) {
+  test(`multi-repo push blocks unreadable store for ${broken}`, async () => {
+    const git = (cwd: string, args: string[]) => args[0] === 'remote' && cwd === '/other'
+      ? 'https://github.com/other/repo.git' : fakeGit(cwd, args);
+    const result = await trainPushDecision('git push origin fix/a; cd /other && git push origin fix/b', '/work', {}, git, {
+      listManifests: async (_env: any, repo?: string) => { if (repo === broken) throw new Error('/store/broken.json'); return []; },
+    });
+    assert.ok(result.reason?.includes(broken));
+  });
+}
+
+test('unresolved push targets do not load manifests', async () => {
+  const git = (cwd: string, args: string[]) => args.includes('--push') ? 'https://github.com/other/repo.git' : fakeGit(cwd, args);
+  assert.deepEqual(await trainPushDecision('git push other fix/a', '/work', {}, git, {
+    listManifests: async () => { assert.fail('must not read storage for unresolved target'); },
+  }), { notices: [] });
+});
+
+test('real push decision ignores unrelated corruption and blocks a non-directory trains home', async t => {
+  const f = await fixture(t), other = manifestPath(f.env, 'evil/other', 'train/broken');
+  await mkdir(join(f.env.PI_TRAIN_DIR, 'evil__other')); await writeFile(other, '{broken');
+  assert.match((await trainPushDecision('git push origin fix/folded', f.repo, f.env)).reason!, /Push refused/);
+  const home = join(f.root, 'file-store'); await writeFile(home, 'not a directory');
+  const decision = await trainPushDecision('git push origin main', f.repo, { ...f.env, PI_TRAIN_DIR: home });
+  assert.ok(decision.reason?.includes(home));
+  assert.deepEqual(await trainPushDecision('git push origin main', f.repo, { ...f.env, PI_TRAIN_DIR: join(f.root, 'missing') }), { notices: [] });
+});
+
+test('corrupt-store exact-branch hook escape remains allowed without adding an in-pi bypass', async t => {
+  const f = await fixture(t);
+  assert.equal(await f.invoke('hook', 'install'), 0);
+  await writeFile(f.path, '{broken');
+  const env = { ...f.env, PI_TRAIN_ALLOW_PUSH: 'fix/folded' };
+  assert.ok((await trainPushDecision('git push origin fix/folded', f.repo, env)).reason);
+  const result = native({ cwd: f.repo, args: ['push', 'origin', 'fix/folded'], env });
+  assert.equal(result.status, 0, result.stderr);
+});
 
 test('decision is cheap for non-push and blocks a folded branch without exempting coordinator lanes', async t => {
   const f = await fixture(t);

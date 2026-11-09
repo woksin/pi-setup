@@ -33,25 +33,35 @@ export async function loadManifest(path, branch) {
   return manifest;
 }
 
+export class ManifestStoreError extends TrainError {}
+
+function storageError(path, error) {
+  return new ManifestStoreError(error.code === 'ENOTDIR'
+    ? `train storage is not a directory: ${path}`
+    : `train storage unreadable: ${path}: ${error.message}`);
+}
+
 async function entries(path) {
   try { return await readdir(path); }
-  catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; }
+  catch (error) { if (error.code === 'ENOENT') return []; throw storageError(path, error); }
 }
 
 async function repoDirs(home) {
   try { return (await readdir(home, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name); }
-  catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; }
+  catch (error) { if (error.code === 'ENOENT') return []; throw storageError(home, error); }
 }
 
 export async function listManifests(env, repo) {
+  if (repo !== undefined && !validRepo(repo)) return [];
   const home = trainHome(env);
-  const dirs = repo ? [repo.replace('/', '__')] : await repoDirs(home);
+  const dirs = repo !== undefined ? [repo.replace('/', '__')] : await repoDirs(home);
   const result = [];
   for (const dir of dirs) {
     for (const name of await entries(join(home, dir))) {
       if (!name.endsWith('.json')) continue;
       const path = join(home, dir, name);
-      result.push({ path, manifest: await loadManifest(path) });
+      try { result.push({ path, manifest: await loadManifest(path) }); }
+      catch (error) { throw new ManifestStoreError(`train manifest unreadable: ${path}: ${error.message}`); }
     }
   }
   return result;
