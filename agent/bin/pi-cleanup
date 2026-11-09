@@ -10,7 +10,9 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
   --apply            execute the plan
   --budget SECONDS   overall dry-run deadline (default 60; 0 unlimited). Unfinished
                      sections are not measured (budget), never removable. Ignored by --apply.
+                     Shares are divided across selected steps; unused time rolls forward.
                      Text sections stream immediately; --json remains one complete document.
+                     Incomplete text dry runs exit 3; JSON keeps exit 0 and lists incomplete sections.
   --only STEPS       comma list of build,worktrees,docker,caches,bins (default: all five)
   --idle-days N      a repo/worktree modified within N days is ACTIVE (default 3; when
                      --scheduled and not given, only the build step uses 0.25)
@@ -41,7 +43,8 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
                      --if-free-below config). If another --apply run holds the lock, a
                      scheduled run logs one line and exits 0.
 
-Exit codes: 0 ok, 1 error, 2 partial (some deletions failed).
+Exit codes: 0 ok, 1 error, 2 partial (some deletions failed), 3 incomplete text dry run.
+JSON and scheduled runs retain existing exit codes; JSON lists incomplete sections.
 
 Global guard. A checkout/worktree is ACTIVE when any process has its cwd or an open
 file inside it (`lsof -nP -d cwd -Fn` + `lsof -nP -Fn`, taken once and refreshed
@@ -130,6 +133,7 @@ DISCOVERY_CACHE = os.path.join(LOG_DIR, "pi-cleanup-discovery-cache.json")
 STATE_DIR = os.path.expanduser("~/.pi/agent/pi-cleanup")
 STEP_SECONDS = {"build": 25 * 60, "worktrees": 15 * 60, "caches": 20 * 60,
                 "bins": 10 * 60, "docker": 10 * 60}
+DRY_STEP_WEIGHTS = {"build": 8, "worktrees": 8, "docker": 8, "caches": 8, "bins": 8}
 DISCOVERY_PRUNE_DIRS = {
     "node_modules", "bin", "obj", ".vs", ".idea", "TestResults", "packages", ".nuget",
     "dist", "build", "build-output", "out", "target", "coverage", "coverage-results",
@@ -2362,6 +2366,8 @@ def render_docker(d, apply, out):
 
 def build_summary_lines(rep):
     L = []
+    if rep.get("incomplete"):
+        L.append(f"INCOMPLETE: {', '.join(rep['incomplete'])} not fully measured; rerun with --budget 0")
     b, w, dk = rep["steps"].get("build"), rep["steps"].get("worktrees"), rep["steps"].get("docker")
     if b:
         s = b["summary"]
@@ -2552,14 +2558,44 @@ class DryBudget:
         self.deadline = start + seconds - reserve if seconds else None
         self.weight = 60
         self.notes = notes
+        self.incomplete = []
+        self.step_remaining = {}
 
-    def measure(self, label, weight, operation, fallback):
-        remaining = max(0, self.deadline - time.monotonic()) if self.deadline else None
+    def configure(self, args):
+        self.weight = 19 + sum(DRY_STEP_WEIGHTS[step] for step in args.steps)
+        self.step_remaining = {step: getattr(args, f"{step}_step_seconds") for step in args.steps}
+
+    def mark_incomplete(self, label):
+        name = "caches" if label == "temporary directories" else label
+        if name not in self.incomplete:
+            self.incomplete.append(name)
+
+    def unavailable_steps(self, steps):
+        for name in sorted(set(steps).intersection(("build", "worktrees", "caches"))):
+            self.weight -= 5 if name == "caches" else DRY_STEP_WEIGHTS[name]
+            self.mark_incomplete(name)
+
+    def allowance(self, step, weight, started):
+        remaining = max(0, self.deadline - started) if self.deadline else None
         allowance = remaining * weight / self.weight if remaining is not None else None
         self.weight -= weight
+        if step not in self.step_remaining:
+            return allowance
+        cap = self.step_remaining[step]
+        return min(allowance, cap) if allowance is not None else cap
+
+    def charge_step(self, step, started):
+        if step in self.step_remaining:
+            self.step_remaining[step] = max(0, self.step_remaining[step] - (time.monotonic() - started))
+
+    def measure(self, label, weight, operation, fallback):
+        started = time.monotonic()
+        step = "caches" if label == "temporary directories" else label
+        allowance = self.allowance(step, weight, started)
         progress(f"{label}: starting")
         if allowance is not None and allowance <= 0:
             self.notes.append(f"{label}: not measured (budget)")
+            self.mark_incomplete(label)
             return fallback
         context = multiprocessing.get_context("fork")
         receive, send = context.Pipe(duplex=False)
@@ -2576,9 +2612,11 @@ class DryBudget:
                 self.notes.append(f"{label}: not measured ({value})")
             else:
                 self.notes.append(f"{label}: not measured (budget)")
+            self.mark_incomplete(label)
             return fallback
         except EOFError:
             self.notes.append(f"{label}: not measured (worker exited)")
+            self.mark_incomplete(label)
             return fallback
         finally:
             # Never signal subprocesses: git children may still be finishing I/O.
@@ -2588,6 +2626,7 @@ class DryBudget:
                 worker.kill()
                 worker.join()
             receive.close()
+            self.charge_step(step, started)
             progress(f"{label}: done")
 
 
@@ -2642,7 +2681,8 @@ def dry_bins(checkouts):
     def probe(cmd, timeout=10):
         rc, out, _ = run(cmd, timeout=timeout)
         return out if rc == 0 else None
-    return BIN_SWEEP["sweep"]([c.path for c in checkouts if c.exists], probe, False)
+    # The outer dry-run watchdog owns the deadline, including --bins-step-seconds.
+    return BIN_SWEEP["sweep"]([c.path for c in checkouts if c.exists], probe, False, budget=float("inf"))
 
 
 def dry_suggestions(ctx, rows):
@@ -2661,34 +2701,36 @@ def dry_plan_steps(ctx, checkouts, budget, rep):
     args = ctx.args
     safe_fs = ctx.snap is not None and ctx.mounts is not None
     wt_rows = []
+    if not safe_fs:
+        budget.unavailable_steps(args.steps)
     if "worktrees" in args.steps:
         rep["notes"].append("remote refs not refreshed (dry run)")
         fallback = (unmeasured_worktrees(checkouts), [])
-        wt_rows, notes = budget.measure("worktrees", 12, lambda: dry_worktrees(ctx, checkouts), fallback) if safe_fs else fallback
+        wt_rows, notes = budget.measure("worktrees", DRY_STEP_WEIGHTS["worktrees"], lambda: dry_worktrees(ctx, checkouts), fallback) if safe_fs else fallback
         rep["notes"].extend(note for note in notes if note not in rep["notes"])
     queued = {row["path"] for row in wt_rows if row["action"] == "remove"}
     for name in args.steps:
         if name == "build":
             skipped = [{"path": c.path, "kind": c.kind, "skip": "not measured (budget)", "dirs": []}
                        for c in checkouts]
-            rows = budget.measure(name, 7, lambda: plan_build(ctx, checkouts, queued), skipped) if safe_fs else skipped
+            rows = budget.measure(name, DRY_STEP_WEIGHTS[name], lambda: plan_build(ctx, checkouts, queued), skipped) if safe_fs else skipped
             plan = {"rows": rows, "summary": summarize_build(rows, False)}
         elif name == "worktrees":
             plan = worktree_report(wt_rows)
         elif name == "docker":
-            plan = budget.measure(name, 5, lambda: plan_docker(ctx),
+            plan = budget.measure(name, DRY_STEP_WEIGHTS[name], lambda: plan_docker(ctx),
                                   {"skip": "not measured (budget)", "prunes": [], "rmi": []})
         elif name == "caches":
             tmp = budget.measure("temporary directories", 3, lambda: plan_tmp(ctx),
                                  [{"name": "temporary directories", "action": "skip", "reason": "not measured (budget)"}])
-            plan = budget.measure(name, 6, lambda: plan_caches(ctx, checkouts, include_tmp=False),
+            plan = budget.measure(name, 5, lambda: plan_caches(ctx, checkouts, include_tmp=False),
                                   {"items": [{"name": "caches", "action": "skip", "reason": "not measured (budget)"}]}) if safe_fs else {
                                       "items": [{"name": "caches", "action": "skip", "reason": "process/mount snapshot unavailable"}]}
             plan["items"] = tmp + plan["items"]
         else:
             skipped = [{"path": c.path, "action": "skipped", "reason": "not measured (budget)",
                         "bytes": 0, "bytes_freed": 0} for c in checkouts if c.exists]
-            plan = {"rows": budget.measure(name, 8, lambda: dry_bins(checkouts), skipped)}
+            plan = {"rows": budget.measure(name, DRY_STEP_WEIGHTS[name], lambda: dry_bins(checkouts), skipped)}
         rep["steps"][name] = plan
         stream_step(args, name, plan)
     return wt_rows
@@ -2744,7 +2786,18 @@ def dry_run(args, rep, t0, budget):
     return finish_dry_report(args, rep, t0)
 
 
+def note_incomplete_bins(rep):
+    if "bins" in rep["incomplete"]:
+        return
+    bins = rep["steps"].get("bins", {}).get("rows", [])
+    if any("walk budget exhausted" in row["reason"] for row in bins):
+        rep["incomplete"].append("bins")
+
+
 def finish_dry_report(args, rep, t0):
+    note_incomplete_bins(rep)
+    if rep["incomplete"] and not args.json:
+        rep["exit"] = rep["exit"] or 3
     rep["runtime_s"] = time.time() - t0
     if args.json:
         print(json.dumps(rep, indent=1, default=str), flush=True)
@@ -2791,6 +2844,8 @@ def parse_args(argv):
                                        "  pi-cleanup --only docker --json  # dry run of one step\n"
                                        "  pi-cleanup --apply               # state-changing: executes the plan\n"
                                        "Exit codes:\n  0 ok\n  1 error\n  2 partial (some deletions failed)\n"
+                                       "  3 incomplete text dry run (rerun with --budget 0)\n"
+                                       "JSON and scheduled runs keep existing exit codes; JSON includes incomplete sections.\n"
                                        "See the header of this file for the safety rules.\n"
                                        "See also: docs/reference.md, dev-doctor --help, docker-guardian --help")
     ap.error = lambda msg: (ap.print_usage(sys.stderr), print(f"pi-cleanup: error: {msg}", file=sys.stderr),
@@ -2812,7 +2867,7 @@ def parse_args(argv):
     ap.add_argument("--scheduled", action="store_true")
     for step, seconds in STEP_SECONDS.items():
         ap.add_argument(f"--{step}-step-seconds", type=budget_seconds, default=seconds,
-                        help=f"scheduled {step} deadline (default {seconds} seconds)")
+                        help=f"dry-run/scheduled {step} deadline (default {seconds} seconds)")
     a = ap.parse_args(argv)
     steps = [s.strip() for s in a.only.split(",") if s.strip()]
     bad = [s for s in steps if s not in STEPS_ALL]
@@ -2939,14 +2994,14 @@ def main(argv=None):
     rep = {"apply": args.apply, "steps_selected": args.steps, "idle_days": args.idle_days,
            "build_idle_days": args.build_idle_days, "roots": [],
            "steps": {}, "suggestions": {}, "df": [], "notes": notes, "errors": errors,
-           "discovered": None, "runtime_s": 0, "exit": 0}
+           "discovered": None, "runtime_s": 0, "exit": 0, "incomplete": []}
     if args.scheduled:
         notes.append("--scheduled: forced --only build,docker,caches,worktrees,bins and --apply")
 
     budget = None if args.apply else DryBudget(args.budget, notes, started)
     if budget:
-        weights = {"build": 7, "worktrees": 12, "docker": 5, "caches": 9, "bins": 8}
-        budget.weight = 19 + sum(weights[step] for step in args.steps)
+        budget.configure(args)
+        rep["incomplete"] = budget.incomplete
     if args.if_free_below is not None:
         if args.apply:
             probes, low, failed = free_space_probes(args)
@@ -2962,7 +3017,8 @@ def main(argv=None):
             notes.append("general cleanup threshold met; running only the bin sweep")
         if not low and not failed and not bins_due:
             if args.json:
-                print(json.dumps({"free_space_ok": True, "threshold_gib": args.if_free_below, "probes": probes}, indent=1))
+                print(json.dumps({"free_space_ok": True, "threshold_gib": args.if_free_below, "probes": probes,
+                                  "incomplete": []}, indent=1))
             else:
                 print("free space OK")
             if args.scheduled:

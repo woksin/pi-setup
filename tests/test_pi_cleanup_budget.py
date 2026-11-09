@@ -124,7 +124,7 @@ class DryBudgetTests(unittest.TestCase):
                 patch.object(cleanup, 'plan_build', side_effect=slow), \
                 patch.object(cleanup.DryBudget, 'measure', prerequisites_in_process(cleanup.DryBudget.measure)):
             before = time.monotonic()
-            self.assertEqual(cleanup.main(['--roots', root, '--budget', '.6']), 0)
+            self.assertEqual(cleanup.main(['--roots', root, '--budget', '.6']), 3)
             self.assertLess(time.monotonic() - before, 1.8)
         text = output.getvalue()
         headings = ['build', 'worktrees', 'docker', 'caches', 'bins', 'suggestions (not done)', 'summary']
@@ -170,6 +170,139 @@ class DryBudgetTests(unittest.TestCase):
         self.assertEqual(rep['steps']['build']['rows'][0]['skip'], 'not measured (budget)')
         self.assertEqual(rep['steps']['bins']['rows'][0]['action'], 'skipped')
 
+    def test_default_budget_gives_every_selected_step_a_slice(self):
+        args = cleanup.parse_args([])
+        ctx = cleanup.Ctx(args)
+        ctx.snap = ctx.mounts = cleanup.PathSet([])
+        rep = {'steps': {}, 'notes': []}
+        clock = [0.0]
+        allowances = []
+        context = Mock()
+        receive, send = Mock(), Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value.is_alive.return_value = False
+        def timeout(seconds):
+            allowances.append(seconds)
+            clock[0] += seconds
+            return False
+        receive.poll.side_effect = timeout
+        with patch.object(cleanup.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(cleanup.multiprocessing, 'get_context', return_value=context), \
+                contextlib.redirect_stdout(io.StringIO()):
+            budget = cleanup.DryBudget(args.budget, rep['notes'])
+            budget.configure(args)
+            cleanup.dry_plan_steps(ctx, [], budget, rep)
+        # Worktrees is measured first; caches' two sub-sections share one slice.
+        self.assertEqual(len(allowances), 6)
+        self.assertTrue(all(0 < seconds < 20 for seconds in allowances), allowances)
+        self.assertLess(sum(allowances), args.budget)
+        shares = allowances[:3] + [sum(allowances[3:5]), allowances[5]]
+        for share in shares:
+            self.assertAlmostEqual(share, shares[0])
+        self.assertEqual(set(budget.incomplete), set(args.steps))
+
+    def test_step_cap_leaves_unused_time_for_later_steps(self):
+        args = cleanup.parse_args(['--only', 'build,bins', '--build-step-seconds', '.02'])
+        ctx = cleanup.Ctx(args)
+        ctx.snap = ctx.mounts = cleanup.PathSet([])
+        rep = {'steps': {}, 'notes': []}
+        budget = cleanup.DryBudget(args.budget, rep['notes'])
+        budget.configure(args)
+        def slow(*args):
+            time.sleep(2)
+        with patch.object(cleanup, 'plan_build', side_effect=slow), \
+                patch.object(cleanup, 'dry_bins', return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            before = time.monotonic()
+            cleanup.dry_plan_steps(ctx, [], budget, rep)
+        self.assertLess(time.monotonic() - before, 1)
+        self.assertEqual(budget.incomplete, ['build'])
+        self.assertEqual(rep['steps']['bins']['rows'], [])
+
+    def test_unused_slice_rolls_forward(self):
+        args = cleanup.parse_args(['--only', 'build,bins'])
+        clock = [0.0]
+        allowances = []
+        context = Mock()
+        receive, send = Mock(), Mock()
+        context.Pipe.return_value = (receive, send)
+        context.Process.return_value.is_alive.return_value = False
+        receive.recv.return_value = (True, [])
+        def quick(seconds):
+            allowances.append(seconds)
+            clock[0] += .1
+            return True
+        receive.poll.side_effect = quick
+        with patch.object(cleanup.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(cleanup.multiprocessing, 'get_context', return_value=context):
+            budget = cleanup.DryBudget(args.budget, [])
+            budget.configure(args)
+            budget.measure('build', cleanup.DRY_STEP_WEIGHTS['build'], lambda: [], [])
+            budget.measure('bins', cleanup.DRY_STEP_WEIGHTS['bins'], lambda: [], [])
+        self.assertGreater(allowances[1], allowances[0])
+
+    def test_caches_subsections_share_the_step_cap(self):
+        args = cleanup.parse_args(['--only', 'caches', '--caches-step-seconds', '0'])
+        ctx = cleanup.Ctx(args)
+        ctx.snap = ctx.mounts = cleanup.PathSet([])
+        rep = {'steps': {}, 'notes': []}
+        budget = cleanup.DryBudget(args.budget, rep['notes'])
+        budget.configure(args)
+        with patch.object(cleanup, 'plan_tmp') as tmp, patch.object(cleanup, 'plan_caches') as caches, \
+                contextlib.redirect_stdout(io.StringIO()):
+            cleanup.dry_plan_steps(ctx, [], budget, rep)
+        tmp.assert_not_called()
+        caches.assert_not_called()
+        self.assertEqual(budget.incomplete, ['caches'])
+
+    def test_bins_walk_uses_the_outer_watchdog_not_a_second_deadline(self):
+        with patch.dict(cleanup.BIN_SWEEP, sweep=Mock(return_value=[])):
+            cleanup.dry_bins([])
+            self.assertEqual(cleanup.BIN_SWEEP['sweep'].call_args.kwargs, {'budget': float('inf')})
+
+    def test_complete_and_walk_limited_reports(self):
+        row = {'path': '/fixture', 'action': 'skipped', 'reason': 'walk budget exhausted',
+               'bytes': 0, 'bytes_freed': 0}
+        for rows, json_mode, expected in (([], False, 0), ([row], False, 3), ([row], True, 0)):
+            with self.subTest(rows=rows, json=json_mode), tempfile.TemporaryDirectory() as root, \
+                    contextlib.redirect_stdout(io.StringIO()) as out, \
+                    patch.object(cleanup, 'docker_running', return_value=False), \
+                    patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
+                    patch.object(cleanup, 'discover', return_value=[]), \
+                    patch.object(cleanup, 'dry_bins', return_value=rows), \
+                    patch.object(cleanup, 'dry_suggestions', return_value=({}, [])):
+                argv = ['--only', 'bins', '--roots', root, '--budget', '0']
+                self.assertEqual(cleanup.main(argv + (['--json'] if json_mode else [])), expected)
+            if json_mode:
+                self.assertEqual(json.loads(out.getvalue())['incomplete'], ['bins'])
+            elif rows:
+                self.assertIn('== summary ==\n  INCOMPLETE: bins not fully measured; rerun with --budget 0',
+                              out.getvalue())
+            else:
+                self.assertNotIn('INCOMPLETE', out.getvalue())
+
+    def test_step_timeout_headline_and_json_compatibility(self):
+        def slow(*args):
+            time.sleep(2)
+        for json_mode in (False, True):
+            with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out, \
+                    patch.object(cleanup, 'docker_running', return_value=False), \
+                    patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
+                    patch.object(cleanup, 'discover', return_value=[]), \
+                    patch.object(cleanup, 'plan_build', side_effect=slow), \
+                    patch.object(cleanup, 'dry_suggestions', return_value=({}, [])):
+                argv = ['--only', 'build', '--roots', root, '--build-step-seconds', '.02']
+                self.assertEqual(cleanup.main(argv + (['--json'] if json_mode else [])), 0 if json_mode else 3)
+            if json_mode:
+                self.assertEqual(json.loads(out.getvalue())['incomplete'], ['build'])
+            else:
+                self.assertIn('INCOMPLETE: build not fully measured; rerun with --budget 0', out.getvalue())
+
+    def test_help_documents_incomplete_exit(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            cleanup.parse_args(['--help'])
+        self.assertIn('3 incomplete', out.getvalue())
+
     def test_apply_never_uses_dry_budget(self):
         with patch.object(cleanup, 'DryBudget', side_effect=AssertionError('dry budget used')), \
                 patch.object(cleanup, 'LOG_DIR', tempfile.gettempdir()), \
@@ -179,7 +312,8 @@ class DryBudgetTests(unittest.TestCase):
                 patch.object(cleanup, 'du_bytes', return_value=0), \
                 patch.dict(cleanup.BIN_SWEEP, sweep=lambda *args: []), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cleanup.main(['--apply', '--only', 'bins', '--roots', root, '--budget', '.001']), 0)
+            self.assertEqual(cleanup.main(['--apply', '--only', 'bins', '--roots', root, '--budget', '.001',
+                                           '--bins-step-seconds', '0']), 0)
 
 
 class RemoteRefTests(RepoFixture):
