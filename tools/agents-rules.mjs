@@ -111,6 +111,7 @@ function hints(unit, corpusUnits) {
 }
 
 const skillPath = (name) => `skills/${name}/SKILL.md`;
+const MIN_NEW_LENGTH = 15;
 const label = (entry) => entry.id ?? entry.ids;
 
 function loadContext(root) {
@@ -142,10 +143,18 @@ function checkSkill(ctx, name) {
 function validateEntry(ctx, entry) {
   const { errors, allowed, corpus, agentsPath } = ctx;
   if (!["reworded", "merged", "removed", "moved-core"].includes(entry.kind)) errors.push(`map: ${label(entry)} has unknown kind ${entry.kind}`);
-  if (!entry.reason) errors.push(`map: ${label(entry)} needs a reason`);
+  if (!entry.reason?.trim()) errors.push(`map: ${label(entry)} needs a reason`);
   if (entry.kind === "removed") return;
-  if (!allowed.has(entry.to)) errors.push(`map: ${label(entry)} points to ${entry.to}, which is not ${agentsPath} or a configured skill`);
-  else if (entry.kind !== "moved-core" && !corpus.get(entry.to)?.includes(normalize(entry.new ?? ""))) errors.push(`map: stale entry ${label(entry)}: new text not found in ${entry.to}`);
+  if (!allowed.has(entry.to)) { errors.push(`map: ${label(entry)} points to ${entry.to}, which is not ${agentsPath} or a configured skill`); return; }
+  if (entry.kind !== "moved-core") { const problem = newTextProblem(corpus, entry); if (problem) errors.push(problem); }
+}
+
+// An empty needle is a substring of every corpus, so a missing or trivial new text would silently pass any rule.
+function newTextProblem(corpus, entry) {
+  const normNew = normalize(entry.new ?? "");
+  if (normNew.length < MIN_NEW_LENGTH) return `map: ${label(entry)} needs new text of at least ${MIN_NEW_LENGTH} characters (the exact replacement sentence)`;
+  if (!corpus.get(entry.to)?.includes(normNew)) return `map: stale entry ${label(entry)}: new text not found in ${entry.to}`;
+  return null;
 }
 
 // Validates every map entry and returns Map<unit id, entry>.
