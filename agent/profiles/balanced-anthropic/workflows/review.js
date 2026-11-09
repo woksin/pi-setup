@@ -452,7 +452,8 @@ const full = f => ({
 const fit = (res, budget = 3600) => arrange(fitSize(res, budget))
 const fitSize = (res, budget) => {
   if (!res.coverageNotes?.length) delete res.coverageNotes
-  const size = () => JSON.stringify(res).length
+  // Measure the arranged result: arrange adds reviewerLines after this budget check would otherwise run.
+  const size = () => JSON.stringify(arrange(res)).length
   if (size() <= budget) return res
   trimRuntimeDetails(res)
   if (res.coverageNotes) res.coverageNotes = res.coverageNotes.map(n => clip(n, 160))

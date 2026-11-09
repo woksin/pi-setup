@@ -167,3 +167,21 @@ test("oversized reports are logged once per fresh notification, not on replay", 
     if (prev === undefined) delete process.env.PI_EFFICIENCY_ERRORS_FILE; else process.env.PI_EFFICIENCY_ERRORS_FILE = prev;
   }
 });
+
+test("expansion is decided once: a record that later vanishes cannot turn a refused fetch into a truncated preview", () => {
+  const marker = "\n...(truncated, use get_subagent_result for full output)";
+  const set = (rec: unknown) => { (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")] = rec === undefined ? undefined : { getRecord: () => rec }; };
+  const text = `<task-notification>\n<task-id>wf1</task-id>\n<status>completed</status>\n<result>${"r".repeat(500)}${marker}</result>\n</task-notification>`;
+  try {
+    set({ status: "completed", result: "r".repeat(1200) });
+    const t = new ResultTracker();
+    t.notification({ role: "custom", customType: "subagent-notification", timestamp: 1, content: text });
+    const first = t.expand(text);
+    assert.ok(!first.includes("truncated"));
+    set(undefined); // record evicted before the next context pass
+    assert.equal(t.expand(text), first); // model keeps seeing the same whole report (stable prefix)
+    assert.match(t.fetch("wf1", false) ?? "", /already delivered/);
+  } finally {
+    set(undefined);
+  }
+});

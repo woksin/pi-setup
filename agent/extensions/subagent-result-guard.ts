@@ -33,18 +33,18 @@ function registryRecord(id: string): RegistryRecord | undefined {
 }
 
 /** Rewrite the text of a custom subagent-notification message; returns the same object when unchanged. */
-function expandMessage<T>(message: T): T {
+function expandMessage<T>(message: T, expand: (text: string) => string): T {
   const msg = message as { role?: string; customType?: string; content?: unknown } | undefined;
   if (msg?.role !== "custom" || msg.customType !== "subagent-notification") return message;
   if (typeof msg.content === "string") {
-    const content = expandNotification(msg.content, registryRecord);
+    const content = expand(msg.content);
     return content === msg.content ? message : { ...msg, content } as T;
   }
   if (!Array.isArray(msg.content)) return message;
   let changed = false;
   const content = msg.content.map(part => {
     if (part?.type !== "text" || typeof part.text !== "string") return part;
-    const text = expandNotification(part.text, registryRecord);
+    const text = expand(part.text);
     if (text === part.text) return part;
     changed = true;
     return { ...part, text };
@@ -56,6 +56,13 @@ export class ResultTracker {
   private delivered = new Map<string, { truncated: boolean; fetched: boolean }>();
   private aliases = new Map<string, string>();
   private observed = new Set<string>();
+  /** Expansion is decided once per text: what the tracker judged complete is exactly what the model sees. */
+  private expansions = new Map<string, string>();
+  expand(text: string): string {
+    let expanded = this.expansions.get(text);
+    if (expanded === undefined) { expanded = expandNotification(text, registryRecord); this.expansions.set(text, expanded); }
+    return expanded;
+  }
   /** Called once per newly delivered notification (not for restored ones: set after restore). */
   onFresh?: (notification: Notification, record: RegistryRecord | undefined) => void;
   private replaying = false;
@@ -65,7 +72,7 @@ export class ResultTracker {
     try { fn(); } finally { this.replaying = false; }
   }
 
-  clear(): void { this.delivered.clear(); this.aliases.clear(); this.observed.clear(); }
+  clear(): void { this.delivered.clear(); this.aliases.clear(); this.observed.clear(); this.expansions.clear(); }
   alias(id: string, name: unknown): void {
     if (typeof name === "string" && name) this.aliases.set(name.replace(/^@/, ""), id);
   }
@@ -76,13 +83,14 @@ export class ResultTracker {
   notification(message: unknown): void {
     const msg = message as { role?: string; customType?: string; content?: unknown; timestamp?: number } | undefined;
     if (msg?.role !== "custom" || msg.customType !== "subagent-notification") return;
-    const original = typeof msg.content === "string" ? msg.content : Array.isArray(msg.content)
-      ? msg.content.map(part => part?.type === "text" ? part.text : "").join("\n") : "";
+    const texts = typeof msg.content === "string" ? [msg.content] : Array.isArray(msg.content)
+      ? msg.content.map(part => part?.type === "text" && typeof part.text === "string" ? part.text : "") : [];
+    const original = texts.join("\n");
     const delivery = `${msg.timestamp ?? ""}\0${original}`;
     if (this.observed.has(delivery)) return;
     this.observed.add(delivery);
     // A preview expanded to the whole report counts as complete: no pointless fetch.
-    const content = expandNotification(original, registryRecord);
+    const content = texts.map(text => this.expand(text)).join("\n");
     for (const match of content.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
       const id = /<task-id>([^<]+)<\/task-id>/.exec(match[1])?.[1];
       const result = /<result>([\s\S]*?)<\/result>/.exec(match[1])?.[1];
@@ -185,7 +193,7 @@ export default function (pi: ExtensionAPI) {
     if (isGuardOff("subagent-results")) return undefined;
     // Deliver whole reports instead of the 500/300-char preview (per-call copy; session file untouched).
     try {
-      const messages = event.messages.map(expandMessage);
+      const messages = event.messages.map(m => expandMessage(m, text => tracker.expand(text)));
       return messages.some((m, i) => m !== event.messages[i]) ? { messages } : undefined;
     } catch (e) {
       logError("subagent-result-guard", "context", e);
