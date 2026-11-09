@@ -10,7 +10,7 @@ type Decision = { block?: string; warn?: string; log?: string };
 type Segment = { tokens: string[]; cwd: string; git: Git; exception: boolean; exceptionName: string };
 const dynamic = (value: string) => /[$`*?{}<>\n]/.test(value);
 const unparsed = (error: unknown, publication = false) => publication
-  ? 'Candidate guard: unparsed publication, allowed.'
+  ? `Candidate guard: unparsed publication, allowed (${(error as Error).message})`
   : `Candidate guard: unparsed, allowed (${(error as Error).message})`;
 const prCreate = (tokens: string[]) => basename(tokens[0] ?? '') === 'gh' && tokens[1] === 'pr' && tokens[2] === 'create';
 const valueFlags = new Set(['-a', '--assignee', '-B', '--base', '-b', '--body', '-F', '--body-file',
@@ -163,7 +163,7 @@ export async function publicationDecision(value: unknown, context: PublicationDe
   const segment: Segment = { tokens: ['gh', ...toGhPlan(request).authority.ghArgs], cwd: context.cwd,
     git: context.git ?? nativeGuardGit, exceptionName, exception: ['major', 'urgent-fix'].includes(exceptionName) };
   try { return await decidePR(segment, env, context.orchestrated ?? false); }
-  catch { return { warn: 'Candidate guard: unparsed publication, allowed.' }; }
+  catch (error) { return { warn: unparsed(error, true) }; }
 }
 
 export async function prCreateDecision(command: string, cwd: string, env = process.env, git: Git = nativeGuardGit, orchestrated = false): Promise<Decision> {
