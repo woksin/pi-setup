@@ -642,14 +642,14 @@ test('manifest rejects unknown major version and slug collisions; repo forms sha
   assert.equal(await f.invoke('status'), 1);
 });
 
-test('listManifests ignores stray files in the trains home and in a repo slot', async t => {
+test('listManifests ignores stray home files but reports non-directory target storage', async t => {
   const f = await setup(t);
   const home = f.ctx.env.PI_TRAIN_DIR;
   await writeFile(join(home, 'config.json'), '{}');
   assert.equal((await listManifests(f.ctx.env)).length, 1);
   await writeFile(join(home, 'stray__file'), '');
-  assert.deepEqual(await listManifests(f.ctx.env, 'stray/file'), []);
-  assert.deepEqual(await listManifests({ ...f.ctx.env, PI_TRAIN_DIR: join(home, 'config.json') }), []);
+  await assert.rejects(listManifests(f.ctx.env, 'stray/file'), /train storage is not a directory:.*stray__file/);
+  await assert.rejects(listManifests({ ...f.ctx.env, PI_TRAIN_DIR: join(home, 'config.json') }), /train storage is not a directory:.*config\.json/);
 });
 
 test('manifest lock serialises concurrent read-modify-writes and reclaims stale locks', async t => {

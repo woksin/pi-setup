@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { tokenizeShell } from './issue-work.ts';
 import { listManifests, repoKey } from './train-manifest.mjs';
-import { protectedItems, pushBlock } from './train-push.mjs';
+import { protectedItems, pushBlock, unreadablePush } from './train-push.mjs';
 
 type Git = (cwd: string, args: string[]) => string;
 type Push = { cwd: string; remote: string; refs: string[]; all: boolean; delete: boolean };
@@ -222,10 +222,13 @@ export async function trainPushDecision(command: string, cwd: string, env = proc
   const unparsedText = await unparsedNotice(unparsed, { env, git, deps });
   if (unparsedText) notices.push(unparsedText);
   if (!pushes.some(push => push.repo)) return { notices };
-  try {
-    const manifests = await (deps.listManifests ?? listManifests)(env);
-    const reason = blockedPush(manifests, pushes);
-    if (reason) return { reason, notices };
-  } catch (error) { notices.push(`Train guard: manifests unavailable; push allowed (${(error as Error).message}).`); }
-  return { notices };
+  const manifests = [];
+  for (const repo of new Set(pushes.map(push => push.repo).filter(Boolean))) {
+    try { manifests.push(...await (deps.listManifests ?? listManifests)(env, repo)); }
+    catch (error) {
+      return { reason: unreadablePush(repo, error), notices };
+    }
+  }
+  const reason = blockedPush(manifests, pushes);
+  return reason ? { reason, notices } : { notices };
 }
