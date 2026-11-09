@@ -1,9 +1,9 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { addressed, backendFor, type MessageRef } from "./backend.ts";
+import { backendFor, type MessageRef } from "./backend.ts";
 import { expand, laneDir, type Config } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
-import { deliveries, foldRegistry, holding, issueKey, ownershipOf, readIssueRegister, short, sourceFailure, type RegisterData, type Source, type IssueView } from "./issue-register.ts";
+import { deliveries, foldRegistry, holding, issueKey, ownershipOf, readIssueRegister, short, sourceFailure, type RegisterData, type Source, type IssueView, type RegistryEvent } from "./issue-register.ts";
 import { runningPiChecked } from "./processes.ts";
 import { idleMinutes } from "./sessions.ts";
 import { parseStatus, suppressed } from "./status-line.ts";
@@ -14,7 +14,16 @@ interface OrchSession { pid: number; id?: string; sessionId?: string; cwd?: stri
 interface Seed {
   id: string; cwd: string; repo?: string; branch?: string; issue?: number; group?: string | null; retired?: boolean; role?: string;
 }
+const heldClaims = Symbol("held claims");
+type RowIssue = NonNullable<RosterRow["issue"]>;
+interface Claim { issue: RowIssue; ts: string; order: number }
+export interface RegistryIndex {
+  views: Map<string, IssueView>;
+  latest: Map<string, { event: RegistryEvent; order: number }>;
+  held: Map<string, Claim[]>;
+}
 export interface RosterRow {
+  [heldClaims]?: RowIssue[];
   lane: string; identity: "registered" | "orch" | "unregistered" | "message-only"; repo: string | null;
   worktree: string | null; branch: string | null; issue: { repo: string; number: number; state: string; holder: boolean } | null;
   state: string; idleMinutes: number | null; contextUse: null; pid: number | null; sessionId: string | null;
@@ -29,6 +38,7 @@ export interface RosterInputs {
 export interface Roster { rows: RosterRow[]; sources: Record<string, Source> }
 export interface Selection { repo?: string; issue?: { repo?: string; number: number } }
 export interface Suggestion { target: string | null; rule: string; reason: string }
+interface SuggestionContext { input: RosterInputs; selection: Selection; now: Date; registry: RegistryIndex }
 
 function readJsonDir<T>(dir: string, valid: (value: any) => boolean): { values: T[]; source: Source } {
   try {
@@ -76,7 +86,7 @@ export async function readRoster(c: Config, root: string, ctx: LanesCtx, registe
   const statusDir = ctx.env.LANE_STATUS_DIR || (c.messages.dir ? join(expand(c.messages.dir, c, root, ctx.home), "status") : join(ctx.piAgentDir, "lane-status"));
   const statuses = readStatuses(statusDir); const messages = await readMessages(c, root, ctx);
   const lanes = rosterSeeds(c, root, ctx); const idle = new Map<string, number | null>();
-  for (const cwd of new Set([...lanes.map(l => l.cwd), ...processes.procs.map(p => p.cwd)])) idle.set(cwd, idleMinutes(cwd, ctx) ?? null);
+  for (const cwd of new Set([...lanes.map(l => l.cwd), ...rosterProcesses(processes.procs, data).map(p => p.cwd)])) idle.set(cwd, idleMinutes(cwd, ctx) ?? null);
   return { lanes, processes, register: data, heartbeats: heartbeats.values, sessions: sessions.values, statuses: statuses.values,
     messages: messages.values, idle, broadcast: c.messages.broadcast, sources: { lanes: { status: "ok", count: lanes.length },
       processes: { status: processes.ok ? "ok" : "error", count: processes.procs.length, ...(!processes.ok ? { detail: "process discovery unavailable or incomplete" } : {}) },
@@ -87,7 +97,7 @@ export async function readRoster(c: Config, root: string, ctx: LanesCtx, registe
 export function matchedSessions(cwd: string | null, pids: number[], data: RegisterData): string[] {
   return [...new Set(data.leases.filter(l => {
     const live = data.liveness.get(l.sessionId);
-    return live?.status === "live" && live.pid === l.pid && (pids.includes(l.pid) || Boolean(cwd && l.cwd === cwd));
+    return live?.status === "live" && live.pid === l.pid && (pids.length ? pids.includes(l.pid) : Boolean(cwd && l.cwd === cwd));
   }).map(l => l.sessionId))];
 }
 function emptyRow(lane: string, identity: RosterRow["identity"]): RosterRow {
@@ -109,38 +119,59 @@ function unregisteredProcess(p: { pid: number; cwd: string }, input: RosterInput
   if (!id) row.notes.push("identity unavailable: unregistered");
   return row;
 }
+function rosterProcesses(procs: { pid: number; cwd: string }[], register: RegisterData): { pid: number; cwd: string }[] {
+  const found = new Map(procs.map(p => [p.pid, p]));
+  for (const lease of register.leases) {
+    const live = register.liveness.get(lease.sessionId);
+    if (live?.status !== "live" || live.pid !== lease.pid || found.has(lease.pid)) continue;
+    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+  }
+  return [...found.values()];
+}
 function processRows(input: RosterInputs): RosterRow[] {
   const seeds = input.lanes.map(l => ({ ...emptyRow(l.id, "registered"), repo: l.repo ?? null, worktree: l.cwd, branch: l.branch ?? null, evidence: ["lanes.json"] }));
   const rows = [...seeds];
-  for (const p of input.processes.procs) {
+  for (const p of rosterProcesses(input.processes.procs, input.register)) {
     const matched = seeds.find(r => r.worktree && r.worktree === p.cwd);
-    if (matched) { if (matched.pid === null) matched.pid = p.pid; continue; }
+    if (matched && matched.pid === null) { matched.pid = p.pid; continue; }
     rows.push(unregisteredProcess(p, input));
   }
   return rows;
 }
-function joinIssue(row: RosterRow, sessions: string[], input: RosterInputs): void {
-  const events = input.register.events.filter(e => sessions.includes(e.sessionId)).sort((a, b) => b.ts.localeCompare(a.ts));
-  const views = foldRegistry(input.register.events);
-  const held = [...views.values()].flatMap(v => v.sessions.filter(s => sessions.includes(s.sessionId) && holding(s.lastState)).map(s => ({ v, s })))
-    .sort((a, b) => b.s.lastTs.localeCompare(a.s.lastTs))[0];
-  if (held) row.issue = { repo: held.v.repo, number: held.v.issue, state: held.s.lastState!, holder: true };
-  else if (events[0]) {
-    const event = events[0];
-    const touch = views.get(issueKey(event.repo, event.issue))?.sessions.find(s => s.sessionId === event.sessionId);
-    row.issue = { repo: event.repo, number: event.issue, state: touch?.lastState ?? "unknown", holder: false };
+export function indexRosterRegistry(events: RegistryEvent[]): RegistryIndex {
+  const views = foldRegistry(events);
+  const latest: RegistryIndex["latest"] = new Map(); const held: RegistryIndex["held"] = new Map();
+  events.forEach((event, order) => {
+    const previous = latest.get(event.sessionId);
+    if (!previous || event.ts > previous.event.ts) latest.set(event.sessionId, { event, order });
+  });
+  let order = 0;
+  for (const view of views.values()) for (const touch of view.sessions) {
+    if (!holding(touch.lastState)) continue;
+    const claims = held.get(touch.sessionId) ?? [];
+    claims.push({ issue: { repo: view.repo, number: view.issue, state: touch.lastState!, holder: true }, ts: touch.lastTs, order: order++ });
+    held.set(touch.sessionId, claims);
   }
-  else {
+  return { views, latest, held };
+}
+function joinIssue(row: RosterRow, sessions: string[], input: RosterInputs, registry: RegistryIndex): void {
+  const latest = sessions.flatMap(id => registry.latest.get(id) ?? []).sort((a, b) => b.event.ts.localeCompare(a.event.ts) || a.order - b.order)[0]?.event;
+  const claims = sessions.flatMap(id => registry.held.get(id) ?? []).sort((a, b) => b.ts.localeCompare(a.ts) || a.order - b.order);
+  row[heldClaims] = claims.map(c => c.issue);
+  if (claims.length) row.issue = claims[0].issue;
+  else if (latest) {
+    const touch = registry.views.get(issueKey(latest.repo, latest.issue))?.sessions.find(s => s.sessionId === latest.sessionId);
+    row.issue = { repo: latest.repo, number: latest.issue, state: touch?.lastState ?? "unknown", holder: false };
+  } else {
     const seed = input.lanes.find(l => l.id === row.lane);
     if (seed?.repo && seed.issue) row.issue = { repo: seed.repo, number: seed.issue, state: "unknown", holder: false };
   }
-  if (events.length) {
-    row.evidence.push("registry"); row.repo ??= events[0].repo; row.branch ??= events[0].branch ?? null;
+  if (latest) {
+    row.evidence.push("registry"); row.repo ??= latest.repo; row.branch ??= latest.branch ?? null;
   }
 }
 function rowSessions(row: RosterRow, input: RosterInputs): string[] {
-  const pids = input.processes.procs.filter(p => p.cwd && p.cwd === row.worktree).map(p => p.pid);
-  if (row.pid !== null && !pids.includes(row.pid)) pids.push(row.pid);
+  const pids = row.pid === null ? [] : [row.pid];
   const sessions = matchedSessions(row.worktree, pids, input.register);
   if (sessions.length) {
     row.evidence.push("lease"); row.sessionId = sessions[0];
@@ -186,32 +217,67 @@ function stateOf(row: RosterRow, input: RosterInputs, now: Date): string {
   if (!live) return seed ? "stopped" : "unknown";
   return activeState(row, line, h, now);
 }
+interface MessageIndex {
+  inbound: Map<string, MessageRef[]>; outbound: Map<string, MessageRef[]>; identities: Set<string>;
+}
+const messageOrder = (a: MessageRef, b: MessageRef): number => b.at.getTime() - a.at.getTime() || b.name.localeCompare(a.name);
+function indexMessage(index: Map<string, MessageRef[]>, key: string, message: MessageRef): void {
+  const latest = index.get(key) ?? [];
+  const sameSender = latest.findIndex(m => m.from === message.from);
+  if (sameSender >= 0) {
+    if (messageOrder(message, latest[sameSender]) >= 0) return;
+    latest.splice(sameSender, 1);
+  }
+  latest.push(message); latest.sort(messageOrder);
+  // Two distinct senders suffice to exclude the row's own messages at lookup.
+  index.set(key, latest.slice(0, 2));
+}
+function messageEndpoints(to: string): Set<string> {
+  const parts = to.split("-"); const endpoints = new Set([to]);
+  // Preserve addressed(): a hyphen-delimited recipient can itself contain hyphens.
+  for (let start = 0; start < parts.length; start++) for (let end = start + 1; end <= parts.length; end++) {
+    endpoints.add(parts.slice(start, end).join("-"));
+  }
+  return endpoints;
+}
+function indexMessages(messages: MessageRef[], now: Date): MessageIndex {
+  const index: MessageIndex = { inbound: new Map(), outbound: new Map(), identities: new Set() };
+  for (const message of messages) {
+    indexMessage(index.outbound, message.from, message);
+    for (const to of message.to) for (const endpoint of messageEndpoints(to)) indexMessage(index.inbound, endpoint, message);
+    if (message.at.getTime() >= now.getTime() - 14 * 86_400_000) {
+      for (const id of [message.from, ...message.to]) index.identities.add(id);
+    }
+  }
+  return index;
+}
 function lastMessage(messages: MessageRef[], now: Date): RosterRow["lastInbound"] {
-  const last = [...messages].sort((a, b) => b.at.getTime() - a.at.getTime() || b.name.localeCompare(a.name))[0];
+  const last = messages.sort(messageOrder)[0];
   return last ? { name: last.name, ageMin: Math.max(0, Math.floor((now.getTime() - last.at.getTime()) / 60000)) } : null;
 }
-function joinMessages(row: RosterRow, input: RosterInputs, now: Date): void {
+function joinMessages(row: RosterRow, input: RosterInputs, now: Date, index: MessageIndex): void {
   const group = input.lanes.find(l => l.id === row.lane)?.group;
   const recipients = [row.lane, "ALL", input.broadcast, ...(group ? [group] : [])];
-  row.lastInbound = lastMessage(input.messages.filter(m => m.from !== row.lane && recipients.some(id => addressed(m, id))), now);
-  row.lastOutbound = lastMessage(input.messages.filter(m => m.from === row.lane), now);
+  row.lastInbound = lastMessage(recipients.flatMap(id => (index.inbound.get(id) ?? []).filter(m => m.from !== row.lane)), now);
+  row.lastOutbound = lastMessage([...(index.outbound.get(row.lane) ?? [])], now);
   if (row.lastInbound || row.lastOutbound) row.evidence.push("messages");
 }
-function messageRows(rows: RosterRow[], input: RosterInputs, now: Date): void {
+function messageRows(rows: RosterRow[], input: RosterInputs, index: MessageIndex): void {
   const reserved = new Set(["", "ALL", "BCAST", input.broadcast, ...input.lanes.flatMap(l => l.group ? [l.group] : [])]);
-  const ids = input.messages.filter(m => m.at.getTime() >= now.getTime() - 14 * 86_400_000).flatMap(m => [m.from, ...m.to]);
-  for (const id of new Set(ids)) if (!reserved.has(id) && !rows.some(r => r.lane === id)) {
-    const row = emptyRow(id, "message-only"); row.notes.push("identity known only from messages"); rows.push(row);
+  const known = new Set(rows.map(r => r.lane));
+  for (const id of index.identities) if (!reserved.has(id) && !known.has(id)) {
+    const row = emptyRow(id, "message-only"); row.notes.push("identity known only from messages"); rows.push(row); known.add(id);
   }
 }
 /** Pure join: no process, filesystem or clock access. */
-export function buildRoster(input: RosterInputs, now: Date): Roster {
-  const rows = processRows(input); messageRows(rows, input, now);
+export function buildRoster(input: RosterInputs, now: Date, registry = indexRosterRegistry(input.register.events)): Roster {
+  const messages = indexMessages(input.messages, now);
+  const rows = processRows(input); messageRows(rows, input, messages);
   for (const row of rows) {
     if (row.pid !== null) row.evidence.push("process");
-    const sessions = rowSessions(row, input); joinIssue(row, sessions, input);
+    const sessions = rowSessions(row, input); joinIssue(row, sessions, input, registry);
     row.idleMinutes = input.idle.get(row.worktree ?? "") ?? null;
-    row.state = stateOf(row, input, now); joinMessages(row, input, now);
+    row.state = stateOf(row, input, now); joinMessages(row, input, now, messages);
   }
   return { rows: rows.sort((a, b) => a.lane.localeCompare(b.lane)), sources: input.sources };
 }
@@ -219,9 +285,18 @@ export function repoMatches(repo: string | null | undefined, filter: string): bo
   const value = repo?.toLowerCase(); const target = filter.toLowerCase();
   return value === target || !target.includes("/") && value?.split("/").at(-1) === target;
 }
+function issueMatches(issue: RowIssue | null, selection: NonNullable<Selection["issue"]>): boolean {
+  return issue?.number === selection.number && (!selection.repo || repoMatches(issue.repo, selection.repo));
+}
 export function filterRows(rows: RosterRow[], selection: Selection): RosterRow[] {
-  return rows.filter(r => (!selection.repo || repoMatches(r.repo, selection.repo)) && (!selection.issue || r.issue?.number === selection.issue.number
-    && (!selection.issue.repo || repoMatches(r.issue.repo, selection.issue.repo))));
+  return rows.flatMap(row => {
+    if (selection.issue) {
+      const issue = [...row[heldClaims] ?? [], ...(row.issue ? [row.issue] : [])].find(i => issueMatches(i, selection.issue!));
+      if (!issue) return [];
+      row = { ...row, issue, repo: issue.repo };
+    }
+    return !selection.repo || repoMatches(row.repo, selection.repo) ? [row] : [];
+  });
 }
 function ownershipUnavailable(input: RosterInputs): Suggestion | undefined {
   if ([input.register.sources.registry, input.register.sources.leases].some(s => s.status === "error")) {
@@ -232,8 +307,8 @@ function liveOwner(rows: RosterRow[], sessionIds: string[], input: RosterInputs)
   return rows.find(r => r.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r.state)
     && matchedSessions(r.worktree, r.pid === null ? [] : [r.pid], input.register).some(id => sessionIds.includes(id)));
 }
-function viewSuggestion(view: IssueView,
-  rows: RosterRow[], input: RosterInputs, now: Date, unique: boolean): Suggestion | undefined {
+function viewSuggestion(view: IssueView, rows: RosterRow[], context: SuggestionContext, unique: boolean): Suggestion | undefined {
+  const { input, now, registry } = context;
   const holders = view.sessions.filter(s => holding(s.lastState));
   if (holders.some(s => input.register.liveness.get(s.sessionId)?.status === "unknown")) return { target: null, rule: "unverified", reason: "holder liveness unknown; verify before assigning" };
   const live = holders.filter(s => input.register.liveness.get(s.sessionId)?.status === "live");
@@ -242,23 +317,25 @@ function viewSuggestion(view: IssueView,
     if (owner && live.length === 1 && unique) return { target: owner.lane, rule: "issue-owner", reason: "live issue holder" };
     return { target: null, rule: "unverified", reason: "holder has no unique matched lane; verify before assigning" };
   }
-  const delivered = deliveries({ ...input.register, key: view.key, now });
+  const delivered = deliveries({ ...input.register, views: registry.views, key: view.key, now });
   if (delivered.length) return { target: null, rule: "delivered", reason: `${delivered.map(s => short(s.sessionId)).join(", ")}: do not assign; verify` };
-  const ownership = ownershipOf({ ...input.register, view, now });
+  const ownership = ownershipOf({ ...input.register, views: registry.views, view, now });
   if (ownership.verdict === "OWNED") return { target: null, rule: "unverified", reason: ownership.reason };
 }
-function issueSuggestion(rows: RosterRow[], input: RosterInputs, selection: Selection, now: Date): Suggestion | undefined {
+function issueSuggestion(rows: RosterRow[], context: SuggestionContext): Suggestion | undefined {
+  const { selection, registry } = context;
   if (!selection.issue) return undefined;
-  const views = [...foldRegistry(input.register.events).values()].filter(v => v.issue === selection.issue!.number
+  const views = [...registry.views.values()].filter(v => v.issue === selection.issue!.number
     && (!selection.issue!.repo || repoMatches(v.repo, selection.issue!.repo)) && (!selection.repo || repoMatches(v.repo, selection.repo)));
   for (const view of views) {
-    const suggestion = viewSuggestion(view, rows, input, now, views.length === 1);
+    const suggestion = viewSuggestion(view, rows, context, views.length === 1);
     if (suggestion) return suggestion;
   }
 }
-export function suggestTarget(rows: RosterRow[], input: RosterInputs, selection: Selection, now: Date): Suggestion {
+export function suggestTarget(rows: RosterRow[], input: RosterInputs & { registry?: RegistryIndex }, selection: Selection, now: Date): Suggestion {
   const unavailable = ownershipUnavailable(input); if (unavailable) return unavailable;
-  const issue = issueSuggestion(rows, input, selection, now); if (issue) return issue;
+  const registry = input.registry ?? indexRosterRegistry(input.register.events);
+  const issue = issueSuggestion(rows, { input, selection, now, registry }); if (issue) return issue;
   const repo = selection.repo || selection.issue?.repo;
   const candidates = rows.filter(r => repo && repoMatches(r.repo, repo) && r.state === "idle" && r.pid !== null && !r.issue?.holder && r.identity !== "unregistered");
   const roleRank = (r: RosterRow) => input.lanes.find(l => l.id === r.lane)?.role === "repo-orch" ? 1 : 0;
