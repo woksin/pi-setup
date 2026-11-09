@@ -1167,7 +1167,7 @@ test("extension check works without UI, defaults repo, requires issue and remain
 	issueWorkExtension(pi, { deps: deps(), git });
 	const ctx: any = { hasUI: false, cwd: "/repo", sessionManager: { getSessionId: () => "sub", getSessionFile: () => undefined } };
 	assert.ok(tool.parameters.properties.action.enum.includes("check"));
-	assert.match(tool.description, /automatically.*activity.*Re-claim.*state=done.*check:/);
+	assert.match(tool.description, /automatically.*activity.*Re-claim.*state=done.*check:/s);
 	const text = (await tool.execute("id", { action: "check", issue: 5 }, undefined, undefined, ctx)).content[0].text;
 	assert.match(text, /Activity on o\/r#5/);
 	assert.equal(seenRecords().length, 1);
