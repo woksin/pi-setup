@@ -39,7 +39,7 @@ test("removing a recorded pin then rerunning leaves it removed", async () => {
   const ctx = testCtx(home, { which: () => "/stub" });
   assert.equal(await main([...args, "--skip-npm"], ctx), 0);
   const data = JSON.parse(readFileSync(path, "utf8"));
-  data.packages = data.packages.filter((p: string) => p !== "npm:@woksin/pi-orch@0.2.0");
+  data.packages = data.packages.filter((p: string) => p !== "npm:@woksin/pi-orch@0.3.0");
   put(path, JSON.stringify(data));
   assert.equal(await main([...args, "--skip-npm"], ctx), 0);
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), data);
@@ -60,8 +60,8 @@ for (const op of [
   assert.ok(removed.packages.includes("npm:@woksin/pi-jobs@0.5.0"), "new packages are still adopted");
   const present = { packages: ["npm:user-choice@1", "npm:@woksin/pi-orch@0.1.0", "npm:other@2"] };
   const ops = pinPackages(present, pi);
-  assert.equal(present.packages[1], "npm:@woksin/pi-orch@0.2.0");
-  assert.deepEqual(ops.find(o => o.op === "array-replace"), { op: "array-replace", key: "packages", before: "npm:@woksin/pi-orch@0.1.0", after: "npm:@woksin/pi-orch@0.2.0" });
+  assert.equal(present.packages[1], "npm:@woksin/pi-orch@0.3.0");
+  assert.deepEqual(ops.find(o => o.op === "array-replace"), { op: "array-replace", key: "packages", before: "npm:@woksin/pi-orch@0.1.0", after: "npm:@woksin/pi-orch@0.3.0" });
 });
 
 for (const code of [0, 1]) test(`npm exit ${code} preserves unrelated manifest entries and saves only successful selected pins`, async () => {
