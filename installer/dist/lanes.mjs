@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 201178e47ad28ad43949255b241b1affee64e0862f1ef8f53a658af2f2868583
+// pi-setup-source-sha256: 1e01a2051ddbbce6cca6a75b1d06f2b37a3c77b6d3bfae04a1f00a2b845807ef
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -4896,6 +4896,13 @@ async function git(ctx, dir, args) {
     return void 0;
   }
 }
+async function piBlocker(ctx, { id, cwd }) {
+  const where = real(cwd);
+  if (!where) return "worktree path could not be resolved";
+  const found = await runningPiChecked(ctx);
+  if (found.procs.some((p) => p.cwd === where)) return `${id} is still running`;
+  return found.ok ? void 0 : "running pi processes could not be fully checked";
+}
 var real = (p) => {
   try {
     return realpathSync3(p);
@@ -4944,7 +4951,8 @@ async function archive3(ctx, { clone, cwd }) {
 }
 async function checks(wt, ctx) {
   if (!existsSync17(wt.cwd)) return left("worktree already removed");
-  if (await piIn(wt.cwd, ctx)) return left(`${wt.id} is still running`);
+  const blocker = await piBlocker(ctx, wt);
+  if (blocker) return left(blocker);
   for (const step of [() => isClean(ctx, wt), () => isMerged(ctx, wt), () => archive3(ctx, wt)]) {
     const verdict2 = await step();
     if (!verdict2.ok) return verdict2;

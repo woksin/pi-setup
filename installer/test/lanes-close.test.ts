@@ -8,7 +8,7 @@ import { main } from "../src/lanes/main.ts";
 import { defaults, saveConfig } from "../src/lanes/config.ts";
 import type { LanesCtx } from "../src/lanes/ctx.ts";
 
-interface Opts { running?: boolean; dirty?: string; merged?: number; ignored?: number; removeCode?: number; statusCode?: number }
+interface Opts { running?: boolean; dirty?: string; merged?: number; ignored?: number; removeCode?: number; statusCode?: number; psFails?: boolean; cwdUnknown?: boolean }
 function fixture(o: Opts = {}) {
   const home = realpathSync(tempDir("lanes-close")); const root = join(home, "coord"); mkdirSync(root);
   const clone = join(home, "repos/alpha");
@@ -23,8 +23,9 @@ function fixture(o: Opts = {}) {
     templatesDir: join(REPO, "installer/lanes/templates"), piAgentDir: join(home, ".pi/agent"), realpath: (p) => p, loadModule: async () => ({}),
     run: async (cmd, args) => {
       if (cmd === "pgrep") return res(o.running ? "101\n" : "", o.running ? 0 : 1);
-      if (cmd === "lsof") return res(`p101\nn${cwd}\n`);
+      if (cmd === "lsof") return o.cwdUnknown ? res("", 1) : res(`p101\nn${cwd}\n`);
       if (cmd === "ps" && args[0] === "-A") return res(o.running ? "101 1 pi\n" : "");
+      if (cmd === "ps" && args[0] === "-axo") return o.psFails ? res("", 1) : res(o.running || o.cwdUnknown ? "101 pi\n" : "");
       if (cmd !== "git") return res("", 1);
       const sub = args.slice(2); calls.push(sub.join(" "));
       if (sub[0] === "rev-parse" && sub.includes("--git-common-dir")) return res(join(clone, ".git"));
@@ -69,6 +70,15 @@ test("a running pi keeps the worktree", async () => {
   const f = fixture({ running: true }); assert.equal(await f.invoke("close", "L1"), 0);
   assert.ok(!removed(f)); assert.ok(f.out.includes("worktree left: L1 is still running")); assert.ok(f.closed());
 });
+test("unverifiable process discovery keeps the worktree", async () => {
+  for (const [o, why] of [[{ psFails: true }, "could not be fully checked"], [{ cwdUnknown: true }, "could not be fully checked"]] as const) {
+    const f = fixture(o); assert.equal(await f.invoke("close", "L1"), 0);
+    assert.ok(!removed(f)); assert.ok(f.out.some((l) => l.startsWith("worktree left:") && l.includes(why)), f.out.join("|")); assert.ok(f.closed());
+  }
+});
+test("no pi anywhere removes the worktree", async () => {
+  const f = fixture(); assert.equal(await f.invoke("close", "L1"), 0); assert.ok(removed(f));
+});
 test("missing worktree reports the existing message and runs no git", async () => {
   const f = fixture(); const { rmSync } = await import("node:fs"); rmSync(f.cwd, { recursive: true });
   assert.equal(await f.invoke("close", "L1"), 0); assert.ok(f.out.includes("worktree already removed; no removal hint")); assert.deepEqual(f.calls, []); assert.ok(f.closed());
@@ -96,7 +106,7 @@ test("real git: a merged lane worktree is removed, an unmerged one is kept", asy
   mkdirSync(f.clone, { recursive: true }); g(f.clone, "init", "-q", "-b", "main"); writeFileSync(join(f.clone, ".gitignore"), ".ai-work/\n");
   g(f.clone, "add", "."); g(f.clone, "commit", "-qm", "init"); g(f.clone, "update-ref", "refs/remotes/origin/main", "HEAD"); g(f.clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
   g(f.clone, "worktree", "add", "-q", "-b", "l1", f.cwd); g(f.clone, "worktree", "lock", f.cwd); mkdirSync(join(f.cwd, ".ai-work")); writeFileSync(join(f.cwd, ".ai-work/n.md"), "x");
-  const real: LanesCtx["run"] = async (cmd, args) => { if (cmd !== "git") return { code: 1, stdout: "", stderr: "", timedOut: false }; const r = spawnSync(cmd, args, { encoding: "utf8" }); return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr, timedOut: false }; };
+  const real: LanesCtx["run"] = async (cmd, args) => { if (cmd === "ps") return { code: 0, stdout: "", stderr: "", timedOut: false }; if (cmd !== "git") return { code: 1, stdout: "", stderr: "", timedOut: false }; const r = spawnSync(cmd, args, { encoding: "utf8" }); return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr, timedOut: false }; };
   f.ctx.run = real;
   writeFileSync(join(f.cwd, "extra.txt"), "x"); assert.equal(await f.invoke("close", "L1"), 0); assert.ok(existsSync(f.cwd)); assert.match(f.out.join("\n"), /worktree is dirty/);
   rmSync(join(f.cwd, "extra.txt")); writeFileSync(join(f.cwd, "c.txt"), "c"); g(f.cwd, "add", "."); g(f.cwd, "commit", "-qm", "ahead");

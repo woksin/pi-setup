@@ -1,7 +1,7 @@
 import { cpSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { LanesCtx } from "../ctx.ts";
-import { piIn } from "../sessions.ts";
+import { runningPiChecked } from "../processes.ts";
 
 const GIT_MS = 10000;
 const AI_WORK = ".ai-work";
@@ -17,6 +17,14 @@ async function git(ctx: LanesCtx, dir: string, args: string[]): Promise<Git | un
     const r = await ctx.run("git", ["-C", dir, ...args], { timeoutMs: GIT_MS });
     return r.timedOut ? undefined : { code: r.code, out: r.stdout };
   } catch { return undefined; }
+}
+/** Why no pi can be proven absent from `cwd`, or undefined when process discovery is complete and none runs there. */
+async function piBlocker(ctx: LanesCtx, { id, cwd }: Worktree): Promise<string | undefined> {
+  const where = real(cwd);
+  if (!where) return "worktree path could not be resolved";
+  const found = await runningPiChecked(ctx);
+  if (found.procs.some((p) => p.cwd === where)) return `${id} is still running`;
+  return found.ok ? undefined : "running pi processes could not be fully checked";
 }
 const real = (p: string): string | undefined => { try { return realpathSync(p); } catch { return undefined; } };
 
@@ -63,7 +71,8 @@ async function archive(ctx: LanesCtx, { clone, cwd }: Worktree): Promise<Verdict
 
 async function checks(wt: Worktree, ctx: LanesCtx): Promise<Verdict> {
   if (!existsSync(wt.cwd)) return left("worktree already removed");
-  if (await piIn(wt.cwd, ctx)) return left(`${wt.id} is still running`);
+  const blocker = await piBlocker(ctx, wt);
+  if (blocker) return left(blocker);
   for (const step of [() => isClean(ctx, wt), () => isMerged(ctx, wt), () => archive(ctx, wt)]) {
     const verdict = await step();
     if (!verdict.ok) return verdict;
