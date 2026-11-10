@@ -138,6 +138,7 @@ from datetime import datetime
 DEFAULT_ROOTS = ["{{REPOS_ROOT}}"]
 STEPS_ALL = ["build", "worktrees", "docker", "caches", "handoffs", "bins"]
 BIN_SWEEP = runpy.run_path(str(Path(__file__).resolve().with_name("bin_sweep.py")))
+PHASE_STATUS = runpy.run_path(str(Path(__file__).resolve().with_name("phase_status.py")))
 HANDOFF_SWEEP = runpy.run_path(str(Path(__file__).resolve().with_name("handoff_sweep.py")))
 HOLDERS = runpy.run_path(str(Path(__file__).resolve().with_name("holders.py")))
 retained_reason = BIN_SWEEP["retained_reason"]
@@ -1266,10 +1267,16 @@ def dockerfile_refs(checkouts, deadline=None):
     return refs, None
 
 
-def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None):
+PRESSURE_YOUNG_SECONDS = 3600  # under pressure an image this young may be a pull in flight: kept
+
+
+def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None, pressure=False):
     """(candidates, kept-notes, error). Images used by no container (by image ID and by name).
     With dev_age_days and refs (the tracked Dockerfile/compose references), unused unpinned unreferenced
-    cratis/* images without a release tag age out by tag time after dev_age_days (item["dev"], item["refs"])."""
+    cratis/* images without a release tag age out by tag time after dev_age_days (item["dev"], item["refs"]).
+    pressure=True (free space below the cleanup floor): every image no container uses is a candidate, whatever
+    its pins, age or references (item["pin"] names an ignored pin); only images younger than an hour (by Created
+    or last tag time; a tagged image whose tag time is unknown is a possible fresh pull: kept) stay. A multi-tag image is untagged per tag (item["per_tag"]), no -f."""
     dev_on = dev_age_days is not None and refs is not None
     if refs is not None and not isinstance(refs, ImageRefs):
         refs = ImageRefs(refs)  # plain reference strings
@@ -1322,6 +1329,18 @@ def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None):
                     "age_days": None if ts is None else round((time.time() - ts) / 86400, 1)}
             if iid in used_ids or used_by_name(used_names, tags, digests):
                 continue  # in use: not a candidate, not worth listing
+            if pressure:
+                tagged = tag_time(last_tag)
+                young = [t for t in (ts, tagged) if t is not None and t > time.time() - PRESSURE_YOUNG_SECONDS]
+                if young or (ts is None and tagged is None) or (tags and tagged is None):
+                    continue
+                pin = pinned_by(pins, iid, tags, digests)
+                if pin:
+                    item["pin"] = pin
+                if len(tags) > 1:
+                    item.update(per_tag=True, refs=list(tags))
+                cands.append(item)
+                continue
             if is_cratis(tags, digests) and refs is None:
                 continue  # reference scan unavailable: never remove cratis images (fail closed)
             dev = dev_on and dev_shaped(tags)
@@ -1354,8 +1373,37 @@ def plan_rmi_for(ctx: Ctx, d):
     """plan_rmi with the dev-image rule when this run knows the checkouts; otherwise only the general rule, with a note."""
     refs, error = dockerfile_refs(getattr(ctx, "checkouts", None) or [], ctx.deadline)
     d["notes"] = [f"dev image age-out skipped: {error}"] if error else []
+    pressure = bool(d.get("pressure"))
     d["rmi"], d["rmi_kept"], d["error"] = plan_rmi(ctx.args.image_age_days, ctx.deadline, ctx.args.dev_image_age_days,
-                                                   None if error else refs)
+                                                   None if error else refs, pressure=pressure)
+    if pressure:
+        ignored = sum(1 for item in d["rmi"] if item.get("pin"))
+        d["notes"] = [f"pressure: pins ignored ({ignored} pinned images are candidates); image age and Dockerfile "
+                      "references ignored; only container-used and under-1h images stay"]
+
+
+def docker_phases_safe():
+    """True only when pi-phase proves no integration phase runs (build/test/ci phases do not use the images)."""
+    rc, out, _ = run([str(Path(__file__).resolve().with_name("pi-phase")), "status"], timeout=20)
+    if rc != 0:
+        return False
+    try:
+        phases = PHASE_STATUS["active_phases"](out)
+    except Exception:
+        return False
+    return phases is not None and all(phase["kind"] in ("build", "test", "ci") for phase in phases)
+
+
+def docker_pressure(ctx: Ctx):
+    """Free space on the home volume is below --docker-pressure-gib (default: the cleanup floor) and no
+    integration phase runs. Unknown free space or phase state is never pressure."""
+    floor = ctx.args.docker_pressure_gib
+    floor = cleanup_trigger_gib() if floor is None else floor
+    try:
+        free = shutil.disk_usage(os.path.expanduser("~")).free
+    except OSError:
+        return False
+    return free < floor * 1024 ** 3 and docker_phases_safe()
 
 
 def plan_docker(ctx: Ctx):
@@ -1364,7 +1412,10 @@ def plan_docker(ctx: Ctx):
         d["skip"] = ("docker unresponsive (timed out twice): docker step skipped" if ctx.docker_unresponsive
                      else "docker not running (or not installed)")
         return d
+    d["pressure"] = docker_pressure(ctx)
     for label, cmd in DOCKER_PRUNES:
+        if d["pressure"] and cmd[:3] == ["docker", "builder", "prune"]:
+            label, cmd = "build cache (all, pressure)", ["docker", "builder", "prune", "-f"]
         d["prunes"].append({"label": label, "cmd": " ".join(cmd), "action": "prune"})
     rc, out, _ = run(["docker", "system", "df", "--format", "{{.Type}}: {{.Size}} (reclaimable {{.Reclaimable}})"], timeout=60)
     if rc == 0:
@@ -1392,8 +1443,9 @@ def apply_docker(ctx: Ctx, d):
 
 def remove_image(it):
     """`docker rmi` (never -f). Dev items are removed per tag, and only while the tag still points at the planned image."""
-    for target in it["refs"] if it.get("dev") else [it["id"]]:
-        if it.get("dev"):
+    per_tag = it.get("dev") or it.get("per_tag")
+    for target in it["refs"] if per_tag else [it["id"]]:
+        if per_tag:
             rc, out, e = run(["docker", "image", "inspect", "-f", "{{.Id}}", target], timeout=60)
             if rc != 0 or out.strip() != it["id"]:
                 it["result"] = f"skipped: {target} changed or gone"
@@ -3331,6 +3383,9 @@ def parse_args(argv):
                     help=".ai-work .trx/.dll/.pdb/.nettrace/.etlx/.dmp/.coverage files older than this are removed (default 2)")
     ap.add_argument("--package-artifact-age-days", type=nonneg_float, default=7, metavar="DAYS",
                     help=".ai-work .nupkg/.snupkg/.jar files older than this are removed (default 7)")
+    ap.add_argument("--docker-pressure-gib", type=nonneg_float, default=None, metavar="GIB",
+                    help="below this much free space on the home volume every image no container uses is removed "
+                         "with `docker rmi` (pins ignored) and all build cache is pruned (default: the cleanup floor)")
     ap.add_argument("--nuget-keep-versions", type=int, default=0)
     ap.add_argument("--session-age-days", type=nonneg_float, default=30)
     ap.add_argument("--handoff-age-days", type=nonneg_float, default=14)
