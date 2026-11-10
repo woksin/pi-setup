@@ -883,14 +883,17 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual([r["outcome"] for r in records], ["passed", "failed", "timeout"])
         self.assertEqual([r["exit"] for r in records], [0, 9, 124])
         record = records[0]
-        self.assertEqual(set(record) - {"envScrubbed"}, {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
+        # warm is recorded only when the bounded obj scan of the enclosing repository is conclusive;
+        # the test root sits inside the checkout, whose size varies, so treat it as optional here.
+        self.assertIn(record.get("warm", False), (True, False))
+        self.assertEqual(set(record) - {"envScrubbed", "warm"}, {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
                                       "head", "dirty", "argvHash", "stack", "envHash", "envPolicy", "profile", "verified", "fingerprint", "fast", "policy", "source",
                                   "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis",
                                   "waitV", "waitBreakdown", "waitScans", "waitSamples",
                                   "host", "peakRssMb", "peakProcRssMb",
                                   "obsV", "configHash", "configSummary", "hangTimeout", "workersSource",
-                                  "warm", "fastShadow", "childCpuS"})
+                                  "fastShadow", "childCpuS"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
