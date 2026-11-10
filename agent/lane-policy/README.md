@@ -97,7 +97,7 @@ The first removes grants; the second also removes bindings and writer rows. Rows
 
 **Trusted-clock assumption:** the machine's wall clock must be trustworthy throughout the grant window. `now < issuedAt` detects some clock rollbacks, and `now >= expires` denies; this does **not** detect revival after expiry if the clock is rolled back into the original window. No monotonic-clock or rollback-proof guarantee is made.
 
-**Cooperative boundary and residual risk:** this is not an OS sandbox. Arbitrary same-UID code can still edit the user-owned policy file or bypass known tool interception. The grant constrains the branch/action/window, **not the branch's commit contents**; matching pushes and PR-create attempts are unlimited during that window. Independent deep security review is required before merging this guard change; nothing here activates live lanes.
+**Cooperative boundary and residual risk:** this is not an OS sandbox. Arbitrary same-UID code can still edit the user-owned policy file or bypass known tool interception. The grant constrains the branch/action/window, **not the branch's commit contents**; matching pushes and PR-create attempts are unlimited during that window. Nothing here activates live lanes.
 
 ### Rollback / pause (operator only)
 
