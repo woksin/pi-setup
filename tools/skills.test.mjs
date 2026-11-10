@@ -222,8 +222,11 @@ test("repair retries are bounded independently of the unchanged review round", a
   assert.equal(second.result.repair.attempt, 2);
   assert.equal(second.result.round, 1);
   const third = await runReview({ ...base, repair: second.result }, { override: partialGpt });
-  assert.equal(third.result.repair.attempt, 3);
-  assert.match((await assertRepairRejected(third.result)).error, /ask the user/);
+  assert.equal(third.result.passed, false);
+  assert.equal(third.result.repair, undefined);
+  assert.match(third.result.next, /ask the user/);
+  const overCap = structuredClone(second.result); overCap.repair.attempt = 3;
+  assert.match((await assertRepairRejected(overCap)).error, /ask the user/);
 });
 
 test("a still-incomplete repair preserves newly completed lanes for the last attempt", async () => {

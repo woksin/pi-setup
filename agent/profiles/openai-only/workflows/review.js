@@ -414,8 +414,9 @@ const buildRepair = (lanes, completedKeys, preserved, notes) => {
     if (completedKeys.has(lane.key) && runs.some(run => run.label === labels[0]) && runs.every(reusableRun)) completed.push(...runs.map(slimRun))
     else missing.push(lane.key)
   }
-  if (missing.length === 0 || missing.length === lanes.length) return undefined
-  const evidence = { v: 1, attempt: repairing ? input.repair.repair.attempt + 1 : 1, round,
+  const attempt = repairing ? input.repair.repair.attempt + 1 : 1
+  if (missing.length === 0 || missing.length === lanes.length || attempt > 2) return undefined
+  const evidence = { v: 1, attempt, round,
     missing: missing.sort(), completed: completed.sort((a, b) => a.label.localeCompare(b.label)),
     advisory: lines(notes.advisory, 3, 90).slice(0, 3), coverageNotes: lines(notes.coverageNotes, 3, 120).slice(0, 3),
     preExisting: lines(notes.preExisting, 3, 100).slice(0, 3) }
@@ -748,6 +749,8 @@ const verdict = buildResult({
   blocking: confirmed, unverified, rejectedCount: rejected.length,
   next: runtimeProblems.length ? runtimeNext : repair
     ? `Incomplete: rerun with the same args plus repair: <this result> to retry only: ${repair.missing.join(', ')}. Do not use since/prior for this.`
-    : nextStep(passed),
+    : repairing && !passed && !complete && confirmed.length === 0 && unverified.length === 0
+      ? 'Still incomplete after the last repair attempt (cap 2); ask the user rather than retry again.'
+      : nextStep(passed),
 })
 return verdict
