@@ -1,6 +1,6 @@
 # Lane-policy local Pi pilot (cooperative guard)
 
-**Dormant by default.** Installing these source files or this README does not enroll a repository. No pilot commands below were executed against live lanes during implementation. Do not reload/activate running lanes without a separate operator decision.
+**No automatic enrollment.** Installing these source files or this README does not enroll a repository. No pilot commands below were executed against live lanes during implementation. Do not reload/activate running lanes without a separate operator decision.
 
 This is a Pi tool-boundary guard, **not** a filesystem/network/process sandbox. It cannot prevent arbitrary scripts outside known enrolled scopes or trusted extensions invoking other tools internally without a model tool event. No child-session authority is inferred from parent metadata.
 
@@ -21,7 +21,7 @@ The optional store is `~/.pi/agent/lane-policy/policy.json`. With no file, the p
 
 Repository identity is the canonical common Git directory (shared by worktrees), plus explicit GitHub `owner/repo`. Session identity comes from Pi's session manager. Each binding records a session, lane, branch and actions. Writers are unique per branch/action and must have matching bindings.
 
-Every successful authority mutation increments one **global monotonic policy revision**, including grant creation, revocation and changes to another repository. Grants are reusable for their 1–60 minute TTL, but only at the exact revision where created. A later authority change invalidates all older grants immediately. A new grant is itself a new authority revision; earlier grants become stale. Reissue the exact exception needed last, not a sequence of grants assumed to accumulate across revisions. Multi-action grant batching is not implemented.
+Every successful authority mutation increments one **global monotonic policy revision**, including grant creation, revocation and changes to another repository. Grants are reusable for their 1–60 minute TTL, but only at the exact revision where created. A later authority change invalidates all older grants immediately. A new grant is itself a new authority revision; earlier grants become stale. Reissue the exact exception needed last, not a sequence of grants assumed to accumulate across revisions. The `exception` command below batches push and PR-create grants in one revision; other multi-action grant batching is not implemented.
 
 `/lane-policy ack <current-revision>` durably records only the invoking bound session/coordinator's acknowledgement for the current repository. It needs explicit operator TUI confirmation, but does not need coordinator reassignment authority. ACK does **not** increment the authority revision, authorize an action, revive a stale grant or require a fresh ACK before an otherwise authorized action. A stale/missing ACK is visibility only.
 
@@ -61,6 +61,43 @@ Other operator authority commands:
 ```
 
 Only the repository coordinator may change authority, unless the operator explicitly appends `--override` and confirms. `revoke writer` also removes the session's grants; `revoke session` removes bindings, writers and grants. Writer conflicts require revoke before reassignment. Configured forbidden targets match an exact case-insensitive `owner/repo/#number`; they are not inferred from unrelated quoted issue numbers.
+
+## Candidate exception grants (human coordinator only)
+
+A human at the repository coordinator's interactive TUI can approve one exact non-integration branch with one command:
+
+```text
+/lane-policy exception WRITER_SESSION urgent-fix pilot-branch 30 Fix the production regression
+/lane-policy exception WRITER_SESSION major refs/heads/pilot-branch 60 Coordinated migration
+```
+
+Syntax: `exception SESSION urgent-fix|major BRANCH [MINUTES] REASON...`. The default window is **30 minutes**, maximum **60 minutes** (integer 1–60). If minutes are omitted, the reason must start with a nonnumeric word; a numeric first token is interpreted as minutes. A reason is required, at most 200 characters, without control characters. The lane can find its session ID with `/lane-policy status` and ask the human coordinator; it cannot grant itself authority. Only a positive human confirmation at the coordinator TUI mints the grants. RPC/json/print, inbox/model tool text, other sessions and `--override` cannot mint them, including an LLM coordinator acting on its own.
+
+The confirmation discloses the branch, reason and expiry: **unlimited matching pushes and PR-create attempts until expiry or revocation**. There is no attempt counter, single-use promise, authorization cache or open-PR precheck. GitHub may permit multiple PRs for one head, for example with different bases or after closing a PR.
+
+One authority revision atomically creates both grants with UUID, kind, issue time, expiry, reason and approving coordinator session metadata. A missing binding/writer is created for only `push,pr-create`; an existing binding must already permit those actions on that exact branch and is never widened or redirected. Another writer requires revocation first. The branch is normalized from `refs/heads/BRANCH` or a plain literal branch name; protected/integration branches, forbidden targets, tag/remotes/other `refs/*` spellings and ambiguous branch syntax are refused.
+
+A matching lane may use these attributable shapes during the window:
+
+```sh
+git push --no-follow-tags origin pilot-branch:pilot-branch
+gh pr create --repo owner/repo --head pilot-branch --title 'Fix' --body 'Description'
+```
+
+`refs/heads/` branch refspecs and `HEAD` as the source are also normalized. The local `refs/heads/BRANCH` must exist; a short refspec cannot fall back to a tag if that branch is absent. PR-create still requires the literal branch name as its head, not a `refs/*` namespace. **`--no-follow-tags` is mandatory for exception pushes**, even with an explicit refspec: configured `push.followTags` could otherwise publish tags implicitly. Force (`--force` or `--force-with-lease`), `+` refspecs, deletion, `--all`, `--mirror`, `--tags` and merge remain denied. Ordinary grants retain their existing force-with-lease behavior. No PR merge, issue write, comment or other repository/branch/session is authorized by this exception. The independent candidate and publication-scanner guards still apply; `kind` is audit metadata, not authentication of the model-typed `PI_CANDIDATE_EXCEPTION` token.
+
+Every assessment rereads policy and checks current revision, exact repository/branch/session/action and expiry. Repeated typed hook/execution or literal-shell assessments are stateless and idempotent, not counted attempts. Revocation or expiry between hook and execution denies execution. Any later authority mutation (even in another repository) invalidates the older revision. Revoke explicitly:
+
+```text
+/lane-policy revoke grants WRITER_SESSION
+/lane-policy revoke session WRITER_SESSION
+```
+
+The first removes grants; the second also removes bindings and writer rows. Rows otherwise remain after expiry but confer no publication authority without a valid grant. `exception-grant` and `exception-admission` audit records include grant identity, kind, branch, session, action and approving session/reason. Repeated assessment records are **not** proof that a push or PR was actually sent.
+
+**Trusted-clock assumption:** the machine's wall clock must be trustworthy throughout the grant window. `now < issuedAt` detects some clock rollbacks, and `now >= expires` denies; this does **not** detect revival after expiry if the clock is rolled back into the original window. No monotonic-clock or rollback-proof guarantee is made.
+
+**Cooperative boundary and residual risk:** this is not an OS sandbox. Arbitrary same-UID code can still edit the user-owned policy file or bypass known tool interception. The grant constrains the branch/action/window, **not the branch's commit contents**; matching pushes and PR-create attempts are unlimited during that window. Nothing here activates live lanes.
 
 ### Rollback / pause (operator only)
 

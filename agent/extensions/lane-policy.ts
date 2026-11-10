@@ -2,6 +2,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { shellGuard } from "../lib/shell-invocations.ts";
 import { isGuardOff } from "../lib/guards.ts";
+import { orchLog } from "../lib/orchestration.ts";
 import { ACTIONS, acknowledge, assessCommand, assessPublication, identity, isSetupWriter, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyStore, savePolicy, tamperReason, type Context } from "../lib/lane-policy.ts";
 
 const HELP = `Lane policy (operator TUI command only; all writes require confirmation):
@@ -11,9 +12,10 @@ coordinator session-id [--override]
 enroll session-id lane branch ${ACTIONS.join(",")}
 writer session-id branch action[,action...]
 grant session-id action exact-target 1..60 minutes
+exception session-id urgent-fix|major branch [minutes 1..60] <reason> (default 30 minutes; coordinator human TUI only, no --override; unlimited matching pushes and PR-create attempts until expiry or revocation; pushes require --no-follow-tags)
 revoke session|writer|grants session-id
 forbid owner/repo/#number | clear-forbidden exact-target
-Non-coordinators must append --override to authority changes. ACK is for the invoking bound session only; it grants no authority and does not change the revision. All authority changes invalidate older exception grants. Grants target a branch for push/pr-create, a numeric issue/PR for issue-write/pr-comment. Merge remains blocked in this first slice. /guards off|on lane-policy controls enforcement. No live lanes are enrolled automatically.`;
+Non-coordinators must append --override to authority changes other than exception grants (coordinator only). ACK is for the invoking bound session only; it grants no authority and does not change the revision. All authority changes invalidate older exception grants. Grants target a branch for push/pr-create, a numeric issue/PR for issue-write/pr-comment. Merge remains blocked in this first slice. /guards off|on lane-policy controls enforcement. No live lanes are enrolled automatically.`;
 const context = (ctx: ExtensionContext): Context => ({ cwd: ctx.cwd, session: ctx.sessionManager.getSessionId(), name: ctx.sessionManager.getSessionName?.() });
 const clean = (text: string) => text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 const record = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
@@ -88,10 +90,14 @@ export default function (pi: ExtensionAPI) {
 					if (words.length !== 2 || !/^\d+$/.test(words[1])) throw new Error("Usage: ack current-revision");
 					acknowledge(policy, actor, id, Number(words[1]));
 				} else mutate(policy, words, actor, id);
-				if (!await ctx.ui.confirm("Change lane policy?", clean(`${args}\nRevision: ${policy.revision}\nRepository: ${id.common}\nOperator session: ${actor.session}`), { timeout: 30000 })) {
+				const exceptions = words[0] === "exception" ? policy.repositories.flatMap(r => r.grants.filter(g => g.kind && g.revision === policy.revision)) : [];
+				const window = exceptions[0];
+				const exceptionNotice = window ? `\nThis authorizes unlimited matching pushes and PR-create attempts until expiry or revocation. Window: ${(window.expires - window.issuedAt!) / 60000} minutes; expires ${new Date(window.expires).toISOString()}. Push requires --no-follow-tags; force, tags, deletion and merge remain denied.` : "";
+				if (!await ctx.ui.confirm("Change lane policy?", clean(`${args}\nRevision: ${policy.revision}\nRepository: ${id.common}\nOperator session: ${actor.session}${exceptionNotice}`), { timeout: 30000 })) {
 					tell("Lane policy unchanged."); return;
 				}
 				savePolicy(policy, expected);
+				for (const grant of exceptions) orchLog("lane-policy", "exception-grant", `id=${grant.id} kind=${grant.kind} session=${grant.session} action=${grant.action} branch=${grant.target} revision=${grant.revision} issuedAt=${grant.issuedAt} expires=${grant.expires} by=${grant.by} reason=${grant.reason}`);
 				refresh(ctx);
 				tell(`Lane policy r${policy.revision} ${words[0] === "ack" ? "acknowledged" : "updated"}.`);
 			} catch (error) { tell((error as Error).message, true); }
