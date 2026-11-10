@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import childProcess, { execFileSync, spawnSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { ACTIONS, acknowledge, assessCommand, assessPublication, emptyPolicy, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyPath, policyStore, savePolicy, validatePolicy, type Policy, type Context } from "./lane-policy.ts";
 import laneExtension from "../extensions/lane-policy.ts";
+import publishExtension from "../extensions/publish.ts";
 import guardsExtension from "../extensions/guards.ts";
 import { setGuards } from "./guards.ts";
 
@@ -62,6 +63,11 @@ class FakeGit {
 	}
 
 	output(state: GitRepository, query: string): string {
+		if (query.startsWith("show-ref --verify --quiet refs/heads/")) {
+			const branch = query.slice("show-ref --verify --quiet refs/heads/".length);
+			if (branch === state.branch) return "";
+			throw this.error("not a valid branch ref", 1);
+		}
 		switch (query) {
 			case "rev-parse --git-common-dir": return state.common;
 			case "rev-parse --git-dir": return state.gitDir;
@@ -145,13 +151,14 @@ function fake(context = ctx, mode = "tui") {
 	const commands = new Map<string, any>(), handlers = new Map<string, Function[]>(), listeners = new Map<string, Function[]>();
 	const notices: string[] = [], statuses: { key: string; text: string | undefined }[] = [];
 	let confirmation = true, confirms = 0;
-	const extCtx: any = { ...context, mode, hasUI: mode === "tui", sessionManager: { getSessionId: () => context.session }, ui: { notify: (s: string) => notices.push(s), setStatus: (key: string, text: string | undefined) => statuses.push({ key, text }), confirm: async () => { confirms++; return confirmation; } } };
+	const confirmationText: string[] = [];
+	const extCtx: any = { ...context, mode, hasUI: mode === "tui", sessionManager: { getSessionId: () => context.session }, ui: { notify: (s: string) => notices.push(s), setStatus: (key: string, text: string | undefined) => statuses.push({ key, text }), confirm: async (_title: string, body: string) => { confirms++; confirmationText.push(body); return confirmation; } } };
 	const pi: any = {
 		registerCommand: (name: string, options: any) => commands.set(name, options),
 		on: (name: string, fn: Function) => handlers.set(name, [...(handlers.get(name) ?? []), fn]),
 		events: { on: (name: string, fn: Function) => listeners.set(name, [...(listeners.get(name) ?? []), fn]) },
 	};
-	return { pi, extCtx, notices, statuses, commands, listeners, get confirms() { return confirms; }, decline: () => { confirmation = false; },
+	return { pi, extCtx, notices, statuses, commands, listeners, confirmationText, get confirms() { return confirms; }, decline: () => { confirmation = false; },
 		fire: async (name: string, event: any = {}) => { for (const fn of handlers.get(name) ?? []) { const value = await fn(event, extCtx); if (value) return value; } },
 		command: (text: string) => commands.get("lane-policy").handler(text, extCtx),
 	};
@@ -330,10 +337,11 @@ test("lane extension dispatches publish before opaque/MCP, including nested chil
 	assert.equal(await host.fire("tool_call", { toolName: "publish", input: { kind: "check", files: ["a"] } }), undefined);
 });
 
-test("missing policy is dormant, including unrelated opaque workflows", () => {
+test("missing policy stays available for bootstrap but publication fails closed; unrelated workflows remain allowed", () => {
 	assert.equal(loadPolicy().policy?.repositories.length, 0);
 	assert.deepEqual(loadPolicy().policy?.forbidden, []);
-	allowed("git push origin main"); allowed("gh api graphql -f query=mutation"); allowed("python custom.py");
+	denied("git push origin main"); denied("gh api graphql -f query=mutation"); allowed("python custom.py");
+	allowed(`cat '${join(home, ".pi/agent/bin/pi-publish")}'`); allowed("gh pr view 1 -R Cratis/Studio");
 	assert.equal(mcpReason(ctx, "github_create_issue"), undefined);
 });
 test("push needs binding, exact writer and fresh explicit grant", () => {
@@ -783,6 +791,8 @@ test("publication enforcement ancestor, glob and directory symlink writes are pr
 });
 
 test("read-only commands on authority files are never policy writes", () => {
+	// Isolate authority-path attribution from the absent-store publication refusal.
+	policy = emptyPolicy(); store();
 	const p = livePaths();
 	for (const c of [
 		`grep -n x ${p.agent}/lane-policy*.json`,
@@ -902,4 +912,242 @@ test("typed API writes are admitted by target repository for sessions unbound to
 	}
 	assert.match(assessPublication({ kind: "api", endpoint: "repos/%ZZ/Studio/issues", method: "POST" }, stranger)!, /invalid publication request/);
 	assert.equal(assessPublication({ kind: "gist-create", files: ["draft.md"], description: "about Cratis/Studio" }, stranger), undefined);
+});
+
+// #196: stateless, human-approved candidate exceptions (binding addendum 2).
+const exceptionArgs = ["exception", "writer-session", "urgent-fix", "lane", "1", "Fix", "production", "regression"];
+const exceptionPush = "git push --no-follow-tags origin lane:lane";
+const exceptionRequest = { kind: "pr-create", repo: "Cratis/Studio", head: "lane", title: "Fix", body: "Safe" };
+function changedException(args: string[], actor = { ...ctx, session: "coordinator-session" }): Policy {
+	const next = structuredClone(policy);
+	mutate(next, args, actor, fixtureIdentity(repo));
+	return next;
+}
+function mint(args = exceptionArgs) {
+	store();
+	const next = changedException(args);
+	savePolicy(next, JSON.stringify(policy)); policy = next;
+	return next.repositories[0].grants;
+}
+function revokeExceptions(what = "grants") {
+	const next = changedException(["revoke", what, ctx.session]);
+	savePolicy(next, JSON.stringify(policy)); policy = next;
+}
+function publisher() {
+	let registered: any, sends = 0;
+	publishExtension({ registerTool: (def: any) => { registered = def; } } as any, {
+		candidate: async () => ({}), root: () => repo,
+		send: async () => { sends++; return { code: "published", text: "published", isError: false }; },
+	});
+	return { execute: (context: unknown) => registered.execute("id", exceptionRequest, undefined, undefined, context), sends: () => sends };
+}
+
+test("exception mint appends both UUID grants in one revision without widening an existing binding", () => {
+	const binding = structuredClone(policy.repositories[0].bindings[0]), before = policy.revision;
+	const grants = mint();
+	assert.equal(policy.revision, before + 1); assert.deepEqual(policy.repositories[0].bindings[0], binding);
+	assert.deepEqual(grants.map(g => g.action), ["push", "pr-create"]);
+	for (const g of grants) {
+		assert.match(g.id!, /^[0-9a-f-]{36}$/); assert.equal(g.kind, "urgent-fix");
+		assert.equal(g.reason, "Fix production regression"); assert.equal(g.by, "coordinator-session");
+		assert.equal(g.revision, policy.revision); assert.equal(g.expires - g.issuedAt!, 60000);
+	}
+	assert.notEqual(grants[0].id, grants[1].id);
+});
+test("major exception creates only push and PR-create binding/writer with a default 30 minute window", () => {
+	policy.repositories[0].bindings = []; policy.repositories[0].writers = [];
+	const grants = mint(["exception", ctx.session, "major", "lane", "Major coordinated change"]);
+	assert.equal(grants[0].expires - grants[0].issuedAt!, 30 * 60000);
+	assert.deepEqual(policy.repositories[0].bindings, [{ session: ctx.session, lane: "exception", branch: "lane", actions: ["push", "pr-create"] }]);
+	assert.deepEqual(policy.repositories[0].writers, [{ session: ctx.session, branch: "lane", actions: ["push", "pr-create"] }]);
+});
+test("exception accepts at most 60 minutes and normalizes the refs/heads mint namespace", () => {
+	const grants = mint(["exception", ctx.session, "major", "refs/heads/lane", "60", "Coordinated migration"]);
+	assert.equal(grants[0].target, "lane"); assert.equal(grants[0].expires - grants[0].issuedAt!, 3600000);
+});
+for (const [name, args] of [
+	["unknown kind", ["exception", "writer-session", "minor", "lane", "1", "reason"]],
+	["missing reason", exceptionArgs.slice(0, 5)],
+	["zero minutes", [...exceptionArgs.slice(0, 4), "0", "reason"]],
+	["negative minutes", [...exceptionArgs.slice(0, 4), "-1", "reason"]],
+	["fractional minutes", [...exceptionArgs.slice(0, 4), "1.5", "reason"]],
+	["overflow minutes", [...exceptionArgs.slice(0, 4), "9007199254740992", "reason"]],
+	["window beyond one hour", [...exceptionArgs.slice(0, 4), "61", "reason"]],
+	["blank session", ["exception", " ", "major", "lane", "1", "reason"]],
+	["blank branch", ["exception", "writer-session", "major", " ", "1", "reason"]],
+	["blank reason", [...exceptionArgs.slice(0, 5), "  "]],
+	["reason longer than 200 characters", [...exceptionArgs.slice(0, 5), "x".repeat(201)]],
+	["control character in reason", [...exceptionArgs.slice(0, 5), "fix\u007fnow"]],
+	["override forbidden", [...exceptionArgs, "--override"]],
+	["override embedded in reason", [...exceptionArgs, "--override", "please"]],
+] as [string, string[]][]) test(`exception mint rejects ${name}`, () => assert.throws(() => changedException(args)));
+for (const branch of ["main", "master", "develop", "development", "release/1", "integration/work", "refs/heads/main", "refs/tags/lane", "refs/remotes/origin/lane", "refs/heads/refs/tags/lane", "HEAD", "lane:other", "+lane", "lane*", "lane..other", "lane/.hidden", "lane.lock", "lane/"]) {
+	test(`exception mint rejects protected or ambiguous branch ${branch}`, () => {
+		assert.throws(() => changedException(["exception", ctx.session, "urgent-fix", branch, "1", "Fix"]));
+	});
+}
+test("exception mint denies a configured forbidden branch", () => {
+	policy.forbidden = ["Cratis/Studio/#lane"];
+	assert.throws(() => changedException(exceptionArgs));
+});
+test("exception mint is coordinator-only, not the lane writer or an override", () => {
+	assert.throws(() => changedException(exceptionArgs, ctx));
+	assert.throws(() => changedException([...exceptionArgs, "--override"], { ...ctx, session: "stranger" }));
+});
+test("exception mint refuses another writer, another binding branch, or widening existing actions", () => {
+	policy.repositories[0].writers[0].session = "other"; assert.throws(() => changedException(exceptionArgs));
+	policy.repositories[0].writers[0].session = ctx.session;
+	policy.repositories[0].bindings[0].branch = "other"; assert.throws(() => changedException(exceptionArgs));
+	policy.repositories[0].bindings[0].branch = "lane"; policy.repositories[0].bindings[0].actions = ["pr-comment"];
+	assert.throws(() => changedException(exceptionArgs));
+});
+for (const [name, change] of [
+	["empty reason", { reason: "" }], ["overlong reason", { reason: "x".repeat(201) }], ["control reason", { reason: "x\u007f" }],
+	["empty issuer", { by: " " }], ["unknown kind", { kind: "minor" }], ["missing id", { id: undefined }],
+	["invalid issue time", { issuedAt: NaN }], ["reversed times", { issuedAt: Number.MAX_SAFE_INTEGER }],
+	["excessive window", { issuedAt: 1 }], ["merge action", { action: "pr-merge" }], ["issue action", { action: "issue-write" }],
+	["tag target", { target: "refs/tags/lane" }],
+] as [string, Record<string, unknown>][]) test(`exception schema rejects ${name}`, () => {
+	mint(); const candidate = structuredClone(policy); Object.assign(candidate.repositories[0].grants[0], change);
+	assert.throws(() => validatePolicy(candidate));
+});
+test("exception schema rejects duplicate ids; ordinary legacy grants remain valid", () => {
+	grant(); assert.doesNotThrow(() => validatePolicy(policy)); policy.repositories[0].grants = [];
+	mint(); policy.repositories[0].grants[1].id = policy.repositories[0].grants[0].id;
+	assert.throws(() => validatePolicy(policy));
+});
+
+test("exception assessments are stateless and idempotent for unlimited matching pushes and PR-create attempts", () => {
+	mint(); const before = readFileSync(policyPath(), "utf8");
+	for (let n = 0; n < 8; n++) { allowed(exceptionPush); assert.equal(assessPublication(exceptionRequest, ctx), undefined); }
+	assert.equal(readFileSync(policyPath(), "utf8"), before);
+	assert.deepEqual(readdirSync(dirname(policyPath())), ["policy.json"]);
+});
+test("repeated literal shell-wrapper assessments of pushes and PR-create stay allowed within the window", () => {
+	mint();
+	for (let n = 0; n < 4; n++) {
+		allowed(`sh -c '${exceptionPush}'`);
+		allowed("sh -c 'gh pr create -R Cratis/Studio --head lane --title Fix --body Safe'");
+		allowed(`eval '${exceptionPush}'`);
+	}
+});
+test("typed hook and execution both admit repeated matching publications without cached authorization", async () => {
+	mint(); const f = fake(); laneExtension(f.pi); const tool = publisher();
+	for (let n = 0; n < 3; n++) {
+		assert.equal(await f.fire("tool_call", { toolName: "publish", input: exceptionRequest }), undefined);
+		assert.equal((await tool.execute(f.extCtx)).isError, false);
+	}
+	assert.equal(tool.sends(), 3);
+});
+for (const change of ["revoked grants", "revoked session", "expired", "unreadable policy", "deleted policy"]) test(`${change} between typed hook and execution denies before publication`, async t => {
+	const grants = mint(); const f = fake(); laneExtension(f.pi); const tool = publisher();
+	assert.equal(await f.fire("tool_call", { toolName: "publish", input: exceptionRequest }), undefined);
+	if (change === "revoked grants") revokeExceptions();
+	else if (change === "revoked session") revokeExceptions("session");
+	else if (change === "expired") t.mock.method(Date, "now", () => grants[0].expires);
+	else if (change === "unreadable policy") writeFileSync(policyPath(), "{");
+	else rmSync(policyPath());
+	assert.equal((await tool.execute(f.extCtx)).isError, true); assert.equal(tool.sends(), 0);
+});
+test("a valid empty policy is dormant without enrollment, unlike an absent policy store", () => {
+	policy = emptyPolicy(); store(); allowed("git push origin main"); allowed("gh api graphql -f query=mutation");
+});
+test("revocation during Git attribution is reread before granting an exception", () => {
+	mint(); let revoked = false;
+	fakeGit.onExec = (_command, args) => {
+		if (revoked || !args.includes("get-url")) return;
+		revoked = true; revokeExceptions();
+	};
+	denied(exceptionPush); assert.equal(revoked, true);
+});
+test("unqualified exception push cannot resolve a tag when its local branch is absent", () => {
+	gitProbe.mock.restore(); diagnosticProbe.mock.restore(); syncBuiltinESMExports();
+	const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+	git("init", "-b", "other");
+	git("-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", "commit", "--allow-empty", "-m", "fixture");
+	git("tag", "lane"); git("remote", "add", "origin", "git@github.com:Cratis/Studio.git");
+	mint(); denied(exceptionPush);
+	git("branch", "lane"); allowed("git push --no-follow-tags origin refs/heads/lane:refs/heads/lane");
+});
+test("a later assessment sees revocation, not a cached permit", () => {
+	mint(); allowed(exceptionPush); revokeExceptions(); denied(exceptionPush); assert.ok(assessPublication(exceptionRequest, ctx));
+});
+test("stale revision and changed writer or binding invalidate exception authority", () => {
+	mint(); policy.revision++; store(); denied(exceptionPush);
+	policy.repositories[0].grants.forEach(g => { g.revision = policy.revision; });
+	policy.repositories[0].writers[0].session = "other"; store(); denied(exceptionPush);
+	policy.repositories[0].writers[0].session = ctx.session; policy.repositories[0].bindings[0].actions = ["pr-comment"]; store(); denied(exceptionPush);
+});
+test("clock rollback before issuedAt denies; now equal to expiry and later deny", t => {
+	const grants = mint(); let now = grants[0].issuedAt! - 1; t.mock.method(Date, "now", () => now);
+	denied(exceptionPush); assert.ok(assessPublication(exceptionRequest, ctx));
+	now = grants[0].expires; denied(exceptionPush); assert.ok(assessPublication(exceptionRequest, ctx));
+	now++; denied(exceptionPush);
+});
+test("exception denies wrong repo, branch, session and action", () => {
+	mint(); denied(exceptionPush, { ...ctx, session: "other" });
+	for (const head of ["other", "refs/tags/lane"]) assert.ok(assessPublication({ ...exceptionRequest, head }, ctx));
+	assert.ok(assessPublication({ ...exceptionRequest, repo: "Other/Repo" }, ctx));
+	fakeGit.repository(repo).remote.push = ["git@github.com:Other/Repo.git"]; denied(exceptionPush);
+	denied("git push --no-follow-tags origin other:other"); denied("git push --no-follow-tags origin lane:other");
+	denied("gh pr merge 39 -R Cratis/Studio"); denied("gh pr comment 39 -R Cratis/Studio --body safe");
+});
+for (const [name, command] of [
+	["force", "git push --no-follow-tags --force origin lane:lane"],
+	["force-with-lease", "git push --no-follow-tags --force-with-lease origin lane:lane"],
+	["plus refspec", "git push --no-follow-tags origin +lane:lane"],
+	["branch deletion", "git push --no-follow-tags origin :lane"],
+	["delete option", "git push --no-follow-tags --delete origin lane"],
+	["all branches", "git push --no-follow-tags --all origin"],
+	["mirror", "git push --no-follow-tags --mirror origin"],
+	["tags", "git push --no-follow-tags --tags origin lane:lane"],
+	["protected namespace", "git push --no-follow-tags origin lane:refs/heads/main"],
+	["tag namespace", "git push --no-follow-tags origin refs/tags/lane:refs/tags/lane"],
+	["implicit tags", "git push --follow-tags origin lane:lane"],
+] as [string, string][]) test(`exception push rejects ${name}`, () => { mint(); denied(command); });
+test("branch push normalizes only refs/heads and HEAD sources, not tag namespaces", () => {
+	mint(); allowed("git push --no-follow-tags origin refs/heads/lane:refs/heads/lane");
+	allowed("git push --no-follow-tags origin HEAD:refs/heads/lane");
+	assert.ok(assessPublication({ ...exceptionRequest, head: "refs/heads/lane" }, ctx));
+});
+test("configured push.followTags cannot publish tags: explicit --no-follow-tags is mandatory", () => {
+	mint(); writeFileSync(join(repo, ".git", "config"), "[push]\n\tfollowTags = true\n");
+	denied("git push origin lane:lane"); allowed(exceptionPush);
+});
+test("ordinary grants preserve force-with-lease and never require exception metadata", () => {
+	grant(); store(); allowed("git push --force-with-lease origin lane:lane");
+});
+test("policy remains protected from model direct writes and shell mutation", async () => {
+	mint(); assert.ok(policyFile(policyPath())); denied(`printf '{}' > '${policyPath()}'`); denied(`rm '${policyPath()}'`);
+	const f = fake(); laneExtension(f.pi);
+	assert.ok(await f.fire("tool_call", { toolName: "write", input: { path: policyPath(), content: "{}" } }));
+	assert.ok(await f.fire("tool_call", { toolName: "edit", input: { path: policyPath(), oldText: "a", newText: "b" } }));
+});
+test("push and PR-create refusals name the human exception route but malformed commands do not", () => {
+	store();
+	for (const denial of [assessCommand("git push origin lane:lane", ctx)!, assessPublication(exceptionRequest, ctx)!]) {
+		assert.match(denial, /writer-session urgent-fix lane/); assert.match(denial, /writer-session major lane/);
+		assert.match(denial, /coordinator TUI/); assert.match(denial, /revoke grants/); assert.match(denial, /60/);
+		assert.match(denial, /unlimited matching pushes and PR-create attempts until expiry or revocation/);
+	}
+	assert.doesNotMatch(assessCommand("git push", ctx)!, /\/lane-policy exception/);
+});
+for (const mode of ["rpc", "json", "print", "tui-refused", "lane TUI", "coordinator override"]) test(`human-only mint rejects ${mode}`, async () => {
+	store(); const actor = mode === "lane TUI" ? ctx : { ...ctx, session: "coordinator-session" };
+	const f = fake(actor, ["rpc", "json", "print"].includes(mode) ? mode : "tui");
+	if (mode === "tui-refused") f.decline(); laneExtension(f.pi);
+	await f.command(exceptionArgs.join(" ") + (mode === "coordinator override" ? " --override" : ""));
+	assert.equal(loadPolicy().policy!.repositories[0].grants.length, 0);
+});
+test("confirmed coordinator TUI discloses unlimited attempts/window/reason and logs grant and admission metadata", async () => {
+	store(); const f = fake({ ...ctx, session: "coordinator-session" }); laneExtension(f.pi);
+	await f.command(exceptionArgs.join(" "));
+	assert.equal(f.confirms, 1); assert.equal(loadPolicy().policy!.repositories[0].grants.length, 2);
+	const confirmation = f.confirmationText[0]; assert.match(confirmation, /Fix production regression/); assert.match(confirmation, /lane/);
+	assert.match(confirmation, /unlimited matching pushes and PR-create attempts until expiry or revocation/);
+	assert.match(confirmation, /1 minute/); allowed(exceptionPush);
+	const log = readFileSync(join(home, ".pi/agent/logs/guard-decisions.jsonl"), "utf8");
+	assert.match(log, /exception-grant/); assert.match(log, /exception-admission/); assert.match(log, /urgent-fix/);
+	assert.match(log, /Fix production regression/); assert.match(log, /coordinator-session/); assert.match(log, /writer-session/);
+	assert.ok(!log.includes(exceptionRequest.body));
 });

@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { orchLog } from "./orchestration.ts";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { argsOf, expandedCommands } from "../extensions/wait-guard.ts";
 import { isGuardOff } from "./guards.ts";
@@ -9,7 +11,10 @@ import { parseCli, toGhPlan, validateRequest, type PublishRequest } from "./publ
 export const ACTIONS = ["push", "pr-create", "pr-merge", "issue-write", "pr-comment"] as const;
 export type Action = typeof ACTIONS[number];
 export interface Binding { session: string; lane: string; branch: string; actions: Action[] }
-export interface Grant { session: string; action: Action; target: string; expires: number; revision: number }
+export interface Grant {
+	session: string; action: Action; target: string; expires: number; revision: number;
+	id?: string; kind?: "urgent-fix" | "major"; issuedAt?: number; reason?: string; by?: string;
+}
 export interface Acknowledgement { session: string; common: string; revision: number }
 export interface Repository {
 	common: string;
@@ -30,6 +35,22 @@ const text = (x: unknown): x is string => typeof x === "string" && x.length > 0 
 const strings = (x: unknown): x is string[] => Array.isArray(x) && x.every(text);
 const actions = (x: unknown): x is Action[] => strings(x) && x.every(a => ACTIONS.includes(a as Action));
 const unique = (xs: string[]) => new Set(xs).size === xs.length;
+const exceptionFields = ["id", "kind", "issuedAt", "reason", "by"];
+const nonblank = (value: unknown): value is string => text(value) && !!value.trim() && !/[\x7f-\x9f]/.test(value);
+const exceptionReason = (value: unknown): value is string => nonblank(value) && value.length <= 200;
+function exceptionBranch(branch: string): boolean {
+	if (!/^[\w][\w./-]*$/.test(branch) || branch.startsWith("refs/") || branch === "HEAD" || branch.includes("..")) return false;
+	return branch.split("/").every(part => !!part && !part.startsWith(".") && !part.endsWith(".") && !part.endsWith(".lock"));
+}
+function validateException(g: Grant): void {
+	if (!exceptionFields.some(key => Object.hasOwn(g, key))) return;
+	if (!text(g.id) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(g.id)) throw new Error("invalid exception id");
+	if (!["urgent-fix", "major"].includes(g.kind!) || !exceptionReason(g.reason) || !nonblank(g.by)) throw new Error("invalid exception metadata");
+	if (!["push", "pr-create"].includes(g.action) || !exceptionBranch(g.target) || protectedBranch(g.target)) throw new Error("invalid exception action/branch");
+	if (!Number.isSafeInteger(g.issuedAt) || g.issuedAt! <= 0) throw new Error("invalid exception issue time");
+	if (g.expires <= g.issuedAt! || g.expires - g.issuedAt! > 3600000) throw new Error("invalid exception window");
+}
+const exceptionIds = (policy: Policy): string[] => policy.repositories.flatMap(r => r.grants.filter(g => g.kind).map(g => g.id!));
 export function validatePolicy(x: unknown): asserts x is Policy {
 	if (!object(x) || x.version !== 1 || !Number.isSafeInteger(x.revision) || x.revision < 0 || !Array.isArray(x.acknowledgements) || !strings(x.forbidden) || !Array.isArray(x.repositories)) throw new Error("invalid policy schema");
 	for (const ack of x.acknowledgements) if (!object(ack) || !text(ack.session) || !text(ack.common) || !Number.isSafeInteger(ack.revision) || ack.revision < 0 || ack.revision > x.revision) throw new Error("invalid acknowledgement");
@@ -43,6 +64,8 @@ export function validatePolicy(x: unknown): asserts x is Policy {
 		if (!unique(r.bindings.map((b: Binding) => b.session)) || !unique(r.writers.map((w: any) => `${w.branch}:${w.actions.join(",")}`))) throw new Error("duplicate binding/writer");
 		for (const a of ACTIONS) if (!unique(r.writers.filter((w: any) => w.actions.includes(a)).map((w: any) => w.branch))) throw new Error("multiple writers");
 	}
+	for (const r of x.repositories) for (const g of r.grants) validateException(g);
+	if (!unique(exceptionIds(x as Policy))) throw new Error("duplicate exception id");
 	if (!unique(x.repositories.map((r: Repository) => r.common)) || !unique(x.repositories.map((r: Repository) => r.slug.toLowerCase()))) throw new Error("duplicate repository");
 }
 export function loadPolicy(file = policyPath()): Loaded {
@@ -200,12 +223,43 @@ export function mcpReason(ctx: Context | undefined, name: string, server = "", i
 	const action = /merge/i.test(capability) ? "pr-merge" : /(?:pull|pr).*create|create.*(?:pull|pr)/i.test(capability) ? "pr-create" : /issue/i.test(capability) ? "issue-write" : /push/i.test(capability) ? "push" : "pr-comment";
 	if (repo || (!ctx && policy.repositories.length)) return denial(policy, repo, ctx, action, ctx ? identity(ctx.cwd)?.branch ?? "" : "", "GitHub-write MCP capability is deny-only; use a supported direct publication command.");
 }
-function permit(policy: Policy, r: Repository, ctx: Context, action: Action, branch: string, target: string): string | undefined {
-	const deny = (why: string) => denial(policy, r, ctx, action, branch, why);
-	const binding = r.bindings.find(b => b.session === ctx.session && b.branch === branch && b.actions.includes(action));
-	if (!binding) return deny(`Session is not bound for ${action}.`);
-	if (!r.writers.some(w => w.session === ctx.session && w.branch === branch && w.actions.includes(action))) return deny(`Session is not the writer for ${action}.`);
-	if (!r.grants.some(g => g.session === ctx.session && g.action === action && g.target === target && g.revision === policy.revision && g.expires > Date.now())) return deny(`No current-revision unexpired ${action} grant for ${target}.`);
+interface Admission { file?: string; branchExists?: boolean; force?: boolean; noFollowTags?: boolean }
+function exceptionRoute(action: Action, session: string, branch: string): string {
+	if (!["push", "pr-create"].includes(action)) return "";
+	return ` Human-only coordinator TUI: /lane-policy exception ${session} urgent-fix ${branch} 30 <reason> or /lane-policy exception ${session} major ${branch} 30 <reason>. This allows unlimited matching pushes and PR-create attempts until expiry or revocation (default 30, maximum 60 minutes); push requires --no-follow-tags. Revoke: /lane-policy revoke grants ${session}. The lane cannot grant itself authority; otherwise use the train/orchestrator handoff.`;
+}
+function publicationGrant(policy: Policy, r: Repository, ctx: Context, action: Action, branch: string, target: string): Grant {
+	if (!r.bindings.some(b => b.session === ctx.session && b.branch === branch && b.actions.includes(action))) throw new Error(`Session is not bound for ${action}.`);
+	if (!r.writers.some(w => w.session === ctx.session && w.branch === branch && w.actions.includes(action))) throw new Error(`Session is not the writer for ${action}.`);
+	const matches = r.grants.filter(g => g.session === ctx.session && g.action === action && g.target === target && g.revision === policy.revision && g.expires > Date.now());
+	const grant = matches.find(g => !g.kind) ?? matches[0];
+	if (!grant) throw new Error(`No current-revision unexpired ${action} grant for ${target}.`);
+	return grant;
+}
+function validateExceptionPublication(policy: Policy, repo: Repository, grant: Grant, admission: Admission): void {
+	if (Date.now() < grant.issuedAt!) throw new Error("Exception denied: clock is before issuedAt.");
+	if (protectedBranch(grant.target) || forbidden(policy, repo.slug, grant.target)) throw new Error("Exception target is protected or forbidden.");
+	if (grant.action !== "push") return;
+	if (admission.force) throw new Error("Exception pushes cannot force or use force-with-lease.");
+	if (!admission.noFollowTags) throw new Error("Exception pushes require explicit --no-follow-tags to prevent implicit tag publication.");
+	if (!admission.branchExists) throw new Error("Exception push requires an existing local refs/heads branch, not a tag or unresolved ref.");
+}
+function permit(policy: Policy, r: Repository, ctx: Context, action: Action, branch: string, target: string, admission: Admission = {}): string | undefined {
+	try {
+		// No authorization survives an earlier hook, shell expansion or execution assessment.
+		const loaded = loadPolicy(admission.file ?? policyPath());
+		if (loaded.error || loaded.policy!.revision !== policy.revision) throw new Error("Policy changed or became unreadable; retry admission.");
+		const current = loaded.policy!;
+		const repo = current.repositories.find(repo => repo.common === r.common && repo.slug === r.slug);
+		if (!repo) throw new Error("Repository is no longer enrolled.");
+		const grant = publicationGrant(current, repo, ctx, action, branch, target);
+		if (grant.kind) {
+			validateExceptionPublication(current, repo, grant, admission);
+			orchLog("lane-policy", "exception-admission", `id=${grant.id} kind=${grant.kind} session=${ctx.session} action=${action} branch=${branch} revision=${current.revision} expires=${grant.expires} by=${grant.by} reason=${grant.reason}`);
+		}
+	} catch (error) {
+		return denial(policy, r, ctx, action, branch, (error as Error).message) + exceptionRoute(action, ctx.session, branch);
+	}
 }
 const protectedBranch = (branch: string) => /^(main|master|develop|development|integration|release(?:\/.*)?)$/.test(branch);
 const forbidden = (policy: Policy, slug: string, target: string) => policy.forbidden.some(x => x.toLowerCase() === `${slug}/#${target}`.toLowerCase());
@@ -247,7 +301,7 @@ function protectedGitConfigWrite(raw: string[]): boolean {
 function gitPublication(raw: string[]): boolean {
 	return /\b(?:push|send-pack|http-push)\b/i.test(raw.join(" ")) || protectedGitConfigWrite(raw);
 }
-function gitCommand(policy: Policy, ctx: Context, raw: string[], namedScope: boolean): string | undefined {
+function gitCommand(policy: Policy, ctx: Context, raw: string[], namedScope: boolean, file = policyPath()): string | undefined {
 	if (!gitPublication(raw)) return;
 	const targetContext = gitTarget(raw, ctx.cwd);
 	const { args, cwd } = targetContext;
@@ -263,7 +317,7 @@ function gitCommand(policy: Policy, ctx: Context, raw: string[], namedScope: boo
 	if (args[0] !== "push") return deny("Git publication tokens/configuration outside direct push are deny-only (only exact stash push is exempt); hand off to the train writer/operator.");
 	if (!repo) return deny(`Push target repository is not enrolled/resolved.${!id ? ` ${identityReason}.` : ""}`);
 	const flags = args.slice(1).filter(a => a.startsWith("-"));
-	if (flags.some(a => !["-u", "--set-upstream", "--force-with-lease"].includes(a))) return deny("Unsupported/ambiguous push options.");
+	if (flags.some(a => !["-u", "--set-upstream", "--force-with-lease", "--no-follow-tags"].includes(a))) return deny("Unsupported/ambiguous push options.");
 	const positional = args.slice(1).filter(a => !a.startsWith("-"));
 	if (positional.length !== 2 || positional[0] !== "origin") return deny("Use git push origin <branch>:<branch> (one explicit refspec).");
 	let slug: string;
@@ -274,7 +328,12 @@ function gitCommand(policy: Policy, ctx: Context, raw: string[], namedScope: boo
 	const source = spec[0] === "HEAD" ? id?.branch : spec[0].replace(/^refs\/heads\//, "");
 	const target = (spec[1] ?? spec[0]).replace(/^refs\/heads\//, "");
 	if (spec.length > 2 || !source || source !== target || /[+*^~]/.test(source) || protectedBranch(target)) return deny("Push must name the same non-integration writer branch at source and destination.", target);
-	return permit(policy, repo, ctx, "push", source, target);
+	// Probe before the final policy/time read. A short source must not fall back to a tag.
+	let branchExists = false;
+	if (repo.grants.some(g => g.kind && g.session === ctx.session && g.action === "push" && g.target === target)) {
+		try { git(cwd, "show-ref", "--verify", "--quiet", `refs/heads/${target}`); branchExists = true; } catch { /* Unresolved refs fail closed for exceptions only. */ }
+	}
+	return permit(policy, repo, ctx, "push", source, target, { file, branchExists, force: flags.includes("--force-with-lease"), noFollowTags: flags.includes("--no-follow-tags") });
 }
 function apiFields(args: string[]): boolean {
 	return args.some(a => /^(-[fF]|--(?:raw-)?field(?:=|$))/.test(a));
@@ -310,7 +369,7 @@ function ghArguments(raw: string[]): string[] {
 	}
 	return [...args, ...prefix];
 }
-function ghCommand(policy: Policy, ctx: Context, raw: string[], namedScope: boolean): string | undefined {
+function ghCommand(policy: Policy, ctx: Context, raw: string[], namedScope: boolean, admission: Admission = {}): string | undefined {
 	const args = ghArguments(raw);
 	const action = ghAction(args);
 	if (!action) return;
@@ -326,11 +385,11 @@ function ghCommand(policy: Policy, ctx: Context, raw: string[], namedScope: bool
 	if (!["pr-create", "pr-comment", "issue-write"].includes(action)) return deny(`${action} has no supported scoped grant in this slice; hand off to the train writer/operator.`);
 	if (!repo || !id || id.common !== repo.common || !explicit) return deny(`Mismatched repository or missing exact --repo owner/repo.${!id ? ` ${identityReason}.` : ""}`);
 	if (!branch || protectedBranch(branch)) return deny("Missing/non-writer branch.");
-	if (action === "pr-create") return permit(policy, repo, ctx, action, branch, branch);
+	if (action === "pr-create") return permit(policy, repo, ctx, action, branch, branch, admission);
 	const target = args[2];
 	if (!target || !/^\d+$/.test(target)) return deny("Use an explicit numeric PR/issue target; issue creation has no supported grant.");
 	if (forbidden(policy, repo.slug, target)) return deny("Forbidden target is closed; no grant can authorize it.");
-	return permit(policy, repo, ctx, action as Action, branch, target);
+	return permit(policy, repo, ctx, action as Action, branch, target, admission);
 }
 /** Exact target identity from validated fields only; query text never establishes scope. */
 function publicationRepository(request: PublishRequest): string | undefined {
@@ -350,12 +409,12 @@ export function assessPublication(value: unknown, ctx: Context, file = policyPat
 		const request = validateRequest(value);
 		if (request.kind === "check") return;
 		const loaded = loadPolicy(file);
-		if (loaded.error) return "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer.";
+		if (!existsSync(file) || loaded.error) return "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer.";
 		const ghArgs = toGhPlan(request).authority.ghArgs;
 		// API (and any other) writes are admitted by target repository, not by the session's cwd binding.
 		const target = publicationTarget(request);
 		const namedScope = loaded.policy!.repositories.some(r => r.slug.toLowerCase() === target?.toLowerCase());
-		return ghCommand(loaded.policy!, ctx, ghArgs, namedScope);
+		return ghCommand(loaded.policy!, ctx, ghArgs, namedScope, { file });
 	} catch { return "Lane policy: invalid publication request."; }
 }
 function publicationArguments(words: string[]): string[] | undefined {
@@ -556,6 +615,14 @@ export function assessCommand(command: string, ctx: Context, file = policyPath()
 	if (admission) return admission;
 	const commands = expandedCommands(command, 0, true);
 	const loaded = loadPolicy(file);
+	if (!existsSync(file)) {
+		const writes = commands.filter(words => {
+			if (SHELL_READERS.includes(words[0]?.split("/").pop() ?? "") || readOnlyForm(words)) return false;
+			const gh = publicationArguments(words);
+			return !gh || ghPublication(gh);
+		});
+		return fallbackPublication(writes.map(words => words.join(" ")).join("; "), writes) ? "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer." : undefined;
+	}
 	if (loaded.error) return fallbackPublication(command, commands) ? "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer." : undefined;
 	const policy = loaded.policy!;
 	if (!policy.repositories.length) return;
@@ -586,7 +653,7 @@ export function assessCommand(command: string, ctx: Context, file = policyPath()
 		const directPublication = gitArgs ? gitPublication(gitArgs) : ghArgs ? ghPublication(ghArgs) : false;
 		if (directPublication) {
 			if (unresolvedCwd || words.some(w => /^(?:GIT_[\w]+|GH_REPO|GH_HOST)=/.test(w)) || /\benv\b.*(?:--chdir|\s-C)/.test(command) || /[$`<>]/.test(command)) return deny("Publication has unresolved cwd/environment/expansion/redirection; use an attributable direct command.");
-			const reason = gitArgs ? gitCommand(policy, actor, gitArgs, namedScope) : ghCommand(policy, actor, ghArgs!, namedScope);
+			const reason = gitArgs ? gitCommand(policy, actor, gitArgs, namedScope, file) : ghCommand(policy, actor, ghArgs!, namedScope, { file });
 			if (reason) return reason;
 			continue;
 		}
@@ -609,6 +676,27 @@ export function assessCommand(command: string, ctx: Context, file = policyPath()
 	}
 }
 
+function mintException(policy: Policy, repo: Repository, args: string[], ctx: Context): void {
+	const [session, kind, rawBranch, ...words] = args;
+	if (!["urgent-fix", "major"].includes(kind) || !nonblank(session) || !nonblank(rawBranch)) throw new Error("Usage: exception session urgent-fix|major branch [minutes 1..60] <reason>");
+	const minutes = /^[+-]?\d/.test(words[0] ?? "") ? Number(words.shift()) : 30;
+	if (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 60) throw new Error("Exception window must be 1..60 minutes (default 30).");
+	const reason = words.join(" ").trim();
+	if (!exceptionReason(reason)) throw new Error("Exception reason must be 1..200 characters without control characters.");
+	const branch = rawBranch.replace(/^refs\/heads\//, "");
+	if (!exceptionBranch(branch) || protectedBranch(branch) || forbidden(policy, repo.slug, branch)) throw new Error("Exception requires an exact non-integration, non-forbidden branch.");
+	const required: Action[] = ["push", "pr-create"];
+	const binding = repo.bindings.find(b => b.session === session);
+	if (binding && (binding.branch !== branch || !required.every(a => binding.actions.includes(a)))) throw new Error("Exception cannot widen or replace an existing session binding.");
+	if (repo.writers.some(w => w.branch === branch && w.session !== session)) throw new Error("Another session is already the writer for this branch.");
+	if (!binding) repo.bindings.push({ session, lane: "exception", branch, actions: [...required] });
+	const missing = required.filter(a => !repo.writers.some(w => w.session === session && w.branch === branch && w.actions.includes(a)));
+	if (missing.length) repo.writers.push({ session, branch, actions: missing });
+	const issuedAt = Date.now();
+	for (const action of required) repo.grants.push({ session, action, target: branch, issuedAt, expires: issuedAt + minutes * 60000, revision: policy.revision,
+		id: randomUUID(), kind: kind as "urgent-fix" | "major", reason, by: ctx.session });
+}
+
 /** Only invoked by the operator slash-command boundary, never by tool calls. */
 function mutateAuthority(policy: Policy, words: string[], ctx: Context, id: Identity): void {
 	const [verb, ...args] = words;
@@ -621,6 +709,11 @@ function mutateAuthority(policy: Policy, words: string[], ctx: Context, id: Iden
 		return;
 	}
 	if (!repo) throw new Error("Repository is not enrolled; bootstrap first.");
+	if (verb === "exception") {
+		if (override || args.includes("--override")) throw new Error("Exception grants do not support --override; only the coordinator's human TUI confirmation may mint them.");
+		if (repo.coordinator !== ctx.session) throw new Error("Only this repository's coordinator may mint exception grants.");
+		mintException(policy, repo, args, ctx); return;
+	}
 	if (repo.coordinator !== ctx.session && !override) throw new Error("Only this repository's coordinator may mutate policy (operator --override requires confirmation).");
 	if (verb === "coordinator" && args.length === 1) { repo.coordinator = args[0]; return; }
 	if (verb === "forbid" && args.length === 1) { policy.forbidden.push(args[0]); return; }
