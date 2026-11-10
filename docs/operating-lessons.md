@@ -4,6 +4,14 @@ Lessons from running many agent sessions ("lanes") in parallel on one machine. E
 
 Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.md` rule agents follow), **practice** (orchestrator habit, not yet automated).
 
+## 2026-11-10
+
+### Removing a worktree under a live session breaks its child processes
+- **Symptom:** `issue_work claim`/`update` failed in one session with `publish: adapter-failed` (scanner exit 4) on every repository, while the `publish` tool in the same session and other sessions worked.
+- **Cause:** the session's process working directory had been deleted (its worktree was removed while it ran). Child processes inherit that dead directory: the scanner's `process.cwd()` throws, and on macOS starting `node` or `python3` from a deleted directory can also take 40 seconds or more, so the same cause can show up as a timeout.
+- **Rule:** tools that spawn children pass an explicit, existing `cwd` instead of inheriting the process directory. Do not remove a worktree that a live session uses as its working directory (check with `pi-holders` first).
+- **Enforced:** tool (`issue_work` starts the scanner from a live directory and names `cwd-unavailable`; `pi-holders` before removal) and practice for other spawners.
+
 ## 2026-10-28
 
 ### Check local routing evidence before assigning
