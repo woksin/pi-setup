@@ -40,7 +40,7 @@ def prerequisites_in_process(real_measure):
 
 class DryBudgetTests(unittest.TestCase):
     def test_default_unlimited_and_invalid_budget(self):
-        self.assertEqual(cleanup.parse_args([]).budget, 60)
+        self.assertEqual(cleanup.parse_args([]).budget, 180)
         self.assertEqual(cleanup.parse_args(['--budget', '0']).budget, 0)
         for value in ('-1', 'nan', 'inf'):
             with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -169,6 +169,18 @@ class DryBudgetTests(unittest.TestCase):
         self.assertEqual(rep['steps']['worktrees']['rows'][0]['action'], 'keep')
         self.assertEqual(rep['steps']['build']['rows'][0]['skip'], 'not measured (budget)')
         self.assertEqual(rep['steps']['bins']['rows'][0]['action'], 'skipped')
+        self.assertIn('worktrees: 0 of 1 checkouts measured; rerun with --budget 720', rep['notes'])
+        self.assertIn('build: 0 of 1 checkouts measured; rerun with --budget 720', rep['notes'])
+
+    def test_measured_count_note_counts_only_measured_checkouts(self):
+        args = cleanup.parse_args(['--only', 'build,worktrees'])
+        steps = {'worktrees': {'rows': [{'blockers': []}, {'blockers': ['not measured (budget)']}, {'blockers': ['dirty(1)']}]},
+                 'build': {'rows': [{'skip': None}, {'skip': 'not measured (budget)'}]}}
+        self.assertEqual(cleanup.checkout_measure_notes(args, steps), [
+            'worktrees: 2 of 3 checkouts measured; rerun with --budget 720',
+            'build: 1 of 2 checkouts measured; rerun with --budget 720'])
+        steps['build']['rows'][1]['skip'] = None
+        self.assertEqual(cleanup.checkout_measure_notes(args, steps)[1], 'build: 2 of 2 checkouts measured')
 
     def test_default_budget_gives_every_selected_step_a_slice(self):
         args = cleanup.parse_args([])
@@ -194,7 +206,7 @@ class DryBudgetTests(unittest.TestCase):
             cleanup.dry_plan_steps(ctx, [], budget, rep)
         # Worktrees is measured first; caches' two sub-sections share one slice.
         self.assertEqual(len(allowances), 7)
-        self.assertTrue(all(0 < seconds < 20 for seconds in allowances), allowances)
+        self.assertTrue(all(0 < seconds < args.budget / 3 for seconds in allowances), allowances)
         self.assertLess(sum(allowances), args.budget)
         shares = allowances[:3] + [sum(allowances[3:5]), allowances[5], allowances[6]]
         for share in shares:

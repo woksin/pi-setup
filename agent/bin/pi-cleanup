@@ -9,7 +9,7 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
 
   (default)          dry run: print the plan, change nothing; use existing remote refs
   --apply            execute the plan
-  --budget SECONDS   overall dry-run deadline (default 60; 0 unlimited). Unfinished
+  --budget SECONDS   overall dry-run deadline (default 180; 0 unlimited). Unfinished
                      sections are not measured (budget), never removable. Ignored by --apply.
                      Shares are divided across selected steps; unused time rolls forward.
                      Text sections stream immediately; --json remains one complete document.
@@ -3204,6 +3204,21 @@ def dry_suggestions(ctx, rows):
     return suggestions, rows
 
 
+def checkout_measure_notes(args, steps):
+    """One line per checkout-wise step: how many checkouts were measured before the budget ended."""
+    unmeasured = "not measured (budget)"
+    counts = {}
+    if "worktrees" in steps:
+        rows = steps["worktrees"]["rows"]
+        counts["worktrees"] = (sum(unmeasured not in row["blockers"] for row in rows), len(rows))
+    if "build" in steps:
+        rows = steps["build"]["rows"]
+        counts["build"] = (sum(row.get("skip") != unmeasured for row in rows), len(rows))
+    suggestion = f"; rerun with --budget {int(args.budget * 4) or 0}" if args.budget else ""
+    return [f"{name}: {done} of {total} checkouts measured" + (suggestion if done < total else "")
+            for name, (done, total) in counts.items()]
+
+
 def dry_plan_steps(ctx, checkouts, budget, rep):
     args = ctx.args
     safe_fs = ctx.snap is not None and ctx.mounts is not None
@@ -3243,6 +3258,7 @@ def dry_plan_steps(ctx, checkouts, budget, rep):
             plan = {"rows": budget.measure(name, DRY_STEP_WEIGHTS[name], lambda: dry_bins(checkouts), skipped)}
         rep["steps"][name] = plan
         stream_step(args, name, plan)
+    rep["notes"].extend(checkout_measure_notes(args, rep["steps"]))
     return wt_rows
 
 
@@ -3368,8 +3384,8 @@ def parse_args(argv):
     ap.error = lambda msg: (ap.print_usage(sys.stderr), print(f"pi-cleanup: error: {msg}", file=sys.stderr),
                             sys.exit(1))  # exit 2 is reserved for "partial"
     ap.add_argument("--apply", action="store_true", help="execute (default is a dry run)")
-    ap.add_argument("--budget", type=budget_seconds, default=60, metavar="SECONDS",
-                    help="overall dry-run budget (default 60 seconds; 0 unlimited; ignored by --apply)")
+    ap.add_argument("--budget", type=budget_seconds, default=180, metavar="SECONDS",
+                    help="overall dry-run budget (default 180 seconds; 0 unlimited; ignored by --apply)")
     ap.add_argument("--only", default=",".join(STEPS_ALL), help="comma list of " + ",".join(STEPS_ALL))
     ap.add_argument("--idle-days", type=nonneg_float, default=None)
     ap.add_argument("--worktree-min-idle-days", type=nonneg_float, default=1)
