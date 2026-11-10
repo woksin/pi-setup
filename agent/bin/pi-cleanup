@@ -9,7 +9,7 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
 
   (default)          dry run: print the plan, change nothing; use existing remote refs
   --apply            execute the plan
-  --budget SECONDS   overall dry-run deadline (default 60; 0 unlimited). Unfinished
+  --budget SECONDS   overall dry-run deadline (default 180; 0 unlimited). Unfinished
                      sections are not measured (budget), never removable. Ignored by --apply.
                      Shares are divided across selected steps; unused time rolls forward.
                      Text sections stream immediately; --json remains one complete document.
@@ -19,11 +19,15 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
                      --scheduled and not given, only the build step uses 0.25)
   --worktree-min-idle-days N  minimum idle age for worktree removal (default 1; may be 0).
                      Effective worktree idle threshold = max(--idle-days, this value)
-  --nuget-age-days N remote-sourced ~/.nuget/packages versions whose newest file
-                     atime/mtime/ctime is older than N days are removed by the caches step
-                     (default 7); runs even while dotnet is running
+  --nuget-age-days N (alias --nuget-unused-days) remote-sourced NuGet global-packages versions
+                     whose newest file mtime is older than N days are removed by the
+                     caches step (default 7; atime is ignored, it is unreliable on APFS); runs
+                     even while dotnet runs. The folder is $NUGET_PACKAGES, else `dotnet nuget
+                     locals global-packages`, else NuGet.Config, else ~/.nuget/packages.
+                     Versions with open files and local-feed versions are always kept
+  --nuget-unused-days-low N  the threshold while free space is below --if-free-below (default 1)
   --nuget-keep-versions N  the newest N versions of every package id are never removed
-                     (default 3; at least one version always stays)
+                     (default 0: unused versions are removed whatever their rank)
   --session-age-days N pi session .jsonl files not modified for N days are gzipped in
                      place by the caches step (default 30)
   --handoff-age-days N context-budget handoff files (.ai-work/handoffs) older than N days are
@@ -86,7 +90,7 @@ Steps
              go/compile/golangci-lint/gopls process); NuGet http-cache and temp, and
              ~/.nuget/packages versions whose .nupkg.metadata source is
              https://api.nuget.org/ or https://pkgs.dev.azure.com/dnceng/ and that are
-             unused for --nuget-age-days and not among the newest --nuget-keep-versions
+             unused for --nuget-age-days and not among the newest --nuget-keep-versions (default 0)
              (never local/file feeds; http-cache/temp clearing is skipped while a
              dotnet/MSBuild/VBCSCompiler process runs); `yarn cache clean` and
              `npm cache clean --force`; gzip in place of old, unopened pi session
@@ -134,6 +138,7 @@ from datetime import datetime
 DEFAULT_ROOTS = ["{{REPOS_ROOT}}"]
 STEPS_ALL = ["build", "worktrees", "docker", "caches", "handoffs", "bins"]
 BIN_SWEEP = runpy.run_path(str(Path(__file__).resolve().with_name("bin_sweep.py")))
+PHASE_STATUS = runpy.run_path(str(Path(__file__).resolve().with_name("phase_status.py")))
 HANDOFF_SWEEP = runpy.run_path(str(Path(__file__).resolve().with_name("handoff_sweep.py")))
 HOLDERS = runpy.run_path(str(Path(__file__).resolve().with_name("holders.py")))
 retained_reason = BIN_SWEEP["retained_reason"]
@@ -157,8 +162,16 @@ POOL = 8
 SIZE_BUDGET_S = 30  # total wall-clock budget for worktree `du` measurements
 DRY_WORKER = False
 TMP_ROOTS = ("/tmp", "/private/tmp")
+DEFAULT_TMP_ROOTS = TMP_ROOTS
+TMP_CLONE_ROOTS = None  # tests only: replaces the derived Chrome code_sign_clone roots
 TMP_PREFIXES = ("pisync.", "gr-stage-ui")
 TMP_MIN_AGE = 2 * 3600
+# Test and tool leftovers: directories by prefix, files by glob; removed once a day old.
+TMP_DAY_PREFIXES = ("pisetup-test.", "pisetup-", "lanes-", "cratis-guard-", "pfb-", "MSBuildTemp")
+TMP_FILE_PATTERNS = ("pi-bash-*.log", "tmp*.tmp", "*.keychain", "*.keychain-db")
+TMP_DAY_AGE = 24 * 3600
+TMP_MEASURE_MAX = 20  # directories measured with du per plan (some hold 160k files)
+CHROME_CLONE_NAME = "com.google.Chrome.code_sign_clone"
 
 BUILD_DIRS = {
     "bin", "obj", "node_modules", "dist", "TestResults", "coverage", "coverage-results",
@@ -557,6 +570,12 @@ def wt_idle_days(args):
     return max(args.idle_days, args.worktree_min_idle_days)
 
 
+def merged_idle_days(args):
+    """Idle threshold of a worktree PROVEN merged (on the default branch or a merged PR): never longer than the
+    general worktree threshold, so a stricter --idle-days still wins when it is shorter."""
+    return min(wt_idle_days(args), getattr(args, "merged_idle_hours", 4) / 24)
+
+
 def age_str(seconds: float) -> str:
     return f"{seconds / 3600:.0f}h" if seconds < 48 * 3600 else f"{seconds / 86400:.1f}d"
 
@@ -647,7 +666,7 @@ class Ctx:
         if reason:
             return reason
         if worktree:
-            idle = wt_idle_days(self.args)
+            idle = merged_idle_days(self.args) if idle is None else idle
         else:
             idle = self.args.idle_days if idle is None else idle
         hit = held_inside(self.snap, c.path, build_output)
@@ -867,7 +886,9 @@ def merged_pr(parent: str, branch: str, head: str, base: str):
 
 
 def plan_worktrees(ctx: Ctx, checkouts, notes):
-    idle_s = wt_idle_days(ctx.args) * 86400
+    # Only a merge-proven worktree can be removed (every other row carries a merge blocker), so the short
+    # merged threshold is applied up front; the longer general threshold never decides a removal.
+    idle_s = merged_idle_days(ctx.args) * 86400
     rows = []
     linked = [c for c in checkouts if c.kind == "linked"]
 
@@ -1246,10 +1267,16 @@ def dockerfile_refs(checkouts, deadline=None):
     return refs, None
 
 
-def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None):
+PRESSURE_YOUNG_SECONDS = 3600  # under pressure an image this young may be a pull in flight: kept
+
+
+def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None, pressure=False):
     """(candidates, kept-notes, error). Images used by no container (by image ID and by name).
     With dev_age_days and refs (the tracked Dockerfile/compose references), unused unpinned unreferenced
-    cratis/* images without a release tag age out by tag time after dev_age_days (item["dev"], item["refs"])."""
+    cratis/* images without a release tag age out by tag time after dev_age_days (item["dev"], item["refs"]).
+    pressure=True (free space below the cleanup floor): every image no container uses is a candidate, whatever
+    its pins, age or references (item["pin"] names an ignored pin); only images younger than an hour (by Created
+    or last tag time; a tagged image whose tag time is unknown is a possible fresh pull: kept) stay. A multi-tag image is untagged per tag (item["per_tag"]), no -f."""
     dev_on = dev_age_days is not None and refs is not None
     if refs is not None and not isinstance(refs, ImageRefs):
         refs = ImageRefs(refs)  # plain reference strings
@@ -1302,6 +1329,18 @@ def plan_rmi(age_days: float, deadline=None, dev_age_days=None, refs=None):
                     "age_days": None if ts is None else round((time.time() - ts) / 86400, 1)}
             if iid in used_ids or used_by_name(used_names, tags, digests):
                 continue  # in use: not a candidate, not worth listing
+            if pressure:
+                tagged = tag_time(last_tag)
+                young = [t for t in (ts, tagged) if t is not None and t > time.time() - PRESSURE_YOUNG_SECONDS]
+                if young or (ts is None and tagged is None) or (tags and tagged is None):
+                    continue
+                pin = pinned_by(pins, iid, tags, digests)
+                if pin:
+                    item["pin"] = pin
+                if len(tags) > 1:
+                    item.update(per_tag=True, refs=list(tags))
+                cands.append(item)
+                continue
             if is_cratis(tags, digests) and refs is None:
                 continue  # reference scan unavailable: never remove cratis images (fail closed)
             dev = dev_on and dev_shaped(tags)
@@ -1334,8 +1373,58 @@ def plan_rmi_for(ctx: Ctx, d):
     """plan_rmi with the dev-image rule when this run knows the checkouts; otherwise only the general rule, with a note."""
     refs, error = dockerfile_refs(getattr(ctx, "checkouts", None) or [], ctx.deadline)
     d["notes"] = [f"dev image age-out skipped: {error}"] if error else []
+    pressure = bool(d.get("pressure"))
     d["rmi"], d["rmi_kept"], d["error"] = plan_rmi(ctx.args.image_age_days, ctx.deadline, ctx.args.dev_image_age_days,
-                                                   None if error else refs)
+                                                   None if error else refs, pressure=pressure)
+    if pressure:
+        ignored = sum(1 for item in d["rmi"] if item.get("pin"))
+        d["notes"] = [f"pressure: pins ignored ({ignored} pinned images are candidates); image age and Dockerfile "
+                      "references ignored; only container-used and under-1h images stay"]
+
+
+def docker_phases_safe():
+    """True only when pi-phase proves no integration phase runs (build/test/ci phases do not use the images)."""
+    rc, out, _ = run([str(Path(__file__).resolve().with_name("pi-phase")), "status"], timeout=20)
+    if rc != 0:
+        return False
+    try:
+        phases = PHASE_STATUS["active_phases"](out)
+    except Exception:
+        return False
+    return phases is not None and all(phase["kind"] in ("build", "test", "ci") for phase in phases)
+
+
+def nuget_busy_reason():
+    """Why the NuGet packages trim must not run now, or None when provably idle. mtime-only selection
+    cannot see a build that is about to read an old package, so any dotnet/MSBuild/VBCSCompiler process
+    or active pi-phase phase blocks it. Fails closed: an undeterminable state is busy."""
+    busy = procs_running(NUGET_PROCS)
+    if busy:
+        return "running: " + ",".join(busy)
+    rc, out, _ = run([str(Path(__file__).resolve().with_name("pi-phase")), "status"], timeout=20)
+    if rc != 0:
+        return "pi-phase state unknown (status failed)"
+    try:
+        phases = PHASE_STATUS["active_phases"](out)
+    except Exception:
+        return "pi-phase state unknown (status unreadable)"
+    if phases is None:
+        return "pi-phase state unknown (status unreadable)"
+    if phases:
+        return "pi-phase active: " + ",".join(sorted({str(phase["kind"]) for phase in phases}))
+    return None
+
+
+def docker_pressure(ctx: Ctx):
+    """Free space on the home volume is below --docker-pressure-gib (default: the cleanup floor) and no
+    integration phase runs. Unknown free space or phase state is never pressure."""
+    floor = ctx.args.docker_pressure_gib
+    floor = cleanup_trigger_gib() if floor is None else floor
+    try:
+        free = shutil.disk_usage(os.path.expanduser("~")).free
+    except OSError:
+        return False
+    return free < floor * 1024 ** 3 and docker_phases_safe()
 
 
 def plan_docker(ctx: Ctx):
@@ -1344,7 +1433,10 @@ def plan_docker(ctx: Ctx):
         d["skip"] = ("docker unresponsive (timed out twice): docker step skipped" if ctx.docker_unresponsive
                      else "docker not running (or not installed)")
         return d
+    d["pressure"] = docker_pressure(ctx)
     for label, cmd in DOCKER_PRUNES:
+        if d["pressure"] and cmd[:3] == ["docker", "builder", "prune"]:
+            label, cmd = "build cache (all, pressure)", ["docker", "builder", "prune", "-f"]
         d["prunes"].append({"label": label, "cmd": " ".join(cmd), "action": "prune"})
     rc, out, _ = run(["docker", "system", "df", "--format", "{{.Type}}: {{.Size}} (reclaimable {{.Reclaimable}})"], timeout=60)
     if rc == 0:
@@ -1372,8 +1464,9 @@ def apply_docker(ctx: Ctx, d):
 
 def remove_image(it):
     """`docker rmi` (never -f). Dev items are removed per tag, and only while the tag still points at the planned image."""
-    for target in it["refs"] if it.get("dev") else [it["id"]]:
-        if it.get("dev"):
+    per_tag = it.get("dev") or it.get("per_tag")
+    for target in it["refs"] if per_tag else [it["id"]]:
+        if per_tag:
             rc, out, e = run(["docker", "image", "inspect", "-f", "{{.Id}}", target], timeout=60)
             if rc != 0 or out.strip() != it["id"]:
                 it["result"] = f"skipped: {target} changed or gone"
@@ -1397,7 +1490,49 @@ EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/share/dotnet", 
 NUGET_REMOTE_PREFIXES = ("https://api.nuget.org/", "https://pkgs.dev.azure.com/dnceng/")
 GO_CACHE_MIN = 10 * 1024 ** 3
 SESSIONS_DIR = os.path.expanduser("~/.pi/agent/sessions")
-NUGET_PACKAGES = os.path.expanduser("~/.nuget/packages")
+NUGET_DEFAULT_PACKAGES = os.path.expanduser("~/.nuget/packages")
+_nuget_dir_cache = []
+
+
+def nuget_configured_dir():
+    """Where NuGet says the global-packages folder is: $NUGET_PACKAGES, then `dotnet nuget locals
+    global-packages --list`, then NuGet.Config's globalPackagesFolder, then ~/.nuget/packages."""
+    env = os.environ.get("NUGET_PACKAGES")
+    if env:
+        return os.path.expanduser(env)
+    rc, out, _ = run(["dotnet", "nuget", "locals", "global-packages", "--list"], timeout=15)
+    if rc == 0:
+        for line in out.splitlines():
+            if line.strip().lower().startswith("global-packages:"):
+                value = line.split(":", 1)[1].strip()
+                if value:
+                    return os.path.expanduser(value)
+    try:
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(os.path.expanduser("~/.nuget/NuGet/NuGet.Config"))
+        for node in tree.iter("add"):
+            if (node.get("key") or "").lower() == "globalpackagesfolder" and node.get("value"):
+                return os.path.expanduser(node.get("value"))
+    except Exception:  # unreadable or malformed config: fall back to the default location
+        pass
+    return NUGET_DEFAULT_PACKAGES
+
+
+def nuget_packages_dir():
+    """Realpath of the NuGet global-packages folder, or "" when it cannot be trusted (fail closed:
+    missing, not a directory, not named like a packages folder, `/` or the home directory)."""
+    if _nuget_dir_cache:
+        return _nuget_dir_cache[0]
+    resolved = ""
+    try:
+        real = os.path.realpath(nuget_configured_dir())
+        if (os.path.isdir(real) and "packages" in os.path.basename(real).lower()
+                and real != "/" and real != os.path.realpath(os.path.expanduser("~"))):
+            resolved = real
+    except OSError:
+        pass
+    _nuget_dir_cache.append(resolved)
+    return resolved
 
 
 def extend_path() -> None:
@@ -1426,11 +1561,10 @@ def procs_running(names):
 
 def tree_usage(vd: str, stop_at=None):
     """Walk `vd` without following symlinks. Returns (newest, bytes, ok): newest is the max
-    of atime/mtime/ctime over the dir and every entry in it; bytes is allocated size; ok is
-    False if ANY stat/walk error happened (callers must then treat the dir as in use). The
-    atime of `.nupkg.metadata` is ignored (only its mtime/ctime count): pi-cleanup itself
-    reads that file, which would otherwise make every scanned version look freshly used.
-    When `stop_at` is given the walk stops at the first entry newer than it."""
+    of mtime over the dir and every entry in it (atime is ignored, it is unreliable on APFS;
+    ctime is ignored so a restored mtime of a downloaded package counts); bytes is allocated
+    size; ok is False if ANY stat/walk error happened (callers must then treat the dir as in
+    use). When `stop_at` is given the walk stops at the first entry newer than it."""
     state = {"ok": True}
 
     def onerror(_e):
@@ -1445,8 +1579,7 @@ def tree_usage(vd: str, stop_at=None):
             except OSError:
                 state["ok"] = False
                 continue
-            ct = 0.0 if name == ".nupkg.metadata" else st.st_ctime
-            newest = max(newest, st.st_atime, st.st_mtime, ct)
+            newest = max(newest, st.st_mtime)  # mtime only: atime is unreliable on APFS
             total += st.st_blocks * 512
             if stop_at is not None and newest >= stop_at:
                 return newest, total, state["ok"]
@@ -1488,14 +1621,27 @@ def nuget_valid_versions(idp: str, names):
 
 
 def nuget_newest(versions, keep: int):
-    """The `keep` newest (NuGet semver order, at least 1) of validated `versions`."""
+    """The `keep` newest (NuGet semver order) of validated `versions`; none when keep <= 0."""
     order = sorted(versions, key=nuget_version_key, reverse=True)
-    return set(order[:max(1, keep)])
+    return set(order[:max(0, keep)])
+
+
+def nuget_unused_days(args):
+    """Unused threshold in days: the stricter --nuget-unused-days-low while free space is low."""
+    days = args.nuget_age_days
+    if getattr(args, "low_space", False):
+        days = min(days, getattr(args, "nuget_unused_days_low", days))
+    return days
+
+
+def nuget_held(ctx, vd):
+    """True unless the process snapshot proves nothing has files open inside `vd` (fail closed)."""
+    return ctx.snap is None or bool(ctx.snap.first_inside(vd))
 
 
 def nuget_eligible(vd: str, cutoff: float, root_real: str):
     """True if version dir `vd` is a remote-sourced, symlink-free package version whose
-    newest atime/mtime/ctime (any file inside) is older than `cutoff`.
+    newest mtime (any file inside) is older than `cutoff`.
     Returns (eligible, is_local_source)."""
     ok, local, _ = nuget_check(vd, cutoff, root_real)
     return ok, local
@@ -1505,7 +1651,7 @@ def nuget_check(vd: str, cutoff: float, root_real: str):
     """Like nuget_eligible, plus the bytes of the version dir when it was fully walked."""
     try:
         idp = os.path.dirname(vd)
-        if os.path.dirname(idp) != NUGET_PACKAGES:
+        if not root_real or os.path.dirname(idp) != nuget_packages_dir():
             return False, False, 0
         for q in (idp, vd):
             if not statmod.S_ISDIR(os.lstat(q).st_mode):  # lstat: symlinks are not dirs
@@ -1539,16 +1685,16 @@ def nuget_check(vd: str, cutoff: float, root_real: str):
 
 def plan_nuget_trim(ctx: Ctx):
     """Returns (candidates, kept_local_count, kept_local_bytes, candidate_bytes)."""
-    cutoff = ctx.now - ctx.args.nuget_age_days * 86400
-    keep = getattr(ctx.args, "nuget_keep_versions", 3)
+    cutoff = ctx.now - nuget_unused_days(ctx.args) * 86400
+    keep = getattr(ctx.args, "nuget_keep_versions", 0)
     cands, kept_local, local_bytes, cand_bytes = [], 0, 0, 0
     try:
-        root_real = os.path.realpath(NUGET_PACKAGES)
-        ids = sorted(os.listdir(NUGET_PACKAGES))
+        root_real = nuget_packages_dir()
+        ids = sorted(os.listdir(nuget_packages_dir()))
     except OSError:
         return cands, kept_local, local_bytes, cand_bytes
     for pid in ids:
-        idp = os.path.join(NUGET_PACKAGES, pid)
+        idp = os.path.join(nuget_packages_dir(), pid)
         try:
             if not statmod.S_ISDIR(os.lstat(idp).st_mode):
                 continue
@@ -1563,7 +1709,7 @@ def plan_nuget_trim(ctx: Ctx):
                 ok, local, _ = nuget_check(vd, 0.0, root_real)
             else:
                 ok, local, size = nuget_check(vd, cutoff, root_real)
-                if ok:
+                if ok and not nuget_held(ctx, vd):
                     cands.append(vd)
                     cand_bytes += size
             if local:
@@ -1590,11 +1736,11 @@ def find_nuget_trash(root_real: str):
     name, a real directory (not a symlink) under the real root, pid not a live process."""
     found = []
     try:
-        ids = os.listdir(NUGET_PACKAGES)
+        ids = os.listdir(nuget_packages_dir())
     except OSError:
         return found
     for pid in ids:
-        idp = os.path.join(NUGET_PACKAGES, pid)
+        idp = os.path.join(nuget_packages_dir(), pid)
         try:
             if not statmod.S_ISDIR(os.lstat(idp).st_mode):
                 continue
@@ -1726,26 +1872,95 @@ def handoffs_failures(plan) -> int:
     return handoffs_totals(plan)["failed"] if plan else 0
 
 
-def tmp_state(path, now):
-    """Only old, user-owned real directories with an explicitly known prefix."""
+def tmp_min_age(name, is_dir):
+    """Minimum age in seconds for an explicitly known temp name, or None for an unknown one."""
+    if is_dir:
+        if name.startswith(TMP_PREFIXES):
+            return TMP_MIN_AGE
+        return TMP_DAY_AGE if name.startswith(TMP_DAY_PREFIXES) else None
+    return TMP_DAY_AGE if any(fnmatch.fnmatchcase(name, pat) for pat in TMP_FILE_PATTERNS) else None
+
+
+def tmp_known_name(name):
+    return tmp_min_age(name, True) is not None or tmp_min_age(name, False) is not None
+
+
+def tmp_state(path, now, clone=False):
+    """Only old, user-owned real directories (or, for the file patterns, regular files) with an
+    explicitly known name; never a symlink or another user's entry. `clone`: a child of a
+    Chrome code_sign_clone directory, any name, older than two hours."""
     reason = retained_reason(path)
     if reason:
         return None, reason
     try:
         st = os.lstat(path)
-        if not os.path.basename(path).startswith(TMP_PREFIXES):
+        is_dir = statmod.S_ISDIR(st.st_mode)
+        min_age = TMP_MIN_AGE if clone else tmp_min_age(os.path.basename(path), is_dir)
+        if min_age is None:
             return None, "unknown prefix"
-        if not statmod.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        if not (is_dir or (not clone and statmod.S_ISREG(st.st_mode))) or st.st_uid != os.getuid():
             return None, "not a user-owned directory"
-        if now - st.st_mtime < TMP_MIN_AGE:
-            return None, "younger than 2 hours"
+        if now - st.st_mtime < min_age:
+            return None, f"younger than {min_age // 3600} hours"
         return (st.st_dev, st.st_ino, st.st_mtime_ns), None
     except OSError as error:
         return None, str(error)
 
 
+def tmp_extra_roots():
+    """Real per-user temp roots besides /tmp: $TMPDIR, the Python temp dir and, for scheduled runs
+    without TMPDIR, the macOS per-user directory (`getconf DARWIN_USER_TEMP_DIR`)."""
+    raw = [os.environ.get("TMPDIR"), tempfile.gettempdir()]
+    if not os.environ.get("TMPDIR"):
+        rc, out, _ = run(["getconf", "DARWIN_USER_TEMP_DIR"], timeout=10)
+        if rc == 0 and out.strip():
+            raw.append(out.strip())
+    roots = []
+    for value in raw:
+        if value:
+            real = os.path.realpath(value)
+            if real not in roots and real != "/" and real != os.path.realpath(os.path.expanduser("~")):
+                roots.append(real)
+    return roots
+
+
+def tmp_roots():
+    """/tmp roots plus the per-user ones. A replaced TMP_ROOTS (tests) is used as given."""
+    if TMP_ROOTS is not DEFAULT_TMP_ROOTS:
+        return [os.path.realpath(r) for r in TMP_ROOTS]
+    roots = []
+    for raw in (*TMP_ROOTS, *tmp_extra_roots()):
+        real = os.path.realpath(raw)
+        if real not in roots:
+            roots.append(real)
+    return roots
+
+
+def tmp_clone_roots():
+    """`/var/folders/xx/yyy/X/com.google.Chrome.code_sign_clone` beside a `.../T` temp root."""
+    if TMP_CLONE_ROOTS is not None:
+        return [os.path.realpath(r) for r in TMP_CLONE_ROOTS]
+    if TMP_ROOTS is not DEFAULT_TMP_ROOTS:
+        return []
+    return [os.path.join(os.path.dirname(r), "X", CHROME_CLONE_NAME)
+            for r in tmp_extra_roots() if os.path.basename(r) == "T"]
+
+
+def command_lines():
+    """All process command lines, or None when they cannot be listed (callers fail closed)."""
+    rc, out, _ = run(["ps", "-axo", "command="], timeout=20)
+    return out.splitlines() if rc == 0 and out.strip() else None
+
+
+def command_mentions(path, lines=None):
+    lines = command_lines() if lines is None else lines
+    return lines is None or any(path in line for line in lines)
+
+
 def tmp_locked(path):
     """A test fixture may be idle without open files except its lifetime lock."""
+    if not os.path.isdir(path):
+        return False  # a plain file has no lifetime lock; open files are caught by the snapshot
     try:
         with open(os.path.join(path, ".pisync.lock"), "rb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1760,10 +1975,40 @@ def plan_tmp(ctx):
     return list(iter_tmp(ctx))
 
 
+def tmp_size(path, measured):
+    """Bytes of a candidate. Directories hold up to 160k files: at most TMP_MEASURE_MAX of them are
+    walked (1 s each); the rest are reported unmeasured, a file is a single lstat."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not statmod.S_ISDIR(st.st_mode):
+        return st.st_blocks * 512
+    if measured[0] >= TMP_MEASURE_MAX:
+        return None
+    measured[0] += 1
+    return du_bytes(path, 1)
+
+
+def tmp_entry(ctx, path, measured, clone=False, lines=None):
+    identity, reason = tmp_state(path, ctx.now, clone)
+    if not reason and (ctx.snap is None or ctx.snap.first_inside(path) or tmp_locked(path)):
+        reason = "process holds directory (or process snapshot unavailable)"
+    if not reason and clone and command_mentions(path, lines):
+        reason = "a process command line references it (or processes cannot be listed)"
+    size = tmp_size(path, measured) if not reason else None
+    entry = {"name": "temporary " + ("file " if os.path.isfile(path) and not os.path.islink(path) else "directory ")
+             + path, "tmp_path": path, "identity": identity, "size": size,
+             "action": "skip" if reason else "run", "reason": reason}
+    if clone:
+        entry["clone"] = True
+    return entry
+
+
 def iter_tmp(ctx):
     seen = set()
-    for raw in TMP_ROOTS:
-        root = os.path.realpath(raw)
+    measured = [0]
+    for root in tmp_roots():
         if root in seen:
             continue
         seen.add(root)
@@ -1772,16 +2017,17 @@ def iter_tmp(ctx):
         except OSError:
             continue
         for name in ctx.items(names):
-            if not name.startswith(TMP_PREFIXES):
-                continue
-            path = os.path.join(root, name)
-            identity, reason = tmp_state(path, ctx.now)
-            if not reason and (ctx.snap is None or ctx.snap.first_inside(path) or tmp_locked(path)):
-                reason = "process holds directory (or process snapshot unavailable)"
-            size = du_bytes(path, 2) if not reason else None
-            yield {"name": "temporary directory " + path, "tmp_path": path,
-                   "identity": identity, "size": size, "action": "skip" if reason else "run",
-                   "reason": reason}
+            if tmp_known_name(name):
+                yield tmp_entry(ctx, os.path.join(root, name), measured)
+    clones = tmp_clone_roots()
+    lines = command_lines() if clones else None
+    for root in clones:
+        try:
+            names = sorted(os.listdir(root)) if not os.path.islink(root) else []
+        except OSError:
+            continue
+        for name in ctx.items(names):
+            yield tmp_entry(ctx, os.path.join(root, name), measured, clone=True, lines=lines)
 
 
 def apply_tmp(ctx, item):
@@ -1792,15 +2038,21 @@ def apply_tmp(ctx, item):
     except SnapshotError:
         item.update(action="skip", reason="process snapshot unavailable")
         return
-    identity, reason = tmp_state(path, time.time())
-    allowed_roots = {os.path.realpath(root) for root in TMP_ROOTS}
+    clone = bool(item.get("clone"))
+    identity, reason = tmp_state(path, time.time(), clone)
+    allowed_roots = set(tmp_clone_roots() if clone else tmp_roots())
     if reason or identity != item["identity"] or os.path.dirname(path) not in allowed_roots:
         item.update(action="skip", reason=reason or "directory identity changed")
     elif snapshot.first_inside(path) or tmp_locked(path):
         item.update(action="skip", reason="process holds directory")
+    elif clone and command_mentions(path):
+        item.update(action="skip", reason="a process command line references it")
     else:
         try:
-            shutil.rmtree(path)
+            if statmod.S_ISDIR(os.lstat(path).st_mode):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
             item["result"] = "removed"
         except OSError as error:
             item["result"] = f"failed: {error}"
@@ -1926,17 +2178,22 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True, consume=None):
         else:
             item("nuget http-cache", "run", cmd=["dotnet", "nuget", "locals", "http-cache", "--clear"])
             item("nuget temp", "run", cmd=["dotnet", "nuget", "locals", "temp", "--clear"])
-        # the packages trim is atime-gated, so it is safe while dotnet runs
-        if ctx.deadline:
-            cands, kept_local, local_bytes, cand_bytes = [], 0, 0, 0
+        # the packages trim selects by mtime only: it waits for dotnet/MSBuild and active pi-phase phases
+        trim_busy = nuget_busy_reason()
+        if trim_busy:
+            item("nuget packages trim", "skip", trim_busy)
+            cands, trash = [], []
         else:
-            cands, kept_local, local_bytes, cand_bytes = plan_nuget_trim(ctx)
-        trash = [] if ctx.deadline else find_nuget_trash(os.path.realpath(NUGET_PACKAGES))
-        item("nuget packages trim", "run" if ctx.deadline or cands or trash else "skip", None if ctx.deadline or cands or trash else "nothing old enough",
-             **({"scheduled_trim": True} if ctx.deadline else {}),
-             paths=cands, size=cand_bytes, trash=len(trash),
-             note=f"{kept_local} local/other-source versions never touched ({human(local_bytes)})"
-                  + (f"; {len(trash)} leftover trash dirs to recover" if trash else ""))
+            if ctx.deadline:
+                cands, kept_local, local_bytes, cand_bytes = [], 0, 0, 0
+            else:
+                cands, kept_local, local_bytes, cand_bytes = plan_nuget_trim(ctx)
+            trash = [] if ctx.deadline else find_nuget_trash(nuget_packages_dir())
+            item("nuget packages trim", "run" if ctx.deadline or cands or trash else "skip", None if ctx.deadline or cands or trash else "nothing old enough",
+                 **({"scheduled_trim": True} if ctx.deadline else {}),
+                 paths=cands, size=cand_bytes, trash=len(trash),
+                 note=f"{kept_local} local/other-source versions never touched ({human(local_bytes)})"
+                      + (f"; {len(trash)} leftover trash dirs to recover" if trash else ""))
     if not ctx.ready():
         return {"items": items}
     # c. yarn / npm
@@ -1949,6 +2206,11 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True, consume=None):
     cands, open_skipped = plan_session_gzip(ctx)
     item("pi session gzip", "run" if cands else "skip", None if cands else "nothing old enough",
          files=cands, note=f"{open_skipped} open files skipped" if open_skipped else None)
+    # d2. .ai-work artifacts and ~/.net extraction folders
+    for entry in (plan_artifacts(ctx, checkouts), plan_dotnet_extractions(ctx)):
+        add(entry)
+    if not ctx.ready():
+        return {"items": items}
     # e. worktree prune
     parents = sorted({c.parent or c.path for c in checkouts if c.exists and (c.parent or c.kind == "main")
                       and os.path.isdir(c.parent or c.path)})
@@ -1962,6 +2224,162 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True, consume=None):
     if not consume:
         protect_cache_items(items)
     return {"items": items}
+
+
+# ----------------------------------------------------------------------------
+# reclaim: .ai-work build artifacts and ~/.net extraction folders (caches step items)
+# ----------------------------------------------------------------------------
+ARTIFACT_SHORT_SUFFIXES = (".trx", ".dll", ".pdb", ".nettrace", ".etlx", ".dmp", ".coverage")
+ARTIFACT_PACKAGE_SUFFIXES = (".nupkg", ".snupkg", ".jar")
+
+
+def reclaim_identity(path):
+    """(type, dev, ino, mtime_ns) of a real file/directory (never a symlink), else None."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    kind = statmod.S_IFMT(st.st_mode)
+    if kind not in (statmod.S_IFREG, statmod.S_IFDIR):
+        return None
+    return [kind, st.st_dev, st.st_ino, st.st_mtime_ns]
+
+
+def artifact_roots(checkouts):
+    """Real .ai-work directories of every checkout, its parent repo and the home directory."""
+    bases = {os.path.expanduser("~")}
+    for c in checkouts:
+        if c.exists:
+            bases.add(c.path)
+            if c.parent:
+                bases.add(c.parent)
+    roots = []
+    for base in sorted(bases):
+        ai = os.path.join(base, ".ai-work")
+        try:
+            real = os.path.realpath(ai)
+            if not statmod.S_ISLNK(os.lstat(ai).st_mode) and statmod.S_ISDIR(os.lstat(ai).st_mode) \
+                    and real not in roots:
+                roots.append(real)
+        except OSError:
+            continue
+    return roots
+
+
+def plan_artifacts(ctx: Ctx, checkouts):
+    """Old build/test artifacts under .ai-work (logs, notes and bundles are never matched)."""
+    item = {"name": ".ai-work build artifacts", "action": "skip", "reason": "nothing old enough", "paths": [],
+            "identities": {}, "roots": [], "size": 0, "reclaim": "artifacts"}
+    if ctx.snap is None:
+        item["reason"] = "process snapshot unavailable"
+        return item
+    short = ctx.now - ctx.args.artifact_age_days * 86400
+    package = ctx.now - ctx.args.package_artifact_age_days * 86400
+    item["roots"] = artifact_roots(checkouts)
+    for root in ctx.items(item["roots"]):
+        for dp, dns, fns in os.walk(root, followlinks=False):
+            dns.sort()
+            for fn in sorted(fns):
+                low = fn.lower()
+                cutoff = short if low.endswith(ARTIFACT_SHORT_SUFFIXES) else \
+                    package if low.endswith(ARTIFACT_PACKAGE_SUFFIXES) else None
+                if cutoff is None:
+                    continue
+                path = os.path.join(dp, fn)
+                ident = reclaim_identity(path)
+                if not ident or ident[0] != statmod.S_IFREG or ident[3] / 1e9 >= cutoff:
+                    continue
+                if retained_reason(path) or ctx.snap.first_inside(path):
+                    continue
+                item["paths"].append(path)
+                item["identities"][path] = ident
+                item["size"] += os.lstat(path).st_blocks * 512
+    if item["paths"]:
+        item.update(action="run", reason=None)
+    return item
+
+
+def plan_dotnet_extractions(ctx: Ctx):
+    """~/.net/<app>/<hash> extraction folders: keep the newest per app and any a process holds."""
+    root = os.path.join(os.path.expanduser("~"), ".net")
+    item = {"name": "~/.net extraction folders", "action": "skip", "reason": "nothing to remove", "paths": [],
+            "identities": {}, "roots": [], "size": 0, "reclaim": "dotnet-extract"}
+    if ctx.snap is None:
+        item["reason"] = "process snapshot unavailable"
+        return item
+    try:
+        if statmod.S_ISLNK(os.lstat(root).st_mode):
+            return item
+        real_root = os.path.realpath(root)
+        apps = sorted(os.listdir(real_root))
+    except OSError:
+        return item
+    item["roots"] = [real_root]
+    for app in ctx.items(apps):
+        app_dir = os.path.join(real_root, app)
+        try:
+            if not statmod.S_ISDIR(os.lstat(app_dir).st_mode):
+                continue
+            versions = [(os.lstat(os.path.join(app_dir, n)).st_mtime_ns, n) for n in os.listdir(app_dir)
+                        if statmod.S_ISDIR(os.lstat(os.path.join(app_dir, n)).st_mode)]
+        except OSError:
+            continue
+        if len(versions) < 2:
+            continue
+        for _, name in sorted(versions)[:-1]:
+            path = os.path.join(app_dir, name)
+            ident = reclaim_identity(path)
+            if not ident or retained_reason(path) or ctx.snap.first_inside(path):
+                continue
+            item["paths"].append(path)
+            item["identities"][path] = ident
+            item["size"] += du_bytes(path, 2) or 0
+    if item["paths"]:
+        item.update(action="run", reason=None)
+    return item
+
+
+def reclaim_blocker(ctx, it, path):
+    """Why `path` must not be removed now, or None. Every condition is re-proven at removal time."""
+    roots = [os.path.realpath(r) for r in it.get("roots", [])]
+    parent = os.path.realpath(os.path.dirname(path))
+    if not any(parent == r or parent.startswith(r + os.sep) for r in roots):
+        return "outside the planned root"
+    if it["reclaim"] == "dotnet-extract" and os.path.dirname(parent) != roots[0]:
+        return "not directly under ~/.net/<app>"
+    if parent != os.path.dirname(path):
+        return "path goes through a symlink"
+    if reclaim_identity(path) != it["identities"].get(path):
+        return "changed since planning"
+    reason = retained_reason(path)
+    if reason:
+        return reason
+    if ctx.snap is None or ctx.snap.first_inside(path):
+        return "held by a process (or process snapshot unavailable)"
+    return None
+
+
+def apply_reclaim(ctx, it):
+    res = {"deleted": 0, "skipped": 0, "failed": 0, "freed": 0}
+    for path in ctx.items(list(it["paths"])):
+        blocker = reclaim_blocker(ctx, it, path)
+        if blocker:
+            res["skipped"] += 1
+            it.setdefault("retained", []).append({"path": path, "reason": blocker})
+            continue
+        try:
+            if it["reclaim"] == "artifacts":
+                size = os.lstat(path).st_blocks * 512
+                os.unlink(path)
+            else:
+                size = du_bytes(path, 5) or 0
+                shutil.rmtree(path)
+            res["deleted"] += 1
+            res["freed"] += size
+        except OSError as error:
+            res["failed"] += 1
+            res["first_error"] = res.get("first_error") or f"{path}: {str(error)[:100]}"
+    it["result"] = res
 
 
 def file_open_state(path: str):
@@ -2087,10 +2505,16 @@ NUGET_PROCS = ["dotnet", "MSBuild", "VBCSCompiler"]
 
 def apply_nuget_paths(ctx, it):
     res = {"deleted": 0, "failed": 0, "skipped": 0, "recovered": 0}
-    cutoff = ctx.now - ctx.args.nuget_age_days * 86400
-    root_real = os.path.realpath(NUGET_PACKAGES)
+    cutoff = ctx.now - nuget_unused_days(ctx.args) * 86400
+    root_real = nuget_packages_dir()
     ids = set()
     for tp in ctx.items(find_nuget_trash(root_real) if it.get("recover_trash", True) else []):
+        reason = retained_reason(tp)
+        if reason or nuget_held(ctx, tp):
+            res["skipped"] += 1
+            if reason:
+                it.setdefault("retained", []).append({"path": tp, "reason": reason})
+            continue
         try:
             shutil.rmtree(tp)
             res["recovered"] += 1
@@ -2100,7 +2524,7 @@ def apply_nuget_paths(ctx, it):
     for vd in ctx.items(it["paths"]):
         reason = retained_reason(vd)
         ok, _ = nuget_eligible(vd, cutoff, root_real)
-        if reason or not ok:
+        if reason or not ok or nuget_held(ctx, vd):
             res["skipped"] += 1
             if reason:
                 it.setdefault("retained", []).append({"path": vd, "reason": reason})
@@ -2127,11 +2551,11 @@ def scheduled_nuget_versions(ctx):
     """List version identities only; expensive checks happen in rotating order."""
     versions = []
     try:
-        ids = sorted(os.listdir(NUGET_PACKAGES))
+        ids = sorted(os.listdir(nuget_packages_dir()))
     except OSError:
         return versions
     for pid in ids:
-        idp = os.path.join(NUGET_PACKAGES, pid)
+        idp = os.path.join(nuget_packages_dir(), pid)
         try:
             if not statmod.S_ISDIR(os.lstat(idp).st_mode):
                 continue
@@ -2149,8 +2573,8 @@ def apply_scheduled_nuget(ctx, it):
     it["result"] = recovery["result"]
     if not ctx.ready():
         return
-    root_real = os.path.realpath(NUGET_PACKAGES)
-    cutoff = ctx.now - ctx.args.nuget_age_days * 86400
+    root_real = nuget_packages_dir()
+    cutoff = ctx.now - nuget_unused_days(ctx.args) * 86400
     kept_local, local_bytes = 0, 0
     for vd, protected in ctx.items(scheduled_nuget_versions(ctx)):
         ok, local, size = nuget_check(vd, 0.0 if protected else cutoff, root_real)
@@ -2205,10 +2629,16 @@ def apply_caches(ctx: Ctx, plan):
             env = dict(ENV, GOCACHE=it["gocache"]) if it.get("gocache") else None
             rc, out, err = run(it["cmd"], timeout=300, env=env)
             it["result"] = "ok" if rc == 0 else f"failed: rc={rc} {(err.strip() or out.strip())[:120]}"
-        elif n == "nuget packages trim" and it.get("scheduled_trim"):
-            apply_scheduled_nuget(ctx, it)
         elif n == "nuget packages trim":
-            apply_nuget_paths(ctx, it)
+            trim_busy = nuget_busy_reason()
+            if trim_busy:
+                it.update(action="skip", reason=trim_busy + " (re-check before delete)")
+            elif it.get("scheduled_trim"):
+                apply_scheduled_nuget(ctx, it)
+            else:
+                apply_nuget_paths(ctx, it)
+        elif "reclaim" in it:
+            apply_reclaim(ctx, it)
         elif n == "pi session gzip":
             res = {"gzipped": 0, "skipped": 0, "failed": 0, "saved": 0}
             for f in ctx.items(it["files"]):
@@ -2269,6 +2699,10 @@ def render_caches(plan, apply, out):
         elif it["name"] == "nuget packages trim":
             det = f"{len(it['paths'])} versions, {human(it.get('size') or 0)}" + (f"; {it['note']}" if it.get("note") else "")
             rows.append([it["name"], (f"deleted {r['deleted']}, failed {r['failed']}" + (f", recovered {r['recovered']} trash dirs" if r.get('recovered') else "") if r else "would delete") if apply else "would delete", det])
+        elif "reclaim" in it:
+            det = f"{len(it['paths'])} entries, {human(it.get('size') or 0)}"
+            rows.append([it["name"], (f"deleted {r['deleted']}, skipped {r['skipped']}, failed {r['failed']}, freed {human(r['freed'])}"
+                                      if r else "remove") if apply else "would remove", det])
         elif it["name"] == "pi session gzip":
             tot = sum(f["size"] for f in it["files"])
             det = f"{len(it['files'])} files, {human(tot)} raw" + (f"; {it['note']}" if it.get("note") else "")
@@ -2806,6 +3240,21 @@ def dry_suggestions(ctx, rows):
     return suggestions, rows
 
 
+def checkout_measure_notes(args, steps):
+    """One line per checkout-wise step: how many checkouts were measured before the budget ended."""
+    unmeasured = "not measured (budget)"
+    counts = {}
+    if "worktrees" in steps:
+        rows = steps["worktrees"]["rows"]
+        counts["worktrees"] = (sum(unmeasured not in row["blockers"] for row in rows), len(rows))
+    if "build" in steps:
+        rows = steps["build"]["rows"]
+        counts["build"] = (sum(row.get("skip") != unmeasured for row in rows), len(rows))
+    suggestion = f"; rerun with --budget {int(args.budget * 4) or 0}" if args.budget else ""
+    return [f"{name}: {done} of {total} checkouts measured" + (suggestion if done < total else "")
+            for name, (done, total) in counts.items()]
+
+
 def dry_plan_steps(ctx, checkouts, budget, rep):
     args = ctx.args
     safe_fs = ctx.snap is not None and ctx.mounts is not None
@@ -2845,6 +3294,7 @@ def dry_plan_steps(ctx, checkouts, budget, rep):
             plan = {"rows": budget.measure(name, DRY_STEP_WEIGHTS[name], lambda: dry_bins(checkouts), skipped)}
         rep["steps"][name] = plan
         stream_step(args, name, plan)
+    rep["notes"].extend(checkout_measure_notes(args, rep["steps"]))
     return wt_rows
 
 
@@ -2970,13 +3420,25 @@ def parse_args(argv):
     ap.error = lambda msg: (ap.print_usage(sys.stderr), print(f"pi-cleanup: error: {msg}", file=sys.stderr),
                             sys.exit(1))  # exit 2 is reserved for "partial"
     ap.add_argument("--apply", action="store_true", help="execute (default is a dry run)")
-    ap.add_argument("--budget", type=budget_seconds, default=60, metavar="SECONDS",
-                    help="overall dry-run budget (default 60 seconds; 0 unlimited; ignored by --apply)")
+    ap.add_argument("--budget", type=budget_seconds, default=180, metavar="SECONDS",
+                    help="overall dry-run budget (default 180 seconds; 0 unlimited; ignored by --apply)")
     ap.add_argument("--only", default=",".join(STEPS_ALL), help="comma list of " + ",".join(STEPS_ALL))
     ap.add_argument("--idle-days", type=nonneg_float, default=None)
     ap.add_argument("--worktree-min-idle-days", type=nonneg_float, default=1)
-    ap.add_argument("--nuget-age-days", type=nonneg_float, default=7)
-    ap.add_argument("--nuget-keep-versions", type=int, default=3)
+    ap.add_argument("--merged-idle-hours", type=nonneg_float, default=4, metavar="HOURS",
+                    help="a clean worktree proven merged (on the default branch or a merged PR) is removable after "
+                         "this idle time (default 4; never longer than --idle-days/--worktree-min-idle-days)")
+    ap.add_argument("--nuget-age-days", "--nuget-unused-days", dest="nuget_age_days", type=nonneg_float, default=7)
+    ap.add_argument("--nuget-unused-days-low", type=nonneg_float, default=1, metavar="DAYS",
+                    help="stricter unused threshold while free space is below --if-free-below (default 1)")
+    ap.add_argument("--artifact-age-days", type=nonneg_float, default=2, metavar="DAYS",
+                    help=".ai-work .trx/.dll/.pdb/.nettrace/.etlx/.dmp/.coverage files older than this are removed (default 2)")
+    ap.add_argument("--package-artifact-age-days", type=nonneg_float, default=7, metavar="DAYS",
+                    help=".ai-work .nupkg/.snupkg/.jar files older than this are removed (default 7)")
+    ap.add_argument("--docker-pressure-gib", type=nonneg_float, default=None, metavar="GIB",
+                    help="below this much free space on the home volume every image no container uses is removed "
+                         "with `docker rmi` (pins ignored) and all build cache is pruned (default: the cleanup floor)")
+    ap.add_argument("--nuget-keep-versions", type=int, default=0)
     ap.add_argument("--session-age-days", type=nonneg_float, default=30)
     ap.add_argument("--handoff-age-days", type=nonneg_float, default=14)
     ap.add_argument("--handoff-keep-newest", type=positive_int, default=3)
@@ -3149,6 +3611,7 @@ def main(argv=None):
                 _log_line(f"free space OK (>= {args.if_free_below:g} GiB on {', '.join(p['path'] for p in probes if 'free' in p)}); nothing to do")
             return 0
         if low:
+            args.low_space = True
             notes.append("low free space: " + "; ".join(low))
         if failed:
             notes.append("free-space probe failed, proceeding with cleanup: " + "; ".join(failed))

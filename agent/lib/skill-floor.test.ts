@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { formatSkillsForPrompt, loadSkills } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG, type FloorConfig } from "./prompt-floor.ts";
 import { compactSkills, readablePath, skillHint } from "./skill-floor.ts";
+import { tempDir } from "./test-tmp.ts";
 
 const cfg = (skills: Partial<FloorConfig["skills"]> = {}): FloorConfig => ({ ...DEFAULT_CONFIG, skills: { ...DEFAULT_CONFIG.skills, ...skills } });
 
@@ -16,7 +17,7 @@ function writeSkill(root: string, name: string, description: string): void {
 
 /** Real loadSkills result: 107 project skills behind a `.pi/skills` symlink (as in Cratis worktrees) and 5 global skills. */
 function fixture() {
-	const base = realpathSync(mkdtempSync(join(tmpdir(), "skill-floor-")));
+	const base = realpathSync(tempDir("skill-floor-"));
 	const corpus = join(base, "repo", ".cratis", "ai", "skills");
 	for (let i = 0; i < 107; i++) writeSkill(corpus, `proj-skill-${String(i).padStart(3, "0")}`, `Use when working on feature ${i}. ${"Long explanation of the skill that goes on and on. ".repeat(6)}`);
 	mkdirSync(join(base, "repo", ".pi"), { recursive: true });

@@ -41,7 +41,7 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
   reap [ID] [--minutes n] [--dry-run | --apply] [--handoff-to ID] [--json]
   handoff <ID> --to ID | --accept --from ID
   snooze <ID> --until ISO|+90m | --clear
-  close <ID> [--reassign-to ID2] [--reason text] [--from ID] [--quit]
+  close <ID> [--reassign-to ID2] [--reason text] [--from ID] [--quit] [--keep-worktree]
 Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
 Send: 3 ownership refusal (with --issue); --force requires an explicit reason.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
@@ -74,9 +74,9 @@ const OPTIONS: Record<string, string[]> = {
   "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"],
   handoff: ["to", "accept", "from"], reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
   snooze: ["until", "clear"],
-  close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"],
+  close: ["reassign-to", "reason", "from", "quit", "keep-worktree", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"],
 };
-const FLAGS = ["write", "preapprove-mcp", "approve-project-trust", "new", "ack", "quit", "dry-run", "json", "direct", "all",
+const FLAGS = ["write", "preapprove-mcp", "approve-project-trust", "new", "ack", "quit", "keep-worktree", "dry-run", "json", "direct", "all",
   "no-orchestrator", "inactive", "clear", "apply", "accept", "legacy", "include-retired"];
 interface Invocation { command: string; positional: string[]; opts: Record<string, string> }
 interface CommandEnv { c: Config; root: string; ctx: LanesCtx }

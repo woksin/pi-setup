@@ -18,6 +18,7 @@ import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'agent/bin/docker-guardian'
 CID = 'c' * 12
+DANGLING = 'sha256:' + '0' * 63 + '1'
 
 
 def image_id(char):
@@ -108,7 +109,11 @@ class GuardianCase(unittest.TestCase):
         self.stub('sleep', '#!/bin/sh\nexit 0\n')
         self.stub('sysctl', '#!/bin/sh\necho "{ 0.10 0.10 0.10 }"\n')
         self.stub('memory_pressure', '#!/bin/sh\nexit 0\n')
+        self.set_free_gib(500)  # plenty of space unless a test simulates disk pressure
         self.extra_env = {}
+
+    def set_free_gib(self, gib):
+        self.stub('df', f'#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/x 999999999 1 {int(gib * 1048576)} 1% /"\n')
 
     def stub(self, name, body):
         path = self.stubs / name
@@ -377,6 +382,60 @@ class CleanupTests(GuardianCase):
         docker = self.call_lines('docker')
         self.assertFalse([c for c in docker if c.startswith(('docker system', 'docker image prune'))], docker)
         self.assertFalse([c for c in docker if c.startswith('docker rmi') and ' -' in c], docker)
+
+    def pressure_scenario(self, free_gib=10):
+        self.image_scenario()
+        for image in self.docker_cfg['images']:
+            if 'acme/new' in image['RepoTags'][0]:  # under pressure only <1h old images are kept
+                image['Created'] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30)).isoformat()
+        self.docker_cfg['images'].append(self.image('0', ['acme/tagless:1.0.0'], hours=48, Metadata={'LastTagTime': '0001-01-01T00:00:00Z'}, Created='bogus'))
+        self.docker_cfg['images'].append(dict(self.image('0', [], hours=48, dangling=True), Id=DANGLING))
+        self.write_docker()
+        self.set_free_gib(free_gib)
+
+    def test_disk_pressure_removes_every_unused_image_except_used_and_recent(self):
+        self.pressure_scenario()
+        self.run_guardian()
+        removed = sorted(self.call_lines('docker rmi'))
+        self.assertEqual(removed, sorted('docker rmi ' + r for r in [
+            'acme/app:1.0.0', 'acme/app:1.1.0', 'acme/app:1.2.0', 'acme/pinned:1.0.0', 'acme/pinned:1.1.0',
+            'acme/pinned:1.2.0', 'acme/float:1.0.0', 'acme/float:latest', 'acme/float:1.1.0', 'acme/float:1.2.0',
+            'acme/used:1.1.0', 'acme/used:1.2.0', DANGLING]))
+        self.assertNotIn('docker rmi acme/used:1.0.0', removed)
+        self.assertFalse([c for c in removed if c.startswith('docker rmi acme/new') or 'tagless' in c], removed)
+        self.assertIn('docker rmi acme/pinned:1.0.0', removed)
+        self.assertIn('docker rmi acme/float:latest', removed)
+        self.assertIn('docker rmi ' + DANGLING, removed)
+        self.assertFalse([c for c in removed if ' -' in c], removed)
+        self.assertIn('images: pressure', self.log_text())
+        self.assertIn('docker builder prune -f --keep-storage 0', self.call_lines('docker'))
+
+    def test_without_pressure_builder_cache_keeps_eight_gb_and_pins_hold(self):
+        self.pressure_scenario(free_gib=500)
+        self.run_guardian()
+        self.assertNotIn('docker rmi acme/pinned:1.0.0', self.call_lines('docker rmi'))
+        self.assertIn('docker builder prune -f --keep-storage 8GB', self.call_lines('docker'))
+
+    def test_unreadable_free_space_is_not_pressure(self):
+        self.pressure_scenario()
+        self.stub('df', '#!/bin/sh\nexit 1\n')
+        self.run_guardian()
+        self.assertEqual(sorted(self.call_lines('docker rmi')), ['docker rmi acme/app:1.0.0', 'docker rmi ' + DANGLING])
+
+    def test_pressure_threshold_comes_from_dev_doctor_config(self):
+        self.pressure_scenario(free_gib=30)
+        cfg = self.home / '.pi/agent'
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / 'dev-doctor.json').write_text('{"disk": {"cleanup_trigger_gib": 20}}')
+        self.run_guardian()
+        self.assertEqual(sorted(self.call_lines('docker rmi')), ['docker rmi acme/app:1.0.0', 'docker rmi ' + DANGLING])  # 30 >= 20: no pressure
+
+    def test_pressure_respects_no_image_prune_switch(self):
+        self.pressure_scenario()
+        (self.state / 'no-image-prune').touch()
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), [])
+        self.assertIn('docker builder prune -f --keep-storage 8GB', self.call_lines('docker'))
 
     def test_local_build_tags_require_twenty_four_hours(self):
         self.image_scenario()

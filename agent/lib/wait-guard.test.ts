@@ -6,12 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setGuards } from "./guards.ts";
 import waitExtension, { MAX_TIMEOUT_SECONDS, PollTracker, argsOf, assess, executableCommands, piPhaseBudget, simpleCommands, repeatedPollMessage } from "../extensions/wait-guard.ts";
+import { tempDir } from "./test-tmp.ts";
 
 const ENV = ["PI_GUARDS_FILE", "PI_GUARDS_OFF", "PI_ORCH_ID", "PI_ORCH_MODE_FILE", "PI_ORCH_REPO_ROOT", "PI_ORCH_MESSAGES_DIR", "PI_GUARD_DECISIONS_LOG"];
 let saved: Record<string, string | undefined>;
 beforeEach(() => {
 	saved = Object.fromEntries(ENV.map(n => [n, process.env[n]]));
-	const dir = mkdtempSync(join(tmpdir(), "wait-guard-"));
+	const dir = tempDir("wait-guard-");
 	process.env.PI_GUARDS_FILE = join(dir, "guards.json");
 	delete process.env.PI_GUARDS_OFF;
 	delete process.env.PI_ORCH_ID;

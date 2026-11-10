@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,27 @@ export function assertTempHome(home: string): string {
   return home;
 }
 
+const created: string[] = [];
+let exitHookInstalled = false;
+
+/** Remember a temp dir so it is removed when this test process exits (pass or fail). */
+function track(dir: string): string {
+  created.push(dir);
+  if (!exitHookInstalled) { exitHookInstalled = true; process.once("exit", disposeTemp); }
+  return dir;
+}
+
+/** Remove every temp dir created through sandbox()/tempDir(); never touches anything outside tmpdir(). */
+export function disposeTemp(): void {
+  const base = realpathSync(tmpdir());
+  for (const dir of created.splice(0)) {
+    try {
+      const real = realpathSync(dir);
+      if (real.startsWith(`${base}/`)) rmSync(real, { recursive: true, force: true });
+    } catch { /* already gone */ }
+  }
+}
+
 export interface Sandbox {
   root: string;
   home: string;
@@ -24,7 +45,7 @@ export interface Sandbox {
 }
 
 export function sandbox(): Sandbox {
-  const root = mkdtempSync(join(tmpdir(), "pisetup-test."));
+  const root = track(mkdtempSync(join(tmpdir(), "pisetup-test.")));
   const home = join(root, "home");
   const stubs = join(root, "stubs");
   mkdirSync(home);
@@ -213,5 +234,5 @@ export function testCtx(home: string, over: Partial<Ctx> = {}, lines: string[] =
 }
 
 export function tempDir(prefix: string): string {
-  return assertTempHome(mkdtempSync(join(tmpdir(), `${prefix}.`)));
+  return assertTempHome(track(mkdtempSync(join(tmpdir(), `${prefix}.`))));
 }

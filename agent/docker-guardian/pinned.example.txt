@@ -1,4 +1,5 @@
 # Integration/base images: keep every tag. Add local globs as needed.
+# Pins apply only while free space is at or above the cleanup floor (40 GiB); below it every image no container uses is removed.
 mongo:*
 quay.io/keycloak/*
 hashicorp/vault:*

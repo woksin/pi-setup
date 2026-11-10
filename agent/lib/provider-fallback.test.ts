@@ -1,11 +1,12 @@
 /** provider-fallback: classification, selection, context veto, turn_end switch/notice. Complements model-drift.test.ts (restore/drift flows). */
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test, type TestContext } from "node:test";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, watch, writeFileSync, type WatchListener } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, watch, writeFileSync, type WatchListener } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ORIGINAL_ENTRY, restoreManualPin, restoreOriginal, type OriginalEntryData } from "./provider-fallback-state.ts";
 import fallbackExtension, { DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK, fallbackContextLimit, classifyError, equivalentOf, fallbackContextVeto, pinnedProvider, selectFallback, sessionLineage, setProcessMainLineage } from "../extensions/provider-fallback.ts";
+import { tempDir } from "./test-tmp.ts";
 
 const CONFIG = {
 	enabled: true,
@@ -82,9 +83,10 @@ const K = { provider: "kimi", id: "k" };
 let stateFile: string;
 let saved: Record<string, string | undefined>;
 const shutdowns: (() => Promise<void>)[] = [];
+let dir: string;
 beforeEach(() => {
 	saved = { c: process.env.PI_PROVIDER_FALLBACK_CONFIG, s: process.env.PI_PROVIDER_FALLBACK_STATE, b: process.env.PI_CONTEXT_BUDGET_CONFIG, bd: process.env.PI_CONTEXT_BUDGET_STATE_DIR };
-	const dir = mkdtempSync(join(tmpdir(), "pfb-"));
+	dir = tempDir("pfb-");
 	stateFile = join(dir, "state.json");
 	process.env.PI_PROVIDER_FALLBACK_CONFIG = join(dir, "c.json");
 	process.env.PI_PROVIDER_FALLBACK_STATE = stateFile;
@@ -97,6 +99,7 @@ beforeEach(() => {
 afterEach(async () => {
 	for (const shutdown of shutdowns.splice(0)) await shutdown();
 	setProcessMainLineage([]);
+	rmSync(dir, { recursive: true, force: true });
 	for (const [k, v] of [["PI_PROVIDER_FALLBACK_CONFIG", saved.c], ["PI_PROVIDER_FALLBACK_STATE", saved.s], ["PI_CONTEXT_BUDGET_CONFIG", saved.b], ["PI_CONTEXT_BUDGET_STATE_DIR", saved.bd]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
 });
 const writeConfig = (c: object) => writeFileSync(process.env.PI_PROVIDER_FALLBACK_CONFIG!, JSON.stringify(c));
@@ -684,6 +687,7 @@ test("stale hint appears once the extension files on disk differ from the loaded
 		assert.match(s.widgets.at(-1)![1]![2], /changed on disk since this session loaded it: \/reload when idle/);
 	} finally {
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+		rmSync(dir, { recursive: true, force: true });
 	}
 });
 
