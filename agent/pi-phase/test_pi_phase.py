@@ -17,6 +17,7 @@ from unittest.mock import Mock, call, patch
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 
 import pi_phase
+from phase_test_support import held_job, wait_seconds
 
 HERE = Path(__file__).resolve().parent
 # Synthetic cleanup snapshot: keeps liveness probes countable apart from the one bounded snapshot.
@@ -53,6 +54,15 @@ class PhaseTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         self.children = []
         self.addCleanup(self.finish_children)
+
+    def test_infrastructure_wait_scale_defaults_and_clamps(self):
+        with patch.dict(os.environ):
+            os.environ.pop("PI_TEST_TIME_SCALE", None)
+            self.assertEqual(wait_seconds(3), 3)
+        for value, expected in (("1", 1), ("0", 1), ("25", 10), ("2.5", 2.5),
+                                ("invalid", 1), ("nan", 1), ("inf", 1)):
+            with self.subTest(value=value), patch.dict(os.environ, PI_TEST_TIME_SCALE=value):
+                self.assertEqual(wait_seconds(3), 3 * expected)
 
     def supervisor_diagnostic(self, observation, *, probe=True, failed_output=False):
         """No real child or signal: reserve a synthetic identity entirely inside mocks."""
@@ -413,17 +423,19 @@ class PhaseTests(unittest.TestCase):
         return owner.pid
 
     def done(self, child, timeout=8):
-        stdout, stderr = child.communicate(timeout=timeout)
+        stdout, stderr = child.communicate(timeout=wait_seconds(timeout))
         return child.returncode, stdout + stderr
 
-    def run_phase(self, kind="test", label="case", timeout="4", queue="5", command=None, extra=()):
+    def run_phase(self, kind="test", label="case", timeout="4", queue=None, command=None, extra=()):
         if command is None:
             command = [sys.executable, "-c", "pass"]
+        if queue is None:
+            queue = str(wait_seconds(5))
         return self.start("run", "--kind", kind, "--label", label, "--timeout", timeout,
                           "--queue-timeout", queue, *extra, "--", *command)
 
     def wait_for(self, predicate, seconds=3):
-        end = time.monotonic() + seconds
+        end = time.monotonic() + wait_seconds(seconds)
         while time.monotonic() < end:
             if predicate():
                 return
@@ -464,7 +476,13 @@ class PhaseTests(unittest.TestCase):
     def configure(self, **options):
         self.config.write_text(json.dumps(dict(heavy_slots=2, integration_slots=1, **options)))
 
-    def fake_docker(self, created):
+    def fake_docker(self, created=None):
+        if created is None:
+            self.executable(self.fake_bin / "docker", "#!" + sys.executable + "\n"
+                            "from datetime import datetime, timedelta, timezone\n"
+                            "stamp = datetime.now(timezone.utc) + timedelta(seconds=2)\n"
+                            "print('container ' + stamp.strftime('%Y-%m-%d %H:%M:%S %z UTC'))\n")
+            return
         stamp = datetime.fromtimestamp(created, timezone.utc).strftime("%Y-%m-%d %H:%M:%S %z UTC")
         self.executable(self.fake_bin / "docker", "#!/bin/sh\nprintf '%s\\n' 'container " + stamp + "'\n")
 
@@ -820,21 +838,20 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual(self.done(self.start("grant-priority", "--uses", "10"))[0], 0)
         running = []
         for i in range(3):
-            marker = self.root / f"running-{i}"
-            command = [sys.executable, "-c",
-                       "import pathlib,sys,time;pathlib.Path(sys.argv[1]).touch();time.sleep(3)",
-                       str(marker)]
-            job = self.run_phase(label=f"high-{i}", command=command,
+            label = f"high-{i}"
+            job = self.run_phase(label=label, command=held_job(self.root, label),
+                                 timeout=str(wait_seconds(30)),
                                  extra=("--priority", "high", "--no-worktree-lock"))
-            running.append(job)
-            self.wait_for(marker.exists)
+            running.append((label, job))
+            self.wait_for((self.root / f"{label}.started").exists)
         grant = (self.state / "priority-grant.json").read_bytes()
         code, output = self.done(self.run_phase(extra=("--priority", "high", "--no-worktree-lock")))
         self.assertEqual(code, 0, output)
         self.assertIn("high-priority cap (3) reached; queued as normal", output)
         self.assertEqual((self.state / "priority-grant.json").read_bytes(), grant)
         self.assertEqual(self.ledger_records()[0]["priority"], "normal")
-        for job in running:
+        for label, job in running:
+            (self.root / f"{label}.release").touch()
             self.assertEqual(self.done(job)[0], 0)
 
     def test_high_cap_config_and_running_reservation(self):
@@ -866,14 +883,17 @@ class PhaseTests(unittest.TestCase):
         self.assertEqual([r["outcome"] for r in records], ["passed", "failed", "timeout"])
         self.assertEqual([r["exit"] for r in records], [0, 9, 124])
         record = records[0]
-        self.assertEqual(set(record) - {"envScrubbed"}, {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
+        # warm is recorded only when the bounded obj scan of the enclosing repository is conclusive;
+        # the test root sits inside the checkout, whose size varies, so treat it as optional here.
+        self.assertIn(record.get("warm", False), (True, False))
+        self.assertEqual(set(record) - {"envScrubbed", "warm"}, {"v", "ts", "session", "lane", "cwd", "kind", "label", "priority",
                                       "queuedAt", "startedAt", "endedAt", "waitS", "runS", "exit", "outcome",
                                       "head", "dirty", "argvHash", "stack", "envHash", "envPolicy", "profile", "verified", "fingerprint", "fast", "policy", "source",
                                   "workKey", "familyKey", "repoKey", "expectedS", "expectedBasis",
                                   "waitV", "waitBreakdown", "waitScans", "waitSamples",
                                   "host", "peakRssMb", "peakProcRssMb",
                                   "obsV", "configHash", "configSummary", "hangTimeout", "workersSource",
-                                  "warm", "fastShadow", "childCpuS"})
+                                  "fastShadow", "childCpuS"})
         self.assertEqual((record["v"], record["session"], record["lane"]), (1, "session", "lane"))
         self.assertEqual((record["cwd"], record["kind"], record["label"], record["priority"]),
                          (str(self.root), "test", "ledger", "normal"))
@@ -1603,9 +1623,13 @@ class PhaseTests(unittest.TestCase):
 
     def test_container_hint_records_fingerprint_once_using_fake_docker(self):
         self.configure(container_test_detection="hint", cold_worktree_hint=False)
-        self.fake_docker(time.time() + 2)
-        command = [sys.executable, "-c", "import time;time.sleep(.4)"]
-        code, out = self.done(self.run_phase(command=command))
+        self.fake_docker()
+        command = held_job(self.root, "container-hint")
+        job = self.run_phase(command=command, timeout=str(wait_seconds(30)))
+        self.wait_for((self.root / "container-hint.started").exists)
+        self.wait_for((self.state / "container-tests.json").exists)
+        (self.root / "container-hint.release").touch()
+        code, out = self.done(job)
         self.assertEqual(code, 0, out)
         self.assertEqual(out.count("hint: this test phase started Testcontainers containers"), 1)
         fingerprint = pi_phase.test_fingerprint(os.getcwd(), command)
@@ -1642,15 +1666,21 @@ class PhaseTests(unittest.TestCase):
 
     def test_recorded_test_promotes_and_claims_both_permits_atomically(self):
         self.configure(container_test_detection="promote", cold_worktree_hint=False)
-        self.fake_docker(time.time() + 2)
-        command = [sys.executable, "-c", "import time;time.sleep(.4)"]
-        code, out = self.done(self.run_phase(command=command))
+        self.fake_docker()
+        command = held_job(self.root, "container-promote")
+        job = self.run_phase(command=command, timeout=str(wait_seconds(30)))
+        self.wait_for((self.root / "container-promote.started").exists)
+        self.wait_for((self.state / "container-tests.json").exists)
+        (self.root / "container-promote.release").touch()
+        code, out = self.done(job)
         self.assertEqual(code, 0, out)
         self.assertNotIn("also claiming", out)  # First discovery only hints.
         self.assertTrue((self.state / "container-tests.json").exists())
+        (self.root / "container-promote.started").unlink()
+        (self.root / "container-promote.release").unlink()
         blocker = pi_phase.lock_file(self.state / "integration-0.lock")
         try:
-            job = self.run_phase(command=command, extra=("--rerun",))
+            job = self.run_phase(command=command, timeout=str(wait_seconds(30)), extra=("--rerun",))
             self.wait_for(lambda: bool(list((self.state / "waiters").glob("*.json"))))
             waiter = json.loads(next((self.state / "waiters").glob("*.json")).read_text())
             self.assertEqual(waiter["kind"], "integration")
@@ -1664,6 +1694,8 @@ class PhaseTests(unittest.TestCase):
         owners = [json.loads(path.read_text()) for path in self.state.glob("heavy-*.json")]
         integration = json.loads((self.state / "integration-0.json").read_text())
         self.assertTrue(any(owner["token"] == integration["token"] for owner in owners))
+        self.wait_for((self.root / "container-promote.started").exists)
+        (self.root / "container-promote.release").touch()
         code, out = self.done(job)
         self.assertEqual(code, 0, out)
         self.assertIn("also claiming an integration permit", out)
@@ -2287,12 +2319,14 @@ class PhaseTests(unittest.TestCase):
 
     def test_policy_direct_ci_preserves_singleton_and_never_memory_gates(self):
         options = ("--policy", "direct", "--repo", "org/repo", "--pr", "42", "--commit", "abc123")
-        active = self.run_phase(kind="ci", extra=options, command=self.marker_job("ci-direct", 1.5))
-        self.wait_for(lambda: (self.root / "ci-direct.json").exists())
+        active = self.run_phase(kind="ci", extra=options, command=held_job(self.root, "ci-direct"),
+                                timeout=str(wait_seconds(30)))
+        self.wait_for((self.root / "ci-direct.started").exists)
         code, out = self.done(self.run_phase(kind="ci", extra=options))
         self.assertEqual(code, 75, out)
         self.assertIn("already watching", out)
         self.assertFalse(list(self.state.glob("direct-*")))
+        (self.root / "ci-direct.release").touch()
         self.assertEqual(self.done(active)[0], 0)
         candidates = pi_phase.phase_candidates(self.state, self.fast_args(kind="ci", policy="direct"), (2, 1, "key", "token"))
         self.assertEqual(candidates, pi_phase.slot_paths(self.state, "ci", 2, 1, "key"))
@@ -3033,20 +3067,30 @@ class PhaseTests(unittest.TestCase):
                          "pi-phase: no active phases\npi-phase: fast=0/2 queued=0\npi-phase: high=0/3")
 
     def test_many_orphans_use_one_bounded_snapshot_per_scan(self):
-        pgid = self.orphan_slots()
+        self.config.write_text('{"heavy_slots": 32, "integration_slots": 1}')
+        self.state.mkdir()
+        pgid = 2147483647  # Synthetic liveness is supplied by the snapshot, not a timed process.
+        for index in range(32):
+            pi_phase.save(self.state / f"heavy-{index}.json", dict(pgid=pgid, token="orphan"))
+        candidates = pi_phase.slot_paths(self.state, "test", 32, 1, ())
+        for remaining in (.4, 2):
+            with self.subTest(remaining=remaining), \
+                    patch.object(pi_phase.time, "monotonic", return_value=10), \
+                    patch.object(pi_phase, "live_groups", return_value={pgid}) as snapshot:
+                deadline = 10 + remaining
+                self.assertIsNone(pi_phase.claim(self.state, candidates, deadline, lambda: False))
+                snapshot.assert_called_once_with(min(.5, deadline - 10))
         calls = self.root / "probe-count"
-        patch = ("import time\n"
+        probe_patch = ("import time\n"
                  "def snapshot(timeout):\n"
                  f"    with open({str(calls)!r}, 'a') as log: log.write('x')\n"
                  "    time.sleep(min(timeout, .2))\n"
                  f"    return {{{pgid}}}\n"
                  "pi_phase.live_groups = snapshot")
-        start = time.monotonic()
-        job, marker = self.patched_phase(patch, queue=".4")
+        job, marker = self.patched_phase(probe_patch, queue=".4")
         code, output = self.done(job)
         self.assertEqual(code, 75, output)
         self.assertIn("queue timeout", output)
-        self.assertLess(time.monotonic() - start, 1.3)
         self.assertFalse(marker.exists())
         self.assertLessEqual(len(calls.read_text()), 2)
 

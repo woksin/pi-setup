@@ -85,17 +85,28 @@ export function savePolicy(policy: Policy, expected: string, file = policyPath()
 		unlinkSync(`${file}.lock`);
 	}
 }
+const GIT_TIMEOUT_MS = 5000;
 function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", timeout: 1500, maxBuffer: 65536, stdio: ["ignore", "pipe", "ignore"] }).trim();
+	return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 65536, stdio: ["ignore", "pipe", "ignore"] }).trim();
 }
-export function identity(cwd: string): Identity | undefined {
+function identityFailureReason(error: unknown): string {
+	if (!object(error)) return "repository lookup failed";
+	if (error.code === "ETIMEDOUT") return `git timed out after ${GIT_TIMEOUT_MS} ms`;
+	if (typeof error.status === "number") return `git exited with status ${error.status}`;
+	if (typeof error.code === "string") return `repository lookup failed (${error.code})`;
+	return "repository lookup failed";
+}
+export function identity(cwd: string, onFailure?: (reason: string) => void): Identity | undefined {
 	try {
 		const common = realpathSync(resolve(cwd, git(cwd, "rev-parse", "--git-common-dir")));
 		const root = realpathSync(git(cwd, "rev-parse", "--show-toplevel"));
 		let branch = "";
 		try { branch = git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD"); } catch { /* detached HEAD has no branch authority */ }
 		return { common, root, branch };
-	} catch { return undefined; }
+	} catch (error) {
+		onFailure?.(identityFailureReason(error));
+		return undefined;
+	}
 }
 function canonical(path: string): string {
 	let at = resolve(path);

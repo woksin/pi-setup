@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import childProcess, { execFileSync, spawnSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { ACTIONS, acknowledge, assessCommand, assessPublication, emptyPolicy, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyPath, policyStore, savePolicy, validatePolicy, type Policy, type Context } from "./lane-policy.ts";
 import laneExtension from "../extensions/lane-policy.ts";
 import guardsExtension from "../extensions/guards.ts";
@@ -13,8 +14,101 @@ const scratch = resolve(".ai-work/pi-lane-policy");
 let home: string, repo: string, outside: string, oldHome: string | undefined, oldGuards: string | undefined, oldEnv: string | undefined;
 let ctx: Context;
 let policy: Policy;
-const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-beforeEach(() => {
+interface GitRepository {
+	root: string;
+	common: string;
+	gitDir: string;
+	branch: string;
+	remote: { origin?: string; push?: string[] };
+}
+class FakeGit {
+	repositories = new Map<string, GitRepository>();
+	failure: Error | undefined;
+	onExec: ((command: string, args: readonly string[], options: { timeout?: number }) => void) | undefined;
+	unsupported: string[] = [];
+
+	init(cwd: string, branch: string, origin?: string) {
+		const root = realpathSync(cwd), common = join(root, ".git");
+		mkdirSync(common);
+		this.repositories.set(root, { root, common, gitDir: common, branch, remote: { origin } });
+	}
+	repository(cwd: string): GitRepository {
+		if (!existsSync(cwd)) throw this.error(`cannot change to '${cwd}': No such file or directory`);
+		let root = realpathSync(cwd);
+		while (!this.repositories.has(root) && dirname(root) !== root) root = dirname(root);
+		const repository = this.repositories.get(root);
+		if (!repository) throw this.error("not a git repository (or any of the parent directories): .git");
+		return repository;
+	}
+
+	worktree(cwd: string, path: string, branch: string) {
+		const parent = this.repository(cwd);
+		mkdirSync(path);
+		const root = realpathSync(path), gitDir = join(parent.common, "worktrees", basename(root));
+		mkdirSync(gitDir, { recursive: true });
+		writeFileSync(join(root, ".git"), `gitdir: ${gitDir}\n`);
+		this.repositories.set(root, { ...parent, root, gitDir, branch });
+	}
+
+	error(message: string, status = 128) {
+		return Object.assign(new Error(message), { status, stderr: `fatal: ${message}\n` });
+	}
+
+	query(command: string, args: readonly string[]): string {
+		assert.equal(command, "git");
+		assert.equal(args[0], "-C");
+		if (this.failure) throw this.failure;
+		return `${this.output(this.repository(args[1]), args.slice(2).join(" "))}\n`;
+	}
+
+	output(state: GitRepository, query: string): string {
+		switch (query) {
+			case "rev-parse --git-common-dir": return state.common;
+			case "rev-parse --git-dir": return state.gitDir;
+			case "rev-parse --show-toplevel": return state.root;
+			case "symbolic-ref --quiet --short HEAD": return this.branch(state);
+			case "remote get-url --push --all origin": return this.pushUrls(state);
+			default:
+				this.unsupported.push(query);
+				throw new Error(`Unsupported fake git query: ${query}`);
+		}
+	}
+
+	branch(state: GitRepository): string {
+		if (!state.branch) throw this.error("ref HEAD is not a symbolic ref", 1);
+		return state.branch;
+	}
+
+	pushUrls(state: GitRepository): string {
+		if (!state.remote.origin) throw this.error("No such remote 'origin'", 2);
+		return (state.remote.push ?? [state.remote.origin]).join("\n");
+	}
+
+	exec(command: string, args: readonly string[], options: { timeout?: number }) {
+		this.onExec?.(command, args, options);
+		return this.query(command, args);
+	}
+
+	spawn(command: string, args: readonly string[]) {
+		try {
+			return { status: 0, signal: null, stdout: this.query(command, args), stderr: "" };
+		} catch (error: any) {
+			return { status: error.status ?? null, signal: null, stdout: "", stderr: error.stderr ?? "", error: error.code ? error : undefined };
+		}
+	}
+}
+let fakeGit: FakeGit;
+let gitProbe: { mock: { restore(): void } }, diagnosticProbe: { mock: { restore(): void } };
+function fixtureIdentity(cwd: string) {
+	const id = identity(cwd);
+	if (!id) {
+		const start = performance.now();
+		const probe = spawnSync("git", ["-C", cwd, "rev-parse", "--git-common-dir"], { encoding: "utf8", timeout: 1500 });
+		assert.fail(`identity(${cwd}) is undefined; diagnostic git rev-parse: exit=${probe.status}, signal=${probe.signal}, stderr=${JSON.stringify(probe.stderr)}, durationMs=${(performance.now() - start).toFixed(1)}, error=${probe.error?.message ?? "none"}`);
+	}
+	return id;
+}
+beforeEach(t => {
 	mkdirSync(scratch, { recursive: true });
 	home = mkdtempSync(join(scratch, "fixture-"));
 	oldHome = process.env.HOME; process.env.HOME = home;
@@ -22,18 +116,26 @@ beforeEach(() => {
 	oldEnv = process.env.PI_GUARDS_OFF; delete process.env.PI_GUARDS_OFF;
 	delete (globalThis as any)[Symbol.for("pi.guards")];
 	repo = join(home, "repo"); outside = join(home, "outside"); mkdirSync(repo); mkdirSync(outside);
-	git(repo, "init", "-b", "lane");
-	git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture");
-	git(repo, "remote", "add", "origin", "git@github.com:Cratis/Studio.git");
+	fakeGit = new FakeGit();
+	fakeGit.init(repo, "lane", "git@github.com:Cratis/Studio.git");
+	gitProbe = t.mock.method(childProcess, "execFileSync", (command, args, options) => fakeGit.exec(command, args, options));
+	diagnosticProbe = t.mock.method(childProcess, "spawnSync", (command, args) => fakeGit.spawn(command, args));
+	syncBuiltinESMExports();
 	ctx = { cwd: repo, session: "writer-session" };
 	policy = emptyPolicy(); policy.revision = 1;
-	policy.repositories.push({ common: identity(repo)!.common, slug: "Cratis/Studio", coordinator: "coordinator-session", bindings: [{ session: ctx.session, lane: "lane-one", branch: "lane", actions: [...ACTIONS] }], writers: [{ session: ctx.session, branch: "lane", actions: [...ACTIONS] }], grants: [] });
+	policy.repositories.push({ common: fixtureIdentity(repo).common, slug: "Cratis/Studio", coordinator: "coordinator-session", bindings: [{ session: ctx.session, lane: "lane-one", branch: "lane", actions: [...ACTIONS] }], writers: [{ session: ctx.session, branch: "lane", actions: [...ACTIONS] }], grants: [] });
 });
 afterEach(() => {
+	gitProbe.mock.restore();
+	diagnosticProbe.mock.restore();
+	syncBuiltinESMExports();
 	if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
 	if (oldGuards === undefined) delete process.env.PI_GUARDS_FILE; else process.env.PI_GUARDS_FILE = oldGuards;
 	if (oldEnv === undefined) delete process.env.PI_GUARDS_OFF; else process.env.PI_GUARDS_OFF = oldEnv;
 	delete (globalThis as any)[Symbol.for("pi.guards")];
+	// Leftover fixture repositories inside the checkout break specs that copy the working tree.
+	rmSync(home, { recursive: true, force: true });
+	assert.deepEqual(fakeGit.unsupported, [], "all assessment Git queries must be modelled");
 });
 function store() { mkdirSync(join(home, ".pi/agent/lane-policy"), { recursive: true }); writeFileSync(policyPath(), JSON.stringify(policy)); }
 function grant(action: any = "push", target = "lane") { policy.repositories[0].grants.push({ session: ctx.session, action, target, expires: Date.now() + 60000, revision: policy.revision }); }
@@ -55,6 +157,20 @@ function fake(context = ctx, mode = "tui") {
 	};
 }
 
+test("real Git smoke resolves common directory, branch and origin slug", () => {
+	gitProbe.mock.restore();
+	syncBuiltinESMExports();
+	const root = join(home, "real-repo"); mkdirSync(root);
+	// Keep real subprocesses in this smoke only, with the product's timeout.
+	const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+	git("init", "-b", "lane");
+	git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture");
+	git("remote", "add", "origin", "git@github.com:Cratis/Studio.git");
+	assert.deepEqual(identity(root), { common: realpathSync(join(root, ".git")), root: realpathSync(root), branch: "lane" });
+	// identity() does not return a slug; the push path resolves it from this URL.
+	assert.equal(git("remote", "get-url", "--push", "--all", "origin").match(/^git@github\.com:(.+)\.git$/)?.[1], "Cratis/Studio");
+});
+
 test("typed publication and CLI reuse exact gh grants without granting unsupported actions", () => {
 	store();
 	const request = { kind: "issue-comment", repo: "Cratis/Studio", number: 39, body: "Safe" };
@@ -72,6 +188,54 @@ test("typed publication and CLI reuse exact gh grants without granting unsupport
 		{ kind: "release-create", repo: "Cratis/Studio", tag: "v1", body: "Safe" },
 		{ kind: "pr-merge", repo: "Cratis/Studio", number: 39, strategy: "squash" },
 	]) assert.ok(assessPublication(request, ctx));
+});
+
+for (const failure of [
+	{ error: Object.assign(new Error("spawnSync git ETIMEDOUT"), { code: "ETIMEDOUT" }), reason: "git timed out after 5000 ms" },
+	{ error: Object.assign(new Error("git failed"), { status: 128 }), reason: "git exited with status 128" },
+]) test(`Git identity failure (${failure.reason}) refuses ACK and publication without stale authority`, async () => {
+	grant(); grant("pr-create", "lane"); store();
+	const publication = { kind: "pr-create", repo: "Cratis/Studio", head: "lane", base: "main", title: "Title", body: "Body" };
+	allowed("git push origin lane:lane");
+	allowed("gh pr create -R Cratis/Studio --head lane");
+	assert.equal(assessPublication(publication, ctx), undefined);
+	const previousIdentity = fixtureIdentity(repo);
+	const previousPolicy = readFileSync(policyPath(), "utf8");
+	const f = fake(); laneExtension(f.pi);
+	fakeGit.onExec = (command, _args, options) => {
+		assert.equal(command, "git");
+		assert.equal(options.timeout, 5000);
+	};
+	fakeGit.failure = failure.error;
+	try {
+		const reasons: string[] = [];
+		assert.equal(identity(repo, reason => reasons.push(reason)), undefined);
+		assert.deepEqual(reasons, [failure.reason]);
+		await f.command("ack 1");
+		assert.equal(f.confirms, 0);
+		assert.ok(f.notices.some(message => message.includes("identity could not be determined") && message.includes(failure.reason)));
+		assert.equal(readFileSync(policyPath(), "utf8"), previousPolicy);
+		denied("git push origin lane:lane");
+		denied("gh pr create -R Cratis/Studio --head lane");
+		assert.ok(assessPublication(publication, ctx));
+		assert.equal((await f.fire("tool_call", { toolName: "bash", input: { command: "git push origin lane:lane" } })).block, true);
+	} finally {
+		fakeGit.failure = undefined;
+		fakeGit.onExec = undefined;
+	}
+	assert.deepEqual(identity(repo), previousIdentity);
+	await f.command("ack 1");
+	assert.equal(f.confirms, 1);
+});
+
+test("fixture identity failures include the diagnostic Git exit, stderr and duration", () => {
+	assert.throws(() => fixtureIdentity(join(home, "missing")), (error: Error) => {
+		assert.ok(error instanceof assert.AssertionError);
+		assert.match(error.message, /diagnostic git rev-parse: exit=128/);
+		assert.match(error.message, /stderr="fatal:/);
+		assert.match(error.message, /durationMs=\d+\.\d/);
+		return true;
+	});
 });
 
 test("hosted publication is host-qualified: never matches an enrolled github.com slug or reuses its grants", () => {
@@ -140,7 +304,7 @@ test("dangerous/ambiguous refspecs cannot use an ordinary grant", () => {
 	allowed("git push --force-with-lease origin HEAD:lane");
 });
 test("worktrees and git -C resolve common repository without granting new sessions authority", () => {
-	const wt = join(home, "worktree"); git(repo, "worktree", "add", "-b", "other", wt);
+	const wt = join(home, "worktree"); fakeGit.worktree(repo, wt, "other");
 	assert.equal(identity(wt)?.common, identity(repo)?.common);
 	grant(); store();
 	denied(`git -C '${wt}' push origin other:other`, { cwd: outside, session: "other-session" });
@@ -149,14 +313,14 @@ test("worktrees and git -C resolve common repository without granting new sessio
 	denied(`cd -P '${wt}' && git push origin other:other`, { cwd: outside, session: "new-child" });
 });
 test("branch changes and detached HEAD never create authority", () => {
-	grant(); store(); git(repo, "switch", "-c", "another"); denied("git push origin HEAD:another");
-	git(repo, "checkout", "--detach"); denied("git push origin HEAD:lane");
+	grant(); store(); fakeGit.repository(repo).branch = "another"; denied("git push origin HEAD:another");
+	fakeGit.repository(repo).branch = ""; denied("git push origin HEAD:lane");
 });
 test("origin must resolve to precisely enrolled GitHub push URL", () => {
 	grant(); store();
-	git(repo, "remote", "set-url", "--push", "origin", "git@github.com:Other/Studio.git"); denied("git push origin lane:lane");
-	git(repo, "remote", "set-url", "--push", "origin", "https://github.com/Cratis/Studio.git"); allowed("git push origin lane:lane");
-	git(repo, "remote", "set-url", "--add", "--push", "origin", "git@github.com:Cratis/Studio.git"); denied("git push origin lane:lane");
+	fakeGit.repository(repo).remote.push = ["git@github.com:Other/Studio.git"]; denied("git push origin lane:lane");
+	fakeGit.repository(repo).remote.push = ["https://github.com/Cratis/Studio.git"]; allowed("git push origin lane:lane");
+	fakeGit.repository(repo).remote.push!.push("git@github.com:Cratis/Studio.git"); denied("git push origin lane:lane");
 });
 test("GH operations enforce distinct grants and explicit repository identity", () => {
 	store(); denied("gh pr create -R Cratis/Studio --head lane --title test");
@@ -170,7 +334,7 @@ test("explicitly configured forbidden targets stay denied even with grants", () 
 	policy.forbidden = ["Cratis/Studio/#42", "Cratis/Studio/#43"];
 	grant("issue-write", "42"); grant("pr-comment", "43"); store();
 	denied("gh issue close 42 -R Cratis/Studio"); denied("gh pr comment 43 -R Cratis/Studio --body hi");
-	assert.throws(() => mutate(policy, ["grant", ctx.session, "issue-write", "42", "5", "minutes"], { ...ctx, session: "coordinator-session" }, identity(repo)!), /Forbidden/);
+	assert.throws(() => mutate(policy, ["grant", ctx.session, "issue-write", "42", "5", "minutes"], { ...ctx, session: "coordinator-session" }, fixtureIdentity(repo)), /Forbidden/);
 });
 test("ordinary execution is allowed; lexical publication stays scoped through wrappers", () => {
 	store();
@@ -187,7 +351,7 @@ test("read-only commands and unenrolled repositories retain existing behavior", 
 	allowed("python other.py", { cwd: outside, session: "unenrolled-session" });
 	assert.equal(mcpReason({ cwd: outside, session: "unenrolled-session" }, "github_create_issue"), undefined);
 	assert.ok(mcpReason({ ...ctx, cwd: outside }, "github_create_issue"));
-	git(outside, "init", "-b", "unrelated");
+	fakeGit.init(outside, "unrelated");
 	denied("gh api repos/Cratis/Studio/issues/123 -X PATCH", { cwd: outside, session: "unbound" });
 	allowed("gh pr view 123 -R Cratis/Studio", { cwd: outside, session: "unbound" });
 });
@@ -257,7 +421,7 @@ test("/guards off mcp cannot auto-allow an enrolled scope at the broker", async 
 });
 test("relevant revocation is re-read on the next call, without a session reload", () => {
 	grant(); store(); allowed("git push origin lane:lane");
-	mutate(policy, ["revoke", "session", ctx.session], { ...ctx, session: "coordinator-session" }, identity(repo)!); store();
+	mutate(policy, ["revoke", "session", ctx.session], { ...ctx, session: "coordinator-session" }, fixtureIdentity(repo)); store();
 	denied("git push origin lane:lane"); assert.ok(mcpReason(ctx, "github_create_issue"));
 });
 
@@ -277,7 +441,7 @@ test("attached, spaced and repeated Git -C share attribution; unresolved global 
 
 test("authority revisions invalidate old grants; durable ACK never revives or gates authority", () => {
 	grant(); store();
-	const id = identity(repo)!;
+	const id = fixtureIdentity(repo);
 	const expected = JSON.stringify(policy);
 	acknowledge(policy, ctx, id, 1); savePolicy(policy, expected);
 	assert.equal(policy.revision, 1); allowed("git push origin lane:lane");
@@ -305,7 +469,7 @@ test("persistence rejects unchanged/reversed authority revisions and stale concu
 	const f = fake(); laneExtension(f.pi);
 	f.extCtx.ui.confirm = async () => {
 		const latest = loadPolicy().policy!; const before = JSON.stringify(latest);
-		mutate(latest, ["forbid", "Other/Repo/#8"], { ...ctx, session: "coordinator-session" }, identity(repo)!);
+		mutate(latest, ["forbid", "Other/Repo/#8"], { ...ctx, session: "coordinator-session" }, fixtureIdentity(repo));
 		savePolicy(latest, before); return true;
 	};
 	await f.command("ack 1");
@@ -321,12 +485,12 @@ test("adapter startup, confirmed ACK, restart and compaction expose latest durab
 	assert.match((await f.fire("before_agent_start", { systemPrompt: "base" })).systemPrompt, /ACK=missing/);
 	await f.command("ack 0"); assert.match(f.notices.at(-1)!, /current/); assert.equal(f.confirms, 0);
 	await f.command("ack 1"); assert.equal(f.confirms, 1);
-	assert.deepEqual(loadPolicy().policy?.acknowledgements, [{ session: ctx.session, common: identity(repo)!.common, revision: 1 }]);
+	assert.deepEqual(loadPolicy().policy?.acknowledgements, [{ session: ctx.session, common: fixtureIdentity(repo).common, revision: 1 }]);
 	const restarted = fake(); laneExtension(restarted.pi);
 	await restarted.fire("session_start", { reason: "resume" });
 	assert.match((await restarted.fire("before_agent_start", { systemPrompt: "base" })).systemPrompt, /ACK=current/);
 	policy = loadPolicy().policy!;
-	mutate(policy, ["forbid", "Other/Repo/#9"], { ...ctx, session: "coordinator-session" }, identity(repo)!); store();
+	mutate(policy, ["forbid", "Other/Repo/#9"], { ...ctx, session: "coordinator-session" }, fixtureIdentity(repo)); store();
 	await restarted.fire("session_compact", {});
 	assert.match(restarted.statuses.at(-1)!.text!, /r2/);
 	const summary = (await restarted.fire("before_agent_start", { systemPrompt: "base after compaction" })).systemPrompt;

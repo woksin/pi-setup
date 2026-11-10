@@ -73,7 +73,8 @@ export default function (pi: ExtensionAPI) {
 				if (loaded.error) throw new Error(loaded.error);
 				const policy = loaded.policy!;
 				const actor = context(ctx);
-				const id = identity(actor.cwd);
+				let identityReason = "repository lookup failed";
+				const id = identity(actor.cwd, reason => { identityReason = reason; });
 				if (!words.length || words[0] === "status") {
 					const repo = policy.repositories.find(r => r.common === id?.common);
 					tell(clean(JSON.stringify({ revision: policy.revision, session: actor.session, repository: id, policy: repo ?? "unenrolled", acknowledgements: policy.acknowledgements.filter(a => a.session === actor.session), forbidden: policy.forbidden }, null, 2)));
@@ -81,7 +82,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				if (ctx.mode !== "tui" || !ctx.hasUI) throw new Error("Lane policy mutation requires an interactive operator TUI; RPC/headless cannot mutate policy.");
-				if (!id) throw new Error("Cannot resolve a Git repository here.");
+				if (!id) throw new Error(`Repository identity could not be determined: ${identityReason}.`);
 				const expected = JSON.stringify(policy);
 				if (words[0] === "ack") {
 					if (words.length !== 2 || !/^\d+$/.test(words[1])) throw new Error("Usage: ack current-revision");
