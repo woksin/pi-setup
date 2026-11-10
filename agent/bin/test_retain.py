@@ -715,10 +715,13 @@ class NugetTrimTests(unittest.TestCase):
         self.real.mkdir()
         self.link = self.tmp / 'packages'
         self.link.symlink_to(self.real)
-        p = patch.object(cleanup, 'NUGET_PACKAGES', str(self.link))
+        p = patch.dict(os.environ, {'NUGET_PACKAGES': str(self.link)})
         p.start()
         self.addCleanup(p.stop)
+        cleanup._nuget_dir_cache.clear()
+        self.addCleanup(cleanup._nuget_dir_cache.clear)
         self.ctx = cleanup.Ctx(cleanup.parse_args(['--only', 'caches']))
+        self.ctx.args.nuget_keep_versions = 3  # exercise the optional newest-N protection (default is 0)
         # ctime cannot be backdated, so move "now" 40 days ahead: every fixture's ctime is
         # then 40 days old and atime/mtime are set relative to this shifted clock.
         self.ctx.now += 40 * self.DAY
@@ -731,7 +734,7 @@ class NugetTrimTests(unittest.TestCase):
         f = vd / 'lib' / 'a.dll'
         f.write_bytes(b'x' * 10)
         self.age(vd, age_days)
-        return str(self.link / pid / ver)
+        return str(self.real / pid / ver)  # the planner reports realpaths
 
     def age(self, vd, days):
         t = self.ctx.now - days * self.DAY
@@ -771,16 +774,16 @@ class NugetTrimTests(unittest.TestCase):
                 item = next(it for it in plan["items"] if it["name"] == "nuget packages trim")
                 self.assertEqual(item["result"]["deleted"], 1)
                 self.assertTrue(any(note.startswith("step caches stopped at deadline after") for note in notes))
-        self.assertEqual(deleted, [str(self.link / name / "1.0.0") for name in ("alpha", "beta")])
+        self.assertEqual(deleted, [str(self.real / name / "1.0.0") for name in ("alpha", "beta")])
 
     def test_defaults(self):
         self.assertEqual(self.ctx.args.nuget_age_days, 7)
-        self.assertEqual(self.ctx.args.nuget_keep_versions, 3)
+        self.assertEqual(cleanup.parse_args(['--only', 'caches']).nuget_keep_versions, 0)  # unused versions are no longer shielded
 
     def test_old_atime_eligible_recent_atime_kept(self):
         old = [self.version('p', f'1.0.{i}') for i in range(4)]
         recent = self.version('p', '0.9.0')  # oldest by semver, but recently read
-        os.utime(Path(recent) / 'lib' / 'a.dll', (self.ctx.now, self.ctx.now - 30 * self.DAY))
+        os.utime(Path(recent) / 'lib' / 'a.dll', (self.ctx.now - 30 * self.DAY, self.ctx.now))  # mtime only: atime is unreliable on APFS
         cands, *_ = self.plan()
         self.assertEqual(cands, [old[0]])  # 1.0.1-1.0.3 newest three; 0.9.0 used recently
 
@@ -794,7 +797,7 @@ class NugetTrimTests(unittest.TestCase):
         self.version('p', '1.0.0')
         self.assertEqual(self.plan()[0], [])
         self.ctx.args.nuget_keep_versions = 0
-        self.assertEqual(self.plan()[0], [])
+        self.assertEqual(self.plan()[0], [str(self.real / 'p' / '1.0.0')])  # newest-N shield is off by default
 
     def test_stray_entries_ignored_for_ranking_and_never_deleted(self):
         vs = [self.version('p', f'1.0.{i}') for i in range(5)]
@@ -807,13 +810,13 @@ class NugetTrimTests(unittest.TestCase):
         cands, *_ = self.plan()
         self.assertEqual(sorted(cands), sorted(vs[:2]))
         self.ctx.args.nuget_keep_versions = 0
-        self.assertEqual(len(self.plan()[0]), 4)  # never the only (newest) real version
+        self.assertEqual(len(self.plan()[0]), 5)  # no newest-N shield: every stale real version
 
-    def test_only_real_version_kept_amid_strays(self):
-        self.version('p', '1.0.0')
+    def test_stray_dir_is_never_a_candidate_next_to_a_stale_version(self):
+        vd = self.version('p', '1.0.0')
         (self.real / 'p' / 'junk').mkdir()
         self.ctx.args.nuget_keep_versions = 0
-        self.assertEqual(self.plan()[0], [])
+        self.assertEqual(self.plan()[0], [vd])
 
     def test_walk_or_stat_error_fails_closed(self):
         vs = [self.version('p', f'1.0.{i}') for i in range(4)]
@@ -851,7 +854,7 @@ class NugetTrimTests(unittest.TestCase):
 
     def test_fresh_metadata_atime_makes_version_ineligible(self):
         vs = [self.version('p', f'1.0.{i}') for i in range(4)]
-        os.utime(Path(vs[0]) / '.nupkg.metadata', (self.ctx.now, self.ctx.now - 30 * self.DAY))
+        os.utime(Path(vs[0]) / '.nupkg.metadata', (self.ctx.now - 30 * self.DAY, self.ctx.now))  # fresh mtime
         self.assertEqual(self.plan()[0], [])
 
     def test_plan_does_not_refresh_metadata_atime(self):
@@ -863,13 +866,13 @@ class NugetTrimTests(unittest.TestCase):
         self.assertEqual((after.st_atime_ns, after.st_mtime_ns), (before.st_atime_ns, before.st_mtime_ns))
 
     def test_old_atimes_without_clock_shift(self):
-        # real clock: only atime/mtime are backdated; ctime is "now", so nothing may be eligible
+        # real clock: mtime is what counts (ctime is ignored: rsync/restore touch it)
         self.ctx.now -= 40 * self.DAY
         vs = [self.version('p', f'1.0.{i}') for i in range(4)]
         self.ctx.now += 40 * self.DAY
         self.assertEqual(self.plan()[0], [vs[0]])
         self.ctx.now = time.time()
-        self.assertEqual(self.plan()[0], [])  # ctime is fresh at the real clock
+        self.assertEqual(self.plan()[0], [vs[0]])  # backdated mtime stays old at the real clock
 
     def test_recheck_before_rename_skips_newly_used(self):
         vd = self.version('p', '1.0.0')
