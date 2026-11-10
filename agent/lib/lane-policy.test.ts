@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import childProcess, { execFileSync, spawnSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ACTIONS, acknowledge, assessCommand, assessPublication, emptyPolicy, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyPath, policyStore, savePolicy, validatePolicy, type Policy, type Context } from "./lane-policy.ts";
 import laneExtension from "../extensions/lane-policy.ts";
@@ -44,6 +44,8 @@ afterEach(() => {
 	if (oldGuards === undefined) delete process.env.PI_GUARDS_FILE; else process.env.PI_GUARDS_FILE = oldGuards;
 	if (oldEnv === undefined) delete process.env.PI_GUARDS_OFF; else process.env.PI_GUARDS_OFF = oldEnv;
 	delete (globalThis as any)[Symbol.for("pi.guards")];
+	// Leftover fixture repositories inside the checkout break specs that copy the working tree.
+	rmSync(home, { recursive: true, force: true });
 });
 function store() { mkdirSync(join(home, ".pi/agent/lane-policy"), { recursive: true }); writeFileSync(policyPath(), JSON.stringify(policy)); }
 function grant(action: any = "push", target = "lane") { policy.repositories[0].grants.push({ session: ctx.session, action, target, expires: Date.now() + 60000, revision: policy.revision }); }
