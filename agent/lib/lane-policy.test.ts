@@ -190,6 +190,40 @@ test("typed publication and CLI reuse exact gh grants without granting unsupport
 	]) assert.ok(assessPublication(request, ctx));
 });
 
+for (const durations of [[2000, 2000, 2000], [5000]]) test(`Git identity shares one deadline across calls (${durations})`, t => {
+	let elapsed = 0;
+	const budgets: number[] = [], reasons: string[] = [];
+	t.mock.method(performance, "now", () => elapsed);
+	fakeGit.onExec = (_command, _args, options) => {
+		budgets.push(options.timeout!);
+		elapsed += durations[budgets.length - 1] ?? 0;
+		if (elapsed > 5000) throw Object.assign(new Error("git timed out"), { code: "ETIMEDOUT" });
+	};
+	assert.equal(identity(repo, reason => reasons.push(reason)), undefined);
+	assert.deepEqual(budgets, durations.length === 1 ? [5000] : [5000, 3000, 1000]);
+	assert.deepEqual(reasons, ["git timed out after 5000 ms"]);
+});
+
+test("a detached HEAD lookup cannot succeed after exhausting the shared deadline", t => {
+	let elapsed = 0;
+	t.mock.method(performance, "now", () => elapsed);
+	fakeGit.repository(repo).branch = "";
+	fakeGit.onExec = (_command, args) => { elapsed += args.includes("symbolic-ref") ? 1000 : 2000; };
+	const reasons: string[] = [];
+	assert.equal(identity(repo, reason => reasons.push(reason)), undefined);
+	assert.deepEqual(reasons, ["git timed out after 5000 ms"]);
+});
+
+test("Git identity retains detached HEAD without branch authority within the shared budget", t => {
+	let elapsed = 0;
+	const budgets: number[] = [];
+	t.mock.method(performance, "now", () => elapsed);
+	fakeGit.repository(repo).branch = "";
+	fakeGit.onExec = (_command, _args, options) => { budgets.push(options.timeout!); elapsed += 1000; };
+	assert.equal(identity(repo)?.branch, "");
+	assert.deepEqual(budgets, [5000, 4000, 3000]);
+});
+
 for (const failure of [
 	{ error: Object.assign(new Error("spawnSync git ETIMEDOUT"), { code: "ETIMEDOUT" }), reason: "git timed out after 5000 ms" },
 	{ error: Object.assign(new Error("git failed"), { status: 128 }), reason: "git exited with status 128" },
@@ -204,7 +238,7 @@ for (const failure of [
 	const f = fake(); laneExtension(f.pi);
 	fakeGit.onExec = (command, _args, options) => {
 		assert.equal(command, "git");
-		assert.equal(options.timeout, 5000);
+		assert.ok(options.timeout! > 0 && options.timeout! <= 5000);
 	};
 	fakeGit.failure = failure.error;
 	try {
@@ -226,6 +260,17 @@ for (const failure of [
 	assert.deepEqual(identity(repo), previousIdentity);
 	await f.command("ack 1");
 	assert.equal(f.confirms, 1);
+});
+
+for (const failure of [
+	{ error: Object.assign(new Error("git timed out"), { code: "ETIMEDOUT" }), reason: "git timed out after 5000 ms" },
+	{ error: Object.assign(new Error("git failed"), { status: 128 }), reason: "git exited with status 128" },
+]) test(`publication assessment notices include the identity failure cause (${failure.reason})`, () => {
+	store(); fakeGit.failure = failure.error;
+	for (const command of ["git push origin lane:lane", `git -C '${repo}' push origin lane:lane`, "gh pr create -R Cratis/Studio --head lane"]) {
+		assert.ok(assessCommand(command, ctx)?.includes(failure.reason), command);
+	}
+	assert.ok(assessPublication({ kind: "pr-create", repo: "Cratis/Studio", head: "lane", title: "Title", body: "Body" }, ctx)?.includes(failure.reason));
 });
 
 test("fixture identity failures include the diagnostic Git exit, stderr and duration", () => {
