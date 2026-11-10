@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { execFileSync, spawnSync } from "node:child_process";
+import childProcess, { execFileSync, spawnSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ACTIONS, acknowledge, assessCommand, assessPublication, emptyPolicy, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyPath, policyStore, savePolicy, validatePolicy, type Policy, type Context } from "./lane-policy.ts";
@@ -81,6 +82,45 @@ test("typed publication and CLI reuse exact gh grants without granting unsupport
 		{ kind: "release-create", repo: "Cratis/Studio", tag: "v1", body: "Safe" },
 		{ kind: "pr-merge", repo: "Cratis/Studio", number: 39, strategy: "squash" },
 	]) assert.ok(assessPublication(request, ctx));
+});
+
+for (const failure of [
+	{ error: Object.assign(new Error("spawnSync git ETIMEDOUT"), { code: "ETIMEDOUT" }), reason: "git timed out after 5000 ms" },
+	{ error: Object.assign(new Error("git failed"), { status: 128 }), reason: "git exited with status 128" },
+]) test(`Git identity failure (${failure.reason}) refuses ACK and publication without stale authority`, async t => {
+	grant(); grant("pr-create", "lane"); store();
+	const publication = { kind: "pr-create", repo: "Cratis/Studio", head: "lane", base: "main", title: "Title", body: "Body" };
+	allowed("git push origin lane:lane");
+	allowed("gh pr create -R Cratis/Studio --head lane");
+	assert.equal(assessPublication(publication, ctx), undefined);
+	const previousIdentity = fixtureIdentity(repo);
+	const previousPolicy = readFileSync(policyPath(), "utf8");
+	const f = fake(); laneExtension(f.pi);
+	const probe = t.mock.method(childProcess, "execFileSync", (command, _args, options) => {
+		assert.equal(command, "git");
+		assert.equal(options.timeout, 5000);
+		throw failure.error;
+	});
+	syncBuiltinESMExports();
+	try {
+		const reasons: string[] = [];
+		assert.equal(identity(repo, reason => reasons.push(reason)), undefined);
+		assert.deepEqual(reasons, [failure.reason]);
+		await f.command("ack 1");
+		assert.equal(f.confirms, 0);
+		assert.ok(f.notices.some(message => message.includes("identity could not be determined") && message.includes(failure.reason)));
+		assert.equal(readFileSync(policyPath(), "utf8"), previousPolicy);
+		denied("git push origin lane:lane");
+		denied("gh pr create -R Cratis/Studio --head lane");
+		assert.ok(assessPublication(publication, ctx));
+		assert.equal((await f.fire("tool_call", { toolName: "bash", input: { command: "git push origin lane:lane" } })).block, true);
+	} finally {
+		probe.mock.restore();
+		syncBuiltinESMExports();
+	}
+	assert.deepEqual(identity(repo), previousIdentity);
+	await f.command("ack 1");
+	assert.equal(f.confirms, 1);
 });
 
 test("fixture identity failures include the diagnostic Git exit, stderr and duration", () => {
