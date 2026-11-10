@@ -161,8 +161,16 @@ POOL = 8
 SIZE_BUDGET_S = 30  # total wall-clock budget for worktree `du` measurements
 DRY_WORKER = False
 TMP_ROOTS = ("/tmp", "/private/tmp")
+DEFAULT_TMP_ROOTS = TMP_ROOTS
+TMP_CLONE_ROOTS = None  # tests only: replaces the derived Chrome code_sign_clone roots
 TMP_PREFIXES = ("pisync.", "gr-stage-ui")
 TMP_MIN_AGE = 2 * 3600
+# Test and tool leftovers: directories by prefix, files by glob; removed once a day old.
+TMP_DAY_PREFIXES = ("pisetup-test.", "pisetup-", "lanes-", "cratis-guard-", "pfb-", "MSBuildTemp")
+TMP_FILE_PATTERNS = ("pi-bash-*.log", "tmp*.tmp", "*.keychain", "*.keychain-db")
+TMP_DAY_AGE = 24 * 3600
+TMP_MEASURE_MAX = 20  # directories measured with du per plan (some hold 160k files)
+CHROME_CLONE_NAME = "com.google.Chrome.code_sign_clone"
 
 BUILD_DIRS = {
     "bin", "obj", "node_modules", "dist", "TestResults", "coverage", "coverage-results",
@@ -1791,26 +1799,95 @@ def handoffs_failures(plan) -> int:
     return handoffs_totals(plan)["failed"] if plan else 0
 
 
-def tmp_state(path, now):
-    """Only old, user-owned real directories with an explicitly known prefix."""
+def tmp_min_age(name, is_dir):
+    """Minimum age in seconds for an explicitly known temp name, or None for an unknown one."""
+    if is_dir:
+        if name.startswith(TMP_PREFIXES):
+            return TMP_MIN_AGE
+        return TMP_DAY_AGE if name.startswith(TMP_DAY_PREFIXES) else None
+    return TMP_DAY_AGE if any(fnmatch.fnmatchcase(name, pat) for pat in TMP_FILE_PATTERNS) else None
+
+
+def tmp_known_name(name):
+    return tmp_min_age(name, True) is not None or tmp_min_age(name, False) is not None
+
+
+def tmp_state(path, now, clone=False):
+    """Only old, user-owned real directories (or, for the file patterns, regular files) with an
+    explicitly known name; never a symlink or another user's entry. `clone`: a child of a
+    Chrome code_sign_clone directory, any name, older than two hours."""
     reason = retained_reason(path)
     if reason:
         return None, reason
     try:
         st = os.lstat(path)
-        if not os.path.basename(path).startswith(TMP_PREFIXES):
+        is_dir = statmod.S_ISDIR(st.st_mode)
+        min_age = TMP_MIN_AGE if clone else tmp_min_age(os.path.basename(path), is_dir)
+        if min_age is None:
             return None, "unknown prefix"
-        if not statmod.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        if not (is_dir or (not clone and statmod.S_ISREG(st.st_mode))) or st.st_uid != os.getuid():
             return None, "not a user-owned directory"
-        if now - st.st_mtime < TMP_MIN_AGE:
-            return None, "younger than 2 hours"
+        if now - st.st_mtime < min_age:
+            return None, f"younger than {min_age // 3600} hours"
         return (st.st_dev, st.st_ino, st.st_mtime_ns), None
     except OSError as error:
         return None, str(error)
 
 
+def tmp_extra_roots():
+    """Real per-user temp roots besides /tmp: $TMPDIR, the Python temp dir and, for scheduled runs
+    without TMPDIR, the macOS per-user directory (`getconf DARWIN_USER_TEMP_DIR`)."""
+    raw = [os.environ.get("TMPDIR"), tempfile.gettempdir()]
+    if not os.environ.get("TMPDIR"):
+        rc, out, _ = run(["getconf", "DARWIN_USER_TEMP_DIR"], timeout=10)
+        if rc == 0 and out.strip():
+            raw.append(out.strip())
+    roots = []
+    for value in raw:
+        if value:
+            real = os.path.realpath(value)
+            if real not in roots and real != "/" and real != os.path.realpath(os.path.expanduser("~")):
+                roots.append(real)
+    return roots
+
+
+def tmp_roots():
+    """/tmp roots plus the per-user ones. A replaced TMP_ROOTS (tests) is used as given."""
+    if TMP_ROOTS is not DEFAULT_TMP_ROOTS:
+        return [os.path.realpath(r) for r in TMP_ROOTS]
+    roots = []
+    for raw in (*TMP_ROOTS, *tmp_extra_roots()):
+        real = os.path.realpath(raw)
+        if real not in roots:
+            roots.append(real)
+    return roots
+
+
+def tmp_clone_roots():
+    """`/var/folders/xx/yyy/X/com.google.Chrome.code_sign_clone` beside a `.../T` temp root."""
+    if TMP_CLONE_ROOTS is not None:
+        return [os.path.realpath(r) for r in TMP_CLONE_ROOTS]
+    if TMP_ROOTS is not DEFAULT_TMP_ROOTS:
+        return []
+    return [os.path.join(os.path.dirname(r), "X", CHROME_CLONE_NAME)
+            for r in tmp_extra_roots() if os.path.basename(r) == "T"]
+
+
+def command_lines():
+    """All process command lines, or None when they cannot be listed (callers fail closed)."""
+    rc, out, _ = run(["ps", "-axo", "command="], timeout=20)
+    return out.splitlines() if rc == 0 and out.strip() else None
+
+
+def command_mentions(path, lines=None):
+    lines = command_lines() if lines is None else lines
+    return lines is None or any(path in line for line in lines)
+
+
 def tmp_locked(path):
     """A test fixture may be idle without open files except its lifetime lock."""
+    if not os.path.isdir(path):
+        return False  # a plain file has no lifetime lock; open files are caught by the snapshot
     try:
         with open(os.path.join(path, ".pisync.lock"), "rb") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1825,10 +1902,40 @@ def plan_tmp(ctx):
     return list(iter_tmp(ctx))
 
 
+def tmp_size(path, measured):
+    """Bytes of a candidate. Directories hold up to 160k files: at most TMP_MEASURE_MAX of them are
+    walked (1 s each); the rest are reported unmeasured, a file is a single lstat."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not statmod.S_ISDIR(st.st_mode):
+        return st.st_blocks * 512
+    if measured[0] >= TMP_MEASURE_MAX:
+        return None
+    measured[0] += 1
+    return du_bytes(path, 1)
+
+
+def tmp_entry(ctx, path, measured, clone=False, lines=None):
+    identity, reason = tmp_state(path, ctx.now, clone)
+    if not reason and (ctx.snap is None or ctx.snap.first_inside(path) or tmp_locked(path)):
+        reason = "process holds directory (or process snapshot unavailable)"
+    if not reason and clone and command_mentions(path, lines):
+        reason = "a process command line references it (or processes cannot be listed)"
+    size = tmp_size(path, measured) if not reason else None
+    entry = {"name": "temporary " + ("file " if os.path.isfile(path) and not os.path.islink(path) else "directory ")
+             + path, "tmp_path": path, "identity": identity, "size": size,
+             "action": "skip" if reason else "run", "reason": reason}
+    if clone:
+        entry["clone"] = True
+    return entry
+
+
 def iter_tmp(ctx):
     seen = set()
-    for raw in TMP_ROOTS:
-        root = os.path.realpath(raw)
+    measured = [0]
+    for root in tmp_roots():
         if root in seen:
             continue
         seen.add(root)
@@ -1837,16 +1944,17 @@ def iter_tmp(ctx):
         except OSError:
             continue
         for name in ctx.items(names):
-            if not name.startswith(TMP_PREFIXES):
-                continue
-            path = os.path.join(root, name)
-            identity, reason = tmp_state(path, ctx.now)
-            if not reason and (ctx.snap is None or ctx.snap.first_inside(path) or tmp_locked(path)):
-                reason = "process holds directory (or process snapshot unavailable)"
-            size = du_bytes(path, 2) if not reason else None
-            yield {"name": "temporary directory " + path, "tmp_path": path,
-                   "identity": identity, "size": size, "action": "skip" if reason else "run",
-                   "reason": reason}
+            if tmp_known_name(name):
+                yield tmp_entry(ctx, os.path.join(root, name), measured)
+    clones = tmp_clone_roots()
+    lines = command_lines() if clones else None
+    for root in clones:
+        try:
+            names = sorted(os.listdir(root)) if not os.path.islink(root) else []
+        except OSError:
+            continue
+        for name in ctx.items(names):
+            yield tmp_entry(ctx, os.path.join(root, name), measured, clone=True, lines=lines)
 
 
 def apply_tmp(ctx, item):
@@ -1857,15 +1965,21 @@ def apply_tmp(ctx, item):
     except SnapshotError:
         item.update(action="skip", reason="process snapshot unavailable")
         return
-    identity, reason = tmp_state(path, time.time())
-    allowed_roots = {os.path.realpath(root) for root in TMP_ROOTS}
+    clone = bool(item.get("clone"))
+    identity, reason = tmp_state(path, time.time(), clone)
+    allowed_roots = set(tmp_clone_roots() if clone else tmp_roots())
     if reason or identity != item["identity"] or os.path.dirname(path) not in allowed_roots:
         item.update(action="skip", reason=reason or "directory identity changed")
     elif snapshot.first_inside(path) or tmp_locked(path):
         item.update(action="skip", reason="process holds directory")
+    elif clone and command_mentions(path):
+        item.update(action="skip", reason="a process command line references it")
     else:
         try:
-            shutil.rmtree(path)
+            if statmod.S_ISDIR(os.lstat(path).st_mode):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
             item["result"] = "removed"
         except OSError as error:
             item["result"] = f"failed: {error}"

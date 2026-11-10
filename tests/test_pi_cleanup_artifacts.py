@@ -240,6 +240,158 @@ class DotnetExtractionTests(ReclaimFixture):
         self.assertEqual(cleanup.plan_dotnet_extractions(ctx)['action'], 'skip')
 
 
+class TempLeftoverTests(ReclaimFixture):
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / 'T'
+        self.root.mkdir()
+        for target, value in (('TMP_ROOTS', (str(self.root),)), ('TMP_CLONE_ROOTS', ())):
+            patcher = patch.object(cleanup, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def entry(self, name, days, directory=True):
+        path = self.root / name
+        if directory:
+            path.mkdir()
+            (path / 'data').write_text('x')
+        else:
+            path.write_text('x')
+        self.age(path, days)
+        return path
+
+    def rows(self, held=()):
+        ctx = self.ctx(held=held)
+        return {os.path.basename(r['tmp_path']): r for r in cleanup.plan_tmp(ctx)}
+
+    def test_each_new_directory_prefix_removed_after_a_day_not_before(self):
+        names = ('pisetup-test.abc', 'pisetup-xyz', 'lanes-1', 'cratis-guard-2', 'pfb-3', 'MSBuildTemp501')
+        for name in names:
+            self.entry(name, 2)
+            self.entry(name + '-young', 0.2)
+        rows = self.rows()
+        self.assertTrue(all(rows[n]['action'] == 'run' for n in names))
+        self.assertTrue(all(rows[n + '-young']['action'] == 'skip' for n in names))
+
+    def test_existing_prefixes_keep_their_two_hour_age(self):
+        self.entry('pisync.a', 0.2)
+        self.entry('gr-stage-ui-b', 0.01)
+        rows = self.rows()
+        self.assertEqual(rows['pisync.a']['action'], 'run')
+        self.assertEqual(rows['gr-stage-ui-b']['action'], 'skip')
+
+    def test_file_patterns_and_unknown_names(self):
+        wanted = ('pi-bash-1.log', 'tmpabc.tmp', 'login.keychain', 'login.keychain-db')
+        for name in wanted:
+            self.entry(name, 2, directory=False)
+        self.entry('other.log', 2, directory=False)
+        self.entry('unrelated', 2)
+        self.entry('pi-bash-young.log', 0.1, directory=False)
+        rows = self.rows()
+        self.assertEqual(sorted(n for n, r in rows.items() if r['action'] == 'run'), sorted(wanted))
+        self.assertNotIn('other.log', rows)
+        self.assertNotIn('unrelated', rows)
+        self.assertEqual(rows['pi-bash-young.log']['action'], 'skip')
+
+    def test_held_directory_file_and_symlink_are_skipped(self):
+        held = self.entry('lanes-held', 2)
+        open_file = self.entry('pi-bash-open.log', 2, directory=False)
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        (self.root / 'lanes-link').symlink_to(outside)
+        rows = self.rows(held=[str(held / 'data'), str(open_file)])
+        self.assertEqual({n: r['action'] for n, r in rows.items()},
+                         {'lanes-held': 'skip', 'pi-bash-open.log': 'skip', 'lanes-link': 'skip'})
+
+    def test_apply_removes_old_dir_and_file_only(self):
+        directory = self.entry('pfb-old', 2)
+        plain = self.entry('tmp1.tmp', 2, directory=False)
+        young = self.entry('pfb-new', 0.1)
+        ctx = self.ctx()
+        for row in cleanup.plan_tmp(ctx):
+            with patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])):
+                cleanup.apply_tmp(ctx, row)
+        self.assertEqual([p.exists() for p in (directory, plain, young)], [False, False, True])
+
+    def test_dry_run_plan_measures_a_bounded_number_of_directories(self):
+        for index in range(cleanup.TMP_MEASURE_MAX + 5):
+            self.entry(f'lanes-{index:03d}', 2)
+        sizes = [r['size'] for r in cleanup.plan_tmp(self.ctx())]
+        self.assertEqual(sum(size is not None for size in sizes), cleanup.TMP_MEASURE_MAX)
+
+    def test_extra_roots_come_from_tmpdir_and_getconf(self):
+        real = os.path.realpath(self.root)
+        with patch.dict(os.environ, {'TMPDIR': str(self.root) + '/'}):
+            self.assertIn(real, cleanup.tmp_extra_roots())
+        user = self.tmp / 'var' / 'T'
+        user.mkdir(parents=True)
+        env = {k: v for k, v in os.environ.items() if k != 'TMPDIR'}
+        with patch.dict(os.environ, env, clear=True), patch.object(
+                cleanup, 'run', return_value=(0, str(user) + '/\n', '')):
+            self.assertIn(os.path.realpath(user), cleanup.tmp_extra_roots())
+
+    def test_default_roots_include_extras_and_dedupe(self):
+        with patch.object(cleanup, 'TMP_ROOTS', cleanup.DEFAULT_TMP_ROOTS), patch.object(
+                cleanup, 'tmp_extra_roots', return_value=[str(self.root), os.path.realpath('/tmp')]):
+            roots = cleanup.tmp_roots()
+        self.assertIn(str(self.root), roots)
+        self.assertEqual(len(roots), len(set(roots)))
+
+
+class ChromeCloneTests(ReclaimFixture):
+    def setUp(self):
+        super().setUp()
+        self.clone = self.tmp / 'var' / 'X' / cleanup.CHROME_CLONE_NAME
+        self.clone.mkdir(parents=True)
+        for target, value in (('TMP_ROOTS', (str(self.tmp / 'none'),)), ('TMP_CLONE_ROOTS', (str(self.clone),))):
+            patcher = patch.object(cleanup, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def child(self, name, hours):
+        path = self.clone / name
+        path.mkdir()
+        (path / 'f').write_text('x')
+        self.age(path, hours / 24)
+        return path
+
+    def rows(self, commands, held=()):
+        with patch.object(cleanup, 'command_lines', return_value=commands):
+            return {os.path.basename(r['tmp_path']): r for r in cleanup.plan_tmp(self.ctx(held=held))}
+
+    def test_old_unreferenced_removed_young_and_referenced_kept(self):
+        old, young, used, opened = (self.child(n, h) for n, h in (('old', 5), ('young', 1), ('used', 5), ('open', 5)))
+        rows = self.rows(['/usr/bin/chrome --path=' + str(used)], held=[str(opened / 'f')])
+        self.assertEqual({n: r['action'] for n, r in rows.items()},
+                         {'old': 'run', 'young': 'skip', 'used': 'skip', 'open': 'skip'})
+        ctx = self.ctx()
+        with patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
+                patch.object(cleanup, 'command_lines', return_value=['unrelated']):
+            cleanup.apply_tmp(ctx, rows['old'])
+        self.assertEqual([old.exists(), young.exists(), used.exists()], [False, True, True])
+
+    def test_unlistable_processes_fail_closed(self):
+        self.child('old', 5)
+        self.assertEqual(self.rows(None)['old']['action'], 'skip')
+
+    def test_apply_rechecks_command_lines(self):
+        old = self.child('old', 5)
+        row = self.rows(['x'])['old']
+        with patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
+                patch.object(cleanup, 'command_lines', return_value=['run ' + str(old)]):
+            cleanup.apply_tmp(self.ctx(), row)
+        self.assertTrue(old.exists())
+
+    def test_derived_roots_only_beside_a_T_directory(self):
+        base = self.tmp / 'folders'
+        (base / 'T').mkdir(parents=True)
+        (base / 'other').mkdir()
+        with patch.object(cleanup, 'TMP_ROOTS', cleanup.DEFAULT_TMP_ROOTS), patch.object(
+                cleanup, 'TMP_CLONE_ROOTS', None), patch.object(
+                cleanup, 'tmp_extra_roots', return_value=[str(base / 'T'), str(base / 'other')]):
+            self.assertEqual(cleanup.tmp_clone_roots(), [str(base / 'X' / cleanup.CHROME_CLONE_NAME)])
+
+
 class NugetUnusedTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix='pisetup-test.nuget.')))
