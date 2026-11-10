@@ -5,6 +5,7 @@ import type { LanesCtx } from "./ctx.ts";
 import { UsageError, type Config } from "./config.ts";
 import { runningPiChecked } from "./processes.ts";
 import { validId } from "./names.ts";
+import type { RegisterData } from "./issue-register.ts";
 import { readJsonDir, type RosterInputs, type RosterRow } from "./roster.ts";
 
 export interface Registration { id: string; pid: number; cwd: string; startedAt: string; retiredAt?: string }
@@ -95,74 +96,122 @@ export function checkRegistrations(records: Registration[], processes: RosterInp
     return { ...record, cwd, alive: Boolean(alive) };
   });
 }
-export async function registrationParents(records: CheckedRegistration[], ctx: LanesCtx): Promise<Map<number, number>> {
-  const parents = new Map<number, number>();
-  if (!records.some(record => record.alive)) return parents;
+export async function registrationParents(records: CheckedRegistration[], ctx: LanesCtx): Promise<Map<number, number> | undefined> {
+  if (!records.some(record => record.alive)) return undefined;
   try {
     const result = await ctx.run("ps", ["-A", "-o", "pid=,ppid="], { timeoutMs: 10000 });
-    if (result.code !== 0 || result.timedOut) return parents;
+    if (result.code !== 0 || result.timedOut) return undefined;
+    const parents = new Map<number, number>();
     for (const line of result.stdout.split("\n")) {
       const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
       if (match) parents.set(Number(match[1]), Number(match[2]));
     }
-  } catch { /* Missing ancestry permits only an unambiguous cwd fallback. */ }
-  return parents;
+    return result.stdout.trim() && !parents.size ? undefined : parents;
+  } catch { return undefined; }
 }
-function descendsFrom(row: RosterRow, record: CheckedRegistration, parents: Map<number, number>): boolean {
-  const visited = new Set<number>(); let pid = row.pid;
-  for (let hops = 0; hops < 64 && pid !== null; hops++) {
-    if (visited.has(pid)) return false;
+interface PiProcess { pid: number; cwd: string }
+interface IdentityAttribution {
+  identity: string;
+  source: "registration-pid" | "registration-descendant" | "orch" | "seed" | "registration-cwd" | "unregistered";
+}
+export interface ProcessAttribution extends IdentityAttribution {
+  process: PiProcess; sessions: string[]; sessionId: string | null;
+  heartbeat?: RosterInputs["heartbeats"][number]; orch?: RosterInputs["sessions"][number];
+}
+function verifiedLeasePid(lease: RegisterData["leases"][number], data: RegisterData): boolean {
+  const live = data.liveness.get(lease.sessionId);
+  return live?.status === "live" && live.pid === lease.pid;
+}
+export function verifiedPidSessions(pids: number[], data: RegisterData): string[] {
+  return [...new Set(data.leases.filter(lease => verifiedLeasePid(lease, data) && pids.includes(lease.pid)).map(lease => lease.sessionId))];
+}
+export function livePiProcesses(procs: PiProcess[], register: RegisterData): PiProcess[] {
+  const found = new Map(procs.map(process => [process.pid, process]));
+  for (const lease of register.leases) {
+    if (!verifiedLeasePid(lease, register) || found.has(lease.pid)) continue;
+    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+  }
+  return [...found.values()];
+}
+function latestHeartbeat(process: PiProcess, input: RosterInputs): ProcessAttribution["heartbeat"] {
+  return input.heartbeats.filter(heartbeat => heartbeat.pid === process.pid).sort((a, b) => b.at.localeCompare(a.at))[0];
+}
+interface AttributionBuild {
+  input: RosterInputs; processes: PiProcess[]; records: CheckedRegistration[];
+  identities: Map<number, IdentityAttribution>;
+}
+function attributeExactPids(build: AttributionBuild): void {
+  for (const process of build.processes) {
+    const record = build.records.find(record => record.pid === process.pid);
+    if (record) build.identities.set(process.pid, { identity: record.id, source: "registration-pid" });
+  }
+}
+function wrapperAncestor(process: PiProcess, wrappers: Map<number, CheckedRegistration>, parents: Map<number, number>): CheckedRegistration | undefined {
+  const visited = new Set<number>(); let pid = process.pid;
+  for (let hops = 0; hops < 64; hops++) {
+    if (visited.has(pid)) return undefined;
     visited.add(pid);
-    const parent = parents.get(pid);
-    if (parent === record.pid) return true;
-    pid = parent ?? null;
+    const parent = parents.get(pid); if (parent === undefined) return undefined;
+    const record = wrappers.get(parent); if (record) return record;
+    pid = parent;
   }
-  return false;
+  return undefined;
 }
-function onlyRow(rows: RosterRow[]): RosterRow | undefined { return rows.length === 1 ? rows[0] : undefined; }
-function attachRegistration(rows: RosterRow[], record: CheckedRegistration, processRow: RosterRow): void {
-  const target = rows.find(row => row !== processRow && row.lane === record.id);
-  if (target) {
-    target.pid = processRow.pid; target.evidence.push(...processRow.evidence);
-    rows.splice(rows.indexOf(processRow), 1);
-    return;
-  }
-  processRow.lane = record.id;
-  if (processRow.identity === "unregistered") processRow.identity = "launched";
-  processRow.notes = processRow.notes.filter(note => note !== "identity unavailable: unregistered");
+function wrapperRecords(build: AttributionBuild): CheckedRegistration[] {
+  const piPids = new Set(build.processes.map(process => process.pid));
+  return build.records.filter(record => !piPids.has(record.pid));
 }
-interface RegistrationMatches { rows: RosterRow[]; claimed: Set<number>; attached: Set<CheckedRegistration> }
-type ProcessSelector = (available: RosterRow[], record: CheckedRegistration) => RosterRow | undefined;
-function availableProcesses(matches: RegistrationMatches): RosterRow[] {
-  return matches.rows.filter(row => row.pid !== null && !matches.claimed.has(row.pid));
-}
-function claimRegistrations(matches: RegistrationMatches, records: CheckedRegistration[], select: ProcessSelector): void {
-  for (const record of records) {
-    if (!record.alive || matches.attached.has(record)) continue;
-    const processRow = select(availableProcesses(matches), record);
-    if (!processRow) continue;
-    matches.claimed.add(processRow.pid!); matches.attached.add(record);
-    attachRegistration(matches.rows, record, processRow);
+function attributeDescendants(build: AttributionBuild): void {
+  const parents = build.input.registrationParents; if (!parents) return;
+  const wrappers = new Map(wrapperRecords(build).map(record => [record.pid, record]));
+  for (const process of build.processes) {
+    if (build.identities.has(process.pid)) continue;
+    const record = wrapperAncestor(process, wrappers, parents);
+    if (record) build.identities.set(process.pid, { identity: record.id, source: "registration-descendant" });
   }
 }
-function registrationRow(matches: RegistrationMatches, record: CheckedRegistration, empty: (id: string) => RosterRow): void {
-  let row = matches.rows.find(row => row.lane === record.id);
-  if (!row) { row = { ...empty(record.id), worktree: record.cwd }; matches.rows.push(row); }
-  if (!record.alive || matches.attached.has(record)) return;
-  if (availableProcesses(matches).filter(process => process.worktree === record.cwd).length > 1) row.notes.push("ambiguous cwd");
+function attributeOrch(build: AttributionBuild): void {
+  for (const process of build.processes) {
+    if (build.identities.has(process.pid)) continue;
+    const session = build.input.sessions.find(session => session.pid === process.pid);
+    const id = session?.id || latestHeartbeat(process, build.input)?.id;
+    if (id) build.identities.set(process.pid, { identity: id, source: "orch" });
+  }
 }
-export function launchedRows(rows: RosterRow[], input: RosterInputs, empty: (id: string) => RosterRow): Set<number> {
-  const registrations = input.registrations ?? [];
-  const matches: RegistrationMatches = { rows, claimed: new Set(), attached: new Set() };
-  const parents = input.registrationParents ?? new Map<number, number>();
-  const piPids = new Set(rows.map(row => row.pid));
-  const wrappers = registrations.filter(record => !piPids.has(record.pid));
-  // Reserve exact owners and descendants before any registration can fall back to cwd.
-  claimRegistrations(matches, registrations, (available, record) => available.find(row => row.pid === record.pid));
-  claimRegistrations(matches, wrappers, (available, record) => onlyRow(available.filter(row => descendsFrom(row, record, parents))));
-  claimRegistrations(matches, wrappers, (available, record) => onlyRow(available.filter(row => row.worktree === record.cwd)));
-  for (const record of registrations) registrationRow(matches, record, empty);
-  return matches.claimed;
+function attributeSeeds(build: AttributionBuild): void {
+  const used = new Set([...build.identities.values()].map(attribution => attribution.identity));
+  for (const process of build.processes) {
+    if (build.identities.has(process.pid)) continue;
+    const seed = build.input.lanes.find(seed => seed.cwd && seed.cwd === process.cwd);
+    if (!seed || used.has(seed.id)) continue;
+    build.identities.set(process.pid, { identity: seed.id, source: "seed" }); used.add(seed.id);
+  }
+}
+function attributeFallback(build: AttributionBuild): void {
+  if (build.input.registrationParents !== undefined) return;
+  for (const record of wrapperRecords(build)) {
+    if ([...build.identities.values()].some(attribution => attribution.identity === record.id)) continue;
+    const candidates = build.processes.filter(process => !build.identities.has(process.pid) && process.cwd === record.cwd);
+    if (candidates.length !== 1) continue;
+    build.identities.set(candidates[0].pid, { identity: record.id, source: "registration-cwd" });
+  }
+}
+function processAttribution(process: PiProcess, build: AttributionBuild): ProcessAttribution {
+  const attribution = build.identities.get(process.pid) ?? { identity: `unregistered-p${process.pid}`, source: "unregistered" as const };
+  const sessions = verifiedPidSessions([process.pid], build.input.register);
+  const orch = build.input.sessions.find(session => session.pid === process.pid); const heartbeat = latestHeartbeat(process, build.input);
+  return { ...attribution, process, sessions, sessionId: sessions[0] || orch?.sessionId || heartbeat?.sessionId || null, orch, heartbeat };
+}
+/** The only process-to-identity join. Later stages cannot overwrite earlier attribution. */
+export function attributeProcesses(input: RosterInputs): Map<number, ProcessAttribution> {
+  const build: AttributionBuild = { input, processes: livePiProcesses(input.processes.procs, input.register),
+    records: (input.registrations ?? []).filter(record => record.alive && !record.retiredAt), identities: new Map() };
+  attributeExactPids(build);
+  attributeDescendants(build);
+  attributeOrch(build);
+  attributeSeeds(build);
+  attributeFallback(build);
+  return new Map(build.processes.map(process => [process.pid, processAttribution(process, build)]));
 }
 /** Add identity and exit evidence without treating a wrapper PID as a Pi PID. */
 export function joinRegistration(row: RosterRow, input: RosterInputs): void {

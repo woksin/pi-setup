@@ -24,7 +24,7 @@ function fixture() {
   }
   const register = (pid: number, id = "SMOKE1") => put(`.state/roster/${id}.json`, { id, pid, cwd: home, startedAt: now.toISOString() });
   const who = async () => { assert.equal(await main(["who", "--json"], ctx), 0); return JSON.parse(lines.at(-1)!).rows; };
-  return { ctx, register, who, parents: (value: string) => { parents = value; } };
+  return { ctx, register, who, put, parents: (value: string) => { parents = value; } };
 }
 test("a Pi registration takes its exact pid and lease, not another Pi in the same configured cwd", async () => {
   const f = fixture(); f.register(701);
@@ -45,10 +45,10 @@ for (const parents of ["701 1\n702 1", "701 30\n30 701\n702 1", ""]) test(`ambig
   assert.ok(row.notes.includes("ambiguous cwd")); assert.ok(row.evidence.includes("registration"));
   assert.ok(!row.evidence.includes("lease")); assert.ok(!row.evidence.includes("heartbeat(fresh)"));
 });
-test("a configured live wrapper with ambiguous cwd cannot borrow a Pi or its lease", async () => {
+test("a configured seed keeps its own Pi when a same-ID wrapper has no descendant", async () => {
   const f = fixture(); f.register(20, "L0");
   const rows = await f.who(); const row = rows.find((r: any) => r.lane === "L0");
-  assert.equal(row.pid, null); assert.equal(row.sessionId, null); assert.equal(row.state, "idle"); assert.ok(row.notes.includes("ambiguous cwd"));
+  assert.equal(row.pid, 701); assert.equal(row.sessionId, "session-701"); assert.equal(row.state, "working");
   assert.equal(rows.filter((r: any) => r.pid !== null).length, 2);
 });
 test("a configured wrapper selects its descendant instead of the first cwd match", async () => {
@@ -70,9 +70,17 @@ test("retiring a registration leaves its live Pi with an independent identity", 
   assert.ok(!row.evidence.includes("lease")); assert.ok(!row.evidence.includes("heartbeat(fresh)"));
   const live = rows.find((r: any) => r.pid === 702); assert.ok(live); assert.notEqual(live.lane, "SMOKE1"); assert.equal(live.sessionId, "session-702");
 });
-test("exact Pi owners reserve their process before wrapper cwd fallback", async () => {
+test("exact owners and configured seeds both outrank a non-descendant wrapper", async () => {
   const f = fixture(); f.register(20, "AWRAP"); f.register(701, "ZOWNER");
   const rows = await f.who();
   assert.equal(rows.find((r: any) => r.lane === "ZOWNER").pid, 701);
-  assert.equal(rows.find((r: any) => r.lane === "AWRAP").pid, 702);
+  assert.equal(rows.find((r: any) => r.lane === "AWRAP").pid, null);
+  assert.equal(rows.find((r: any) => r.lane === "L0").pid, 702);
+});
+test("send ownership accepts only sessions attributed to the recipient, never a shared cwd", async () => {
+  const f = fixture(); f.register(20, "AWRAP"); f.register(701, "ZOWNER");
+  f.put("agent/issue-work/registry.jsonl", { ts: f.ctx.now().toISOString(), repo: "example/alpha", issue: 42,
+    sessionId: "session-701", state: "in-progress", source: "tool" });
+  const send = (to: string) => main(["send", to, "task", "-m", "body", "--from", "C0", "--issue", "example/alpha#42"], f.ctx);
+  assert.equal(await send("AWRAP"), 3); assert.equal(await send("ZOWNER"), 0);
 });

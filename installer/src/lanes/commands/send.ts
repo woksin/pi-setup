@@ -5,7 +5,7 @@ import { effectiveParent, UsageError, type Config, type Lane } from "../config.t
 import type { LanesCtx } from "../ctx.ts";
 import { validId, validTopic } from "../names.ts";
 import { age, foldRegistry, holding, issueKey, ownershipOf, parseIssue, readIssueRegister, type RegisterData } from "../issue-register.ts";
-import { buildRoster, matchedSessions, readRoster, type RosterRow } from "../roster.ts";
+import { buildRoster, readRoster, sessionsForRow, type RosterRow } from "../roster.ts";
 export async function send(
   args: string[], opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx,
 ): Promise<number> {
@@ -114,10 +114,8 @@ function forceNote(opts: Record<string, string>, ctx: LanesCtx): number {
 }
 async function recipientSessions(to: string, deps: SendContext, data: RegisterData): Promise<string[]> {
   const input = await readRoster(deps.c, deps.root, deps.ctx, data);
-  const recipient = buildRoster(input, deps.ctx.now()).rows.find(r => r.lane === to);
-  if (!recipient) return [];
-  const pids = input.processes.procs.filter(p => p.cwd && p.cwd === recipient.worktree).map(p => p.pid);
-  return matchedSessions(recipient.worktree, pids, data);
+  const recipients = buildRoster(input, deps.ctx.now()).rows.filter(row => row.lane === to);
+  return [...new Set(recipients.flatMap(sessionsForRow))];
 }
 async function conflictingOwner(to: string, issue: { repo: string; number: number }, deps: SendContext, data: RegisterData): Promise<string | undefined> {
   const view = foldRegistry(data.events).get(issueKey(issue.repo, issue.number));

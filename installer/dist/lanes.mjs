@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 974116a6d0ffd7532da3109b1944ec018368f1ee0f82191428acf6e5684a3d5b
+// pi-setup-source-sha256: 6e34d1f3694af1862e1cc68ef9229f6b032d9f15517c48a81f7e249783857f1e
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -3242,6 +3242,7 @@ async function readIssueRegister(ctx) {
 // src/lanes/roster.ts
 var HEARTBEAT_STALE_MIN = 15;
 var heldClaims = /* @__PURE__ */ Symbol("held claims");
+var attributedProcess = /* @__PURE__ */ Symbol("attributed process");
 function readJsonDir(dir, valid) {
   try {
     const names = readdirSync11(dir).filter((n) => n.endsWith(".json"));
@@ -3315,7 +3316,7 @@ async function readRoster(c, root, ctx, register2) {
   const messages2 = await readMessages(c, root, ctx);
   const lanes = rosterSeeds(c, root, ctx);
   const idle2 = /* @__PURE__ */ new Map();
-  for (const cwd of /* @__PURE__ */ new Set([...lanes.map((l) => l.cwd), ...rosterProcesses(processes.procs, data).map((p) => p.cwd)])) idle2.set(cwd, idleMinutes2(cwd, ctx) ?? null);
+  for (const cwd of /* @__PURE__ */ new Set([...lanes.map((l) => l.cwd), ...livePiProcesses(processes.procs, data).map((p) => p.cwd)])) idle2.set(cwd, idleMinutes2(cwd, ctx) ?? null);
   return {
     lanes,
     processes,
@@ -3341,11 +3342,8 @@ async function readRoster(c, root, ctx, register2) {
     }
   };
 }
-function matchedSessions(cwd, pids, data) {
-  return [...new Set(data.leases.filter((l) => {
-    const live = data.liveness.get(l.sessionId);
-    return live?.status === "live" && live.pid === l.pid && (pids.length ? pids.includes(l.pid) : Boolean(cwd && l.cwd === cwd));
-  }).map((l) => l.sessionId))];
+function sessionsForRow(row) {
+  return row[attributedProcess]?.sessions ?? [];
 }
 function emptyRow(lane, identity2) {
   return {
@@ -3366,50 +3364,49 @@ function emptyRow(lane, identity2) {
     notes: []
   };
 }
-function heartbeatFor2(pid, input) {
-  return input.heartbeats.filter((h) => h.pid === pid).sort((a, b) => b.at.localeCompare(a.at))[0];
-}
 function fresh2(h, now) {
   return Boolean(h && Date.parse(h.at) >= now.getTime() - HEARTBEAT_STALE_MIN * 6e4);
 }
-function unregisteredProcess(p, input) {
-  const session = input.sessions.find((s) => s.pid === p.pid);
-  const h = heartbeatFor2(p.pid, input);
-  const id = session?.id || h?.id;
-  const row = emptyRow(id || `unregistered-p${p.pid}`, id ? "orch" : "unregistered");
-  row.pid = p.pid;
-  row.worktree = p.cwd || session?.cwd || null;
-  if (session) row.evidence.push("orch-session");
-  if (!id) row.notes.push("identity unavailable: unregistered");
-  return row;
-}
-function rosterProcesses(procs, register2) {
-  const found = new Map(procs.map((p) => [p.pid, p]));
-  for (const lease of register2.leases) {
-    const live = register2.liveness.get(lease.sessionId);
-    if (live?.status !== "live" || live.pid !== lease.pid || found.has(lease.pid)) continue;
-    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+function attributionIdentity(attribution) {
+  switch (attribution.source) {
+    case "seed":
+      return "registered";
+    case "orch":
+      return "orch";
+    case "unregistered":
+      return "unregistered";
+    default:
+      return "launched";
   }
-  return [...found.values()];
 }
-function seedAvailable(seed, liveRegistrations) {
-  if (!seed) return false;
-  if (seed.pid !== null) return false;
-  return !liveRegistrations.has(seed.lane);
+function registrationRows(rows, input, attributions) {
+  for (const record2 of input.registrations ?? []) {
+    let row = rows.find((row2) => row2.lane === record2.id);
+    if (!row) {
+      row = { ...emptyRow(record2.id, "launched"), worktree: record2.cwd };
+      rows.push(row);
+    }
+    if (!record2.alive || row[attributedProcess]) continue;
+    if ([...attributions.values()].filter((value) => value.process.cwd === record2.cwd).length > 1) row.notes.push("ambiguous cwd");
+  }
 }
-function processRows(input) {
+function processRows(input, attributions) {
   const seeds = input.lanes.map((l) => ({ ...emptyRow(l.id, "registered"), repo: l.repo ?? null, worktree: l.cwd, branch: l.branch ?? null, evidence: ["lanes.json"] }));
-  const processes = rosterProcesses(input.processes.procs, input.register).map((p) => unregisteredProcess(p, input));
-  const rows = [...seeds, ...processes];
-  const claimed = launchedRows(rows, input, (id) => emptyRow(id, "launched"));
-  const liveRegistrations = new Set(input.registrations?.filter((record2) => record2.alive).map((record2) => record2.id));
-  for (const p of processes) {
-    if (claimed.has(p.pid)) continue;
-    const matched = seeds.find((r) => r.worktree && r.worktree === p.worktree);
-    if (!seedAvailable(matched, liveRegistrations)) continue;
-    matched.pid = p.pid;
-    rows.splice(rows.indexOf(p), 1);
+  const rows = [...seeds];
+  for (const attribution of attributions.values()) {
+    let row = seeds.find((row2) => row2.lane === attribution.identity && row2.pid === null);
+    if (!row) {
+      row = emptyRow(attribution.identity, attributionIdentity(attribution));
+      rows.push(row);
+    }
+    row[attributedProcess] = attribution;
+    row.pid = attribution.process.pid;
+    row.sessionId = attribution.sessionId;
+    row.worktree = attribution.process.cwd || row.worktree;
+    if (attribution.orch) row.evidence.push("orch-session");
+    if (attribution.source === "unregistered") row.notes.push("identity unavailable: unregistered");
   }
+  registrationRows(rows, input, attributions);
   return rows;
 }
 function indexRosterRegistry(events) {
@@ -3447,25 +3444,9 @@ function joinIssue(row, sessions, input, registry3) {
     row.branch ??= latest.branch ?? null;
   }
 }
-function registrationOwnsIdentity(row, input) {
-  return row.identity === "launched" || Boolean(input.registrations?.some((record2) => record2.alive && record2.id === row.lane));
-}
-function rowSessions(row, input) {
-  if (row.pid === null && registrationOwnsIdentity(row, input)) return [];
-  return processSessions(row, input);
-}
-function processSessions(row, input) {
-  const pids = row.pid === null ? [] : [row.pid];
-  const sessions = matchedSessions(row.worktree, pids, input.register);
-  if (sessions.length) {
-    row.evidence.push("lease");
-    row.sessionId = sessions[0];
-    row.pid ??= input.register.liveness.get(sessions[0]).pid;
-  } else {
-    const orch = input.sessions.find((s) => s.pid === row.pid);
-    const h = heartbeatFor2(row.pid, input);
-    row.sessionId = orch?.sessionId || h?.sessionId || null;
-  }
+function rowSessions(row) {
+  const sessions = sessionsForRow(row);
+  if (sessions.length) row.evidence.push("lease");
   return sessions;
 }
 function heartbeatEvidence(row, h, now) {
@@ -3503,7 +3484,7 @@ function stateOf(row, input, now) {
   const seed = input.lanes.find((l) => l.id === row.lane);
   const line = input.statuses.get(row.lane);
   if (line) row.evidence.push("status-file");
-  const h = heartbeatFor2(row.pid, input);
+  const h = row[attributedProcess]?.heartbeat;
   const heartbeatFresh = heartbeatEvidence(row, h, now);
   if (seed?.retired || parseStatus(line).kind === "closed") return "retired";
   const registered = row.evidence.includes("registration");
@@ -3568,12 +3549,13 @@ function messageRows(rows, input, index) {
 }
 function buildRoster(input, now, registry3 = indexRosterRegistry(input.register.events)) {
   const messages2 = indexMessages(input.messages, now);
-  const rows = processRows(input);
+  const attributions = attributeProcesses(input);
+  const rows = processRows(input, attributions);
   messageRows(rows, input, messages2);
   for (const row of rows) {
     joinRegistration(row, input);
     if (row.pid !== null) row.evidence.push("process");
-    const sessions = rowSessions(row, input);
+    const sessions = rowSessions(row);
     joinIssue(row, sessions, input, registry3);
     row.idleMinutes = input.idle.get(row.worktree ?? "") ?? null;
     row.state = stateOf(row, input, now);
@@ -3604,15 +3586,15 @@ function ownershipUnavailable(input) {
     return { target: null, rule: "unverified", reason: "ownership unavailable; verify before assigning" };
   }
 }
-function liveOwner(rows, sessionIds, input) {
-  return rows.find((r) => r.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r.state) && matchedSessions(r.worktree, r.pid === null ? [] : [r.pid], input.register).some((id) => sessionIds.includes(id)));
+function liveOwner(rows, sessionIds) {
+  return rows.find((r) => r.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r.state) && sessionsForRow(r).some((id) => sessionIds.includes(id)));
 }
 function viewSuggestion(view, rows, context, unique) {
   const { input, now, registry: registry3 } = context;
   const holders = view.sessions.filter((s) => holding(s.lastState));
   if (holders.some((s) => input.register.liveness.get(s.sessionId)?.status === "unknown")) return { target: null, rule: "unverified", reason: "holder liveness unknown; verify before assigning" };
   const live = holders.filter((s) => input.register.liveness.get(s.sessionId)?.status === "live");
-  const owner = liveOwner(rows, live.map((s) => s.sessionId), input);
+  const owner = liveOwner(rows, live.map((s) => s.sessionId));
   if (live.length) {
     if (owner && live.length === 1 && unique) return { target: owner.lane, rule: "issue-owner", reason: "live issue holder" };
     return { target: null, rule: "unverified", reason: "holder has no unique matched lane; verify before assigning" };
@@ -3638,7 +3620,7 @@ function suggestTarget(rows, input, selection, now) {
   const issue = issueSuggestion(rows, { input, selection, now, registry: registry3 });
   if (issue) return issue;
   const repo = selection.repo || selection.issue?.repo;
-  const candidates = rows.filter((r) => repo && repoMatches(r.repo, repo) && r.state === "idle" && r.pid !== null && !r.issue?.holder && r.identity !== "unregistered");
+  const candidates = rows.filter((r) => repo && repoMatches(r.repo, repo) && r.state === "idle" && r[attributedProcess] !== void 0 && !r.issue?.holder && r.identity !== "unregistered");
   const roleRank = (r) => input.lanes.find((l) => l.id === r.lane)?.role === "repo-orch" ? 1 : 0;
   candidates.sort((a, b) => roleRank(a) - roleRank(b) || (b.idleMinutes ?? -1) - (a.idleMinutes ?? -1) || a.lane.localeCompare(b.lane));
   return candidates.length ? { target: candidates[0].lane, rule: "idle-in-repo", reason: "longest idle lane in repository (ties by lane id; workers before repo orchestrator)" } : { target: null, rule: "start-lane", reason: `no live lane for ${repo ?? "matching repositories"}` };
@@ -3751,79 +3733,119 @@ function checkRegistrations(records, processes, ctx) {
   });
 }
 async function registrationParents(records, ctx) {
-  const parents = /* @__PURE__ */ new Map();
-  if (!records.some((record2) => record2.alive)) return parents;
+  if (!records.some((record2) => record2.alive)) return void 0;
   try {
     const result2 = await ctx.run("ps", ["-A", "-o", "pid=,ppid="], { timeoutMs: 1e4 });
-    if (result2.code !== 0 || result2.timedOut) return parents;
+    if (result2.code !== 0 || result2.timedOut) return void 0;
+    const parents = /* @__PURE__ */ new Map();
     for (const line of result2.stdout.split("\n")) {
       const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
       if (match) parents.set(Number(match[1]), Number(match[2]));
     }
+    return result2.stdout.trim() && !parents.size ? void 0 : parents;
   } catch {
+    return void 0;
   }
-  return parents;
 }
-function descendsFrom(row, record2, parents) {
+function verifiedLeasePid(lease, data) {
+  const live = data.liveness.get(lease.sessionId);
+  return live?.status === "live" && live.pid === lease.pid;
+}
+function verifiedPidSessions(pids, data) {
+  return [...new Set(data.leases.filter((lease) => verifiedLeasePid(lease, data) && pids.includes(lease.pid)).map((lease) => lease.sessionId))];
+}
+function livePiProcesses(procs, register2) {
+  const found = new Map(procs.map((process2) => [process2.pid, process2]));
+  for (const lease of register2.leases) {
+    if (!verifiedLeasePid(lease, register2) || found.has(lease.pid)) continue;
+    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+  }
+  return [...found.values()];
+}
+function latestHeartbeat(process2, input) {
+  return input.heartbeats.filter((heartbeat) => heartbeat.pid === process2.pid).sort((a, b) => b.at.localeCompare(a.at))[0];
+}
+function attributeExactPids(build) {
+  for (const process2 of build.processes) {
+    const record2 = build.records.find((record3) => record3.pid === process2.pid);
+    if (record2) build.identities.set(process2.pid, { identity: record2.id, source: "registration-pid" });
+  }
+}
+function wrapperAncestor(process2, wrappers, parents) {
   const visited = /* @__PURE__ */ new Set();
-  let pid = row.pid;
-  for (let hops = 0; hops < 64 && pid !== null; hops++) {
-    if (visited.has(pid)) return false;
+  let pid = process2.pid;
+  for (let hops = 0; hops < 64; hops++) {
+    if (visited.has(pid)) return void 0;
     visited.add(pid);
     const parent = parents.get(pid);
-    if (parent === record2.pid) return true;
-    pid = parent ?? null;
+    if (parent === void 0) return void 0;
+    const record2 = wrappers.get(parent);
+    if (record2) return record2;
+    pid = parent;
   }
-  return false;
+  return void 0;
 }
-function onlyRow(rows) {
-  return rows.length === 1 ? rows[0] : void 0;
+function wrapperRecords(build) {
+  const piPids2 = new Set(build.processes.map((process2) => process2.pid));
+  return build.records.filter((record2) => !piPids2.has(record2.pid));
 }
-function attachRegistration(rows, record2, processRow) {
-  const target = rows.find((row) => row !== processRow && row.lane === record2.id);
-  if (target) {
-    target.pid = processRow.pid;
-    target.evidence.push(...processRow.evidence);
-    rows.splice(rows.indexOf(processRow), 1);
-    return;
-  }
-  processRow.lane = record2.id;
-  if (processRow.identity === "unregistered") processRow.identity = "launched";
-  processRow.notes = processRow.notes.filter((note) => note !== "identity unavailable: unregistered");
-}
-function availableProcesses(matches) {
-  return matches.rows.filter((row) => row.pid !== null && !matches.claimed.has(row.pid));
-}
-function claimRegistrations(matches, records, select) {
-  for (const record2 of records) {
-    if (!record2.alive || matches.attached.has(record2)) continue;
-    const processRow = select(availableProcesses(matches), record2);
-    if (!processRow) continue;
-    matches.claimed.add(processRow.pid);
-    matches.attached.add(record2);
-    attachRegistration(matches.rows, record2, processRow);
+function attributeDescendants(build) {
+  const parents = build.input.registrationParents;
+  if (!parents) return;
+  const wrappers = new Map(wrapperRecords(build).map((record2) => [record2.pid, record2]));
+  for (const process2 of build.processes) {
+    if (build.identities.has(process2.pid)) continue;
+    const record2 = wrapperAncestor(process2, wrappers, parents);
+    if (record2) build.identities.set(process2.pid, { identity: record2.id, source: "registration-descendant" });
   }
 }
-function registrationRow(matches, record2, empty) {
-  let row = matches.rows.find((row2) => row2.lane === record2.id);
-  if (!row) {
-    row = { ...empty(record2.id), worktree: record2.cwd };
-    matches.rows.push(row);
+function attributeOrch(build) {
+  for (const process2 of build.processes) {
+    if (build.identities.has(process2.pid)) continue;
+    const session = build.input.sessions.find((session2) => session2.pid === process2.pid);
+    const id = session?.id || latestHeartbeat(process2, build.input)?.id;
+    if (id) build.identities.set(process2.pid, { identity: id, source: "orch" });
   }
-  if (!record2.alive || matches.attached.has(record2)) return;
-  if (availableProcesses(matches).filter((process2) => process2.worktree === record2.cwd).length > 1) row.notes.push("ambiguous cwd");
 }
-function launchedRows(rows, input, empty) {
-  const registrations = input.registrations ?? [];
-  const matches = { rows, claimed: /* @__PURE__ */ new Set(), attached: /* @__PURE__ */ new Set() };
-  const parents = input.registrationParents ?? /* @__PURE__ */ new Map();
-  const piPids2 = new Set(rows.map((row) => row.pid));
-  const wrappers = registrations.filter((record2) => !piPids2.has(record2.pid));
-  claimRegistrations(matches, registrations, (available, record2) => available.find((row) => row.pid === record2.pid));
-  claimRegistrations(matches, wrappers, (available, record2) => onlyRow(available.filter((row) => descendsFrom(row, record2, parents))));
-  claimRegistrations(matches, wrappers, (available, record2) => onlyRow(available.filter((row) => row.worktree === record2.cwd)));
-  for (const record2 of registrations) registrationRow(matches, record2, empty);
-  return matches.claimed;
+function attributeSeeds(build) {
+  const used = new Set([...build.identities.values()].map((attribution) => attribution.identity));
+  for (const process2 of build.processes) {
+    if (build.identities.has(process2.pid)) continue;
+    const seed = build.input.lanes.find((seed2) => seed2.cwd && seed2.cwd === process2.cwd);
+    if (!seed || used.has(seed.id)) continue;
+    build.identities.set(process2.pid, { identity: seed.id, source: "seed" });
+    used.add(seed.id);
+  }
+}
+function attributeFallback(build) {
+  if (build.input.registrationParents !== void 0) return;
+  for (const record2 of wrapperRecords(build)) {
+    if ([...build.identities.values()].some((attribution) => attribution.identity === record2.id)) continue;
+    const candidates = build.processes.filter((process2) => !build.identities.has(process2.pid) && process2.cwd === record2.cwd);
+    if (candidates.length !== 1) continue;
+    build.identities.set(candidates[0].pid, { identity: record2.id, source: "registration-cwd" });
+  }
+}
+function processAttribution(process2, build) {
+  const attribution = build.identities.get(process2.pid) ?? { identity: `unregistered-p${process2.pid}`, source: "unregistered" };
+  const sessions = verifiedPidSessions([process2.pid], build.input.register);
+  const orch = build.input.sessions.find((session) => session.pid === process2.pid);
+  const heartbeat = latestHeartbeat(process2, build.input);
+  return { ...attribution, process: process2, sessions, sessionId: sessions[0] || orch?.sessionId || heartbeat?.sessionId || null, orch, heartbeat };
+}
+function attributeProcesses(input) {
+  const build = {
+    input,
+    processes: livePiProcesses(input.processes.procs, input.register),
+    records: (input.registrations ?? []).filter((record2) => record2.alive && !record2.retiredAt),
+    identities: /* @__PURE__ */ new Map()
+  };
+  attributeExactPids(build);
+  attributeDescendants(build);
+  attributeOrch(build);
+  attributeSeeds(build);
+  attributeFallback(build);
+  return new Map(build.processes.map((process2) => [process2.pid, processAttribution(process2, build)]));
 }
 function joinRegistration(row, input) {
   const record2 = input.registrations?.find((r) => r.id === row.lane);
@@ -4511,10 +4533,8 @@ function forceNote(opts, ctx) {
 }
 async function recipientSessions(to, deps, data) {
   const input = await readRoster(deps.c, deps.root, deps.ctx, data);
-  const recipient2 = buildRoster(input, deps.ctx.now()).rows.find((r) => r.lane === to);
-  if (!recipient2) return [];
-  const pids = input.processes.procs.filter((p) => p.cwd && p.cwd === recipient2.worktree).map((p) => p.pid);
-  return matchedSessions(recipient2.worktree, pids, data);
+  const recipients = buildRoster(input, deps.ctx.now()).rows.filter((row) => row.lane === to);
+  return [...new Set(recipients.flatMap(sessionsForRow))];
 }
 async function conflictingOwner(to, issue, deps, data) {
   const view = foldRegistry(data.events).get(issueKey(issue.repo, issue.number));
