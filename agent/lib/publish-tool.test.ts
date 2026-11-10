@@ -134,6 +134,13 @@ test("publisher detail is rendered after the unchanged first line and included i
 	assert.deepEqual(await cliMain(["check", "--file", "a"], { send }), { text: `publish: gh-failed\ndetail: ${detail}`, exitCode: 5 });
 });
 
+test("tool and CLI help describe JSON bodyFile for nested arrays and safe gh diagnostics", () => {
+	assert.match(tool(allowed).description, /arrays\/objects of objects need a JSON bodyFile \(no fields\)/);
+	assert.match(tool(allowed).description, /fields are flat gh -f\/-F values/);
+	assert.match(PUBLISH_HELP, /arrays\/objects of objects need a JSON bodyFile \(no fields\)/);
+	assert.match(PUBLISH_HELP, /gh errors give exit code, category, HTTP status and a redacted API message/);
+});
+
 test("bin help smoke does not publish or show raw paths", () => {
 	const text = execFileSync(process.execPath, [new URL("../bin/pi-publish", import.meta.url).pathname, "--help"], { encoding: "utf8" });
 	assert.equal(text, PUBLISH_HELP);

@@ -35,6 +35,33 @@ for (const request of cases) test(`validates and plans ${request.kind}`, () => {
 	assert.ok(plan.payloads.every(source => /^(?:body|files\[\d+\]|fields\[\d+\])$/.test(source.label)));
 });
 
+for (const abbreviated of ["abcd", "abc1234", "A".repeat(39)]) test(`release target rejects ${abbreviated.length}-character abbreviated SHA without echoing it`, () => {
+	assert.throws(() => validateRequest({ kind: "release-create", repo: target.repo, tag: "v1", body: "Notes", target: abbreviated }), (error: unknown) => {
+		assert.ok(error instanceof InvalidRequest);
+		assert.match(error.detail!, /abbreviated commit SHA; use the full 40-character SHA or a branch name/);
+		assert.ok(!error.detail!.includes(abbreviated));
+		return true;
+	});
+});
+for (const fullTarget of ["a".repeat(40), "main", "v1.0", "release/1.2", "feature-1234abcd"]) test(`release target accepts ${fullTarget}`, () => {
+	assert.equal(validateRequest({ kind: "release-create", repo: target.repo, tag: "v1", body: "Notes", target: fullTarget }).kind, "release-create");
+});
+
+for (const name of ["vulnerabilities[][package][name]", "x[][a]"]) test(`api fields reject nested array name without echoing it: ${name}`, () => {
+	assert.throws(() => validateRequest({ kind: "api", endpoint: "repos/o/r", method: "POST", fields: [{ name, value: "VALUE-SENTINEL" }] }), (error: unknown) => {
+		assert.ok(error instanceof InvalidRequest);
+		assert.match(error.detail!, /fields cannot build arrays of objects/);
+		assert.match(error.detail!, /JSON in a bodyFile with no fields/);
+		assert.ok(!error.detail!.includes(name)); assert.ok(!error.detail!.includes("VALUE-SENTINEL"));
+		return true;
+	});
+});
+for (const name of ["labels[]", "a[b]", "a.b"]) test(`api fields keep scalar/nested object syntax: ${name}`, () => {
+	const request = { kind: "api", endpoint: "repos/o/r", method: "POST", fields: [{ name, value: "value" }] };
+	assert.deepEqual(validateRequest(request), request);
+	assert.ok(toGhPlan(validateRequest(request)).argv.includes(`--raw-field=${name}=value`));
+});
+
 const minimalCases: Record<string, unknown>[] = [
 	{ kind: "issue-create", repo: target.repo, title: "T", body: "B" },
 	{ kind: "pr-create", repo: target.repo, title: "T", body: "B" },

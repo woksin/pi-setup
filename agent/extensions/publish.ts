@@ -52,7 +52,7 @@ async function executePublication(value: unknown, signal: AbortSignal | undefine
 }
 export default function publishExtension(pi: ExtensionAPI, services: PublishServices = {}) {
 	pi.registerTool({
-		name: "publish", label: "Publish", description: "Publish GitHub text from typed fields after authority admission and exact captured-byte scanning. Prefer bodyFile created with write. No shell, scan override or arbitrary gh flags. Optional host (repository kinds and api only) targets GitHub Enterprise; default github.com. It needs a stored `gh auth login --hostname HOST` credential; env tokens are never sent to it. Required fields: " + kindSummary(),
+		name: "publish", label: "Publish", description: "Publish GitHub text from typed fields after authority admission and exact captured-byte scanning. Prefer bodyFile created with write. api: arrays/objects of objects need a JSON bodyFile (no fields); fields are flat gh -f/-F values. No shell, scan override or arbitrary gh flags. Optional host (repository kinds and api only) targets GitHub Enterprise; default github.com. It needs a stored `gh auth login --hostname HOST` credential; env tokens are never sent to it. Required fields: " + kindSummary(),
 		parameters: publishRequestSchema as any,
 		execute: (_id: string, value: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) => executePublication(value, signal, ctx, services),
 	} as any);
@@ -62,7 +62,8 @@ export const PUBLISH_HELP = [
 	"       pi-publish check --file FILE",
 	"Publish GitHub issue and PR text (create, comment, edit, close, reopen) through the same typed validator and captured-byte scanner as the pi publish tool.",
 	"Shell lane/candidate admission is separate. Use the publish tool from pi where possible.",
-	"Payload errors name the resolved path; gh errors give exit code and category.",
+	"Payload errors name the resolved path; gh errors give exit code, category, HTTP status and a redacted API message.",
+	"api: arrays/objects of objects need a JSON bodyFile (no fields); fields are flat gh -f/-F values.",
 	"--host HOST targets a GitHub Enterprise host (default github.com). It needs a stored `gh auth login --hostname HOST` credential; env tokens are never sent to it.",
 	"",
 	"Examples:",
