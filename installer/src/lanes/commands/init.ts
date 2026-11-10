@@ -11,6 +11,7 @@ export async function init(args: string[], opts: Record<string, string>, ctx: La
     c.coordinator.id = opts.coordinator || c.coordinator.id;
     c.terminal.backend = opts.terminal || c.terminal.backend;
     c.launch.preapproveMcp = opts["preapprove-mcp"] === "true" || preapprovalDefault(ctx.templatesDir);
+    c.launch.approveProjectTrust = opts["approve-project-trust"] === "true";
   }
   validate(c);
   const vars = templateVars(c, ctx, root);
