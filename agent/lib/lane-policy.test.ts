@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ACTIONS, acknowledge, assessCommand, assessPublication, emptyPolicy, identity, loadPolicy, mutate, mcpReason, policyContext, policyFile, policyPath, policyStore, savePolicy, validatePolicy, type Policy, type Context } from "./lane-policy.ts";
@@ -14,6 +14,15 @@ let home: string, repo: string, outside: string, oldHome: string | undefined, ol
 let ctx: Context;
 let policy: Policy;
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+function fixtureIdentity(cwd: string) {
+	const id = identity(cwd);
+	if (!id) {
+		const start = performance.now();
+		const probe = spawnSync("git", ["-C", cwd, "rev-parse", "--git-common-dir"], { encoding: "utf8", timeout: 1500 });
+		assert.fail(`identity(${cwd}) is undefined; diagnostic git rev-parse: exit=${probe.status}, signal=${probe.signal}, stderr=${JSON.stringify(probe.stderr)}, durationMs=${(performance.now() - start).toFixed(1)}, error=${probe.error?.message ?? "none"}`);
+	}
+	return id;
+}
 beforeEach(() => {
 	mkdirSync(scratch, { recursive: true });
 	home = mkdtempSync(join(scratch, "fixture-"));
@@ -27,7 +36,7 @@ beforeEach(() => {
 	git(repo, "remote", "add", "origin", "git@github.com:Cratis/Studio.git");
 	ctx = { cwd: repo, session: "writer-session" };
 	policy = emptyPolicy(); policy.revision = 1;
-	policy.repositories.push({ common: identity(repo)!.common, slug: "Cratis/Studio", coordinator: "coordinator-session", bindings: [{ session: ctx.session, lane: "lane-one", branch: "lane", actions: [...ACTIONS] }], writers: [{ session: ctx.session, branch: "lane", actions: [...ACTIONS] }], grants: [] });
+	policy.repositories.push({ common: fixtureIdentity(repo).common, slug: "Cratis/Studio", coordinator: "coordinator-session", bindings: [{ session: ctx.session, lane: "lane-one", branch: "lane", actions: [...ACTIONS] }], writers: [{ session: ctx.session, branch: "lane", actions: [...ACTIONS] }], grants: [] });
 });
 afterEach(() => {
 	if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
@@ -72,6 +81,16 @@ test("typed publication and CLI reuse exact gh grants without granting unsupport
 		{ kind: "release-create", repo: "Cratis/Studio", tag: "v1", body: "Safe" },
 		{ kind: "pr-merge", repo: "Cratis/Studio", number: 39, strategy: "squash" },
 	]) assert.ok(assessPublication(request, ctx));
+});
+
+test("fixture identity failures include the diagnostic Git exit, stderr and duration", () => {
+	assert.throws(() => fixtureIdentity(join(home, "missing")), (error: Error) => {
+		assert.ok(error instanceof assert.AssertionError);
+		assert.match(error.message, /diagnostic git rev-parse: exit=128/);
+		assert.match(error.message, /stderr="fatal:/);
+		assert.match(error.message, /durationMs=\d+\.\d/);
+		return true;
+	});
 });
 
 test("hosted publication is host-qualified: never matches an enrolled github.com slug or reuses its grants", () => {
@@ -170,7 +189,7 @@ test("explicitly configured forbidden targets stay denied even with grants", () 
 	policy.forbidden = ["Cratis/Studio/#42", "Cratis/Studio/#43"];
 	grant("issue-write", "42"); grant("pr-comment", "43"); store();
 	denied("gh issue close 42 -R Cratis/Studio"); denied("gh pr comment 43 -R Cratis/Studio --body hi");
-	assert.throws(() => mutate(policy, ["grant", ctx.session, "issue-write", "42", "5", "minutes"], { ...ctx, session: "coordinator-session" }, identity(repo)!), /Forbidden/);
+	assert.throws(() => mutate(policy, ["grant", ctx.session, "issue-write", "42", "5", "minutes"], { ...ctx, session: "coordinator-session" }, fixtureIdentity(repo)), /Forbidden/);
 });
 test("ordinary execution is allowed; lexical publication stays scoped through wrappers", () => {
 	store();
@@ -257,7 +276,7 @@ test("/guards off mcp cannot auto-allow an enrolled scope at the broker", async 
 });
 test("relevant revocation is re-read on the next call, without a session reload", () => {
 	grant(); store(); allowed("git push origin lane:lane");
-	mutate(policy, ["revoke", "session", ctx.session], { ...ctx, session: "coordinator-session" }, identity(repo)!); store();
+	mutate(policy, ["revoke", "session", ctx.session], { ...ctx, session: "coordinator-session" }, fixtureIdentity(repo)); store();
 	denied("git push origin lane:lane"); assert.ok(mcpReason(ctx, "github_create_issue"));
 });
 
@@ -277,7 +296,7 @@ test("attached, spaced and repeated Git -C share attribution; unresolved global 
 
 test("authority revisions invalidate old grants; durable ACK never revives or gates authority", () => {
 	grant(); store();
-	const id = identity(repo)!;
+	const id = fixtureIdentity(repo);
 	const expected = JSON.stringify(policy);
 	acknowledge(policy, ctx, id, 1); savePolicy(policy, expected);
 	assert.equal(policy.revision, 1); allowed("git push origin lane:lane");
@@ -305,7 +324,7 @@ test("persistence rejects unchanged/reversed authority revisions and stale concu
 	const f = fake(); laneExtension(f.pi);
 	f.extCtx.ui.confirm = async () => {
 		const latest = loadPolicy().policy!; const before = JSON.stringify(latest);
-		mutate(latest, ["forbid", "Other/Repo/#8"], { ...ctx, session: "coordinator-session" }, identity(repo)!);
+		mutate(latest, ["forbid", "Other/Repo/#8"], { ...ctx, session: "coordinator-session" }, fixtureIdentity(repo));
 		savePolicy(latest, before); return true;
 	};
 	await f.command("ack 1");
@@ -321,12 +340,12 @@ test("adapter startup, confirmed ACK, restart and compaction expose latest durab
 	assert.match((await f.fire("before_agent_start", { systemPrompt: "base" })).systemPrompt, /ACK=missing/);
 	await f.command("ack 0"); assert.match(f.notices.at(-1)!, /current/); assert.equal(f.confirms, 0);
 	await f.command("ack 1"); assert.equal(f.confirms, 1);
-	assert.deepEqual(loadPolicy().policy?.acknowledgements, [{ session: ctx.session, common: identity(repo)!.common, revision: 1 }]);
+	assert.deepEqual(loadPolicy().policy?.acknowledgements, [{ session: ctx.session, common: fixtureIdentity(repo).common, revision: 1 }]);
 	const restarted = fake(); laneExtension(restarted.pi);
 	await restarted.fire("session_start", { reason: "resume" });
 	assert.match((await restarted.fire("before_agent_start", { systemPrompt: "base" })).systemPrompt, /ACK=current/);
 	policy = loadPolicy().policy!;
-	mutate(policy, ["forbid", "Other/Repo/#9"], { ...ctx, session: "coordinator-session" }, identity(repo)!); store();
+	mutate(policy, ["forbid", "Other/Repo/#9"], { ...ctx, session: "coordinator-session" }, fixtureIdentity(repo)); store();
 	await restarted.fire("session_compact", {});
 	assert.match(restarted.statuses.at(-1)!.text!, /r2/);
 	const summary = (await restarted.fire("before_agent_start", { systemPrompt: "base after compaction" })).systemPrompt;

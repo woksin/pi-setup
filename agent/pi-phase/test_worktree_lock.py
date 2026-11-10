@@ -11,6 +11,7 @@ import time
 from unittest.mock import patch
 
 import pi_phase
+from phase_test_support import held_job, wait_seconds
 from test_queue_order import GIT, HERE, Harness, git_repo
 
 
@@ -37,8 +38,10 @@ class WorktreeLockTests(Harness):
         command = options.pop("command", None) or self.job(label)
         extra = options.pop("extra", ())
         kind = options.pop("kind", "test")
+        timeout = options.pop("timeout", 8)
         return self.start_in(cwd, "run", "--kind", kind, "--label", label,
-                             "--policy", policy, "--timeout", "8", "--queue-timeout", "5",
+                             "--policy", policy, "--timeout", str(wait_seconds(timeout)),
+                             "--queue-timeout", str(wait_seconds(5)),
                              *extra, "--", *command, **options)
 
     def job(self, label, seconds=.8):
@@ -68,15 +71,22 @@ class WorktreeLockTests(Harness):
     def test_serialises_policies_subdirectory_wait_message_and_ledger(self):
         sub = self.repo / "sub"
         sub.mkdir()
-        a = self.phase("A")
+        a = self.phase("A", command=held_job(self.root, "A"), timeout=30)
         self.started("A")
-        b = self.phase("B", "queued", cwd=sub)
+        b = self.phase("B", "queued", cwd=sub, command=held_job(self.root, "B"), timeout=30)
         self.wait_for(lambda: len(self.waiting()) == 1)
-        c = self.phase("C", "fast", extra=("--expect-fast",))
+        c = self.phase("C", "fast", extra=("--expect-fast",),
+                       command=held_job(self.root, "C"), timeout=30)
+        self.wait_for(lambda: len(self.waiting()) == 2)
+        (self.root / "A.release").touch()
         self.assertEqual(self.done(a)[0], 0)
+        self.started("B")
+        (self.root / "B.release").touch()
         code, output = self.done(b)
         self.assertEqual(code, 0, output)
         self.assertIn(f"waiting for worktree lock (held by A pid {a.pid})", output)
+        self.started("C")
+        (self.root / "C.release").touch()
         self.assertEqual(self.done(c)[0], 0)
         ai, bi, ci = self.intervals("A", "B", "C")
         self.assertLessEqual(ai[1], bi[0])
@@ -119,14 +129,18 @@ class WorktreeLockTests(Harness):
             self.assertEqual(pi_phase.worktree_root(self.root), os.path.realpath(self.root))
 
     def test_opt_out_overlaps_but_build_rejects_it(self):
-        a = self.phase("A")
+        a = self.phase("A", command=held_job(self.root, "A"), timeout=30)
         self.started("A")
-        b = self.phase("B", extra=("--no-worktree-lock",))
+        b = self.phase("B", extra=("--no-worktree-lock",),
+                       command=held_job(self.root, "B"), timeout=30)
+        self.started("B")
         rejected = self.start_in(self.repo, "run", "--kind", "build", "--label", "bad",
                                  "--no-worktree-lock", "--", "true")
         code, output = self.done(rejected)
         self.assertEqual(code, 125, output)
         self.assertIn("build writes the worktree", output)
+        (self.root / "A.release").touch()
+        (self.root / "B.release").touch()
         self.assertEqual(self.done(a)[0], 0)
         self.assertEqual(self.done(b)[0], 0)
         ai, bi = self.intervals("A", "B")
