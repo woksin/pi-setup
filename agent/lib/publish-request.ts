@@ -181,6 +181,14 @@ function validateShape(input: RecordValue): void {
 		}
 	}
 }
+function validateTarget(input: RecordValue): void {
+	if (typeof input.target !== "string" || !/^[0-9a-fA-F]{4,39}$/.test(input.target)) return;
+	invalid(`target looks like an abbreviated commit SHA; use the full 40-character SHA or a branch name; ${kindContract(input.kind as PublishRequest["kind"])}`);
+}
+function validateFields(input: RecordValue): void {
+	if (!(input.fields as ApiField[] | undefined)?.some(field => /\[\]\[/.test(field.name))) return;
+	invalid(`fields cannot build arrays of objects (name with [][key]); send the whole body as JSON in a bodyFile with no fields; ${kindContract(input.kind as PublishRequest["kind"])}`);
+}
 function needsBody(input: RecordValue): boolean {
 	if (REQUIRED_BODY_KINDS.includes(input.kind as string)) return true;
 	return input.kind === "pr-review" && input.event !== "approve";
@@ -219,11 +227,11 @@ function freeze<T>(value: T): T {
 export function validateRequest(value: unknown): PublishRequest {
 	try {
 		if (!record(value)) invalid();
-		validateShape(value); validateBody(value); validateChanges(value);
+		validateShape(value); validateBody(value); validateChanges(value); validateTarget(value); validateFields(value);
 		const encoded = JSON.stringify(value);
 		if (Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES) invalid();
 		const detached = JSON.parse(encoded);
-		validateShape(detached); validateBody(detached); validateChanges(detached);
+		validateShape(detached); validateBody(detached); validateChanges(detached); validateTarget(detached); validateFields(detached);
 		if (detached.host === DEFAULT_HOST) delete detached.host;
 		return freeze(detached) as PublishRequest;
 	} catch (error) { throw error instanceof InvalidRequest ? error : new InvalidRequest(); }

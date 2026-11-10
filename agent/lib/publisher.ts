@@ -124,15 +124,22 @@ function openErrorCode(error: unknown): PublishCode {
 	if (typeof errno !== "string") return "payload-unreadable";
 	return Object.hasOwn(OPEN_ERRORS, errno) ? OPEN_ERRORS[errno] : "payload-unreadable";
 }
+function unreadableDetail(error: unknown): string | undefined {
+	if (!error || typeof error !== "object" || !("code" in error)) return undefined;
+	const errno = error.code;
+	if (typeof errno !== "string") return undefined;
+	if (/^E[A-Z0-9_]{2,19}$/.exec(errno)?.[0] !== errno) return undefined;
+	return `code=${errno}`;
+}
 async function openCapture(path: string, flags: number, run: Runtime): Promise<CaptureHandle> {
 	try { return await run.io.open(resolve(run.context.cwd ?? process.cwd(), path), flags); }
 	catch (error) {
 		const code = openErrorCode(error);
-		throw new Failure(code, undefined, code === "payload-unreadable" ? undefined : displayPath(path, run));
+		throw new Failure(code, undefined, code === "payload-unreadable" ? unreadableDetail(error) : displayPath(path, run));
 	}
 }
 function captureFailure(error: unknown, path: string, run: Runtime): Failure {
-	if (!(error instanceof Failure)) return new Failure("payload-unreadable");
+	if (!(error instanceof Failure)) return new Failure("payload-unreadable", undefined, unreadableDetail(error));
 	if (error.detail || error.code === "payload-unreadable") return error;
 	return error.code.startsWith("payload-") ? new Failure(error.code, error.diagnostics, displayPath(path, run)) : error;
 }
@@ -254,12 +261,55 @@ function watchStream(stream: Readable | null, stop: (code: PublishCode) => void,
 	});
 	stream?.on("error", () => stop("gh-failed"));
 }
-function childFailure(state: { code: number | null; failure?: PublishCode; stderr: string }): Failure | undefined {
+function messageText(text: string): string {
+	return text.replace(/\s+/gu, " ").replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
+}
+function jsonStrings(text: string): string[] {
+	let value: unknown;
+	try { value = JSON.parse(text); } catch { return []; }
+	const pending = [value], strings: string[] = [];
+	while (pending.length) {
+		const next = pending.pop();
+		if (typeof next === "string") { strings.push(next); continue; }
+		if (!next || typeof next !== "object") continue;
+		for (const nested of Object.values(next)) pending.push(nested);
+	}
+	return strings;
+}
+/** Reflection candidates come from the scanned plan and captured bytes, never a second file read. */
+function reflectionTexts(plan: GhPlan, bytes: Buffer[]): string[] {
+	const texts = plan.outbound.filter(source => source.text.length >= 4 || source.label.startsWith("fields[")).map(source => source.text);
+	for (const payload of bytes) {
+		const text = decoded(payload);
+		texts.push(text);
+		for (const value of jsonStrings(text)) texts.push(value);
+	}
+	return [...new Set(texts.flatMap(text => text.split(/\r?\n/)).map(messageText).filter(text => text.length > 0))];
+}
+function ghMessage(stderr: string, reflect: string[], run: Runtime): string {
+	const lines = stderr.split(/\r?\n/), first = lines.findIndex(line => /^gh: .+/.test(line));
+	if (first < 0) return "";
+	const candidates = [lines[first].replace(/^gh: /, "").replace(/ \(HTTP \d{3}\)$/, "")];
+	for (const line of lines.slice(first + 1, first + 4)) {
+		if (!line.trim()) break;
+		candidates.push(line);
+	}
+	return candidates.map(messageText).filter(line => {
+		if (!line || reflect.some(text => line.includes(text))) return false;
+		return scanPublication(line, run.scanContext).count === 0;
+	}).map(line => line.slice(0, 120)).join(" ").slice(0, 400);
+}
+function ghDetail(stderr: string, reflect: string[], run: Runtime): string {
+	const status = stderr.match(/HTTP (\d{3})/)?.[1], message = ghMessage(stderr, reflect, run);
+	return [status ? `status=${status}` : "", message ? `message=${JSON.stringify(message)}` : ""].filter(Boolean).join("; ");
+}
+function childFailure(state: { code: number | null; failure?: PublishCode; stderr: string; reflect?: string[]; run: Runtime }): Failure | undefined {
 	if (state.failure) return new Failure(state.failure);
 	if (state.code === 0) return undefined;
 	const category = classifyStderr(state.stderr);
 	const exit = Number.isInteger(state.code) && state.code! >= 0 && state.code! <= 255 ? state.code : "none";
-	return new Failure("gh-failed", undefined, `exit=${exit} category=${category}; ${GH_ADVICE[category]}`);
+	const detail = state.code === null || !state.reflect ? "" : ghDetail(state.stderr, state.reflect, state.run);
+	return new Failure("gh-failed", undefined, `exit=${exit} category=${category}${detail ? `; ${detail}` : ""}; ${GH_ADVICE[category]}`);
 }
 function stderrCapture() {
 	let text = "", remaining = STDERR_LIMIT;
@@ -273,7 +323,7 @@ function stderrCapture() {
 		take() { const captured = text + decoder.decode(); text = ""; return captured; },
 	};
 }
-function monitor(child: PublisherChild, run: Runtime): Promise<void> {
+function monitor(child: PublisherChild, run: Runtime, reflect?: string[]): Promise<void> {
 	return new Promise((resolve, reject) => {
 		let failure: PublishCode | undefined;
 		const stderr = stderrCapture();
@@ -287,7 +337,7 @@ function monitor(child: PublisherChild, run: Runtime): Promise<void> {
 		child.on("error", () => stop("gh-failed"));
 		child.once("close", (code: number | null) => {
 			cancelTimer(); run.context.signal?.removeEventListener("abort", abort);
-			const error = childFailure({ code, failure, stderr: stderr.take() });
+			const error = childFailure({ code, failure, stderr: stderr.take(), reflect, run });
 			if (error) reject(error); else resolve();
 		});
 		watchStream(child.stdout, stop); watchStream(child.stderr, stop, stderr.append);
@@ -295,17 +345,17 @@ function monitor(child: PublisherChild, run: Runtime): Promise<void> {
 		if (run.context.signal?.aborted) abort();
 	});
 }
-async function runGh(argv: () => string[], env: NodeJS.ProcessEnv, run: Runtime): Promise<void> {
+async function runGh(argv: () => string[], env: NodeJS.ProcessEnv, run: Runtime, reflect?: string[]): Promise<void> {
 	const executable = await ghExecutable(run);
 	cancelled(run.context.signal);
 	const args = argv();
 	try {
 		const child = run.spawn(executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"], env, cwd: run.context.cwd });
-		await monitor(child, run);
+		await monitor(child, run, reflect);
 	} catch (error) { if (error instanceof Failure) throw error; throw new Failure("gh-failed"); }
 }
 async function send(plan: GhPlan, state: { bytes: Buffer[]; paths: string[] }, run: Runtime): Promise<void> {
-	await runGh(() => plan.argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), environment(run.env, plan.host), run);
+	await runGh(() => plan.argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), environment(run.env, plan.host), run, reflectionTexts(plan, state.bytes));
 }
 /** A non-default host must already hold a stored gh credential; output is discarded, failure is a fixed code. */
 async function hostPreflight(host: string, run: Runtime): Promise<void> {
@@ -315,7 +365,7 @@ async function hostPreflight(host: string, run: Runtime): Promise<void> {
 function failed(error: unknown): PublishResult {
 	if (error instanceof InvalidRequest) return result("invalid-request", undefined, error.detail);
 	if (error instanceof Failure) return result(error.code, error.diagnostics, error.detail);
-	return result("payload-unreadable");
+	return result("payload-unreadable", undefined, unreadableDetail(error));
 }
 async function cleanup(state: { directory?: string; outcome: PublishResult }, io: PublisherIO): Promise<PublishResult> {
 	if (!state.directory) return state.outcome;

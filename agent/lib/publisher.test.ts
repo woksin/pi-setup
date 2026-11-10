@@ -33,7 +33,7 @@ function code(result: PublishResult, expected: string) {
 	assert.equal(result.text, expected === "published" ? "published" : expected === "scan-clean" ? "scan clean" : `publish: ${expected}`);
 	assert.equal(result.isError, !["published", "scan-clean"].includes(expected));
 	assert.doesNotMatch(JSON.stringify(result), /private-value|trusted\/gh|stderr/);
-	if (!["invalid-request", "gh-failed", "payload-not-found", "payload-symlink", "payload-not-file", "payload-permission", "payload-too-large"].includes(expected)) assert.equal(result.detail, undefined);
+	if (!["invalid-request", "gh-failed", "payload-not-found", "payload-symlink", "payload-not-file", "payload-permission", "payload-too-large", "payload-unreadable"].includes(expected)) assert.equal(result.detail, undefined);
 }
 
 test("real descriptor capture, permissions, exact BOM/newlines, forced host and sanitized success", () => fixture(async root => {
@@ -312,7 +312,7 @@ for (const [errno, expected] of [
 	mocks.io!.open = async path => { opened = path; throw Object.assign(new Error("private-value"), { code: errno, path: "private-value" }); };
 	const result = await publish({ ...base, bodyFile: "draft.md" }, { ...safeContext, cwd: "/workspace/project" }, mocks);
 	code(result, expected); assert.equal(opened, "/workspace/project/draft.md");
-	assert.equal(result.detail, expected === "payload-unreadable" ? undefined : "/workspace/project/draft.md");
+	assert.equal(result.detail, expected === "payload-unreadable" ? (errno === "EIO" ? "code=EIO" : undefined) : "/workspace/project/draft.md");
 });
 
 test("capture details abbreviate only the home component, sanitize and bound caller paths", async () => {
@@ -325,7 +325,17 @@ test("capture details abbreviate only the home component, sanitize and bound cal
 	assert.equal(result.detail?.length, 300);
 });
 
-test("oversize descriptors name the resolved caller path; read and close errno remain generic", async () => {
+for (const errno of ["EIO", "EACCES", "EIO private-value", "EIO\n", "EE", "E" + "A".repeat(20), "private-value", undefined]) test(`unreadable capture keeps only a bare errno token: ${JSON.stringify(errno)}`, async () => {
+	const file = fakeHandle();
+	file.handle.read = async () => { throw Object.assign(new Error("private-value file contents"), { code: errno, path: "/private-value/source.md" }); };
+	const mocks = adapters(); mocks.io!.open = async () => file.handle;
+	const result = await publish({ ...base, bodyFile: "source.md" }, safeContext, mocks);
+	code(result, "payload-unreadable");
+	assert.equal(result.detail, errno === "EIO" || errno === "EACCES" ? `code=${errno}` : undefined);
+	assert.ok(!JSON.stringify(result).includes("source.md")); assert.ok(!JSON.stringify(result).includes("file contents"));
+});
+
+test("oversize descriptors name the resolved caller path; read and close errors expose only errno", async () => {
 	const mocks = adapters(); mocks.io!.open = async () => fakeHandle({ size: MAX_STRING_BYTES + 1 }).handle;
 	const result = await publish({ ...base, bodyFile: "draft.md" }, safeContext, mocks);
 	assert.equal(result.detail, resolve("draft.md"));
@@ -333,7 +343,7 @@ test("oversize descriptors name the resolved caller path; read and close errno r
 		const file = fakeHandle(); file.handle[operation] = async () => { throw Object.assign(new Error("private-value"), { code: "ENOENT" }); };
 		mocks.io!.open = async () => file.handle;
 		const failed = await publish({ ...base, bodyFile: "draft.md" }, safeContext, mocks);
-		code(failed, "payload-unreadable"); assert.equal(failed.detail, undefined);
+		code(failed, "payload-unreadable"); assert.equal(failed.detail, "code=ENOENT");
 	}
 });
 
@@ -360,7 +370,8 @@ for (const [message, category, advice] of [
 		}); return child;
 	});
 	const result = await publish({ ...base, body: "PAYLOAD-SENTINEL" }, safeContext, mocks);
-	code(result, "gh-failed"); assert.equal(result.detail, `exit=1 category=${category}; ${advice}`);
+	const status = message.match(/HTTP (\d{3})/)?.[1];
+	code(result, "gh-failed"); assert.equal(result.detail, `exit=1 category=${category}${status ? `; status=${status}` : ""}; ${advice}`);
 	assert.ok(!JSON.stringify(result).includes("PAYLOAD-SENTINEL"));
 });
 
@@ -382,18 +393,72 @@ for (const termination of ["signal", "spawn", "child-error", "stream-error"] as 
 test("streaming UTF-8 stderr decoding handles split characters and a split category", async () => {
 	const mocks = adapters(() => {
 		const child = new Child(); queueMicrotask(() => {
-			const bytes = Buffer.from("é HTTP 422 Validation Failed private-value");
+			const bytes = Buffer.from("gh: é Validation Failed (HTTP 422)\n\nprivate-value");
 			for (const byte of bytes) child.stderr.emit("data", Buffer.from([byte]));
 			child.finish(3);
 		}); return child;
 	});
 	const result = await publish({ ...base, body: "Safe" }, safeContext, mocks);
-	code(result, "gh-failed"); assert.equal(result.detail, "exit=3 category=validation; do not retry; fix the request (repo, number, fields)");
+	code(result, "gh-failed"); assert.equal(result.detail, 'exit=3 category=validation; status=422; message="é Validation Failed"; do not retry; fix the request (repo, number, fields)');
+});
+
+async function ghError(stderr: string, request: unknown = { ...base, body: "Safe body" }): Promise<PublishResult> {
+	const mocks = adapters(() => {
+		const child = new Child(); queueMicrotask(() => {
+			child.stdout.write("gh: private-value (HTTP 401)"); child.stderr.write(stderr); child.finish(1);
+		}); return child;
+	});
+	const result = await publish(request, safeContext, mocks);
+	code(result, "gh-failed"); return result;
+}
+
+test("gh failure surfaces status and bounded API validation lines from stderr only", async () => {
+	const result = await ghError("gh: Validation Failed (HTTP 422)\nvulnerabilities.package is invalid\n\nprivate-value");
+	assert.equal(result.detail, 'exit=1 category=validation; status=422; message="Validation Failed vulnerabilities.package is invalid"; do not retry; fix the request (repo, number, fields)');
+});
+
+for (const unsafe of [["gh", "p_", "a1".repeat(20)].join(""), "/Users/alice/private-value", "https://user:private-value@example.invalid"]) test("gh message drops entire scanner-hit lines, not just the secret", async () => {
+	const result = await ghError(`gh: Validation Failed (HTTP 422)\nunsafe-marker ${unsafe}\npackage is invalid`);
+	assert.match(result.detail!, /message="Validation Failed package is invalid"/);
+	assert.ok(!result.detail!.includes(unsafe)); assert.ok(!result.detail!.includes("unsafe-marker"));
+});
+
+test("gh message drops echoed field values and keeps status when no message survives", async () => {
+	const result = await ghError("gh: Invalid value 'zzzzzz' (HTTP 422)", { kind: "api", endpoint: "repos/o/r", method: "POST", fields: [{ name: "name", value: "zzzzzz" }] });
+	assert.equal(result.detail, "exit=1 category=validation; status=422; do not retry; fix the request (repo, number, fields)");
+});
+
+for (const body of ["REQUEST-BODY-SENTINEL", "First line\nREQUEST-BODY-SENTINEL\nLast line", JSON.stringify({ body: "REQUEST-BODY-SENTINEL" }), JSON.stringify({ body: "First line\nREQUEST-BODY-SENTINEL\nLast line" })]) test("gh message drops echoed inline body text", async () => {
+	const result = await ghError("gh: Invalid value REQUEST-BODY-SENTINEL (HTTP 422)", { ...base, body });
+	assert.doesNotMatch(result.detail!, /REQUEST-BODY-SENTINEL|message=/);
+});
+
+test("gh message filters against captured file bytes, including JSON string values", () => fixture(async root => {
+	const file = join(root, "body.json"); writeFileSync(file, JSON.stringify({ body: "FILE-BODY-SENTINEL" }));
+	const result = await ghError("gh: Invalid value FILE-BODY-SENTINEL (HTTP 422)", { kind: "api", endpoint: "repos/o/r", method: "POST", bodyFile: file });
+	assert.doesNotMatch(result.detail!, /FILE-BODY-SENTINEL|message=/);
+}));
+
+test("gh message strips controls, normalizes whitespace and JSON-quotes structure", async () => {
+	const result = await ghError('gh: Invalid\u0000\u200b   "input"\tvalue (HTTP 422)');
+	assert.match(result.detail!, /message="Invalid \\"input\\" value"/);
+	assert.doesNotMatch(result.detail!, /[\p{Cc}\p{Cf}]/u);
+});
+
+test("gh message filters full lines before truncation, including control-obfuscated reflections", async () => {
+	const result = await ghError(`gh: ${"x".repeat(121)} Invalid REQUE\u0000ST-BODY-SENTINEL (HTTP 422)`, { ...base, body: "REQUEST-BODY-SENTINEL" });
+	assert.doesNotMatch(result.detail!, /message=/);
+});
+
+test("gh message caps each line at 120, total text at 400, and consumes at most three following lines", async () => {
+	const result = await ghError(`gh: ${"a".repeat(150)} (HTTP 422)\n${"b".repeat(150)}\n${"c".repeat(150)}\n${"d".repeat(150)}\nprivate-value`);
+	const message = JSON.parse(result.detail!.match(/message=(".*"); do not retry/)![1]);
+	assert.equal(message, ["a".repeat(120), "b".repeat(120), "c".repeat(120), "d".repeat(120)].join(" ").slice(0, 400));
 });
 
 test("successful gh exit never exposes or classifies stderr", async () => {
 	const mocks = adapters(() => {
-		const child = new Child(); queueMicrotask(() => { child.stderr.write("HTTP 401 private-value"); child.finish(0); }); return child;
+		const child = new Child(); queueMicrotask(() => { child.stderr.write("gh: HTTP 401 private-value"); child.finish(0); }); return child;
 	});
 	code(await publish({ ...base, body: "Safe" }, safeContext, mocks), "published");
 });
