@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import time
 import unittest
@@ -704,6 +705,30 @@ class PlanRmiPinTests(unittest.TestCase):
         self.assertFalse([c for c in calls if c[:2] == ['docker', 'rmi']])
 
 
+def phase_patch(phases, rc=0, procs=()):
+    return patch.multiple(cleanup, procs_running=Mock(return_value=list(procs)), run=Mock(return_value=(rc, 'status', '')),
+                          PHASE_STATUS={'active_phases': Mock(side_effect=phases if isinstance(phases, Exception) else None,
+                                                              return_value=None if isinstance(phases, Exception) else phases)})
+
+
+class NugetBusyGuardTests(unittest.TestCase):
+    def test_busy_guard_names_dotnet_active_phase_and_unknown_state(self):
+        with phase_patch([], procs=['MSBuild']):
+            self.assertEqual(cleanup.nuget_busy_reason(), 'running: MSBuild')
+        with phase_patch([], procs=['dotnet(pgrep rc=2, assumed running)']):
+            self.assertIn('running', cleanup.nuget_busy_reason())
+        with phase_patch([{'kind': 'integration'}, {'kind': 'build'}]):
+            self.assertEqual(cleanup.nuget_busy_reason(), 'pi-phase active: build,integration')
+        with phase_patch(None):
+            self.assertIn('unknown', cleanup.nuget_busy_reason())
+        with phase_patch([], rc=1):
+            self.assertIn('unknown', cleanup.nuget_busy_reason())
+        with phase_patch(ValueError('bad')):
+            self.assertIn('unknown', cleanup.nuget_busy_reason())
+        with phase_patch([]):
+            self.assertIsNone(cleanup.nuget_busy_reason())
+
+
 class NugetTrimTests(unittest.TestCase):
     DAY = 86400
 
@@ -720,6 +745,9 @@ class NugetTrimTests(unittest.TestCase):
         self.addCleanup(p.stop)
         cleanup._nuget_dir_cache.clear()
         self.addCleanup(cleanup._nuget_dir_cache.clear)
+        idle = patch.object(cleanup, 'nuget_busy_reason', return_value=None)  # busy guard has its own specs
+        idle.start()
+        self.addCleanup(idle.stop)
         self.ctx = cleanup.Ctx(cleanup.parse_args(['--only', 'caches']))
         self.ctx.args.nuget_keep_versions = 3  # exercise the optional newest-N protection (default is 0)
         # ctime cannot be backdated, so move "now" 40 days ahead: every fixture's ctime is
@@ -901,6 +929,23 @@ class NugetTrimTests(unittest.TestCase):
         self.assertTrue(outside.is_dir())
         self.assertFalse(found[0] and os.path.exists(found[0]))
 
+    def test_dead_pid_trash_that_is_open_or_retained_is_kept(self):
+        import subprocess
+        p = subprocess.Popen(['true']); p.wait()
+        held = self.real / 'p' / f'.1.0.1.pi-cleanup-trash-{p.pid}'
+        kept = self.real / 'p' / f'.1.0.2.pi-cleanup-trash-{p.pid}'
+        freed = self.real / 'p' / f'.1.0.3.pi-cleanup-trash-{p.pid}'
+        for d in (held, kept, freed):
+            d.mkdir(parents=True)
+        item = dict(name='nuget packages trim', action='run', paths=[])
+        reason = lambda path: 'pi-retain: test' if path == str(kept) else None
+        with patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([str(held / 'x.dll')])), \
+             patch.object(cleanup, 'retained_reason', side_effect=reason), \
+             patch.object(cleanup, 'protect_cache_items'):
+            cleanup.apply_caches(self.ctx, dict(items=[item]))
+        self.assertEqual(item['result']['recovered'], 1)
+        self.assertEqual((held.is_dir(), kept.is_dir(), freed.exists()), (True, True, False))
+
     def test_local_sourced_kept_and_sized(self):
         local = [self.version('p', f'1.0.{i}', source='/Users/x/local-feed') for i in range(5)]
         cands, kept, local_bytes, _ = self.plan()
@@ -929,18 +974,56 @@ class NugetTrimTests(unittest.TestCase):
             self.assertEqual(cleanup.trash_remove(vd), 'skipped')
         self.assertTrue(os.path.isdir(vd))
 
-    def test_symlinked_root_plans_and_apply_runs_with_dotnet_running(self):
+    def test_symlinked_root_plans_and_apply_waits_for_dotnet(self):
         paths = [self.version('p', f'1.0.{i}') for i in range(5)]
         cands, kept, _, size = self.plan()
         self.assertEqual(sorted(cands), sorted(paths[:2]))
         self.assertGreater(size, 0)
         item = dict(name='nuget packages trim', action='run', paths=cands)
-        with patch.object(cleanup, 'procs_running', return_value=['dotnet']), \
+        with patch.object(cleanup, 'nuget_busy_reason', return_value='running: dotnet'), \
              patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
              patch.object(cleanup, 'protect_cache_items'):
             cleanup.apply_caches(self.ctx, dict(items=[item]))
+        self.assertEqual(item['action'], 'skip')
+        self.assertIn('running: dotnet', item['reason'])
+        self.assertEqual(len(os.listdir(self.real / 'p')), 5)
+        with patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
+             patch.object(cleanup, 'protect_cache_items'):
+            item['action'] = 'run'
+            cleanup.apply_caches(self.ctx, dict(items=[item]))
         self.assertEqual(item['result']['deleted'], 2)
         self.assertEqual(sorted(os.listdir(self.real / 'p')), ['1.0.2', '1.0.3', '1.0.4'])
+
+
+
+    def plan_trim_item(self, reason):
+        for i in range(4):
+            self.version('p', f'1.0.{i}')
+        with mock.patch.object(cleanup, 'nuget_busy_reason', return_value=reason), \
+             mock.patch.object(cleanup, 'which', side_effect=lambda tool: tool == 'dotnet'), \
+             mock.patch.object(cleanup, 'procs_running', return_value=[]), \
+             mock.patch.object(cleanup, 'take_snapshot', return_value=cleanup.PathSet([])), \
+             mock.patch.object(cleanup, 'run', return_value=(0, '', '')), \
+             mock.patch.object(cleanup, 'plan_artifacts', return_value={'name': 'artifacts', 'action': 'skip', 'reason': 'test'}), \
+             mock.patch.object(cleanup, 'plan_dotnet_extractions', return_value={'name': 'dotnet', 'action': 'skip', 'reason': 'test'}), \
+             mock.patch.object(cleanup, 'protect_cache_items'), \
+             mock.patch.object(cleanup, 'plan_session_gzip', return_value=([], 0)):
+            self.ctx.snap = cleanup.PathSet([])
+            plan = cleanup.plan_caches(self.ctx, [], include_tmp=False)
+        return next(it for it in plan['items'] if it['name'] == 'nuget packages trim')
+
+    def test_dry_plan_reports_why_the_trim_is_skipped(self):
+        for reason in ('running: dotnet', 'pi-phase active: build', 'pi-phase state unknown (status failed)'):
+            with self.subTest(reason=reason):
+                item = self.plan_trim_item(reason)
+                self.assertEqual((item['action'], item['reason']), ('skip', reason))
+                self.assertEqual(item.get('paths') or [], [])
+                shutil.rmtree(self.real); self.real.mkdir()
+
+    def test_dry_plan_trims_when_idle(self):
+        item = self.plan_trim_item(None)
+        self.assertEqual(item['action'], 'run')
+        self.assertEqual(len(item['paths']), 1)
 
     def test_recent_use_between_plan_and_apply_is_respected(self):
         vd = self.version('p', '1.0.0')

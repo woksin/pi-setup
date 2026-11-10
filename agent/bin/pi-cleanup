@@ -1394,6 +1394,27 @@ def docker_phases_safe():
     return phases is not None and all(phase["kind"] in ("build", "test", "ci") for phase in phases)
 
 
+def nuget_busy_reason():
+    """Why the NuGet packages trim must not run now, or None when provably idle. mtime-only selection
+    cannot see a build that is about to read an old package, so any dotnet/MSBuild/VBCSCompiler process
+    or active pi-phase phase blocks it. Fails closed: an undeterminable state is busy."""
+    busy = procs_running(NUGET_PROCS)
+    if busy:
+        return "running: " + ",".join(busy)
+    rc, out, _ = run([str(Path(__file__).resolve().with_name("pi-phase")), "status"], timeout=20)
+    if rc != 0:
+        return "pi-phase state unknown (status failed)"
+    try:
+        phases = PHASE_STATUS["active_phases"](out)
+    except Exception:
+        return "pi-phase state unknown (status unreadable)"
+    if phases is None:
+        return "pi-phase state unknown (status unreadable)"
+    if phases:
+        return "pi-phase active: " + ",".join(sorted({str(phase["kind"]) for phase in phases}))
+    return None
+
+
 def docker_pressure(ctx: Ctx):
     """Free space on the home volume is below --docker-pressure-gib (default: the cleanup floor) and no
     integration phase runs. Unknown free space or phase state is never pressure."""
@@ -2157,17 +2178,22 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True, consume=None):
         else:
             item("nuget http-cache", "run", cmd=["dotnet", "nuget", "locals", "http-cache", "--clear"])
             item("nuget temp", "run", cmd=["dotnet", "nuget", "locals", "temp", "--clear"])
-        # the packages trim is atime-gated, so it is safe while dotnet runs
-        if ctx.deadline:
-            cands, kept_local, local_bytes, cand_bytes = [], 0, 0, 0
+        # the packages trim selects by mtime only: it waits for dotnet/MSBuild and active pi-phase phases
+        trim_busy = nuget_busy_reason()
+        if trim_busy:
+            item("nuget packages trim", "skip", trim_busy)
+            cands, trash = [], []
         else:
-            cands, kept_local, local_bytes, cand_bytes = plan_nuget_trim(ctx)
-        trash = [] if ctx.deadline else find_nuget_trash(nuget_packages_dir())
-        item("nuget packages trim", "run" if ctx.deadline or cands or trash else "skip", None if ctx.deadline or cands or trash else "nothing old enough",
-             **({"scheduled_trim": True} if ctx.deadline else {}),
-             paths=cands, size=cand_bytes, trash=len(trash),
-             note=f"{kept_local} local/other-source versions never touched ({human(local_bytes)})"
-                  + (f"; {len(trash)} leftover trash dirs to recover" if trash else ""))
+            if ctx.deadline:
+                cands, kept_local, local_bytes, cand_bytes = [], 0, 0, 0
+            else:
+                cands, kept_local, local_bytes, cand_bytes = plan_nuget_trim(ctx)
+            trash = [] if ctx.deadline else find_nuget_trash(nuget_packages_dir())
+            item("nuget packages trim", "run" if ctx.deadline or cands or trash else "skip", None if ctx.deadline or cands or trash else "nothing old enough",
+                 **({"scheduled_trim": True} if ctx.deadline else {}),
+                 paths=cands, size=cand_bytes, trash=len(trash),
+                 note=f"{kept_local} local/other-source versions never touched ({human(local_bytes)})"
+                      + (f"; {len(trash)} leftover trash dirs to recover" if trash else ""))
     if not ctx.ready():
         return {"items": items}
     # c. yarn / npm
@@ -2483,6 +2509,12 @@ def apply_nuget_paths(ctx, it):
     root_real = nuget_packages_dir()
     ids = set()
     for tp in ctx.items(find_nuget_trash(root_real) if it.get("recover_trash", True) else []):
+        reason = retained_reason(tp)
+        if reason or nuget_held(ctx, tp):
+            res["skipped"] += 1
+            if reason:
+                it.setdefault("retained", []).append({"path": tp, "reason": reason})
+            continue
         try:
             shutil.rmtree(tp)
             res["recovered"] += 1
@@ -2597,10 +2629,14 @@ def apply_caches(ctx: Ctx, plan):
             env = dict(ENV, GOCACHE=it["gocache"]) if it.get("gocache") else None
             rc, out, err = run(it["cmd"], timeout=300, env=env)
             it["result"] = "ok" if rc == 0 else f"failed: rc={rc} {(err.strip() or out.strip())[:120]}"
-        elif n == "nuget packages trim" and it.get("scheduled_trim"):
-            apply_scheduled_nuget(ctx, it)
         elif n == "nuget packages trim":
-            apply_nuget_paths(ctx, it)
+            trim_busy = nuget_busy_reason()
+            if trim_busy:
+                it.update(action="skip", reason=trim_busy + " (re-check before delete)")
+            elif it.get("scheduled_trim"):
+                apply_scheduled_nuget(ctx, it)
+            else:
+                apply_nuget_paths(ctx, it)
         elif "reclaim" in it:
             apply_reclaim(ctx, it)
         elif n == "pi session gzip":
