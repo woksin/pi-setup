@@ -231,6 +231,8 @@ Message retention is configured with `messages.retention`: `mode` is `keep`, `ar
 
 MCP preapproval is off by default. The wizard asks before trusting project MCP server definitions; `./install.sh --with lanes --preapprove-mcp` saves this opt-in for new coordination folders. `lanes init <new-dir> --preapprove-mcp` opts in for one folder. Existing folders keep their saved setting; doctor reports the current folder’s setting or the installed default.
 
+Project-trust approval is off by default and is a per-folder opt-in: `lanes init <new-dir> --approve-project-trust` (or `launch.approveProjectTrust: true` in `lanes.json`). When on, `lanes start`/`resume` pass `--approve` to pi, for that process only, in worktrees that `lanes add` created for a lane repository (never the coordinator, adopted lanes with a custom `cwd`, or other directories); `trust.json` is not modified. Trust boundary: pi then loads the worktree’s `.pi/settings.json`, `.pi/extensions`, project packages, `.pi/mcp.json` and `.agents/skills`, i.e. runs code from the checked-out branch with your OS permissions. Enable it only for repositories you control; a fork PR checkout is code execution. Saving a trust decision for the worktrees parent folder is broader than this, since it trusts every future directory under it. Existing folders keep false; with it off, lanes prints a hint when a worktree has project-local pi files.
+
 Lanes operations (use `--dir <folder>` outside the coordination folder):
 - `lanes idle-check [--minutes n]` reports running lanes that have gone silent.
 - `lanes nudge <ID|coordinator> <text>` sends one line only to a foreground pi session.

@@ -170,13 +170,41 @@ class IssueStatusTest(unittest.TestCase):
     def test_missing_scanner_fails_closed_without_writing(self):
         fake = FakeGitHub(['Body'])
         issue_status.scan_status = self.real_scan
-        for failure in (FileNotFoundError('/no/pi-publish'), subprocess.TimeoutExpired('pi-publish', 60), PermissionError('x')):
-            issue_status.gh_json = fake
-            argv = ['update', '--repo', 'o/r', '--issue', '1', '--file', self.file('s.md', 'new')]
-            with mock.patch.object(subprocess, 'run', side_effect=failure), self.assertRaises(SystemExit) as raised:
-                issue_status.main(argv)
-            self.assertEqual(raised.exception.code, 'publication scanner unavailable; status not written')
-            self.assertEqual(fake.writes, [])
+        cases = [(FileNotFoundError('SECRET-PATH'), 'binary-missing'),
+                 (PermissionError('SECRET-PATH'), 'binary-not-executable'),
+                 (subprocess.TimeoutExpired('SECRET-COMMAND', 60), 'timeout'),
+                 (OSError('SECRET-ERROR'), 'spawn-failed'),
+                 (subprocess.SubprocessError('SECRET-ERROR'), 'spawn-failed')]
+        for failure, step in cases:
+            with self.subTest(step=step):
+                issue_status.gh_json = fake
+                argv = ['update', '--repo', 'o/r', '--issue', '1', '--file', self.file('s.md', 'new')]
+                err = io.StringIO()
+                with mock.patch.object(subprocess, 'run', side_effect=failure), contextlib.redirect_stderr(err), \
+                        self.assertRaises(SystemExit) as raised:
+                    issue_status.main(argv)
+                self.assertEqual(raised.exception.code, f'publication scanner unavailable ({step}); status not written')
+                self.assertEqual(fake.writes, [])
+                self.assertNotIn('SECRET', err.getvalue() + str(raised.exception.code))
+
+    def test_dead_cwd_uses_private_snapshot_directory_and_still_scans_before_writing(self):
+        issue_status.scan_status = self.real_scan
+        for rc in (0, 4):
+            with self.subTest(rc=rc):
+                fake = FakeGitHub(['Body'])
+                def run(argv, **kwargs):
+                    directory = os.path.dirname(argv[-1])
+                    self.assertEqual(kwargs['cwd'], directory)
+                    self.assertTrue(os.path.isdir(directory))
+                    self.assertEqual(Path(argv[-1]).read_text(), f'{S}\nnew\n{E}')
+                    return subprocess.CompletedProcess(argv, rc, stdout='publish: adapter-failed\n', stderr='SECRET-STDERR')
+                with mock.patch.object(os, 'getcwd', side_effect=FileNotFoundError('SECRET-CWD')), \
+                        mock.patch.object(subprocess, 'run', side_effect=run):
+                    code, _, err = self.run_update(fake, 'new')
+                self.assertEqual(code, 0 if rc == 0 else 1)
+                self.assertEqual(fake.writes, [f'Body\n\n{S}\nnew\n{E}\n'] if rc == 0 else [])
+                self.assertEqual(err, '' if rc == 0 else 'publish: adapter-failed\n')
+                self.assertNotIn('SECRET', err)
 
     def test_scanner_exit_mapping_and_output_filtering(self):
         issue_status.scan_status = self.real_scan
@@ -219,6 +247,48 @@ class IssueStatusTest(unittest.TestCase):
                     issue_status.scan_status("block")
                 self.assertEqual(err.getvalue(), "")
 
+    def test_infrastructure_detail_forwarding_is_strict_and_limited_to_one_line(self):
+        issue_status.scan_status = self.real_scan
+        cases = [('detail: cwd-unavailable ENOENT\n', 'detail: cwd-unavailable ENOENT\n'),
+                 ('detail: publish-threw\ndetail: cwd-unavailable ENOENT\n', 'detail: publish-threw\n'),
+                 ('detail: leaked SECRET-VALUE\n', ''),
+                 ('detail: cwd-unavailable ENOENT SECRET-VALUE\n', ''),
+                 ('detail: ' + 'a' * 41 + '\n', '')]
+        for detail, forwarded in cases:
+            with self.subTest(detail=detail):
+                fake = FakeGitHub(['Body'])
+                done = subprocess.CompletedProcess([], 4, stdout='publish: adapter-failed\n' + detail, stderr='SECRET-STDERR')
+                with mock.patch.object(subprocess, 'run', return_value=done):
+                    code, _, err = self.run_update(fake, 'new')
+                self.assertEqual(code, 1)
+                self.assertEqual(err, 'publish: adapter-failed\n' + forwarded)
+                self.assertEqual(fake.writes, [])
+                self.assertNotIn('SECRET', err)
+
+    def test_scanner_without_code_line_names_only_allowlisted_infrastructure_steps(self):
+        issue_status.scan_status = self.real_scan
+        cases = [(126, 'SECRET-STDERR', 'interpreter-or-binary-not-found'),
+                 (127, 'SECRET-STDERR', 'interpreter-or-binary-not-found'),
+                 (1, 'ERR_MODULE_NOT_FOUND SECRET-PATH', 'node-too-old'),
+                 (1, 'ERR_UNKNOWN_FILE_EXTENSION SECRET-PATH', 'node-too-old'),
+                 (1, 'bad option --experimental-strip-types SECRET-VALUE', 'node-too-old'),
+                 (1, 'uv_cwd SECRET-PATH', 'cwd-unavailable'),
+                 (1, 'ENOENT SECRET-PATH', 'cwd-unavailable'),
+                 (1, 'SECRET-STDERR', None)]
+        for rc, stderr, step in cases:
+            with self.subTest(rc=rc, stderr=stderr):
+                fake = FakeGitHub(['Body'])
+                done = subprocess.CompletedProcess([], rc, stdout='SECRET-STDOUT', stderr=stderr)
+                issue_status.gh_json = fake
+                err = io.StringIO()
+                with mock.patch.object(subprocess, 'run', return_value=done), contextlib.redirect_stderr(err), \
+                        self.assertRaises(SystemExit) as raised:
+                    issue_status.main(['update', '--repo', 'o/r', '--issue', '1', '--file', self.file('s.md', 'new')])
+                self.assertEqual(raised.exception.code, f'publication scanner failed (exit {rc}); status not written')
+                self.assertEqual(err.getvalue(), f'step: {step}\n' if step else '')
+                self.assertEqual(fake.writes, [])
+                self.assertNotIn('SECRET', err.getvalue() + str(raised.exception.code))
+
     def test_scanner_gets_a_private_file_with_the_exact_bytes_and_cleans_up(self):
         issue_status.scan_status = self.real_scan
         seen = {}
@@ -232,6 +302,7 @@ class IssueStatusTest(unittest.TestCase):
         self.assertEqual((seen['mode'], seen['dirmode']), (0o600, 0o700))
         self.assertEqual(seen['argv'][:3], ['/agent/bin/pi-publish', 'check', '--file'])
         self.assertNotIn('shell', seen['kwargs']); self.assertEqual(seen['kwargs']['timeout'], 60)
+        self.assertNotIn('cwd', seen['kwargs'])
         self.assertFalse(os.path.exists(seen['argv'][-1])); self.assertFalse(os.path.exists(os.path.dirname(seen['argv'][-1])))
 
     def test_patch_failure_prints_a_fixed_message_without_stderr(self):

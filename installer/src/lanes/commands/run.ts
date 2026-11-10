@@ -6,6 +6,7 @@ import { admit, inventory } from "../admission.ts";
 import { expand, laneDir, type Config } from "../config.ts";
 import type { InheritedChild, LanesCtx } from "../ctx.ts";
 import { laneTarget } from "../sessions.ts";
+import { approveProjectTrust, hasProjectFiles } from "../trust.ts";
 import { preapprove } from "../preapprove.ts";
 import { backendFor } from "../backend.ts";
 import { parseStatus } from "../status-line.ts";
@@ -38,8 +39,13 @@ export async function run(id: string, opts: Record<string, string>, c: Config, r
   for (const name of c.launch.unsetEnv) delete env[name];
   const messages = expand(c.messages.dir, c, root, ctx.home);
   Object.assign(env, { PI_ORCH_ID: target.id, LANES_DIR: root, INBOX_DIR: messages, LANE_STATUS_DIR: join(messages, "status") });
+  const approve = approveProjectTrust(c, root, target, ctx);
+  if (approve) ctx.out(`project trust approved for ${target.cwd} (launch.approveProjectTrust)`);
+  else if (!target.coordinator && !c.launch.approveProjectTrust && hasProjectFiles(target.cwd))
+    ctx.out("pi will ask for project trust; set launch.approveProjectTrust to true in lanes.json to approve lanes-created worktrees");
+  const piArgs = approve ? ["--approve", `@${prompt}`] : [`@${prompt}`];
   let child: InheritedChild;
-  try { child = (ctx.spawnInherited ?? nativeSpawn)(wrapper, [`@${prompt}`], { cwd: target.cwd, env }); }
+  try { child = (ctx.spawnInherited ?? nativeSpawn)(wrapper, piArgs, { cwd: target.cwd, env }); }
   catch (e) { await lease.release(); throw e; }
   // Attach rejection handling before probing identity (a failed executable may exit immediately).
   let settled = false;

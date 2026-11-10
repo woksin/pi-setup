@@ -16,6 +16,11 @@ export interface PublishServices {
 function fixed(code: string, detail?: string) {
 	return { content: [{ type: "text" as const, text: `publish: ${code}` + (detail ? `\ndetail: ${detail}` : "") }], details: { code, ...(detail ? { detail } : {}) }, isError: true };
 }
+function adapterFailure(step: "cwd-unavailable" | "publish-threw", error: unknown) {
+	const code = (error as { code?: unknown } | null)?.code;
+	const errno = typeof code === "string" && /^E[A-Z0-9_]{2,19}$/.test(code) ? ` ${code}` : "";
+	return fixed("adapter-failed", step + errno);
+}
 function invalidResult(error: unknown) {
 	return fixed("invalid-request", error instanceof InvalidRequest ? error.detail : undefined);
 }
@@ -43,7 +48,7 @@ async function executePublication(value: unknown, signal: AbortSignal | undefine
 		const warning = candidate.warn ? "\npublish: candidate-warning" : "";
 		return { content: [{ type: "text" as const, text: rendered(result) + warning }],
 			details: publicationDetails(result), isError: result.isError };
-	} catch { return fixed("adapter-failed"); }
+	} catch (error) { return adapterFailure("publish-threw", error); }
 }
 export default function publishExtension(pi: ExtensionAPI, services: PublishServices = {}) {
 	pi.registerTool({
@@ -70,6 +75,7 @@ export const PUBLISH_HELP = [
 	"  2 invalid request",
 	"  3 secret scan refused the body",
 	"  4 payload unreadable, cleanup failed or adapter failed",
+	"    Adapter failures print a detail: step line (cwd-unavailable or publish-threw, with optional errno).",
 	"  5 gh unavailable, failed, timed out or over the output limit, or the --host is not authenticated in gh",
 	"  130 cancelled",
 	"See also: docs/reference.md, README.md",
@@ -83,13 +89,15 @@ function exitCode(result: PublishResult): number {
 	return ["gh-unavailable", "gh-failed", "gh-timeout", "gh-output-limit", "host-unauthenticated"].includes(result.code) ? 5 : 4;
 }
 /** Trusted script/human adapter; Pi's shell hooks provide CLI authority admission, as for raw gh. */
-export async function cliMain(argv: readonly string[], options: { signal?: AbortSignal; send?: typeof publish } = {}): Promise<{ text: string; exitCode: number }> {
+export async function cliMain(argv: readonly string[], options: { signal?: AbortSignal; send?: typeof publish; cwd?: () => string } = {}): Promise<{ text: string; exitCode: number }> {
 	let request;
 	try { request = parseCli(argv); } catch (error) { return { text: invalidResult(error).content[0].text, exitCode: 2 }; }
 	if (request.kind === "help") return { text: PUBLISH_HELP, exitCode: 0 };
+	let cwd: string;
+	try { cwd = (options.cwd ?? (() => process.cwd()))(); }
+	catch (error) { return { text: adapterFailure("cwd-unavailable", error).content[0].text, exitCode: 4 }; }
 	try {
-		const cwd = process.cwd();
 		const result = await (options.send ?? publish)(request, { cwd, repoRoot: identity(cwd)?.root, signal: options.signal });
 		return { text: rendered(result), exitCode: exitCode(result) };
-	} catch { return { text: "publish: adapter-failed", exitCode: 4 }; }
+	} catch (error) { return { text: adapterFailure("publish-threw", error).content[0].text, exitCode: 4 }; }
 }
