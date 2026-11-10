@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ORIGINAL_ENTRY, restoreManualPin, restoreOriginal, type OriginalEntryData } from "./provider-fallback-state.ts";
 import fallbackExtension, { DEFAULT_MAX_CONTEXT_TOKENS_FOR_FALLBACK, fallbackContextLimit, classifyError, equivalentOf, fallbackContextVeto, pinnedProvider, selectFallback, sessionLineage, setProcessMainLineage } from "../extensions/provider-fallback.ts";
+import { tempDir } from "./test-tmp.ts";
 
 const CONFIG = {
 	enabled: true,
@@ -85,7 +86,7 @@ const shutdowns: (() => Promise<void>)[] = [];
 let dir: string;
 beforeEach(() => {
 	saved = { c: process.env.PI_PROVIDER_FALLBACK_CONFIG, s: process.env.PI_PROVIDER_FALLBACK_STATE, b: process.env.PI_CONTEXT_BUDGET_CONFIG, bd: process.env.PI_CONTEXT_BUDGET_STATE_DIR };
-	dir = mkdtempSync(join(tmpdir(), "pfb-"));
+	dir = tempDir("pfb-");
 	stateFile = join(dir, "state.json");
 	process.env.PI_PROVIDER_FALLBACK_CONFIG = join(dir, "c.json");
 	process.env.PI_PROVIDER_FALLBACK_STATE = stateFile;

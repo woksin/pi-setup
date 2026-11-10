@@ -4,9 +4,10 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tempDir } from "./test-tmp.ts";
 
 // The module reads PI_CODING_AGENT_DIR / PI_MCP_CONFIG_MODE at import time and applies the mode on load: isolate both.
-const agent = realpathSync(mkdtempSync(join(tmpdir(), "mcp-trust-agent-")));
+const agent = realpathSync(tempDir("mcp-trust-agent-"));
 const savedEnv = { dir: process.env.PI_CODING_AGENT_DIR, mode: process.env.PI_MCP_CONFIG_MODE };
 process.env.PI_CODING_AGENT_DIR = agent;
 delete process.env.PI_MCP_CONFIG_MODE;
@@ -17,7 +18,7 @@ process.on("exit", () => {
 	for (const [k, v] of [["PI_CODING_AGENT_DIR", savedEnv.dir], ["PI_MCP_CONFIG_MODE", savedEnv.mode]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
 });
 
-const folder = (name: string) => { const p = join(realpathSync(mkdtempSync(join(tmpdir(), "mcp-trust-"))), name); mkdirSync(p, { recursive: true }); return p; };
+const folder = (name: string) => { const p = join(realpathSync(tempDir("mcp-trust-")), name); mkdirSync(p, { recursive: true }); return p; };
 const trust = (decisions: Record<string, boolean> | undefined) => decisions === undefined ? writeFileSync(join(agent, "trust.json"), "{ not json") : writeFileSync(join(agent, "trust.json"), JSON.stringify(decisions));
 const settings = (s: object) => writeFileSync(join(agent, "settings.json"), JSON.stringify(s));
 const reset = () => { trust({}); settings({}); };

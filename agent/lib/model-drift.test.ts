@@ -7,12 +7,13 @@ import { DriftTracker, expectedModel } from "./model-drift.ts";
 import { ORIGINAL_ENTRY, publishFallbackState, readFallbackState, restoreOriginal } from "./provider-fallback-state.ts";
 import driftExtension from "../extensions/model-drift.ts";
 import fallbackExtension from "../extensions/provider-fallback.ts";
+import { tempDir } from "./test-tmp.ts";
 
 const A = { provider: "anthropic", id: "a" };
 const B = { provider: "openai", id: "b" };
 
 function agentDir(opts: { active?: string; mainModel?: string; settings?: object } = {}): string {
-	const dir = mkdtempSync(join(tmpdir(), "drift-"));
+	const dir = tempDir("drift-");
 	writeFileSync(join(dir, "settings.json"), JSON.stringify(opts.settings ?? { defaultProvider: "anthropic", defaultModel: "a" }));
 	if (opts.active) {
 		mkdirSync(join(dir, "profiles", opts.active), { recursive: true });
@@ -102,7 +103,7 @@ function harness(opts: { dir: string; hasUI?: boolean; model?: typeof A; entries
 }
 
 function fallbackEnv(limited: boolean, restoreWhenExpired = true): void {
-	const dir = mkdtempSync(join(tmpdir(), "fb-"));
+	const dir = tempDir("fb-");
 	writeFileSync(join(dir, "c.json"), JSON.stringify({ enabled: true, restoreWhenExpired, limitPatterns: { anthropic: ["rate_limit_error"] }, pairs: [["anthropic/a", "openai/b"]] }));
 	writeFileSync(join(dir, "s.json"), JSON.stringify(limited ? { anthropic: { until: Date.now() + 3_600_000, since: Date.now() } } : {}));
 	process.env.PI_PROVIDER_FALLBACK_CONFIG = join(dir, "c.json");

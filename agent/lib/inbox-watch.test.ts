@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, utimesSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+import { tempDir } from "./test-tmp.ts";
 
 const script = join(process.env.HOME ?? homedir(), ".pi/agent/bin/inbox-watch");
 const env = (dir: string, extra: Record<string, string> = {}) => ({ ...process.env, INBOX_DIR: dir, INBOX_SETTLE_SECONDS: "1", INBOX_SETTLE_MAX_SECONDS: "3", INBOX_ALIASES: "", ...extra });
@@ -20,7 +21,7 @@ const run = (dir: string, ...args: string[]) => spawnRun(dir, args, {});
 const LONG_SETTLE = { INBOX_SETTLE_SECONDS: "20", INBOX_SETTLE_MAX_SECONDS: "20" };
 const NO_SLEEP_MS = 10_000;
 const runLongSettle = (dir: string) => spawnRun(dir, [], LONG_SETTLE);
-const fresh = () => mkdtempSync(join(tmpdir(), "inbox-watch-"));
+const fresh = () => tempDir("inbox-watch-");
 const put = (dir: string, name: string, ageSeconds = 0) => {
 	const file = join(dir, name);
 	writeFileSync(file, "x");
