@@ -25,6 +25,27 @@ class ProfileAgentBodies(unittest.TestCase):
                 self.assertEqual(body(path), body(shared), f"{profile}/{path.name}: body differs from agent/agents/{path.name}")
 
 
+class CodeHealthNeverStops(unittest.TestCase):
+    """A Code Health miss is reported; it never stops an agent before the gate and commit (#190)."""
+
+    STOP = re.compile(r"\b(and|then|must|should|always)\s+stop\b|[;:]\s*stop\b", re.IGNORECASE)
+
+    def test_no_agent_makes_a_code_health_miss_a_stop(self):
+        files = sorted(AGENTS.glob("*.md")) + sorted((ROOT / "agent" / "profiles").glob("*/agents/*.md"))
+        self.assertTrue(files, "no agent files found")
+        for path in files:
+            for number, line in enumerate(body(path).splitlines(), 1):
+                if "code health" not in line.lower() and "9.5" not in line:
+                    continue
+                with self.subTest(file=str(path.relative_to(ROOT)), line=number):
+                    self.assertIsNone(self.STOP.search(line), f"Code Health line stops the work: {line}")
+
+    def test_implementers_carry_on_after_a_miss(self):
+        for name in ("implementer", "careful-implementer", "opus-implementer", "slice-implementer", "general-purpose"):
+            with self.subTest(agent=name):
+                self.assertIn("carry on with the gate and commit", body(AGENTS / f"{name}.md"))
+
+
 class AnthropicOnlyProfiles(unittest.TestCase):
     def test_anthropic_only_profiles_have_no_foreign_models(self):
         profiles = ROOT / "agent" / "profiles"
