@@ -1,5 +1,7 @@
 """Disk reclaim rules of pi-cleanup (pi-setup#207): merged-idle worktrees, .ai-work artifacts, temp leftovers,
 ~/.net extractions, unused NuGet versions. Every fixture lives in a temp dir that is removed afterwards."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -7,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_pi_cleanup import cleanup, g, RepoFixture
@@ -29,7 +32,7 @@ class MergedIdleWorktreeTests(RepoFixture):
     def test_flag_default_and_validation(self):
         self.assertEqual(cleanup.parse_args([]).merged_idle_hours, 4)
         self.assertEqual(cleanup.parse_args(['--merged-idle-hours', '0.5']).merged_idle_hours, 0.5)
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cleanup.parse_args(['--merged-idle-hours', '-1'])
 
     def test_merged_clean_worktree_idle_five_hours_is_removable(self):
@@ -76,6 +79,165 @@ class MergedIdleWorktreeTests(RepoFixture):
         self.assertEqual(row['action'], 'remove')  # min(0.5 days, 4 h) = 4 h
         self.age_worktree(1)
         self.assertEqual(self.default_plan('--merged-idle-hours', '0.5')['action'], 'remove')
+
+
+class ReclaimFixture(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix='pisetup-test.reclaim.')))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = self.tmp / 'home'
+        self.home.mkdir()
+        env = patch.dict(os.environ, {'HOME': str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def age(self, path, days):
+        when = time.time() - days * DAY
+        os.utime(path, (when, when), follow_symlinks=False)
+
+    def ctx(self, held=()):
+        ctx = cleanup.Ctx(cleanup.parse_args([]))
+        ctx.snap = cleanup.PathSet(list(held))
+        return ctx
+
+
+class AiWorkArtifactTests(ReclaimFixture):
+    def setUp(self):
+        super().setUp()
+        self.repo = self.tmp / 'repo'
+        self.work = self.repo / '.ai-work'
+        (self.work / 'keep').mkdir(parents=True)
+        self.checkouts = [SimpleNamespace(exists=True, path=str(self.repo), parent=None)]
+
+    def make(self, name, days):
+        path = self.work / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('x' * 10)
+        self.age(path, days)
+        return path
+
+    def plan(self, ctx=None):
+        return cleanup.plan_artifacts(ctx or self.ctx(), self.checkouts)
+
+    def test_suffix_ages_and_keep_dir_are_included(self):
+        old = [self.make('a.trx', 3), self.make('keep/b.dll', 3), self.make('out/c.pdb', 3),
+               self.make('d.nettrace', 3), self.make('e.etlx', 3), self.make('f.dmp', 3), self.make('.coverage', 3),
+               self.make('g.nupkg', 8), self.make('h.snupkg', 8), self.make('i.jar', 8)]
+        young = [self.make('young.trx', 1), self.make('young.nupkg', 3)]
+        item = self.plan()
+        self.assertEqual(item['action'], 'run')
+        self.assertEqual(sorted(item['paths']), sorted(str(p) for p in old))
+        self.assertFalse(set(map(str, young)) & set(item['paths']))
+
+    def test_notes_logs_and_bundles_are_never_matched(self):
+        for name in ('notes.md', 'build.log', 'repo.bundle', 'data.json', 'plan.txt'):
+            self.make(name, 30)
+        self.assertEqual(self.plan()['paths'], [])
+
+    def test_retained_symlinked_and_open_files_are_skipped(self):
+        retained = self.make('keep/r.trx', 5)
+        opened = self.make('open.dll', 5)
+        plain = self.make('plain.trx', 5)
+        outside = self.tmp / 'outside.trx'
+        outside.write_text('x')
+        self.age(outside, 5)
+        (self.work / 'link.trx').symlink_to(outside)
+        (self.work / 'linkdir').symlink_to(self.tmp)
+        with patch.object(cleanup, 'retained_reason', side_effect=lambda p, **k: 'retained' if p == str(retained) else None):
+            item = self.plan(self.ctx(held=[str(opened)]))
+        self.assertEqual(item['paths'], [str(plain)])
+
+    def test_symlinked_ai_work_is_not_walked(self):
+        shutil.rmtree(self.work)
+        target = self.tmp / 'elsewhere'
+        target.mkdir()
+        (target / 'x.trx').write_text('x')
+        self.age(target / 'x.trx', 5)
+        self.work.symlink_to(target)
+        self.assertEqual(self.plan()['paths'], [])
+
+    def test_unknown_snapshot_removes_nothing(self):
+        self.make('a.trx', 5)
+        ctx = self.ctx()
+        ctx.snap = None
+        self.assertEqual(self.plan(ctx)['action'], 'skip')
+
+    def test_apply_deletes_planned_files_only_and_dry_run_plan_does_not(self):
+        old, notes = self.make('a.trx', 5), self.make('notes.md', 5)
+        item = self.plan()
+        self.assertTrue(old.exists())  # planning is read-only
+        cleanup.apply_reclaim(self.ctx(), item)
+        self.assertEqual((old.exists(), notes.exists()), (False, True))
+        self.assertEqual(item['result']['deleted'], 1)
+
+    def test_apply_refuses_changed_held_and_retained_files(self):
+        changed, held, retained, ok = (self.make(n, 5) for n in ('c.trx', 'h.trx', 'r.trx', 'k.trx'))
+        item = self.plan()
+        changed.write_text('rewritten')  # mtime moves
+        ctx = self.ctx(held=[str(held)])
+        with patch.object(cleanup, 'retained_reason', side_effect=lambda p, **k: 'retained' if p == str(retained) else None):
+            cleanup.apply_reclaim(ctx, item)
+        self.assertEqual([p.exists() for p in (changed, held, retained, ok)], [True, True, True, False])
+        self.assertEqual(item['result']['skipped'], 3)
+
+    def test_apply_refuses_a_path_swapped_for_a_symlink(self):
+        victim = self.tmp / 'victim.trx'
+        victim.write_text('precious')
+        path = self.make('a.trx', 5)
+        item = self.plan()
+        path.unlink()
+        path.symlink_to(victim)
+        cleanup.apply_reclaim(self.ctx(), item)
+        self.assertTrue(victim.exists())
+        self.assertEqual(item['result']['deleted'], 0)
+
+
+class DotnetExtractionTests(ReclaimFixture):
+    def app(self, name, versions):
+        base = self.home / '.net' / name
+        for version, days in versions.items():
+            path = base / version
+            path.mkdir(parents=True)
+            (path / 'lib.so').write_text('x')
+            self.age(path, days)
+        return base
+
+    def test_newest_kept_older_removed_held_kept(self):
+        base = self.app('cratis', {'a': 5, 'b': 3, 'c': 1})
+        item = cleanup.plan_dotnet_extractions(self.ctx(held=[str(base / 'a' / 'lib.so')]))
+        self.assertEqual(item['paths'], [str(base / 'b')])
+        cleanup.apply_reclaim(self.ctx(), item)
+        self.assertEqual([(base / n).exists() for n in 'abc'], [True, False, True])
+
+    def test_three_versions_two_removed(self):
+        base = self.app('Cratis.Cli', {'a': 5, 'b': 3, 'c': 1})
+        item = cleanup.plan_dotnet_extractions(self.ctx())
+        cleanup.apply_reclaim(self.ctx(), item)
+        self.assertEqual([(base / n).exists() for n in 'abc'], [False, False, True])
+        self.assertEqual(item['result']['deleted'], 2)
+
+    def test_single_version_and_plain_files_are_ignored(self):
+        base = self.app('solo', {'a': 9})
+        (self.home / '.net' / 'stray.txt').write_text('x')
+        (self.home / '.net' / 'cratis-file').write_text('x')
+        item = cleanup.plan_dotnet_extractions(self.ctx())
+        self.assertEqual(item['paths'], [])
+        self.assertTrue((base / 'a').exists())
+
+    def test_symlinked_version_is_not_followed(self):
+        base = self.app('cratis', {'a': 5, 'c': 1})
+        target = self.tmp / 'precious'
+        target.mkdir()
+        os.symlink(target, base / 'b')
+        item = cleanup.plan_dotnet_extractions(self.ctx())
+        cleanup.apply_reclaim(self.ctx(), item)
+        self.assertTrue(target.exists())
+
+    def test_unknown_snapshot_removes_nothing(self):
+        self.app('cratis', {'a': 5, 'c': 1})
+        ctx = self.ctx()
+        ctx.snap = None
+        self.assertEqual(cleanup.plan_dotnet_extractions(ctx)['action'], 'skip')
 
 
 class NugetUnusedTests(unittest.TestCase):

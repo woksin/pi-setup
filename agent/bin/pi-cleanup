@@ -2014,6 +2014,11 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True, consume=None):
     cands, open_skipped = plan_session_gzip(ctx)
     item("pi session gzip", "run" if cands else "skip", None if cands else "nothing old enough",
          files=cands, note=f"{open_skipped} open files skipped" if open_skipped else None)
+    # d2. .ai-work artifacts and ~/.net extraction folders
+    for entry in (plan_artifacts(ctx, checkouts), plan_dotnet_extractions(ctx)):
+        add(entry)
+    if not ctx.ready():
+        return {"items": items}
     # e. worktree prune
     parents = sorted({c.parent or c.path for c in checkouts if c.exists and (c.parent or c.kind == "main")
                       and os.path.isdir(c.parent or c.path)})
@@ -2027,6 +2032,162 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True, consume=None):
     if not consume:
         protect_cache_items(items)
     return {"items": items}
+
+
+# ----------------------------------------------------------------------------
+# reclaim: .ai-work build artifacts and ~/.net extraction folders (caches step items)
+# ----------------------------------------------------------------------------
+ARTIFACT_SHORT_SUFFIXES = (".trx", ".dll", ".pdb", ".nettrace", ".etlx", ".dmp", ".coverage")
+ARTIFACT_PACKAGE_SUFFIXES = (".nupkg", ".snupkg", ".jar")
+
+
+def reclaim_identity(path):
+    """(type, dev, ino, mtime_ns) of a real file/directory (never a symlink), else None."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    kind = statmod.S_IFMT(st.st_mode)
+    if kind not in (statmod.S_IFREG, statmod.S_IFDIR):
+        return None
+    return [kind, st.st_dev, st.st_ino, st.st_mtime_ns]
+
+
+def artifact_roots(checkouts):
+    """Real .ai-work directories of every checkout, its parent repo and the home directory."""
+    bases = {os.path.expanduser("~")}
+    for c in checkouts:
+        if c.exists:
+            bases.add(c.path)
+            if c.parent:
+                bases.add(c.parent)
+    roots = []
+    for base in sorted(bases):
+        ai = os.path.join(base, ".ai-work")
+        try:
+            real = os.path.realpath(ai)
+            if not statmod.S_ISLNK(os.lstat(ai).st_mode) and statmod.S_ISDIR(os.lstat(ai).st_mode) \
+                    and real not in roots:
+                roots.append(real)
+        except OSError:
+            continue
+    return roots
+
+
+def plan_artifacts(ctx: Ctx, checkouts):
+    """Old build/test artifacts under .ai-work (logs, notes and bundles are never matched)."""
+    item = {"name": ".ai-work build artifacts", "action": "skip", "reason": "nothing old enough", "paths": [],
+            "identities": {}, "roots": [], "size": 0, "reclaim": "artifacts"}
+    if ctx.snap is None:
+        item["reason"] = "process snapshot unavailable"
+        return item
+    short = ctx.now - ctx.args.artifact_age_days * 86400
+    package = ctx.now - ctx.args.package_artifact_age_days * 86400
+    item["roots"] = artifact_roots(checkouts)
+    for root in ctx.items(item["roots"]):
+        for dp, dns, fns in os.walk(root, followlinks=False):
+            dns.sort()
+            for fn in sorted(fns):
+                low = fn.lower()
+                cutoff = short if low.endswith(ARTIFACT_SHORT_SUFFIXES) else \
+                    package if low.endswith(ARTIFACT_PACKAGE_SUFFIXES) else None
+                if cutoff is None:
+                    continue
+                path = os.path.join(dp, fn)
+                ident = reclaim_identity(path)
+                if not ident or ident[0] != statmod.S_IFREG or ident[3] / 1e9 >= cutoff:
+                    continue
+                if retained_reason(path) or ctx.snap.first_inside(path):
+                    continue
+                item["paths"].append(path)
+                item["identities"][path] = ident
+                item["size"] += os.lstat(path).st_blocks * 512
+    if item["paths"]:
+        item.update(action="run", reason=None)
+    return item
+
+
+def plan_dotnet_extractions(ctx: Ctx):
+    """~/.net/<app>/<hash> extraction folders: keep the newest per app and any a process holds."""
+    root = os.path.join(os.path.expanduser("~"), ".net")
+    item = {"name": "~/.net extraction folders", "action": "skip", "reason": "nothing to remove", "paths": [],
+            "identities": {}, "roots": [], "size": 0, "reclaim": "dotnet-extract"}
+    if ctx.snap is None:
+        item["reason"] = "process snapshot unavailable"
+        return item
+    try:
+        if statmod.S_ISLNK(os.lstat(root).st_mode):
+            return item
+        real_root = os.path.realpath(root)
+        apps = sorted(os.listdir(real_root))
+    except OSError:
+        return item
+    item["roots"] = [real_root]
+    for app in ctx.items(apps):
+        app_dir = os.path.join(real_root, app)
+        try:
+            if not statmod.S_ISDIR(os.lstat(app_dir).st_mode):
+                continue
+            versions = [(os.lstat(os.path.join(app_dir, n)).st_mtime_ns, n) for n in os.listdir(app_dir)
+                        if statmod.S_ISDIR(os.lstat(os.path.join(app_dir, n)).st_mode)]
+        except OSError:
+            continue
+        if len(versions) < 2:
+            continue
+        for _, name in sorted(versions)[:-1]:
+            path = os.path.join(app_dir, name)
+            ident = reclaim_identity(path)
+            if not ident or retained_reason(path) or ctx.snap.first_inside(path):
+                continue
+            item["paths"].append(path)
+            item["identities"][path] = ident
+            item["size"] += du_bytes(path, 2) or 0
+    if item["paths"]:
+        item.update(action="run", reason=None)
+    return item
+
+
+def reclaim_blocker(ctx, it, path):
+    """Why `path` must not be removed now, or None. Every condition is re-proven at removal time."""
+    roots = [os.path.realpath(r) for r in it.get("roots", [])]
+    parent = os.path.realpath(os.path.dirname(path))
+    if not any(parent == r or parent.startswith(r + os.sep) for r in roots):
+        return "outside the planned root"
+    if it["reclaim"] == "dotnet-extract" and os.path.dirname(parent) != roots[0]:
+        return "not directly under ~/.net/<app>"
+    if parent != os.path.dirname(path):
+        return "path goes through a symlink"
+    if reclaim_identity(path) != it["identities"].get(path):
+        return "changed since planning"
+    reason = retained_reason(path)
+    if reason:
+        return reason
+    if ctx.snap is None or ctx.snap.first_inside(path):
+        return "held by a process (or process snapshot unavailable)"
+    return None
+
+
+def apply_reclaim(ctx, it):
+    res = {"deleted": 0, "skipped": 0, "failed": 0, "freed": 0}
+    for path in ctx.items(list(it["paths"])):
+        blocker = reclaim_blocker(ctx, it, path)
+        if blocker:
+            res["skipped"] += 1
+            it.setdefault("retained", []).append({"path": path, "reason": blocker})
+            continue
+        try:
+            if it["reclaim"] == "artifacts":
+                size = os.lstat(path).st_blocks * 512
+                os.unlink(path)
+            else:
+                size = du_bytes(path, 5) or 0
+                shutil.rmtree(path)
+            res["deleted"] += 1
+            res["freed"] += size
+        except OSError as error:
+            res["failed"] += 1
+            res["first_error"] = res.get("first_error") or f"{path}: {str(error)[:100]}"
+    it["result"] = res
 
 
 def file_open_state(path: str):
@@ -2274,6 +2435,8 @@ def apply_caches(ctx: Ctx, plan):
             apply_scheduled_nuget(ctx, it)
         elif n == "nuget packages trim":
             apply_nuget_paths(ctx, it)
+        elif "reclaim" in it:
+            apply_reclaim(ctx, it)
         elif n == "pi session gzip":
             res = {"gzipped": 0, "skipped": 0, "failed": 0, "saved": 0}
             for f in ctx.items(it["files"]):
@@ -2334,6 +2497,10 @@ def render_caches(plan, apply, out):
         elif it["name"] == "nuget packages trim":
             det = f"{len(it['paths'])} versions, {human(it.get('size') or 0)}" + (f"; {it['note']}" if it.get("note") else "")
             rows.append([it["name"], (f"deleted {r['deleted']}, failed {r['failed']}" + (f", recovered {r['recovered']} trash dirs" if r.get('recovered') else "") if r else "would delete") if apply else "would delete", det])
+        elif "reclaim" in it:
+            det = f"{len(it['paths'])} entries, {human(it.get('size') or 0)}"
+            rows.append([it["name"], (f"deleted {r['deleted']}, skipped {r['skipped']}, failed {r['failed']}, freed {human(r['freed'])}"
+                                      if r else "remove") if apply else "would remove", det])
         elif it["name"] == "pi session gzip":
             tot = sum(f["size"] for f in it["files"])
             det = f"{len(it['files'])} files, {human(tot)} raw" + (f"; {it['note']}" if it.get("note") else "")
@@ -3046,6 +3213,10 @@ def parse_args(argv):
     ap.add_argument("--nuget-age-days", "--nuget-unused-days", dest="nuget_age_days", type=nonneg_float, default=7)
     ap.add_argument("--nuget-unused-days-low", type=nonneg_float, default=1, metavar="DAYS",
                     help="stricter unused threshold while free space is below --if-free-below (default 1)")
+    ap.add_argument("--artifact-age-days", type=nonneg_float, default=2, metavar="DAYS",
+                    help=".ai-work .trx/.dll/.pdb/.nettrace/.etlx/.dmp/.coverage files older than this are removed (default 2)")
+    ap.add_argument("--package-artifact-age-days", type=nonneg_float, default=7, metavar="DAYS",
+                    help=".ai-work .nupkg/.snupkg/.jar files older than this are removed (default 7)")
     ap.add_argument("--nuget-keep-versions", type=int, default=0)
     ap.add_argument("--session-age-days", type=nonneg_float, default=30)
     ap.add_argument("--handoff-age-days", type=nonneg_float, default=14)
