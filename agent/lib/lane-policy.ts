@@ -409,7 +409,7 @@ export function assessPublication(value: unknown, ctx: Context, file = policyPat
 		const request = validateRequest(value);
 		if (request.kind === "check") return;
 		const loaded = loadPolicy(file);
-		if (!existsSync(file) || loaded.error) return "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer.";
+		if (loaded.error) return "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer.";
 		const ghArgs = toGhPlan(request).authority.ghArgs;
 		// API (and any other) writes are admitted by target repository, not by the session's cwd binding.
 		const target = publicationTarget(request);
@@ -615,14 +615,6 @@ export function assessCommand(command: string, ctx: Context, file = policyPath()
 	if (admission) return admission;
 	const commands = expandedCommands(command, 0, true);
 	const loaded = loadPolicy(file);
-	if (!existsSync(file)) {
-		const writes = commands.filter(words => {
-			if (SHELL_READERS.includes(words[0]?.split("/").pop() ?? "") || readOnlyForm(words)) return false;
-			const gh = publicationArguments(words);
-			return !gh || ghPublication(gh);
-		});
-		return fallbackPublication(writes.map(words => words.join(" ")).join("; "), writes) ? "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer." : undefined;
-	}
 	if (loaded.error) return fallbackPublication(command, commands) ? "Lane policy runknown: publication denied; operator must repair unreadable policy and identify the train writer." : undefined;
 	const policy = loaded.policy!;
 	if (!policy.repositories.length) return;

@@ -17,7 +17,7 @@ No guard was disabled in a live session as part of this work; tests use isolated
 
 ## Policy and revisions
 
-The store is `~/.pi/agent/lane-policy/policy.json`. Loading no file for discovery/bootstrap yields revision 0, with no repositories, bindings/grants/ACKs and **no forbidden-task defaults**; that empty snapshot is not publication authority. An absent, unreadable or corrupt store fails closed for publication. The operator can still use `/lane-policy bootstrap owner/repo` to create it; a valid empty policy with no repositories remains dormant. Malformed/legacy schema fails closed rather than migrating silently. There is no automatic enrollment or repair.
+The optional store is `~/.pi/agent/lane-policy/policy.json`. With no file, the policy is revision 0, has no repositories, no bindings/grants/ACKs and **no forbidden-task defaults**. Restrictions exist only after explicit configuration. Malformed/legacy schema fails closed rather than migrating silently. There is no automatic activation or repair.
 
 Repository identity is the canonical common Git directory (shared by worktrees), plus explicit GitHub `owner/repo`. Session identity comes from Pi's session manager. Each binding records a session, lane, branch and actions. Writers are unique per branch/action and must have matching bindings.
 

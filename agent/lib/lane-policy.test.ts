@@ -337,12 +337,12 @@ test("lane extension dispatches publish before opaque/MCP, including nested chil
 	assert.equal(await host.fire("tool_call", { toolName: "publish", input: { kind: "check", files: ["a"] } }), undefined);
 });
 
-test("missing policy stays available for bootstrap but publication fails closed; unrelated workflows remain allowed", () => {
+test("missing policy is dormant, including unrelated opaque workflows", () => {
 	assert.equal(loadPolicy().policy?.repositories.length, 0);
 	assert.deepEqual(loadPolicy().policy?.forbidden, []);
-	denied("git push origin main"); denied("gh api graphql -f query=mutation"); allowed("python custom.py");
-	allowed(`cat '${join(home, ".pi/agent/bin/pi-publish")}'`); allowed("gh pr view 1 -R Cratis/Studio");
+	allowed("git push origin main"); allowed("gh api graphql -f query=mutation"); allowed("python custom.py");
 	assert.equal(mcpReason(ctx, "github_create_issue"), undefined);
+	assert.equal(assessPublication({ kind: "issue-comment", repo: "Cratis/Studio", number: 1, body: "x" } as never, ctx), undefined);
 });
 test("push needs binding, exact writer and fresh explicit grant", () => {
 	store(); denied("git push origin lane:lane"); grant(); store(); allowed("git push origin lane:lane");
@@ -791,7 +791,6 @@ test("publication enforcement ancestor, glob and directory symlink writes are pr
 });
 
 test("read-only commands on authority files are never policy writes", () => {
-	// Isolate authority-path attribution from the absent-store publication refusal.
 	policy = emptyPolicy(); store();
 	const p = livePaths();
 	for (const c of [
@@ -1039,17 +1038,16 @@ test("typed hook and execution both admit repeated matching publications without
 	}
 	assert.equal(tool.sends(), 3);
 });
-for (const change of ["revoked grants", "revoked session", "expired", "unreadable policy", "deleted policy"]) test(`${change} between typed hook and execution denies before publication`, async t => {
+for (const change of ["revoked grants", "revoked session", "expired", "unreadable policy"]) test(`${change} between typed hook and execution denies before publication`, async t => {
 	const grants = mint(); const f = fake(); laneExtension(f.pi); const tool = publisher();
 	assert.equal(await f.fire("tool_call", { toolName: "publish", input: exceptionRequest }), undefined);
 	if (change === "revoked grants") revokeExceptions();
 	else if (change === "revoked session") revokeExceptions("session");
 	else if (change === "expired") t.mock.method(Date, "now", () => grants[0].expires);
-	else if (change === "unreadable policy") writeFileSync(policyPath(), "{");
-	else rmSync(policyPath());
+	else writeFileSync(policyPath(), "{");
 	assert.equal((await tool.execute(f.extCtx)).isError, true); assert.equal(tool.sends(), 0);
 });
-test("a valid empty policy is dormant without enrollment, unlike an absent policy store", () => {
+test("a valid empty policy is dormant without enrollment, like an absent policy store", () => {
 	policy = emptyPolicy(); store(); allowed("git push origin main"); allowed("gh api graphql -f query=mutation");
 });
 test("revocation during Git attribution is reread before granting an exception", () => {
