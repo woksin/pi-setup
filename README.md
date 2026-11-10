@@ -238,7 +238,7 @@ Lanes operations (use `--dir <folder>` outside the coordination folder):
 - `lanes nudge <ID|coordinator> <text>` sends one line only to a foreground pi session.
 - `lanes resume-check` verifies standing watches, unread inbox and NOW.md after a reset.
 - `lanes green-prs [--new | --ack]` lists green PRs or acknowledges the current list.
-- `lanes close <ID> [--reassign-to ID2] [--reason text] [--quit]` posts a passive BCAST notice + wake for the reassign target and a removal hint; it never removes worktrees or edits lanes.json. `--quit` is opt-in and refuses busy or recently active sessions.
+- `lanes close <ID> [--reassign-to ID2] [--reason text] [--quit] [--keep-worktree]` posts a passive BCAST notice + wake for the reassign target and records the closed state in lanes.json. It then removes the lane worktree only when it is safe: merged into the default branch, clean (apart from `.ai-work`, which is archived first), and no pi running. Otherwise it keeps the worktree and prints why plus a manual removal hint; the branch is never deleted. `--keep-worktree` skips removal. `--quit` is opt-in and refuses busy or recently active sessions.
 Watch exits: 0 fire/OK, 1 nothing/missing, 2 error. Nudge: 0 sent, 3 refused, 4 no tab/pane or print backend.
 
 Optional, macOS only: use `--with docker-guardian`, `--with cleanup`, `--with secret-sweep` or `--with disk-growth` to manage schedules. The installer fills in your home and username and creates `~/Library/LaunchAgents/com.<user>.docker-guardian.plist`, `com.<user>.pi-cleanup.plist`, `com.<user>.secret-sweep.plist` or `com.<user>.disk-growth.plist`. Files under `agent/launchd/` remain manual-install templates, not the managed filenames.

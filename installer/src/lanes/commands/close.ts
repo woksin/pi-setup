@@ -8,6 +8,7 @@ import { alive, descendants } from "../processes.ts";
 import { idleMinutes, laneTarget, piIn } from "../sessions.ts";
 import { clean, closedLine } from "../status-line.ts";
 import { shellQuote } from "../terminal.ts";
+import { tryRemove } from "./close-remove.ts";
 import { nudge } from "./nudge.ts";
 function closeBody(id: string, to: string | undefined, reason: string | undefined, unread: MessageRef[] | undefined): string {
   const body = [`Lane ${id} is closed.${to ? ` Reassigned to ${to}.` : ""}${reason ? ` Reason: ${clean(reason)}` : ""}`, "",
@@ -29,12 +30,12 @@ async function quit(id: string, pid: number, cwd: string, c: Config, root: strin
   }
   ctx.err(`REFUSED: pi ${pid} did not quit`); return false;
 }
-async function removalHint(cwd: string, ctx: LanesCtx): Promise<string> {
-  if (!existsSync(cwd)) return "worktree already removed; no removal hint";
+async function removalHint(cwd: string, ctx: LanesCtx): Promise<{ text: string; clone?: string }> {
+  if (!existsSync(cwd)) return { text: "worktree already removed; no removal hint" };
   const common = await ctx.run("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 10000 });
   if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
-  const clone = shellQuote(dirname(common.stdout.trim())); const wt = shellQuote(cwd);
-  return `when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`;
+  const dir = dirname(common.stdout.trim()); const clone = shellQuote(dir); const wt = shellQuote(cwd);
+  return { text: `when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`, clone: dir };
 }
 function persistClosed(c: Config, root: string, record: { id: string; reason: string; by: string; at: Date }): void {
   c.lanes.find(l => l.id === record.id)!.closed = { reason: record.reason, by: record.by, at: record.at.toISOString() };
@@ -65,6 +66,11 @@ export async function close(id: string, opts: Record<string, string>, c: Config,
     const wake = await backend.send({ from, to, topic, body: `Lane ${id} closed, pick up its work; details in ${message.name}\n` });
     ctx.out(wake.path);
   }
-  ctx.out(hint);
+  if (existsSync(target.cwd)) {
+    const status = opts["keep-worktree"] ? "worktree left: --keep-worktree" : await tryRemove(id, target.cwd, hint.clone, ctx);
+    ctx.out(status);
+    if (status.startsWith("worktree removed")) return 0;
+  }
+  ctx.out(hint.text);
   return 0;
 }

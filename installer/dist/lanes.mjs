@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: caa99f6917a34799c5a894816a975d6375f46e17df73f323939e04bcbc06be70
+// pi-setup-source-sha256: 9182341dc14db721645d9615ccbd16a4e11f565bedefd78a8123673be87a7227
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
-import { realpathSync as realpathSync3 } from "node:fs";
+import { realpathSync as realpathSync4 } from "node:fs";
 
 // src/lanes/ctx.ts
 import { existsSync, realpathSync } from "node:fs";
@@ -124,18 +124,18 @@ function parseDirected(tokens) {
   if (end === start2) return legacyNamedRecipient(tokens, k);
   if (!topic) return void 0;
   if (k < 0) return { from: "", to: [tokens.slice(0, end).join("-")], topic };
-  const left = tokens.slice(0, k);
-  if (!left.length || !left.every(messageIdToken)) return void 0;
+  const left2 = tokens.slice(0, k);
+  if (!left2.length || !left2.every(messageIdToken)) return void 0;
   const right = tokens.slice(start2, end).join("-");
-  return tokens[k] === "to" ? { from: left.join("-"), to: [right], topic } : { from: right, to: [left.join("-")], topic };
+  return tokens[k] === "to" ? { from: left2.join("-"), to: [right], topic } : { from: right, to: [left2.join("-")], topic };
 }
 function legacyNamedRecipient(tokens, k) {
   if (k < 1 || tokens[k] !== "to") return void 0;
-  const left = tokens.slice(0, k);
-  if (!left.every(messageIdToken)) return void 0;
+  const left2 = tokens.slice(0, k);
+  if (!left2.every(messageIdToken)) return void 0;
   const match = /^([a-z][a-z0-9]*(?:-[a-z0-9]+)*?)-((?:[01]\d|2[0-3])[0-5]\d)(?:-([a-z0-9][a-z0-9-]*))?$/.exec(tokens.slice(k + 1).join("-"));
   if (!match) return void 0;
-  return { from: left.join("-"), to: [match[1]], topic: match[3] || match[2] };
+  return { from: left2.join("-"), to: [match[1]], topic: match[3] || match[2] };
 }
 function messageIdToken(token) {
   return /^[A-Z]/.test(token) || /^ttys[0-9]+$/.test(token);
@@ -1577,8 +1577,8 @@ function summary(signals, env) {
   if (names.length) result2.push({ label: "Unparseable messages", names });
   const text2 = optionalText(join16(env.ctx.piAgentDir, "issue-work/registry.jsonl"));
   try {
-    const foreign = registry(text2 ?? "").filter((claim) => !mapped(claim, signals, env));
-    if (foreign.length) result2.push({ label: "Foreign claims", names: foreign.map((claim) => `${claim.repo}#${claim.issue}`) });
+    const foreign2 = registry(text2 ?? "").filter((claim) => !mapped(claim, signals, env));
+    if (foreign2.length) result2.push({ label: "Foreign claims", names: foreign2.map((claim) => `${claim.repo}#${claim.issue}`) });
   } catch {
     result2.push({ label: "Claim summary unavailable", names: ["cannot read issue-work registry"] });
   }
@@ -2855,13 +2855,13 @@ async function assignOrchestrator(plan, { c, root, ctx }) {
 }
 async function createWorktree(lane, opts, env) {
   const { c, root, ctx } = env;
-  const git = (clone2, args, timeoutMs = 1e4) => ctx.run("git", ["-C", clone2, ...args], { timeoutMs });
-  const clone = await findClone(lane, opts, env, git);
-  const base = await prepareBase({ clone, lane, opts, env }, git);
+  const git2 = (clone2, args, timeoutMs = 1e4) => ctx.run("git", ["-C", clone2, ...args], { timeoutMs });
+  const clone = await findClone(lane, opts, env, git2);
+  const base = await prepareBase({ clone, lane, opts, env }, git2);
   const wt = laneDir(lane, c, root, ctx);
-  await addWorktree({ clone, lane, wt, base }, git);
+  await addWorktree({ clone, lane, wt, base }, git2);
   try {
-    const lock = await git(clone, ["worktree", "lock", "--reason", `lanes ${lane.id}`, wt]);
+    const lock = await git2(clone, ["worktree", "lock", "--reason", `lanes ${lane.id}`, wt]);
     if (lock.code !== 0) throw new Error(`git worktree lock failed: ${lock.stderr.trim()}`);
     writePrompt({ lane, wt, base }, env);
     c.lanes.push(lane);
@@ -2873,7 +2873,7 @@ async function createWorktree(lane, opts, env) {
   }
   return 0;
 }
-async function findClone(lane, opts, { c, root, ctx }, git) {
+async function findClone(lane, opts, { c, root, ctx }, git2) {
   const [owner, name] = lane.repo.split("/");
   const repos = expand(c.reposRoot, c, root, ctx.home);
   const candidates = [
@@ -2882,29 +2882,29 @@ async function findClone(lane, opts, { c, root, ctx }, git) {
     join28(repos, name),
     join28(repos, owner, name)
   ].filter((p) => Boolean(p));
-  for (const path of candidates) if ((await git(path, ["rev-parse", "--git-dir"])).code === 0) return path;
+  for (const path of candidates) if ((await git2(path, ["rev-parse", "--git-dir"])).code === 0) return path;
   throw new Error(`clone it first: gh repo clone ${lane.repo} ${join28(repos, name)}`);
 }
-async function prepareBase(input, git) {
+async function prepareBase(input, git2) {
   const { clone, lane, opts, env: { c, ctx } } = input;
-  const remote = await git(clone, ["remote", "get-url", "origin"]);
+  const remote = await git2(clone, ["remote", "get-url", "origin"]);
   if (!remote.stdout.trim().endsWith(lane.repo) && !remote.stdout.trim().endsWith(`${lane.repo}.git`)) {
     ctx.err(`warning: origin does not match ${lane.repo}`);
   }
   const base = opts.base || c.baseBranch;
-  const fetch = await git(clone, ["fetch", "origin"], 12e4);
-  const ref = await git(clone, ["rev-parse", "--verify", `${base}^{commit}`]);
+  const fetch = await git2(clone, ["fetch", "origin"], 12e4);
+  const ref = await git2(clone, ["rev-parse", "--verify", `${base}^{commit}`]);
   if (ref.code !== 0) throw new Error(`base ${base} does not resolve`);
   if (fetch.code !== 0) ctx.err(`warning: fetch origin failed; using local ${base}`);
   return base;
 }
-async function addWorktree(input, git) {
+async function addWorktree(input, git2) {
   const { clone, lane, wt, base } = input;
   if (existsSync10(wt)) throw new Error(`worktree already exists: ${wt}`);
-  if ((await git(clone, ["show-ref", "--verify", "--quiet", `refs/heads/${lane.branch}`])).code === 0) {
+  if ((await git2(clone, ["show-ref", "--verify", "--quiet", `refs/heads/${lane.branch}`])).code === 0) {
     throw new Error(`branch already exists: ${lane.branch}`);
   }
-  const created = await git(clone, ["worktree", "add", "-b", lane.branch, wt, base], 12e4);
+  const created = await git2(clone, ["worktree", "add", "-b", lane.branch, wt, base], 12e4);
   if (created.code !== 0) throw new Error(`git worktree add failed: ${created.stderr.trim()}`);
 }
 function writePrompt(input, { c, root, ctx }) {
@@ -4767,10 +4767,10 @@ import { join as join41 } from "node:path";
 
 // src/lanes/stale-check.ts
 var completedCheck = (check) => check.status === "completed" && ["success", "skipped", "neutral"].includes(check.conclusion);
-function usableChecks(checks, head) {
-  if (!checks.check_runs.length) return false;
-  if (checks.total_count > checks.check_runs.length) return false;
-  return checks.check_runs.every(completedCheck) && checks.check_runs.every((check) => check.head_sha === head);
+function usableChecks(checks2, head) {
+  if (!checks2.check_runs.length) return false;
+  if (checks2.total_count > checks2.check_runs.length) return false;
+  return checks2.check_runs.every(completedCheck) && checks2.check_runs.every((check) => check.head_sha === head);
 }
 var sha = (value) => typeof value === "string" && /^[a-f0-9]{40,64}$/.test(value);
 async function api(ctx, path, budget) {
@@ -4781,8 +4781,8 @@ async function api(ctx, path, budget) {
 }
 async function ciHead({ repo, pr }, ctx, budget) {
   if (!sha(pr.headRefOid)) throw new Error("missing CI head");
-  const checks = await api(ctx, `repos/${repo}/commits/${pr.headRefOid}/check-runs?per_page=100`, budget);
-  if (!usableChecks(checks, pr.headRefOid)) throw new Error("incomplete CI evidence");
+  const checks2 = await api(ctx, `repos/${repo}/commits/${pr.headRefOid}/check-runs?per_page=100`, budget);
+  if (!usableChecks(checks2, pr.headRefOid)) throw new Error("incomplete CI evidence");
   return pr.headRefOid;
 }
 async function comparisonBase(repo, head, ctx, budget) {
@@ -4879,8 +4879,90 @@ async function greenPrs(opts, c, root, ctx) {
 }
 
 // src/lanes/commands/close.ts
-import { existsSync as existsSync17 } from "node:fs";
-import { basename as basename6, dirname as dirname8 } from "node:path";
+import { existsSync as existsSync18 } from "node:fs";
+import { basename as basename7, dirname as dirname9 } from "node:path";
+
+// src/lanes/commands/close-remove.ts
+import { cpSync, existsSync as existsSync17, mkdirSync as mkdirSync13, realpathSync as realpathSync3 } from "node:fs";
+import { basename as basename6, dirname as dirname8, join as join42 } from "node:path";
+var GIT_MS = 1e4;
+var AI_WORK = ".ai-work";
+var left = (why) => ({ ok: false, why });
+async function git(ctx, dir, args) {
+  try {
+    const r = await ctx.run("git", ["-C", dir, ...args], { timeoutMs: GIT_MS });
+    return r.timedOut ? void 0 : { code: r.code, out: r.stdout };
+  } catch {
+    return void 0;
+  }
+}
+var real = (p) => {
+  try {
+    return realpathSync3(p);
+  } catch {
+    return void 0;
+  }
+};
+function foreign(porcelain) {
+  return porcelain.split("\n").filter((l) => l.trim()).filter((l) => {
+    const path = l.slice(3).replace(/^"|"$/g, "");
+    return path !== AI_WORK && path !== `${AI_WORK}/` && !path.startsWith(`${AI_WORK}/`);
+  });
+}
+async function isClean(ctx, cwd) {
+  const top = await git(ctx, cwd, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
+  const root = top?.code === 0 ? real(top.out.trim()) : void 0;
+  if (!root || root !== real(cwd)) return left("worktree root could not be verified");
+  const status2 = await git(ctx, cwd, ["status", "--porcelain", "--ignored"]);
+  if (!status2 || status2.code !== 0) return left("git status failed");
+  const other = foreign(status2.out);
+  return other.length ? left(`worktree is dirty (${other.length} path${other.length === 1 ? "" : "s"}, e.g. ${other[0].trim()})`) : { ok: true };
+}
+async function isMerged(ctx, clone, cwd) {
+  const head = await git(ctx, clone, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  const ref = head?.code === 0 ? head.out.trim() : "";
+  if (!ref) return left("default branch unknown");
+  const merged = await git(ctx, cwd, ["merge-base", "--is-ancestor", "HEAD", ref]);
+  if (!merged) return left("merge check failed");
+  if (merged.code === 1) return left("not merged");
+  return merged.code === 0 ? { ok: true } : left("merge check failed");
+}
+async function archive3(ctx, clone, cwd) {
+  const src = join42(cwd, AI_WORK);
+  if (!existsSync17(src)) return { ok: true };
+  const base = join42(clone, AI_WORK, "keep", "removed-worktrees", basename6(cwd));
+  const dest = existsSync17(base) ? `${base}-${ctx.now().getTime()}` : base;
+  const ignored = await git(ctx, clone, ["check-ignore", "-q", dest]);
+  if (!ignored || ignored.code !== 0) return left(`archive path is not git-ignored: ${dest}`);
+  try {
+    mkdirSync13(dirname8(dest), { recursive: true });
+    cpSync(src, dest, { recursive: true, errorOnExist: true, force: false });
+  } catch (error) {
+    return left(`archive of ${AI_WORK} failed: ${error.message}`);
+  }
+  return { ok: true };
+}
+async function checks(id, cwd, clone, ctx) {
+  if (!existsSync17(cwd)) return left("worktree already removed");
+  if (await piIn(cwd, ctx)) return left(`${id} is still running`);
+  for (const step of [() => isClean(ctx, cwd), () => isMerged(ctx, clone, cwd), () => archive3(ctx, clone, cwd)]) {
+    const verdict2 = await step();
+    if (!verdict2.ok) return verdict2;
+  }
+  return { ok: true };
+}
+async function tryRemove(id, cwd, clone, ctx) {
+  if (!clone) return "worktree left: clone could not be determined";
+  const verdict2 = await checks(id, cwd, clone, ctx);
+  if (!verdict2.ok) return `worktree left: ${verdict2.why}`;
+  await git(ctx, clone, ["worktree", "unlock", cwd]);
+  const removed = await git(ctx, clone, ["worktree", "remove", cwd]);
+  if (removed?.code === 0) return `worktree removed: ${cwd} (${AI_WORK} archived under ${join42(clone, AI_WORK, "keep", "removed-worktrees")}; branch kept)`;
+  await git(ctx, clone, ["worktree", "lock", "--reason", `lanes ${id}`, cwd]);
+  return "worktree left: git refused to remove it (re-locked)";
+}
+
+// src/lanes/commands/close.ts
 function closeBody(id, to, reason, unread2) {
   const body = [
     `Lane ${id} is closed.${to ? ` Reassigned to ${to}.` : ""}${reason ? ` Reason: ${clean(reason)}` : ""}`,
@@ -4895,7 +4977,7 @@ function closeBody(id, to, reason, unread2) {
 `;
 }
 async function quit(id, pid, cwd, c, root, ctx) {
-  const busy = (await descendants2(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename6(cmd.split(/\s+/)[0])));
+  const busy = (await descendants2(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename7(cmd.split(/\s+/)[0])));
   if (busy.length) {
     ctx.err(`REFUSED: busy children: ${busy.join(" ")}`);
     return false;
@@ -4914,12 +4996,13 @@ async function quit(id, pid, cwd, c, root, ctx) {
   return false;
 }
 async function removalHint(cwd, ctx) {
-  if (!existsSync17(cwd)) return "worktree already removed; no removal hint";
+  if (!existsSync18(cwd)) return { text: "worktree already removed; no removal hint" };
   const common = await ctx.run("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 });
   if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
-  const clone = shellQuote(dirname8(common.stdout.trim()));
+  const dir = dirname9(common.stdout.trim());
+  const clone = shellQuote(dir);
   const wt = shellQuote(cwd);
-  return `when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`;
+  return { text: `when merged, remove the worktree: git -C ${clone} worktree unlock ${wt} && git -C ${clone} worktree remove ${wt}`, clone: dir };
 }
 function persistClosed(c, root, record2) {
   c.lanes.find((l) => l.id === record2.id).closed = { reason: record2.reason, by: record2.by, at: record2.at.toISOString() };
@@ -4940,7 +5023,7 @@ async function close(id, opts, c, root, ctx) {
   const hint = await removalHint(target.cwd, ctx);
   const backend = backendFor(c, ctx, root);
   const unread2 = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
-  const pid = existsSync17(target.cwd) ? await piIn(target.cwd, ctx) : void 0;
+  const pid = existsSync18(target.cwd) ? await piIn(target.cwd, ctx) : void 0;
   if (pid && opts.quit && !await quit(id, pid, target.cwd, c, root, ctx)) return 1;
   if (pid && !opts.quit) ctx.err(`${id} is still running; type /quit in its session or use --quit`);
   const at = ctx.now();
@@ -4956,12 +5039,17 @@ async function close(id, opts, c, root, ctx) {
 ` });
     ctx.out(wake.path);
   }
-  ctx.out(hint);
+  if (existsSync18(target.cwd)) {
+    const status2 = opts["keep-worktree"] ? "worktree left: --keep-worktree" : await tryRemove(id, target.cwd, hint.clone, ctx);
+    ctx.out(status2);
+    if (status2.startsWith("worktree removed")) return 0;
+  }
+  ctx.out(hint.text);
   return 0;
 }
 
 // src/lanes/commands/status.ts
-import { existsSync as existsSync18 } from "node:fs";
+import { existsSync as existsSync19 } from "node:fs";
 async function status(c, root, ctx, all = false) {
   const backend = backendFor(c, ctx, root);
   const processes = await runningPi(ctx);
@@ -5023,7 +5111,7 @@ function showClosed(c, ctx) {
 }
 function findPid(cwd, processes, ctx) {
   let pid = "missing";
-  if (existsSync18(cwd)) {
+  if (existsSync19(cwd)) {
     try {
       pid = String(processes.find((p) => p.cwd === ctx.realpath(cwd))?.pid || "-");
     } catch {
@@ -5077,7 +5165,7 @@ async function who(args, opts, c, root, ctx) {
 
 // src/lanes/commands/unacked.ts
 import { statSync as statSync13 } from "node:fs";
-import { join as join42 } from "node:path";
+import { join as join43 } from "node:path";
 var ACK_MINUTES_DEFAULT = 30;
 var ACK_LOOKBACK_HOURS_DEFAULT = 24;
 var HUMAN_MESSAGE_LIMIT = 20;
@@ -5158,7 +5246,7 @@ function readMarkers(dir, directed) {
   const markers = /* @__PURE__ */ new Map();
   for (const id of new Set(directed.flatMap((m) => m.recipients))) {
     try {
-      const stat2 = statSync13(join42(dir, `${id}-inbox.marker`));
+      const stat2 = statSync13(join43(dir, `${id}-inbox.marker`));
       if (!stat2.isFile()) throw new Error(`invalid inbox marker for ${id}`);
       markers.set(id, stat2.mtimeMs);
     } catch (e) {
@@ -5279,7 +5367,7 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
   reap [ID] [--minutes n] [--dry-run | --apply] [--handoff-to ID] [--json]
   handoff <ID> --to ID | --accept --from ID
   snooze <ID> --until ISO|+90m | --clear
-  close <ID> [--reassign-to ID2] [--reason text] [--from ID] [--quit]
+  close <ID> [--reassign-to ID2] [--reason text] [--from ID] [--quit] [--keep-worktree]
 Ops exits: 0 fire/OK, 1 nothing/missing, 2 usage/I/O/gh failure.
 Send: 3 ownership refusal (with --issue); --force requires an explicit reason.
 Nudge: 0 sent, 3 not sent, 4 tab/pane not found or print.
@@ -5332,7 +5420,7 @@ var OPTIONS = {
   handoff: ["to", "accept", "from"],
   reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
   snooze: ["until", "clear"],
-  close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"]
+  close: ["reassign-to", "reason", "from", "quit", "keep-worktree", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"]
 };
 var FLAGS = [
   "write",
@@ -5341,6 +5429,7 @@ var FLAGS = [
   "new",
   "ack",
   "quit",
+  "keep-worktree",
   "dry-run",
   "json",
   "direct",
@@ -5526,7 +5615,7 @@ function appendPositional({ argv, index }, positional) {
 }
 
 // src/lanes/cli.ts
-if (process.argv[1] && realpathSync3(process.argv[1]) === fileURLToPath3(import.meta.url)) {
+if (process.argv[1] && realpathSync4(process.argv[1]) === fileURLToPath3(import.meta.url)) {
   process.exitCode = await main(process.argv.slice(2), realLanesCtx());
 }
 export {
