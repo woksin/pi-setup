@@ -69,7 +69,26 @@ test("check has typed admission and no later publication guarantee; warnings/err
 	const result = await registered.execute("id", { kind: "check", files: ["draft"] }, undefined, undefined, context);
 	assert.equal(result.details.code, "scan-clean"); assert.ok(!JSON.stringify(result).includes("private-value"));
 	const failed = tool({ ...allowed, send: async () => { throw new Error("private-value"); } });
-	assert.equal((await failed.execute("id", request, undefined, undefined, context)).details.code, "adapter-failed");
+	const failure = await failed.execute("id", request, undefined, undefined, context);
+	assert.deepEqual(failure.details, { code: "adapter-failed", detail: "publish-threw" });
+	assert.equal(failure.content[0].text, "publish: adapter-failed\ndetail: publish-threw");
+	assert.ok(!JSON.stringify(failure).includes("private-value"));
+});
+
+test("CLI names an escaped publisher failure without leaking its message", async () => {
+	const result = await cliMain(["check", "--file", "x"], { send: async () => { throw new Error("private-value"); } });
+	assert.deepEqual(result, { text: "publish: adapter-failed\ndetail: publish-threw", exitCode: 4 });
+	assert.ok(!result.text.includes("private-value"));
+});
+
+for (const code of ["ENOENT", "EACCES", "private-value", "ENOENT private-value", "ENOENT\n", "ENOENT\r", "EE", "E" + "A".repeat(20), undefined]) test(`CLI names unavailable cwd with only a safe errno (${code})`, async () => {
+	const result = await cliMain(["check", "--file", "x"], {
+		cwd: () => { throw Object.assign(new Error("private-value"), { code }); },
+		send: async () => assert.fail("cwd failure must not reach publication"),
+	});
+	const errno = code === "ENOENT" || code === "EACCES" ? ` ${code}` : "";
+	assert.deepEqual(result, { text: `publish: adapter-failed\ndetail: cwd-unavailable${errno}`, exitCode: 4 });
+	assert.ok(!result.text.includes("private-value"));
 });
 
 test("CLI help is standalone and parsed requests use only shared publisher core", async () => {

@@ -35,6 +35,7 @@ SCAN_REFUSED_EXIT = 4
 SCAN_TIMEOUT = 60
 # The one value-free code line forwarded for infrastructure failures (any non-zero exit other than 3).
 CODE_LINE = re.compile(r'^publish: [a-z-]{1,40}$')
+DETAIL_LINE = re.compile(r'^detail: [a-z-]{1,40}( E[A-Z0-9_]{2,19})?$')
 # The only scanner output lines that are ever forwarded on a refusal; everything else is withheld.
 SCAN_LINE = re.compile(r'^(publish: [a-z-]+|[\w\[\]]+: line \d+ [a-z-]+|findings: \d+)$')
 
@@ -88,16 +89,53 @@ def run_scanner(block):
         path = os.path.join(directory, 'status.md')
         with os.fdopen(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), 'wb') as handle:
             handle.write(block.encode('utf-8'))
+        options = {}
+        try:
+            os.getcwd()
+        except OSError:
+            options['cwd'] = directory
         return subprocess.run([os.path.join(agent, 'bin', 'pi-publish'), 'check', '--file', path],
-                              capture_output=True, text=True, timeout=SCAN_TIMEOUT)
+                              capture_output=True, text=True, timeout=SCAN_TIMEOUT, **options)
     except UnicodeEncodeError:
         sys.exit('status text is not valid UTF-8; status not written')
+    except FileNotFoundError:
+        sys.exit('publication scanner unavailable (binary-missing); status not written')
+    except PermissionError:
+        sys.exit('publication scanner unavailable (binary-not-executable); status not written')
+    except subprocess.TimeoutExpired:
+        sys.exit('publication scanner unavailable (timeout); status not written')
     except (OSError, subprocess.SubprocessError):
-        sys.exit('publication scanner unavailable; status not written')
+        sys.exit('publication scanner unavailable (spawn-failed); status not written')
     finally:
         for name in os.listdir(directory):
             os.unlink(os.path.join(directory, name))
         os.rmdir(directory)
+
+
+def scanner_failure_step(result):
+    """Classify unstructured child failures without ever forwarding stderr values."""
+    if result.returncode in (126, 127):
+        return 'interpreter-or-binary-not-found'
+    if any(token in result.stderr for token in ('ERR_MODULE_NOT_FOUND', 'ERR_UNKNOWN_FILE_EXTENSION', 'strip-types')):
+        return 'node-too-old'
+    if any(token in result.stderr for token in ('uv_cwd', 'ENOENT')):
+        return 'cwd-unavailable'
+    return None
+
+
+def forward_scanner_failure(result):
+    """Forward only the code and one strictly value-free detail, or a fixed inferred step."""
+    lines = result.stdout.splitlines()
+    code_line = next((line for line in lines if CODE_LINE.match(line)), None)
+    if code_line:
+        print(code_line, file=sys.stderr)
+        detail_line = next((line for line in lines if DETAIL_LINE.match(line)), None)
+        if detail_line:
+            print(detail_line, file=sys.stderr)
+    else:
+        step = scanner_failure_step(result)
+        if step:
+            print(f'step: {step}', file=sys.stderr)
 
 
 def scan_status(block):
@@ -106,9 +144,7 @@ def scan_status(block):
     if result.returncode == 0:
         return
     if result.returncode != 3:
-        code_line = next((line for line in result.stdout.splitlines() if CODE_LINE.match(line)), None)
-        if code_line:
-            print(code_line, file=sys.stderr)
+        forward_scanner_failure(result)
         sys.exit(f'publication scanner failed (exit {result.returncode}); status not written')
     forwarded = [line for line in result.stdout.splitlines() if SCAN_LINE.match(line)]
     print('\n'.join(forwarded) if forwarded else 'scanner output withheld', file=sys.stderr)
