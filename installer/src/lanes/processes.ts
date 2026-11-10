@@ -62,7 +62,7 @@ export async function ttyOf(ctx: LanesCtx, pid: number): Promise<string | undefi
   const tty = r.stdout.trim();
   return r.code === 0 && /^[A-Za-z0-9/]+$/.test(tty) ? tty : undefined;
 }
-async function processCwd(ctx: LanesCtx, pid: number): Promise<string | undefined> {
+export async function processCwd(ctx: LanesCtx, pid: number): Promise<string | undefined> {
   if (ctx.readCwd) return ctx.readCwd(pid);
   const r = ctx.platform === "darwin"
     ? await ctx.run("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { timeoutMs: 10000 })
@@ -96,6 +96,34 @@ export async function descendants(ctx: LanesCtx, rootPid: number): Promise<strin
     for (const row of rows) if (ids.has(row.parent) && !ids.has(row.pid)) { ids.add(row.pid); changed = true; }
   }
   return rows.filter((r) => r.pid !== rootPid && ids.has(r.pid)).map((r) => r.command);
+}
+interface Ancestor { pid: number; parent: number; comm: string }
+function ancestorRows(text: string): Map<number, Ancestor> {
+  const rows = new Map<number, Ancestor>();
+  for (const line of text.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    if (match) rows.set(Number(match[1]), { pid: Number(match[1]), parent: Number(match[2]), comm: match[3] });
+  }
+  return rows;
+}
+function nearestPi(rows: Map<number, Ancestor>, startPid: number): number | undefined {
+  const visited = new Set<number>(); let pid = startPid;
+  for (let hops = 0; hops < 64; hops++) {
+    if (visited.has(pid)) return undefined;
+    visited.add(pid);
+    const row = rows.get(pid); if (!row) return undefined;
+    if (row.comm.split("/").at(-1) === "pi") return row.pid;
+    pid = row.parent;
+  }
+  return undefined;
+}
+/** Resolve a long-lived Pi ancestor instead of registering the short-lived tool shell. */
+export async function ancestorChain(ctx: LanesCtx, startPid = process.pid): Promise<number | undefined> {
+  try {
+    const result = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,comm="], { timeoutMs: 10000 });
+    if (result.code !== 0 || result.timedOut) return undefined;
+    return nearestPi(ancestorRows(result.stdout), startPid);
+  } catch { return undefined; }
 }
 export async function alive(ctx: LanesCtx, pid: number): Promise<boolean> {
   return (await ctx.run("ps", ["-p", String(pid)], { timeoutMs: 10000 })).code === 0;

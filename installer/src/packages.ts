@@ -10,7 +10,7 @@ export const PINNED_PACKAGES = [
   { name: "@woksin/pi-jobs", version: "0.5.0" },
   { name: "@woksin/pi-context-budget", version: "0.5.0" },
   { name: "@woksin/pi-recover", version: "0.1.1" },
-  { name: "@woksin/pi-orch", version: "0.2.0" },
+  { name: "@woksin/pi-orch", version: "0.3.0" },
 ];
 export const PACKAGE_BINS = [
   ["pi-context-budget", "pi-session"], ["pi-orch", "orch"], ["pi-orch", "orch-poll"],

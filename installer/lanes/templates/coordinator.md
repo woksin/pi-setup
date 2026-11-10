@@ -23,6 +23,8 @@ Read first:
 First turn: run `lanes --dir {{root_sh}} status`, also run `lanes --dir {{root_sh}} resume-check` after every reset, then arm the watches in WATCHES.md. Keep NOW.md and STATE.md accurate as work changes. Never silently drop an inbox watch across a handoff.
 
 ## Assignment routing
+For a hand-started Pi session, run `lanes register <ID>` from its tool shell: it finds the nearest Pi ancestor and uses that process's cwd. Use `--pid PID` or `--cwd DIR` to override discovery; `lanes unregister <ID>` retires the identity. Registration does not edit config or require pi-orch. An unknown-recipient `send` warning lists up to three closest live candidates, but still sends to the requested ID; verify rather than guessing.
+
 Before assigning, run `lanes who --issue OWNER/REPO#N` or `lanes who --repo R`; prefer the live holder or an idle same-repository lane. Check source notes: unknown liveness, stale heartbeats and missing sources are not idle proof. `unverified` or `delivered` means verify, not reassign. Context use is currently `-` (no reliable local signal).
 
 Use `lanes unacked [--minutes N] [--hours N]` for recipient summaries and the 20 oldest outstanding message rows (default last 24 hours, retired/closed recipients excluded; `--hours 336` restores 14 days, `--include-retired` includes ended recipients, `--json` shows all rows): `unread` needs delivery/watch attention, while `read-no-reply` means read but not acknowledged by a reply.

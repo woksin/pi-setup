@@ -17,6 +17,7 @@ import { messagesPrune } from "./retention.ts";
 import { status } from "./commands/status.ts";
 import { who } from "./commands/who.ts";
 import { unacked } from "./commands/unacked.ts";
+import { register, unregister } from "./commands/register.ts";
 
 export const HELP = `Usage: lanes [--dir root] <command> [options]
   adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
@@ -26,6 +27,8 @@ export const HELP = `Usage: lanes [--dir root] <command> [options]
   start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
   run <ID>|coordinator [--from-handoff ID|file]
   resume <ID> [--terminal backend]
+  register <ID> [--cwd DIR] [--pid PID]
+  unregister <ID>
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
   who [--repo R] [--issue N|OWNER/REPO#N] [--json]
   unacked [--json] [--minutes N] [--hours N] [--include-retired]
@@ -64,6 +67,7 @@ const OPTIONS: Record<string, string[]> = {
     "orchestrator", "orchestrator-id", "no-orchestrator"],
   run: ["from-handoff", "handoff-digest"], start: ["terminal", "from-handoff"], resume: ["terminal"], send: ["m", "from", "direct", "issue", "force"], who: ["repo", "issue", "json"],
   unacked: ["json", "minutes", "hours", "include-retired"],
+  register: ["cwd", "pid"], unregister: [],
   status: ["all"], messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"], nudge: ["terminal"], "resume-check": [], "green-prs": ["new", "ack"],
   handoff: ["to", "accept", "from"], reap: ["minutes", "dry-run", "json", "apply", "handoff-to"],
@@ -123,6 +127,7 @@ function validateInvocation({ command, positional, opts }: Invocation): void {
   validateOptions({ command, opts });
   const bounds: Record<string, [number, number]> = {
     adopt: [0, 0], init: [0, 1], add: [1, 1], run: [1, 1], start: [1, 1], resume: [1, 1], send: [2, 3], who: [0, 0], status: [0, 0], messages: [1, 1],
+    register: [1, 1], unregister: [1, 1],
     unacked: [0, 0], "idle-check": [0, 0], nudge: [2, 2], "resume-check": [0, 0], "green-prs": [0, 0], handoff: [1, 1],
     reap: [0, 1], snooze: [1, 1], close: [opts.inactive ? 0 : 1, 1],
   };
@@ -145,6 +150,7 @@ async function dispatch(input: Invocation, env: CommandEnv): Promise<number> {
     resume: () => resume(args, opts, env),
     messages: () => messagesPrune(opts, c, root, ctx), send: () => send(args, opts, c, root, ctx), who: () => who(args, opts, c, root, ctx),
     unacked: () => unacked(args, opts, c, root, ctx),
+    register: () => register(args[0], opts, root, ctx), unregister: () => unregister(args[0], root, ctx),
     "idle-check": () => idleCheck(opts, c, root, ctx), nudge: () => nudge(args[0], args[1], opts, c, root, ctx),
     "resume-check": () => resumeCheck(c, root, ctx), "green-prs": () => greenPrs(opts, c, root, ctx),
     handoff: () => handoff(args, opts, env), snooze: () => snooze(args, opts, env),

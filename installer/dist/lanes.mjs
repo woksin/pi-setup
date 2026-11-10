@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 66716138c28880307f956723919e19cdcc3eff64e528fe2e5e892bdc22dcb307
+// pi-setup-source-sha256: 050ee14a1b9914d2686143fce0cbcc9db5770d3592180f53ec98018fd6c6d89a
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -17,15 +17,15 @@ import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 var MAX_BUFFER = 16 * 1024 * 1024;
 function inherited(cmd, args, options) {
-  return new Promise((resolve11) => {
+  return new Promise((resolve12) => {
     const child = spawn(cmd, args, { cwd: options.cwd, env: { ...process.env, ...options.env }, stdio: "inherit" });
-    child.on("error", (error) => resolve11({ code: null, stdout: "", stderr: error.message, timedOut: false }));
-    child.on("close", (code) => resolve11({ code, stdout: "", stderr: "", timedOut: false }));
+    child.on("error", (error) => resolve12({ code: null, stdout: "", stderr: error.message, timedOut: false }));
+    child.on("close", (code) => resolve12({ code, stdout: "", stderr: "", timedOut: false }));
   });
 }
 var realRun = (cmd, args, options = {}) => {
   if (options.inherit) return inherited(cmd, args, options);
-  return new Promise((resolve11) => {
+  return new Promise((resolve12) => {
     const child = execFile(
       cmd,
       args,
@@ -33,7 +33,7 @@ var realRun = (cmd, args, options = {}) => {
       (error, stdout, stderr) => {
         const failure = error;
         const code = failure ? typeof failure.code === "number" ? failure.code : null : 0;
-        resolve11({
+        resolve12({
           code,
           stdout: String(stdout ?? ""),
           stderr: failure && code === null && !stderr ? failure.message : String(stderr ?? ""),
@@ -1824,7 +1824,7 @@ async function unchanged(env, s) {
   if (version(current) !== version(s)) throw new Error("handoff request safety evidence changed");
 }
 async function waitForContext(env, s, at) {
-  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
+  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve12) => setTimeout(resolve12, ms)));
   let reason = "lane handoff absent or stale";
   for (let attempt = 0; attempt < 30; attempt++) {
     try {
@@ -1874,7 +1874,7 @@ async function exited(env, pid) {
   return false;
 }
 async function awaitExit(env, pid) {
-  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve11) => setTimeout(resolve11, ms)));
+  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve12) => setTimeout(resolve12, ms)));
   for (let attempt = 0; attempt < 5; attempt++) {
     if (await exited(env, pid)) return;
     await sleep(200);
@@ -2334,6 +2334,36 @@ async function descendants2(ctx, rootPid) {
     }
   }
   return rows.filter((r2) => r2.pid !== rootPid && ids.has(r2.pid)).map((r2) => r2.command);
+}
+function ancestorRows(text2) {
+  const rows = /* @__PURE__ */ new Map();
+  for (const line of text2.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    if (match) rows.set(Number(match[1]), { pid: Number(match[1]), parent: Number(match[2]), comm: match[3] });
+  }
+  return rows;
+}
+function nearestPi(rows, startPid) {
+  const visited = /* @__PURE__ */ new Set();
+  let pid = startPid;
+  for (let hops = 0; hops < 64; hops++) {
+    if (visited.has(pid)) return void 0;
+    visited.add(pid);
+    const row = rows.get(pid);
+    if (!row) return void 0;
+    if (row.comm.split("/").at(-1) === "pi") return row.pid;
+    pid = row.parent;
+  }
+  return void 0;
+}
+async function ancestorChain(ctx, startPid = process.pid) {
+  try {
+    const result2 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,comm="], { timeoutMs: 1e4 });
+    if (result2.code !== 0 || result2.timedOut) return void 0;
+    return nearestPi(ancestorRows(result2.stdout), startPid);
+  } catch {
+    return void 0;
+  }
 }
 async function alive(ctx, pid) {
   return (await ctx.run("ps", ["-p", String(pid)], { timeoutMs: 1e4 })).code === 0;
@@ -3212,6 +3242,7 @@ async function readIssueRegister(ctx) {
 // src/lanes/roster.ts
 var HEARTBEAT_STALE_MIN = 15;
 var heldClaims = /* @__PURE__ */ Symbol("held claims");
+var attributedProcess = /* @__PURE__ */ Symbol("attributed process");
 function readJsonDir(dir, valid) {
   try {
     const names = readdirSync11(dir).filter((n) => n.endsWith(".json"));
@@ -3270,10 +3301,12 @@ function rosterSeeds(c, root, ctx) {
     ...c.lanes.map((l) => ({ ...l, cwd: canonical(laneDir(l, c, root, ctx), ctx), retired: Boolean(l.retired || l.closed) }))
   ];
 }
-async function readRoster(c, root, ctx, register) {
-  const data = register ?? await readIssueRegister(ctx);
+async function readRoster(c, root, ctx, register2) {
+  const data = register2 ?? await readIssueRegister(ctx);
   const processes = await runningPiChecked(ctx);
   const registrations = readRegistrations(root, registrationCutoff(c, ctx.now()));
+  const checkedRegistrations = checkRegistrations(registrations.values, processes, ctx);
+  const parents = await registrationParents(checkedRegistrations, ctx);
   const orch = join32(ctx.home, ".pi/orch");
   const heartbeats = readJsonDir(join32(orch, "heartbeats"), (v) => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
   const sessions = readJsonDir(join32(orch, "sessions"), (v) => v && Number.isInteger(v.pid) && (v.id === void 0 || typeof v.id === "string"));
@@ -3283,11 +3316,12 @@ async function readRoster(c, root, ctx, register) {
   const messages2 = await readMessages(c, root, ctx);
   const lanes = rosterSeeds(c, root, ctx);
   const idle2 = /* @__PURE__ */ new Map();
-  for (const cwd of /* @__PURE__ */ new Set([...lanes.map((l) => l.cwd), ...rosterProcesses(processes.procs, data).map((p) => p.cwd)])) idle2.set(cwd, idleMinutes2(cwd, ctx) ?? null);
+  for (const cwd of /* @__PURE__ */ new Set([...lanes.map((l) => l.cwd), ...livePiProcesses(processes.procs, data).map((p) => p.cwd)])) idle2.set(cwd, idleMinutes2(cwd, ctx) ?? null);
   return {
     lanes,
     processes,
-    registrations: checkRegistrations(registrations.values, processes, ctx),
+    registrations: checkedRegistrations,
+    registrationParents: parents,
     register: data,
     heartbeats: heartbeats.values,
     sessions: sessions.values,
@@ -3308,11 +3342,8 @@ async function readRoster(c, root, ctx, register) {
     }
   };
 }
-function matchedSessions(cwd, pids, data) {
-  return [...new Set(data.leases.filter((l) => {
-    const live = data.liveness.get(l.sessionId);
-    return live?.status === "live" && live.pid === l.pid && (pids.length ? pids.includes(l.pid) : Boolean(cwd && l.cwd === cwd));
-  }).map((l) => l.sessionId))];
+function sessionsForRow(row) {
+  return row[attributedProcess]?.sessions ?? [];
 }
 function emptyRow(lane, identity2) {
   return {
@@ -3333,44 +3364,49 @@ function emptyRow(lane, identity2) {
     notes: []
   };
 }
-function heartbeatFor2(pid, input) {
-  return input.heartbeats.filter((h) => h.pid === pid).sort((a, b) => b.at.localeCompare(a.at))[0];
-}
 function fresh2(h, now) {
   return Boolean(h && Date.parse(h.at) >= now.getTime() - HEARTBEAT_STALE_MIN * 6e4);
 }
-function unregisteredProcess(p, input) {
-  const session = input.sessions.find((s) => s.pid === p.pid);
-  const h = heartbeatFor2(p.pid, input);
-  const id = session?.id || h?.id;
-  const row = emptyRow(id || `unregistered-p${p.pid}`, id ? "orch" : "unregistered");
-  row.pid = p.pid;
-  row.worktree = p.cwd || session?.cwd || null;
-  if (session) row.evidence.push("orch-session");
-  if (!id) row.notes.push("identity unavailable: unregistered");
-  return row;
-}
-function rosterProcesses(procs, register) {
-  const found = new Map(procs.map((p) => [p.pid, p]));
-  for (const lease of register.leases) {
-    const live = register.liveness.get(lease.sessionId);
-    if (live?.status !== "live" || live.pid !== lease.pid || found.has(lease.pid)) continue;
-    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+function attributionIdentity(attribution) {
+  switch (attribution.source) {
+    case "seed":
+      return "registered";
+    case "orch":
+      return "orch";
+    case "unregistered":
+      return "unregistered";
+    default:
+      return "launched";
   }
-  return [...found.values()];
 }
-function processRows(input) {
+function registrationRows(rows, input, attributions) {
+  for (const record2 of input.registrations ?? []) {
+    let row = rows.find((row2) => row2.lane === record2.id);
+    if (!row) {
+      row = { ...emptyRow(record2.id, "launched"), worktree: record2.cwd };
+      rows.push(row);
+    }
+    if (!record2.alive || row[attributedProcess]) continue;
+    if ([...attributions.values()].filter((value) => value.process.cwd === record2.cwd).length > 1) row.notes.push("ambiguous cwd");
+  }
+}
+function processRows(input, attributions) {
   const seeds = input.lanes.map((l) => ({ ...emptyRow(l.id, "registered"), repo: l.repo ?? null, worktree: l.cwd, branch: l.branch ?? null, evidence: ["lanes.json"] }));
   const rows = [...seeds];
-  for (const p of rosterProcesses(input.processes.procs, input.register)) {
-    const matched = seeds.find((r) => r.worktree && r.worktree === p.cwd);
-    if (matched && matched.pid === null) {
-      matched.pid = p.pid;
-      continue;
+  for (const attribution of attributions.values()) {
+    let row = seeds.find((row2) => row2.lane === attribution.identity && row2.pid === null);
+    if (!row) {
+      row = emptyRow(attribution.identity, attributionIdentity(attribution));
+      rows.push(row);
     }
-    rows.push(unregisteredProcess(p, input));
+    row[attributedProcess] = attribution;
+    row.pid = attribution.process.pid;
+    row.sessionId = attribution.sessionId;
+    row.worktree = attribution.process.cwd || row.worktree;
+    if (attribution.orch) row.evidence.push("orch-session");
+    if (attribution.source === "unregistered") row.notes.push("identity unavailable: unregistered");
   }
-  launchedRows(rows, input, (id) => emptyRow(id, "launched"));
+  registrationRows(rows, input, attributions);
   return rows;
 }
 function indexRosterRegistry(events) {
@@ -3408,18 +3444,9 @@ function joinIssue(row, sessions, input, registry3) {
     row.branch ??= latest.branch ?? null;
   }
 }
-function rowSessions(row, input) {
-  const pids = row.pid === null ? [] : [row.pid];
-  const sessions = matchedSessions(row.worktree, pids, input.register);
-  if (sessions.length) {
-    row.evidence.push("lease");
-    row.sessionId = sessions[0];
-    row.pid ??= input.register.liveness.get(sessions[0]).pid;
-  } else {
-    const orch = input.sessions.find((s) => s.pid === row.pid);
-    const h = heartbeatFor2(row.pid, input);
-    row.sessionId = orch?.sessionId || h?.sessionId || null;
-  }
+function rowSessions(row) {
+  const sessions = sessionsForRow(row);
+  if (sessions.length) row.evidence.push("lease");
   return sessions;
 }
 function heartbeatEvidence(row, h, now) {
@@ -3457,7 +3484,7 @@ function stateOf(row, input, now) {
   const seed = input.lanes.find((l) => l.id === row.lane);
   const line = input.statuses.get(row.lane);
   if (line) row.evidence.push("status-file");
-  const h = heartbeatFor2(row.pid, input);
+  const h = row[attributedProcess]?.heartbeat;
   const heartbeatFresh = heartbeatEvidence(row, h, now);
   if (seed?.retired || parseStatus(line).kind === "closed") return "retired";
   const registered = row.evidence.includes("registration");
@@ -3522,12 +3549,13 @@ function messageRows(rows, input, index) {
 }
 function buildRoster(input, now, registry3 = indexRosterRegistry(input.register.events)) {
   const messages2 = indexMessages(input.messages, now);
-  const rows = processRows(input);
+  const attributions = attributeProcesses(input);
+  const rows = processRows(input, attributions);
   messageRows(rows, input, messages2);
   for (const row of rows) {
     joinRegistration(row, input);
     if (row.pid !== null) row.evidence.push("process");
-    const sessions = rowSessions(row, input);
+    const sessions = rowSessions(row);
     joinIssue(row, sessions, input, registry3);
     row.idleMinutes = input.idle.get(row.worktree ?? "") ?? null;
     row.state = stateOf(row, input, now);
@@ -3558,15 +3586,15 @@ function ownershipUnavailable(input) {
     return { target: null, rule: "unverified", reason: "ownership unavailable; verify before assigning" };
   }
 }
-function liveOwner(rows, sessionIds, input) {
-  return rows.find((r) => r.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r.state) && matchedSessions(r.worktree, r.pid === null ? [] : [r.pid], input.register).some((id) => sessionIds.includes(id)));
+function liveOwner(rows, sessionIds) {
+  return rows.find((r) => r.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r.state) && sessionsForRow(r).some((id) => sessionIds.includes(id)));
 }
 function viewSuggestion(view, rows, context, unique) {
   const { input, now, registry: registry3 } = context;
   const holders = view.sessions.filter((s) => holding(s.lastState));
   if (holders.some((s) => input.register.liveness.get(s.sessionId)?.status === "unknown")) return { target: null, rule: "unverified", reason: "holder liveness unknown; verify before assigning" };
   const live = holders.filter((s) => input.register.liveness.get(s.sessionId)?.status === "live");
-  const owner = liveOwner(rows, live.map((s) => s.sessionId), input);
+  const owner = liveOwner(rows, live.map((s) => s.sessionId));
   if (live.length) {
     if (owner && live.length === 1 && unique) return { target: owner.lane, rule: "issue-owner", reason: "live issue holder" };
     return { target: null, rule: "unverified", reason: "holder has no unique matched lane; verify before assigning" };
@@ -3592,7 +3620,7 @@ function suggestTarget(rows, input, selection, now) {
   const issue = issueSuggestion(rows, { input, selection, now, registry: registry3 });
   if (issue) return issue;
   const repo = selection.repo || selection.issue?.repo;
-  const candidates = rows.filter((r) => repo && repoMatches(r.repo, repo) && r.state === "idle" && r.pid !== null && !r.issue?.holder && r.identity !== "unregistered");
+  const candidates = rows.filter((r) => repo && repoMatches(r.repo, repo) && r.state === "idle" && r[attributedProcess] !== void 0 && !r.issue?.holder && r.identity !== "unregistered");
   const roleRank = (r) => input.lanes.find((l) => l.id === r.lane)?.role === "repo-orch" ? 1 : 0;
   candidates.sort((a, b) => roleRank(a) - roleRank(b) || (b.idleMinutes ?? -1) - (a.idleMinutes ?? -1) || a.lane.localeCompare(b.lane));
   return candidates.length ? { target: candidates[0].lane, rule: "idle-in-repo", reason: "longest idle lane in repository (ties by lane id; workers before repo orchestrator)" } : { target: null, rule: "start-lane", reason: `no live lane for ${repo ?? "matching repositories"}` };
@@ -3616,6 +3644,29 @@ function writeRegistration(root, record2) {
 function retireRegistration(root, id, at) {
   const record2 = JSON.parse(readFileSync17(registrationPath(root, id), "utf8"));
   writeRegistration(root, { ...record2, retiredAt: at });
+}
+async function registerSession(root, input, ctx) {
+  if (!validId(input.id)) throw new UsageError("invalid registration id");
+  const existing = readRegistrations(root).values.find((record2) => record2.id === input.id);
+  if (existing && await sameLiveOwner(existing, input, ctx)) return;
+  writeRegistration(root, { ...input, startedAt: ctx.now().toISOString() });
+}
+async function sameLiveOwner(existing, input, ctx) {
+  const [checked] = checkRegistrations([existing], await runningPiChecked(ctx), ctx);
+  if (!checked.alive) return false;
+  if (existing.pid !== input.pid) throw new Error(`${input.id} already registered to pid ${existing.pid} (${existing.cwd})`);
+  return true;
+}
+function unregisterSession(root, id, ctx) {
+  if (!validId(id)) throw new UsageError("invalid registration id");
+  let record2;
+  try {
+    record2 = JSON.parse(readFileSync17(registrationPath(root, id), "utf8"));
+  } catch (e) {
+    if (e.code === "ENOENT") throw new Error(`${id} not registered`);
+    throw e;
+  }
+  if (!record2.retiredAt) retireRegistration(root, id, ctx.now().toISOString());
 }
 function parseableAt(value) {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
@@ -3681,17 +3732,120 @@ function checkRegistrations(records, processes, ctx) {
     return { ...record2, cwd, alive: Boolean(alive3) };
   });
 }
-function launchedRows(rows, input, empty) {
-  const registrations = [...input.registrations ?? []].sort((a, b) => Number(b.alive) - Number(a.alive));
-  for (const record2 of registrations) {
-    if (rows.some((r) => r.lane === record2.id)) continue;
-    const detected = record2.alive && rows.find((r) => r.identity === "unregistered" && r.worktree === record2.cwd);
-    if (detected) {
-      detected.lane = record2.id;
-      detected.identity = "launched";
-      detected.notes = detected.notes.filter((note) => note !== "identity unavailable: unregistered");
-    } else rows.push({ ...empty(record2.id), worktree: record2.cwd });
+async function registrationParents(records, ctx) {
+  if (!records.some((record2) => record2.alive)) return void 0;
+  try {
+    const result2 = await ctx.run("ps", ["-A", "-o", "pid=,ppid="], { timeoutMs: 1e4 });
+    if (result2.code !== 0 || result2.timedOut) return void 0;
+    const parents = /* @__PURE__ */ new Map();
+    for (const line of result2.stdout.split("\n")) {
+      const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+      if (match) parents.set(Number(match[1]), Number(match[2]));
+    }
+    return result2.stdout.trim() && !parents.size ? void 0 : parents;
+  } catch {
+    return void 0;
   }
+}
+function verifiedLeasePid(lease, data) {
+  const live = data.liveness.get(lease.sessionId);
+  return live?.status === "live" && live.pid === lease.pid;
+}
+function verifiedPidSessions(pids, data) {
+  return [...new Set(data.leases.filter((lease) => verifiedLeasePid(lease, data) && pids.includes(lease.pid)).map((lease) => lease.sessionId))];
+}
+function livePiProcesses(procs, register2) {
+  const found = new Map(procs.map((process2) => [process2.pid, process2]));
+  for (const lease of register2.leases) {
+    if (!verifiedLeasePid(lease, register2) || found.has(lease.pid)) continue;
+    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+  }
+  return [...found.values()];
+}
+function latestHeartbeat(process2, input) {
+  return input.heartbeats.filter((heartbeat) => heartbeat.pid === process2.pid).sort((a, b) => b.at.localeCompare(a.at))[0];
+}
+function attributeExactPids(build) {
+  for (const process2 of build.processes) {
+    const record2 = build.records.find((record3) => record3.pid === process2.pid);
+    if (record2) build.identities.set(process2.pid, { identity: record2.id, source: "registration-pid" });
+  }
+}
+function wrapperAncestor(process2, wrappers, parents) {
+  const visited = /* @__PURE__ */ new Set();
+  let pid = process2.pid;
+  for (let hops = 0; hops < 64; hops++) {
+    if (visited.has(pid)) return void 0;
+    visited.add(pid);
+    const parent = parents.get(pid);
+    if (parent === void 0) return void 0;
+    const record2 = wrappers.get(parent);
+    if (record2) return record2;
+    pid = parent;
+  }
+  return void 0;
+}
+function wrapperRecords(build) {
+  const piPids2 = new Set(build.processes.map((process2) => process2.pid));
+  return build.records.filter((record2) => !piPids2.has(record2.pid));
+}
+function attributeDescendants(build) {
+  const parents = build.input.registrationParents;
+  if (!parents) return;
+  const wrappers = new Map(wrapperRecords(build).map((record2) => [record2.pid, record2]));
+  for (const process2 of build.processes) {
+    if (build.identities.has(process2.pid)) continue;
+    const record2 = wrapperAncestor(process2, wrappers, parents);
+    if (record2) build.identities.set(process2.pid, { identity: record2.id, source: "registration-descendant" });
+  }
+}
+function attributeOrch(build) {
+  for (const process2 of build.processes) {
+    if (build.identities.has(process2.pid)) continue;
+    const session = build.input.sessions.find((session2) => session2.pid === process2.pid);
+    const id = session?.id || latestHeartbeat(process2, build.input)?.id;
+    if (id) build.identities.set(process2.pid, { identity: id, source: "orch" });
+  }
+}
+function attributeSeeds(build) {
+  const used = new Set([...build.identities.values()].map((attribution) => attribution.identity));
+  for (const process2 of build.processes) {
+    if (build.identities.has(process2.pid)) continue;
+    const seed = build.input.lanes.find((seed2) => seed2.cwd && seed2.cwd === process2.cwd);
+    if (!seed || used.has(seed.id)) continue;
+    build.identities.set(process2.pid, { identity: seed.id, source: "seed" });
+    used.add(seed.id);
+  }
+}
+function attributeFallback(build) {
+  if (build.input.registrationParents !== void 0) return;
+  for (const record2 of wrapperRecords(build)) {
+    if ([...build.identities.values()].some((attribution) => attribution.identity === record2.id)) continue;
+    const candidates = build.processes.filter((process2) => !build.identities.has(process2.pid) && process2.cwd === record2.cwd);
+    if (candidates.length !== 1) continue;
+    build.identities.set(candidates[0].pid, { identity: record2.id, source: "registration-cwd" });
+  }
+}
+function processAttribution(process2, build) {
+  const attribution = build.identities.get(process2.pid) ?? { identity: `unregistered-p${process2.pid}`, source: "unregistered" };
+  const sessions = verifiedPidSessions([process2.pid], build.input.register);
+  const orch = build.input.sessions.find((session) => session.pid === process2.pid);
+  const heartbeat = latestHeartbeat(process2, build.input);
+  return { ...attribution, process: process2, sessions, sessionId: sessions[0] || orch?.sessionId || heartbeat?.sessionId || null, orch, heartbeat };
+}
+function attributeProcesses(input) {
+  const build = {
+    input,
+    processes: livePiProcesses(input.processes.procs, input.register),
+    records: (input.registrations ?? []).filter((record2) => record2.alive && !record2.retiredAt),
+    identities: /* @__PURE__ */ new Map()
+  };
+  attributeExactPids(build);
+  attributeDescendants(build);
+  attributeOrch(build);
+  attributeSeeds(build);
+  attributeFallback(build);
+  return new Map(build.processes.map((process2) => [process2.pid, processAttribution(process2, build)]));
 }
 function joinRegistration(row, input) {
   const record2 = input.registrations?.find((r) => r.id === row.lane);
@@ -4032,9 +4186,9 @@ async function admit(ctx, request2, beforeLaunch) {
 // src/lanes/commands/run.ts
 function nativeSpawn(exe, args, options) {
   const child = spawn2(exe, args, { ...options, stdio: "inherit", shell: false });
-  const done = new Promise((resolve11, reject) => {
+  const done = new Promise((resolve12, reject) => {
     child.once("error", reject);
-    child.once("exit", (code, signal) => resolve11({ code, signal }));
+    child.once("exit", (code, signal) => resolve12({ code, signal }));
   });
   return { pid: child.pid ?? 0, done, signal: (signal) => {
     child.kill(signal);
@@ -4087,8 +4241,8 @@ async function run(id, opts, c, root, ctx, beforeLaunch) {
     }
   }
   let verified;
-  const identity2 = new Promise((resolve11) => {
-    verified = resolve11;
+  const identity2 = new Promise((resolve12) => {
+    verified = resolve12;
   });
   const handlers = /* @__PURE__ */ new Map();
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -4268,17 +4422,12 @@ import { readFileSync as readFileSync19 } from "node:fs";
 import { resolve as resolve10 } from "node:path";
 async function send(args, opts, c, root, ctx) {
   let [to, topic, file] = args;
-  const from = opts.from || ctx.env.PI_ORCH_ID;
-  if (!from) throw new UsageError("set --from or PI_ORCH_ID");
-  if (!validId(from)) throw new UsageError("invalid from");
-  if (!validId(to)) throw new UsageError("invalid to");
-  if (!validTopic(topic)) throw new UsageError("invalid topic");
-  if (opts.m !== void 0 && file !== void 0) throw new UsageError("choose a file or -m, not both");
+  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to, topic, file }, opts);
   const known = [c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.flatMap((l) => [l.id, l.group])];
-  if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  if (!known.includes(to)) await warnUnknown(to, { c, root, ctx });
   const refusal = await guardIssue(to, opts, { c, root, ctx });
   if (refusal) return refusal;
-  let body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync19(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+  let body = await messageBody(file, opts, ctx);
   if (!body.trim()) throw new UsageError("empty message body");
   if (opts.force !== void 0) body = `Ownership override (--force): ${opts.force}
 
@@ -4286,6 +4435,60 @@ ${body}`;
   to = route({ to, from, direct: opts.direct }, c, ctx);
   ctx.out((await backendFor(c, ctx, root).send({ from, to, topic, body })).path);
   return 0;
+}
+function validateMessage(input, opts) {
+  if (!input.from) throw new UsageError("set --from or PI_ORCH_ID");
+  if (!validId(input.from)) throw new UsageError("invalid from");
+  if (!validId(input.to)) throw new UsageError("invalid to");
+  if (!validTopic(input.topic)) throw new UsageError("invalid topic");
+  if (opts.m !== void 0 && input.file !== void 0) throw new UsageError("choose a file or -m, not both");
+  return input.from;
+}
+async function messageBody(file, opts, ctx) {
+  if (opts.m !== void 0) return opts.m;
+  if (file && file !== "-") return readFileSync19(resolve10(ctx.cwd, file), "utf8");
+  return file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+}
+async function liveRoster({ c, root, ctx }) {
+  try {
+    const input = await readRoster(c, root, ctx);
+    const registered = new Set(input.registrations?.filter((r) => r.alive).map((r) => r.id));
+    const rows = buildRoster(input, ctx.now()).rows.filter((row) => liveCandidate(row, registered));
+    return { rows, registered };
+  } catch {
+    return { rows: [], registered: /* @__PURE__ */ new Set() };
+  }
+}
+function liveCandidate(row, registered) {
+  if (["retired", "stopped", "unknown"].includes(row.state)) return false;
+  return row.pid !== null || registered.has(row.lane);
+}
+function sharedPrefix(a, b) {
+  let length = 0;
+  while (length < Math.min(a.length, b.length) && a[length] === b[length]) length++;
+  return length;
+}
+function editDistance(a, b) {
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 0; i < a.length; i++) {
+    const current = [i + 1];
+    for (let j = 0; j < b.length; j++) current.push(Math.min(current[j] + 1, previous[j + 1] + 1, previous[j] + Number(a[i] !== b[j])));
+    previous = current;
+  }
+  return previous[b.length];
+}
+function closestLive(to, rows) {
+  const target = to.toLowerCase();
+  const ranked = rows.map((row) => ({ row, prefix: sharedPrefix(target, row.lane.toLowerCase()), distance: editDistance(target, row.lane.toLowerCase()) }));
+  ranked.sort((a, b) => b.prefix - a.prefix || a.distance - b.distance || Number(b.row.state === "idle") - Number(a.row.state === "idle") || a.row.lane.localeCompare(b.row.lane));
+  return ranked.slice(0, 3).map(({ row }) => `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${row.state}`).join(", ");
+}
+async function warnUnknown(to, deps) {
+  const live = await liveRoster(deps);
+  if (live.registered.has(to)) return;
+  deps.ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  const candidates = closestLive(to, live.rows);
+  if (candidates) deps.ctx.err(`closest live: ${candidates}`);
 }
 function assignmentRepo(to, c) {
   const lanes = c.lanes.filter((l) => l.id === to && !l.retired && !l.closed);
@@ -4330,10 +4533,8 @@ function forceNote(opts, ctx) {
 }
 async function recipientSessions(to, deps, data) {
   const input = await readRoster(deps.c, deps.root, deps.ctx, data);
-  const recipient2 = buildRoster(input, deps.ctx.now()).rows.find((r) => r.lane === to);
-  if (!recipient2) return [];
-  const pids = input.processes.procs.filter((p) => p.cwd && p.cwd === recipient2.worktree).map((p) => p.pid);
-  return matchedSessions(recipient2.worktree, pids, data);
+  const recipients = buildRoster(input, deps.ctx.now()).rows.filter((row) => row.lane === to);
+  return [...new Set(recipients.flatMap(sessionsForRow))];
 }
 async function conflictingOwner(to, issue, deps, data) {
   const view = foldRegistry(data.events).get(issueKey(issue.repo, issue.number));
@@ -4978,6 +5179,46 @@ async function unacked(args, opts, c, root, ctx) {
   return rows.length ? 0 : 1;
 }
 
+// src/lanes/commands/register.ts
+import { statSync as statSync14 } from "node:fs";
+import { resolve as resolve11 } from "node:path";
+function explicitPid(value) {
+  const pid = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(pid) || pid <= 0) throw new UsageError("--pid must be a positive integer");
+  return pid;
+}
+async function registrationPid(value, ctx) {
+  const pid = value === void 0 ? await ancestorChain(ctx) : explicitPid(value);
+  if (pid === void 0) throw new Error("no pi process found among ancestors; pass --pid");
+  if (!(ctx.pidAlive ?? pidAlive)(pid)) throw new Error(`pid ${pid} is not alive`);
+  return pid;
+}
+async function registrationCwd(opts, pid, ctx) {
+  let cwd = opts.cwd;
+  if (cwd === void 0) {
+    try {
+      cwd = await processCwd2(ctx, pid);
+    } catch {
+    }
+  }
+  const canonical2 = ctx.realpath(resolve11(ctx.cwd, cwd ?? ctx.cwd));
+  if (!statSync14(canonical2).isDirectory()) throw new Error(`not a directory: ${canonical2}`);
+  return canonical2;
+}
+async function register(id, opts, root, ctx) {
+  if (!validId(id)) throw new UsageError("invalid registration id");
+  const pid = await registrationPid(opts.pid, ctx);
+  const cwd = await registrationCwd(opts, pid, ctx);
+  await registerSession(root, { id, pid, cwd }, ctx);
+  ctx.out(`registered ${id} pid=${pid} cwd=${cwd}`);
+  return 0;
+}
+function unregister(id, root, ctx) {
+  unregisterSession(root, id, ctx);
+  ctx.out(`unregistered ${id}`);
+  return 0;
+}
+
 // src/lanes/main.ts
 var HELP = `Usage: lanes [--dir root] <command> [options]
   adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
@@ -4987,6 +5228,8 @@ var HELP = `Usage: lanes [--dir root] <command> [options]
   start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
   run <ID>|coordinator [--from-handoff ID|file]
   resume <ID> [--terminal backend]
+  register <ID> [--cwd DIR] [--pid PID]
+  unregister <ID>
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
   who [--repo R] [--issue N|OWNER/REPO#N] [--json]
   unacked [--json] [--minutes N] [--hours N] [--include-retired]
@@ -5039,6 +5282,8 @@ var OPTIONS = {
   send: ["m", "from", "direct", "issue", "force"],
   who: ["repo", "issue", "json"],
   unacked: ["json", "minutes", "hours", "include-retired"],
+  register: ["cwd", "pid"],
+  unregister: [],
   status: ["all"],
   messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
   "idle-check": ["minutes"],
@@ -5129,6 +5374,8 @@ function validateInvocation({ command, positional, opts }) {
     who: [0, 0],
     status: [0, 0],
     messages: [1, 1],
+    register: [1, 1],
+    unregister: [1, 1],
     unacked: [0, 0],
     "idle-check": [0, 0],
     nudge: [2, 2],
@@ -5162,6 +5409,8 @@ async function dispatch(input, env) {
     send: () => send(args, opts, c, root, ctx),
     who: () => who(args, opts, c, root, ctx),
     unacked: () => unacked(args, opts, c, root, ctx),
+    register: () => register(args[0], opts, root, ctx),
+    unregister: () => unregister(args[0], root, ctx),
     "idle-check": () => idleCheck(opts, c, root, ctx),
     nudge: () => nudge(args[0], args[1], opts, c, root, ctx),
     "resume-check": () => resumeCheck(c, root, ctx),

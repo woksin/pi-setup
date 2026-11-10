@@ -41,15 +41,17 @@ test("indexed messages preserve direct, compound, broadcast, group, self-exclusi
   assertMessages(onlyOld, "W1");
 });
 
-test("verified process identity takes precedence; cwd is only a no-PID fallback", () => {
+test("verified sessions require process PIDs; cwd never supplies session identity", () => {
   const data = input();
   data.register.leases = [701, 702].map(pid => ({ sessionId: `s${pid}`, pid, startedAt: now.toISOString(), cwd: "/shared" }));
   data.register.liveness = new Map([["s701", { status: "live", pid: 701 }], ["s702", { status: "live", pid: 702 }]]);
   assert.deepEqual(matchedSessions("/shared", [702], data.register), ["s702"]);
   assert.deepEqual(matchedSessions("/shared", [999], data.register), []);
-  assert.deepEqual(matchedSessions("/shared", [], data.register), ["s701", "s702"]);
+  assert.deepEqual(matchedSessions("/shared", [], data.register), []);
   data.register.liveness.set("s701", { status: "live", pid: 999 });
-  assert.deepEqual(matchedSessions("/shared", [], data.register), ["s702"]);
+  assert.deepEqual(matchedSessions("/shared", [], data.register), []);
+  assert.deepEqual(matchedSessions("/shared", [701], data.register), []);
+  assert.deepEqual(matchedSessions("/shared", [702], data.register), ["s702"]);
 });
 
 test("uncovered verified-live leases supply holder rows without cross-attributing a shared cwd", () => {

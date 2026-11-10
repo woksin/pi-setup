@@ -5,24 +5,17 @@ import { effectiveParent, UsageError, type Config, type Lane } from "../config.t
 import type { LanesCtx } from "../ctx.ts";
 import { validId, validTopic } from "../names.ts";
 import { age, foldRegistry, holding, issueKey, ownershipOf, parseIssue, readIssueRegister, type RegisterData } from "../issue-register.ts";
-import { buildRoster, matchedSessions, readRoster } from "../roster.ts";
+import { buildRoster, readRoster, sessionsForRow, type RosterRow } from "../roster.ts";
 export async function send(
   args: string[], opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx,
 ): Promise<number> {
   let [to, topic, file] = args;
-  const from = opts.from || ctx.env.PI_ORCH_ID;
-  if (!from) throw new UsageError("set --from or PI_ORCH_ID");
-  if (!validId(from)) throw new UsageError("invalid from");
-  if (!validId(to)) throw new UsageError("invalid to");
-  if (!validTopic(topic)) throw new UsageError("invalid topic");
-  if (opts.m !== undefined && file !== undefined) throw new UsageError("choose a file or -m, not both");
+  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to, topic, file }, opts);
   const known = [c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.flatMap((l) => [l.id, l.group])];
-  if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  if (!known.includes(to)) await warnUnknown(to, { c, root, ctx });
   const refusal = await guardIssue(to, opts, { c, root, ctx });
   if (refusal) return refusal;
-  let body = opts.m !== undefined ? opts.m
-    : file && file !== "-" ? readFileSync(resolve(ctx.cwd, file), "utf8")
-    : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+  let body = await messageBody(file, opts, ctx);
   if (!body.trim()) throw new UsageError("empty message body");
   if (opts.force !== undefined) body = `Ownership override (--force): ${opts.force}\n\n${body}`;
   to = route({ to, from, direct: opts.direct }, c, ctx);
@@ -30,6 +23,59 @@ export async function send(
   return 0;
 }
 
+function validateMessage(input: { from?: string; to: string; topic: string; file?: string }, opts: Record<string, string>): string {
+  if (!input.from) throw new UsageError("set --from or PI_ORCH_ID");
+  if (!validId(input.from)) throw new UsageError("invalid from");
+  if (!validId(input.to)) throw new UsageError("invalid to");
+  if (!validTopic(input.topic)) throw new UsageError("invalid topic");
+  if (opts.m !== undefined && input.file !== undefined) throw new UsageError("choose a file or -m, not both");
+  return input.from;
+}
+async function messageBody(file: string | undefined, opts: Record<string, string>, ctx: LanesCtx): Promise<string> {
+  if (opts.m !== undefined) return opts.m;
+  if (file && file !== "-") return readFileSync(resolve(ctx.cwd, file), "utf8");
+  return file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+}
+interface LiveRoster { rows: RosterRow[]; registered: Set<string> }
+async function liveRoster({ c, root, ctx }: SendContext): Promise<LiveRoster> {
+  try {
+    const input = await readRoster(c, root, ctx);
+    const registered = new Set(input.registrations?.filter(r => r.alive).map(r => r.id));
+    const rows = buildRoster(input, ctx.now()).rows.filter(row => liveCandidate(row, registered));
+    return { rows, registered };
+  } catch { return { rows: [], registered: new Set() }; }
+}
+function liveCandidate(row: RosterRow, registered: Set<string>): boolean {
+  if (["retired", "stopped", "unknown"].includes(row.state)) return false;
+  return row.pid !== null || registered.has(row.lane);
+}
+function sharedPrefix(a: string, b: string): number {
+  let length = 0;
+  while (length < Math.min(a.length, b.length) && a[length] === b[length]) length++;
+  return length;
+}
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 0; i < a.length; i++) {
+    const current = [i + 1];
+    for (let j = 0; j < b.length; j++) current.push(Math.min(current[j] + 1, previous[j + 1] + 1, previous[j] + Number(a[i] !== b[j])));
+    previous = current;
+  }
+  return previous[b.length];
+}
+function closestLive(to: string, rows: RosterRow[]): string {
+  const target = to.toLowerCase();
+  const ranked = rows.map(row => ({ row, prefix: sharedPrefix(target, row.lane.toLowerCase()), distance: editDistance(target, row.lane.toLowerCase()) }));
+  ranked.sort((a, b) => b.prefix - a.prefix || a.distance - b.distance || Number(b.row.state === "idle") - Number(a.row.state === "idle") || a.row.lane.localeCompare(b.row.lane));
+  return ranked.slice(0, 3).map(({ row }) => `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${row.state}`).join(", ");
+}
+async function warnUnknown(to: string, deps: SendContext): Promise<void> {
+  const live = await liveRoster(deps);
+  if (live.registered.has(to)) return;
+  deps.ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  const candidates = closestLive(to, live.rows);
+  if (candidates) deps.ctx.err(`closest live: ${candidates}`);
+}
 function assignmentRepo(to: string, c: Config): string | undefined {
   const lanes = c.lanes.filter(l => l.id === to && !l.retired && !l.closed);
   return lanes.length === 1 ? lanes[0].repo : undefined;
@@ -68,10 +114,8 @@ function forceNote(opts: Record<string, string>, ctx: LanesCtx): number {
 }
 async function recipientSessions(to: string, deps: SendContext, data: RegisterData): Promise<string[]> {
   const input = await readRoster(deps.c, deps.root, deps.ctx, data);
-  const recipient = buildRoster(input, deps.ctx.now()).rows.find(r => r.lane === to);
-  if (!recipient) return [];
-  const pids = input.processes.procs.filter(p => p.cwd && p.cwd === recipient.worktree).map(p => p.pid);
-  return matchedSessions(recipient.worktree, pids, data);
+  const recipients = buildRoster(input, deps.ctx.now()).rows.filter(row => row.lane === to);
+  return [...new Set(recipients.flatMap(sessionsForRow))];
 }
 async function conflictingOwner(to: string, issue: { repo: string; number: number }, deps: SendContext, data: RegisterData): Promise<string | undefined> {
   const view = foldRegistry(data.events).get(issueKey(issue.repo, issue.number));

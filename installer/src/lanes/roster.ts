@@ -7,7 +7,7 @@ import { deliveries, foldRegistry, holding, issueKey, ownershipOf, readIssueRegi
 import { runningPiChecked } from "./processes.ts";
 import { idleMinutes } from "./sessions.ts";
 import { parseStatus, suppressed } from "./status-line.ts";
-import { checkRegistrations, joinRegistration, launchedRows, readRegistrations, registrationCutoff, registrationState, type CheckedRegistration } from "./registration.ts";
+import { attributeProcesses, checkRegistrations, joinRegistration, livePiProcesses, readRegistrations, registrationCutoff, registrationParents, registrationState, verifiedPidSessions, type CheckedRegistration, type ProcessAttribution } from "./registration.ts";
 
 export const HEARTBEAT_STALE_MIN = 15;
 interface Heartbeat { pid: number; id?: string; sessionId?: string; at: string; state?: string }
@@ -16,6 +16,7 @@ interface Seed {
   id: string; cwd: string; repo?: string; branch?: string; issue?: number; group?: string | null; retired?: boolean; role?: string;
 }
 const heldClaims = Symbol("held claims");
+const attributedProcess = Symbol("attributed process");
 type RowIssue = NonNullable<RosterRow["issue"]>;
 interface Claim { issue: RowIssue; ts: string; order: number }
 export interface RegistryIndex {
@@ -25,6 +26,7 @@ export interface RegistryIndex {
 }
 export interface RosterRow {
   [heldClaims]?: RowIssue[];
+  [attributedProcess]?: ProcessAttribution;
   lane: string; identity: "registered" | "orch" | "unregistered" | "message-only" | "launched"; repo: string | null;
   worktree: string | null; branch: string | null; issue: { repo: string; number: number; state: string; holder: boolean } | null;
   state: string; idleMinutes: number | null; contextUse: null; pid: number | null; sessionId: string | null;
@@ -36,6 +38,7 @@ export interface RosterInputs {
   heartbeats: Heartbeat[]; sessions: OrchSession[]; statuses: Map<string, string>; messages: MessageRef[];
   idle: Map<string, number | null>; sources: Record<string, Source>; broadcast: string;
   registrations?: CheckedRegistration[];
+  registrationParents?: Map<number, number>;
 }
 export interface Roster { rows: RosterRow[]; sources: Record<string, Source> }
 export interface Selection { repo?: string; issue?: { repo?: string; number: number } }
@@ -82,6 +85,8 @@ function rosterSeeds(c: Config, root: string, ctx: LanesCtx): Seed[] {
 export async function readRoster(c: Config, root: string, ctx: LanesCtx, register?: RegisterData): Promise<RosterInputs> {
   const data = register ?? await readIssueRegister(ctx); const processes = await runningPiChecked(ctx);
   const registrations = readRegistrations(root, registrationCutoff(c, ctx.now()));
+  const checkedRegistrations = checkRegistrations(registrations.values, processes, ctx);
+  const parents = await registrationParents(checkedRegistrations, ctx);
   const orch = join(ctx.home, ".pi/orch");
   const heartbeats = readJsonDir<Heartbeat>(join(orch, "heartbeats"), v => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
   const sessions = readJsonDir<OrchSession>(join(orch, "sessions"), v => v && Number.isInteger(v.pid) && (v.id === undefined || typeof v.id === "string"));
@@ -89,57 +94,56 @@ export async function readRoster(c: Config, root: string, ctx: LanesCtx, registe
   const statusDir = ctx.env.LANE_STATUS_DIR || (c.messages.dir ? join(expand(c.messages.dir, c, root, ctx.home), "status") : join(ctx.piAgentDir, "lane-status"));
   const statuses = readStatuses(statusDir); const messages = await readMessages(c, root, ctx);
   const lanes = rosterSeeds(c, root, ctx); const idle = new Map<string, number | null>();
-  for (const cwd of new Set([...lanes.map(l => l.cwd), ...rosterProcesses(processes.procs, data).map(p => p.cwd)])) idle.set(cwd, idleMinutes(cwd, ctx) ?? null);
-  return { lanes, processes, registrations: checkRegistrations(registrations.values, processes, ctx), register: data, heartbeats: heartbeats.values, sessions: sessions.values, statuses: statuses.values,
+  for (const cwd of new Set([...lanes.map(l => l.cwd), ...livePiProcesses(processes.procs, data).map(p => p.cwd)])) idle.set(cwd, idleMinutes(cwd, ctx) ?? null);
+  return { lanes, processes, registrations: checkedRegistrations, registrationParents: parents, register: data, heartbeats: heartbeats.values, sessions: sessions.values, statuses: statuses.values,
     messages: messages.values, idle, broadcast: c.messages.broadcast, sources: { lanes: { status: "ok", count: lanes.length },
       processes: { status: processes.ok ? "ok" : "error", count: processes.procs.length, ...(!processes.ok ? { detail: "process discovery unavailable or incomplete" } : {}) },
       ...data.sources, registrations: registrations.source, heartbeats: heartbeats.source, sessions: sessions.source, assignments: assignments.source,
       "status-files": statuses.source, messages: messages.source } };
 }
 /** Only identity-verified, current leases participate; a reused pid must not name a recipient. */
-export function matchedSessions(cwd: string | null, pids: number[], data: RegisterData): string[] {
-  return [...new Set(data.leases.filter(l => {
-    const live = data.liveness.get(l.sessionId);
-    return live?.status === "live" && live.pid === l.pid && (pids.length ? pids.includes(l.pid) : Boolean(cwd && l.cwd === cwd));
-  }).map(l => l.sessionId))];
+export function matchedSessions(_cwd: string | null, pids: number[], data: RegisterData): string[] {
+  return verifiedPidSessions(pids, data);
+}
+/** Session evidence is carried from the single process attribution, never inferred from cwd. */
+export function sessionsForRow(row: RosterRow): string[] {
+  return row[attributedProcess]?.sessions ?? [];
 }
 function emptyRow(lane: string, identity: RosterRow["identity"]): RosterRow {
   return { lane, identity, repo: null, worktree: null, branch: null, issue: null, state: "unknown", idleMinutes: null,
     contextUse: null, pid: null, sessionId: null, lastInbound: null, lastOutbound: null, evidence: [], notes: [] };
 }
-function heartbeatFor(pid: number | null, input: RosterInputs): Heartbeat | undefined {
-  return input.heartbeats.filter(h => h.pid === pid).sort((a, b) => b.at.localeCompare(a.at))[0];
-}
 function fresh(h: Heartbeat | undefined, now: Date): boolean {
   return Boolean(h && Date.parse(h.at) >= now.getTime() - HEARTBEAT_STALE_MIN * 60000);
 }
-function unregisteredProcess(p: { pid: number; cwd: string }, input: RosterInputs): RosterRow {
-  const session = input.sessions.find(s => s.pid === p.pid); const h = heartbeatFor(p.pid, input);
-  const id = session?.id || h?.id;
-  const row = emptyRow(id || `unregistered-p${p.pid}`, id ? "orch" : "unregistered");
-  row.pid = p.pid; row.worktree = p.cwd || session?.cwd || null;
-  if (session) row.evidence.push("orch-session");
-  if (!id) row.notes.push("identity unavailable: unregistered");
-  return row;
-}
-function rosterProcesses(procs: { pid: number; cwd: string }[], register: RegisterData): { pid: number; cwd: string }[] {
-  const found = new Map(procs.map(p => [p.pid, p]));
-  for (const lease of register.leases) {
-    const live = register.liveness.get(lease.sessionId);
-    if (live?.status !== "live" || live.pid !== lease.pid || found.has(lease.pid)) continue;
-    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+function attributionIdentity(attribution: ProcessAttribution): RosterRow["identity"] {
+  switch (attribution.source) {
+    case "seed": return "registered";
+    case "orch": return "orch";
+    case "unregistered": return "unregistered";
+    default: return "launched";
   }
-  return [...found.values()];
 }
-function processRows(input: RosterInputs): RosterRow[] {
+function registrationRows(rows: RosterRow[], input: RosterInputs, attributions: Map<number, ProcessAttribution>): void {
+  for (const record of input.registrations ?? []) {
+    let row = rows.find(row => row.lane === record.id);
+    if (!row) { row = { ...emptyRow(record.id, "launched"), worktree: record.cwd }; rows.push(row); }
+    if (!record.alive || row[attributedProcess]) continue;
+    if ([...attributions.values()].filter(value => value.process.cwd === record.cwd).length > 1) row.notes.push("ambiguous cwd");
+  }
+}
+function processRows(input: RosterInputs, attributions: Map<number, ProcessAttribution>): RosterRow[] {
   const seeds = input.lanes.map(l => ({ ...emptyRow(l.id, "registered"), repo: l.repo ?? null, worktree: l.cwd, branch: l.branch ?? null, evidence: ["lanes.json"] }));
   const rows = [...seeds];
-  for (const p of rosterProcesses(input.processes.procs, input.register)) {
-    const matched = seeds.find(r => r.worktree && r.worktree === p.cwd);
-    if (matched && matched.pid === null) { matched.pid = p.pid; continue; }
-    rows.push(unregisteredProcess(p, input));
+  for (const attribution of attributions.values()) {
+    let row = seeds.find(row => row.lane === attribution.identity && row.pid === null);
+    if (!row) { row = emptyRow(attribution.identity, attributionIdentity(attribution)); rows.push(row); }
+    row[attributedProcess] = attribution; row.pid = attribution.process.pid; row.sessionId = attribution.sessionId;
+    row.worktree = attribution.process.cwd || row.worktree;
+    if (attribution.orch) row.evidence.push("orch-session");
+    if (attribution.source === "unregistered") row.notes.push("identity unavailable: unregistered");
   }
-  launchedRows(rows, input, id => emptyRow(id, "launched"));
+  registrationRows(rows, input, attributions);
   return rows;
 }
 export function indexRosterRegistry(events: RegistryEvent[]): RegistryIndex {
@@ -174,16 +178,9 @@ function joinIssue(row: RosterRow, sessions: string[], input: RosterInputs, regi
     row.evidence.push("registry"); row.repo ??= latest.repo; row.branch ??= latest.branch ?? null;
   }
 }
-function rowSessions(row: RosterRow, input: RosterInputs): string[] {
-  const pids = row.pid === null ? [] : [row.pid];
-  const sessions = matchedSessions(row.worktree, pids, input.register);
-  if (sessions.length) {
-    row.evidence.push("lease"); row.sessionId = sessions[0];
-    row.pid ??= input.register.liveness.get(sessions[0])!.pid;
-  } else {
-    const orch = input.sessions.find(s => s.pid === row.pid); const h = heartbeatFor(row.pid, input);
-    row.sessionId = orch?.sessionId || h?.sessionId || null;
-  }
+function rowSessions(row: RosterRow): string[] {
+  const sessions = sessionsForRow(row);
+  if (sessions.length) row.evidence.push("lease");
   return sessions;
 }
 function heartbeatEvidence(row: RosterRow, h: Heartbeat | undefined, now: Date): boolean {
@@ -214,7 +211,7 @@ function discoveryUnknown(row: RosterRow, input: RosterInputs, heartbeatFresh: b
 function stateOf(row: RosterRow, input: RosterInputs, now: Date): string {
   const seed = input.lanes.find(l => l.id === row.lane); const line = input.statuses.get(row.lane);
   if (line) row.evidence.push("status-file");
-  const h = heartbeatFor(row.pid, input); const heartbeatFresh = heartbeatEvidence(row, h, now);
+  const h = row[attributedProcess]?.heartbeat; const heartbeatFresh = heartbeatEvidence(row, h, now);
   if (seed?.retired || parseStatus(line).kind === "closed") return "retired";
   const registered = row.evidence.includes("registration");
   const live = row.pid !== null || row.evidence.includes("lease") || heartbeatFresh || registered;
@@ -279,11 +276,12 @@ function messageRows(rows: RosterRow[], input: RosterInputs, index: MessageIndex
 /** Pure join: no process, filesystem or clock access. */
 export function buildRoster(input: RosterInputs, now: Date, registry = indexRosterRegistry(input.register.events)): Roster {
   const messages = indexMessages(input.messages, now);
-  const rows = processRows(input); messageRows(rows, input, messages);
+  const attributions = attributeProcesses(input);
+  const rows = processRows(input, attributions); messageRows(rows, input, messages);
   for (const row of rows) {
     joinRegistration(row, input);
     if (row.pid !== null) row.evidence.push("process");
-    const sessions = rowSessions(row, input); joinIssue(row, sessions, input, registry);
+    const sessions = rowSessions(row); joinIssue(row, sessions, input, registry);
     row.idleMinutes = input.idle.get(row.worktree ?? "") ?? null;
     row.state = stateOf(row, input, now); joinMessages(row, input, now, messages);
   }
@@ -311,16 +309,16 @@ function ownershipUnavailable(input: RosterInputs): Suggestion | undefined {
     return { target: null, rule: "unverified", reason: "ownership unavailable; verify before assigning" };
   }
 }
-function liveOwner(rows: RosterRow[], sessionIds: string[], input: RosterInputs): RosterRow | undefined {
+function liveOwner(rows: RosterRow[], sessionIds: string[]): RosterRow | undefined {
   return rows.find(r => r.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r.state)
-    && matchedSessions(r.worktree, r.pid === null ? [] : [r.pid], input.register).some(id => sessionIds.includes(id)));
+    && sessionsForRow(r).some(id => sessionIds.includes(id)));
 }
 function viewSuggestion(view: IssueView, rows: RosterRow[], context: SuggestionContext, unique: boolean): Suggestion | undefined {
   const { input, now, registry } = context;
   const holders = view.sessions.filter(s => holding(s.lastState));
   if (holders.some(s => input.register.liveness.get(s.sessionId)?.status === "unknown")) return { target: null, rule: "unverified", reason: "holder liveness unknown; verify before assigning" };
   const live = holders.filter(s => input.register.liveness.get(s.sessionId)?.status === "live");
-  const owner = liveOwner(rows, live.map(s => s.sessionId), input);
+  const owner = liveOwner(rows, live.map(s => s.sessionId));
   if (live.length) {
     if (owner && live.length === 1 && unique) return { target: owner.lane, rule: "issue-owner", reason: "live issue holder" };
     return { target: null, rule: "unverified", reason: "holder has no unique matched lane; verify before assigning" };
@@ -345,7 +343,7 @@ export function suggestTarget(rows: RosterRow[], input: RosterInputs & { registr
   const registry = input.registry ?? indexRosterRegistry(input.register.events);
   const issue = issueSuggestion(rows, { input, selection, now, registry }); if (issue) return issue;
   const repo = selection.repo || selection.issue?.repo;
-  const candidates = rows.filter(r => repo && repoMatches(r.repo, repo) && r.state === "idle" && r.pid !== null && !r.issue?.holder && r.identity !== "unregistered");
+  const candidates = rows.filter(r => repo && repoMatches(r.repo, repo) && r.state === "idle" && r[attributedProcess] !== undefined && !r.issue?.holder && r.identity !== "unregistered");
   const roleRank = (r: RosterRow) => input.lanes.find(l => l.id === r.lane)?.role === "repo-orch" ? 1 : 0;
   candidates.sort((a, b) => roleRank(a) - roleRank(b) || (b.idleMinutes ?? -1) - (a.idleMinutes ?? -1) || a.lane.localeCompare(b.lane));
   return candidates.length ? { target: candidates[0].lane, rule: "idle-in-repo", reason: "longest idle lane in repository (ties by lane id; workers before repo orchestrator)" }

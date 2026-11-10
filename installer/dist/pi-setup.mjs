@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 66716138c28880307f956723919e19cdcc3eff64e528fe2e5e892bdc22dcb307
+// pi-setup-source-sha256: 050ee14a1b9914d2686143fce0cbcc9db5770d3592180f53ec98018fd6c6d89a
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -54,10 +54,10 @@ import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 function inherited(cmd, args, options) {
-  return new Promise((resolve15) => {
+  return new Promise((resolve16) => {
     const child = spawn(cmd, args, { cwd: options.cwd, env: { ...process.env, ...options.env }, stdio: "inherit" });
-    child.on("error", (error) => resolve15({ code: null, stdout: "", stderr: error.message, timedOut: false }));
-    child.on("close", (code) => resolve15({ code, stdout: "", stderr: "", timedOut: false }));
+    child.on("error", (error) => resolve16({ code: null, stdout: "", stderr: error.message, timedOut: false }));
+    child.on("close", (code) => resolve16({ code, stdout: "", stderr: "", timedOut: false }));
   });
 }
 function realWhich(env) {
@@ -99,7 +99,7 @@ var init_context = __esm({
     MAX_BUFFER = 16 * 1024 * 1024;
     realRun = (cmd, args, options = {}) => {
       if (options.inherit) return inherited(cmd, args, options);
-      return new Promise((resolve15) => {
+      return new Promise((resolve16) => {
         const child = execFile(
           cmd,
           args,
@@ -107,7 +107,7 @@ var init_context = __esm({
           (error, stdout2, stderr) => {
             const failure = error;
             const code = failure ? typeof failure.code === "number" ? failure.code : null : 0;
-            resolve15({
+            resolve16({
               code,
               stdout: String(stdout2 ?? ""),
               stderr: failure && code === null && !stderr ? failure.message : String(stderr ?? ""),
@@ -2275,7 +2275,7 @@ async function unchanged(env, s) {
   if (version(current) !== version(s)) throw new Error("handoff request safety evidence changed");
 }
 async function waitForContext(env, s, at) {
-  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve15) => setTimeout(resolve15, ms)));
+  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve16) => setTimeout(resolve16, ms)));
   let reason = "lane handoff absent or stale";
   for (let attempt = 0; attempt < 30; attempt++) {
     try {
@@ -2333,7 +2333,7 @@ async function exited(env, pid) {
   return false;
 }
 async function awaitExit(env, pid) {
-  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve15) => setTimeout(resolve15, ms)));
+  const sleep = env.ctx.sleep || ((ms) => new Promise((resolve16) => setTimeout(resolve16, ms)));
   for (let attempt = 0; attempt < 5; attempt++) {
     if (await exited(env, pid)) return;
     await sleep(200);
@@ -2844,6 +2844,36 @@ async function descendants2(ctx, rootPid) {
     }
   }
   return rows.filter((r3) => r3.pid !== rootPid && ids.has(r3.pid)).map((r3) => r3.command);
+}
+function ancestorRows(text4) {
+  const rows = /* @__PURE__ */ new Map();
+  for (const line of text4.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    if (match) rows.set(Number(match[1]), { pid: Number(match[1]), parent: Number(match[2]), comm: match[3] });
+  }
+  return rows;
+}
+function nearestPi(rows, startPid) {
+  const visited = /* @__PURE__ */ new Set();
+  let pid = startPid;
+  for (let hops = 0; hops < 64; hops++) {
+    if (visited.has(pid)) return void 0;
+    visited.add(pid);
+    const row = rows.get(pid);
+    if (!row) return void 0;
+    if (row.comm.split("/").at(-1) === "pi") return row.pid;
+    pid = row.parent;
+  }
+  return void 0;
+}
+async function ancestorChain(ctx, startPid = process.pid) {
+  try {
+    const result3 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,comm="], { timeoutMs: 1e4 });
+    if (result3.code !== 0 || result3.timedOut) return void 0;
+    return nearestPi(ancestorRows(result3.stdout), startPid);
+  } catch {
+    return void 0;
+  }
 }
 async function alive(ctx, pid) {
   return (await ctx.run("ps", ["-p", String(pid)], { timeoutMs: 1e4 })).code === 0;
@@ -3839,10 +3869,12 @@ function rosterSeeds(c2, root, ctx) {
     ...c2.lanes.map((l2) => ({ ...l2, cwd: canonical2(laneDir(l2, c2, root, ctx), ctx), retired: Boolean(l2.retired || l2.closed) }))
   ];
 }
-async function readRoster(c2, root, ctx, register) {
-  const data = register ?? await readIssueRegister(ctx);
+async function readRoster(c2, root, ctx, register2) {
+  const data = register2 ?? await readIssueRegister(ctx);
   const processes = await runningPiChecked(ctx);
   const registrations = readRegistrations(root, registrationCutoff(c2, ctx.now()));
+  const checkedRegistrations = checkRegistrations(registrations.values, processes, ctx);
+  const parents = await registrationParents(checkedRegistrations, ctx);
   const orch = join33(ctx.home, ".pi/orch");
   const heartbeats = readJsonDir(join33(orch, "heartbeats"), (v) => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
   const sessions = readJsonDir(join33(orch, "sessions"), (v) => v && Number.isInteger(v.pid) && (v.id === void 0 || typeof v.id === "string"));
@@ -3852,11 +3884,12 @@ async function readRoster(c2, root, ctx, register) {
   const messages2 = await readMessages(c2, root, ctx);
   const lanes = rosterSeeds(c2, root, ctx);
   const idle2 = /* @__PURE__ */ new Map();
-  for (const cwd of /* @__PURE__ */ new Set([...lanes.map((l2) => l2.cwd), ...rosterProcesses(processes.procs, data).map((p) => p.cwd)])) idle2.set(cwd, idleMinutes2(cwd, ctx) ?? null);
+  for (const cwd of /* @__PURE__ */ new Set([...lanes.map((l2) => l2.cwd), ...livePiProcesses(processes.procs, data).map((p) => p.cwd)])) idle2.set(cwd, idleMinutes2(cwd, ctx) ?? null);
   return {
     lanes,
     processes,
-    registrations: checkRegistrations(registrations.values, processes, ctx),
+    registrations: checkedRegistrations,
+    registrationParents: parents,
     register: data,
     heartbeats: heartbeats.values,
     sessions: sessions.values,
@@ -3877,11 +3910,8 @@ async function readRoster(c2, root, ctx, register) {
     }
   };
 }
-function matchedSessions(cwd, pids, data) {
-  return [...new Set(data.leases.filter((l2) => {
-    const live = data.liveness.get(l2.sessionId);
-    return live?.status === "live" && live.pid === l2.pid && (pids.length ? pids.includes(l2.pid) : Boolean(cwd && l2.cwd === cwd));
-  }).map((l2) => l2.sessionId))];
+function sessionsForRow(row) {
+  return row[attributedProcess]?.sessions ?? [];
 }
 function emptyRow(lane, identity2) {
   return {
@@ -3902,44 +3932,49 @@ function emptyRow(lane, identity2) {
     notes: []
   };
 }
-function heartbeatFor2(pid, input) {
-  return input.heartbeats.filter((h2) => h2.pid === pid).sort((a2, b) => b.at.localeCompare(a2.at))[0];
-}
 function fresh2(h2, now) {
   return Boolean(h2 && Date.parse(h2.at) >= now.getTime() - HEARTBEAT_STALE_MIN * 6e4);
 }
-function unregisteredProcess(p, input) {
-  const session = input.sessions.find((s) => s.pid === p.pid);
-  const h2 = heartbeatFor2(p.pid, input);
-  const id = session?.id || h2?.id;
-  const row = emptyRow(id || `unregistered-p${p.pid}`, id ? "orch" : "unregistered");
-  row.pid = p.pid;
-  row.worktree = p.cwd || session?.cwd || null;
-  if (session) row.evidence.push("orch-session");
-  if (!id) row.notes.push("identity unavailable: unregistered");
-  return row;
-}
-function rosterProcesses(procs, register) {
-  const found = new Map(procs.map((p) => [p.pid, p]));
-  for (const lease of register.leases) {
-    const live = register.liveness.get(lease.sessionId);
-    if (live?.status !== "live" || live.pid !== lease.pid || found.has(lease.pid)) continue;
-    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+function attributionIdentity(attribution) {
+  switch (attribution.source) {
+    case "seed":
+      return "registered";
+    case "orch":
+      return "orch";
+    case "unregistered":
+      return "unregistered";
+    default:
+      return "launched";
   }
-  return [...found.values()];
 }
-function processRows(input) {
+function registrationRows(rows, input, attributions) {
+  for (const record3 of input.registrations ?? []) {
+    let row = rows.find((row2) => row2.lane === record3.id);
+    if (!row) {
+      row = { ...emptyRow(record3.id, "launched"), worktree: record3.cwd };
+      rows.push(row);
+    }
+    if (!record3.alive || row[attributedProcess]) continue;
+    if ([...attributions.values()].filter((value) => value.process.cwd === record3.cwd).length > 1) row.notes.push("ambiguous cwd");
+  }
+}
+function processRows(input, attributions) {
   const seeds = input.lanes.map((l2) => ({ ...emptyRow(l2.id, "registered"), repo: l2.repo ?? null, worktree: l2.cwd, branch: l2.branch ?? null, evidence: ["lanes.json"] }));
   const rows = [...seeds];
-  for (const p of rosterProcesses(input.processes.procs, input.register)) {
-    const matched = seeds.find((r2) => r2.worktree && r2.worktree === p.cwd);
-    if (matched && matched.pid === null) {
-      matched.pid = p.pid;
-      continue;
+  for (const attribution of attributions.values()) {
+    let row = seeds.find((row2) => row2.lane === attribution.identity && row2.pid === null);
+    if (!row) {
+      row = emptyRow(attribution.identity, attributionIdentity(attribution));
+      rows.push(row);
     }
-    rows.push(unregisteredProcess(p, input));
+    row[attributedProcess] = attribution;
+    row.pid = attribution.process.pid;
+    row.sessionId = attribution.sessionId;
+    row.worktree = attribution.process.cwd || row.worktree;
+    if (attribution.orch) row.evidence.push("orch-session");
+    if (attribution.source === "unregistered") row.notes.push("identity unavailable: unregistered");
   }
-  launchedRows(rows, input, (id) => emptyRow(id, "launched"));
+  registrationRows(rows, input, attributions);
   return rows;
 }
 function indexRosterRegistry(events) {
@@ -3977,18 +4012,9 @@ function joinIssue(row, sessions, input, registry3) {
     row.branch ??= latest.branch ?? null;
   }
 }
-function rowSessions(row, input) {
-  const pids = row.pid === null ? [] : [row.pid];
-  const sessions = matchedSessions(row.worktree, pids, input.register);
-  if (sessions.length) {
-    row.evidence.push("lease");
-    row.sessionId = sessions[0];
-    row.pid ??= input.register.liveness.get(sessions[0]).pid;
-  } else {
-    const orch = input.sessions.find((s) => s.pid === row.pid);
-    const h2 = heartbeatFor2(row.pid, input);
-    row.sessionId = orch?.sessionId || h2?.sessionId || null;
-  }
+function rowSessions(row) {
+  const sessions = sessionsForRow(row);
+  if (sessions.length) row.evidence.push("lease");
   return sessions;
 }
 function heartbeatEvidence(row, h2, now) {
@@ -4026,7 +4052,7 @@ function stateOf(row, input, now) {
   const seed = input.lanes.find((l2) => l2.id === row.lane);
   const line = input.statuses.get(row.lane);
   if (line) row.evidence.push("status-file");
-  const h2 = heartbeatFor2(row.pid, input);
+  const h2 = row[attributedProcess]?.heartbeat;
   const heartbeatFresh = heartbeatEvidence(row, h2, now);
   if (seed?.retired || parseStatus(line).kind === "closed") return "retired";
   const registered = row.evidence.includes("registration");
@@ -4090,12 +4116,13 @@ function messageRows(rows, input, index) {
 }
 function buildRoster(input, now, registry3 = indexRosterRegistry(input.register.events)) {
   const messages2 = indexMessages(input.messages, now);
-  const rows = processRows(input);
+  const attributions = attributeProcesses(input);
+  const rows = processRows(input, attributions);
   messageRows(rows, input, messages2);
   for (const row of rows) {
     joinRegistration(row, input);
     if (row.pid !== null) row.evidence.push("process");
-    const sessions = rowSessions(row, input);
+    const sessions = rowSessions(row);
     joinIssue(row, sessions, input, registry3);
     row.idleMinutes = input.idle.get(row.worktree ?? "") ?? null;
     row.state = stateOf(row, input, now);
@@ -4126,15 +4153,15 @@ function ownershipUnavailable(input) {
     return { target: null, rule: "unverified", reason: "ownership unavailable; verify before assigning" };
   }
 }
-function liveOwner(rows, sessionIds, input) {
-  return rows.find((r2) => r2.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r2.state) && matchedSessions(r2.worktree, r2.pid === null ? [] : [r2.pid], input.register).some((id) => sessionIds.includes(id)));
+function liveOwner(rows, sessionIds) {
+  return rows.find((r2) => r2.identity !== "unregistered" && !["retired", "stopped", "unknown"].includes(r2.state) && sessionsForRow(r2).some((id) => sessionIds.includes(id)));
 }
 function viewSuggestion(view, rows, context, unique) {
   const { input, now, registry: registry3 } = context;
   const holders = view.sessions.filter((s) => holding(s.lastState));
   if (holders.some((s) => input.register.liveness.get(s.sessionId)?.status === "unknown")) return { target: null, rule: "unverified", reason: "holder liveness unknown; verify before assigning" };
   const live = holders.filter((s) => input.register.liveness.get(s.sessionId)?.status === "live");
-  const owner = liveOwner(rows, live.map((s) => s.sessionId), input);
+  const owner = liveOwner(rows, live.map((s) => s.sessionId));
   if (live.length) {
     if (owner && live.length === 1 && unique) return { target: owner.lane, rule: "issue-owner", reason: "live issue holder" };
     return { target: null, rule: "unverified", reason: "holder has no unique matched lane; verify before assigning" };
@@ -4160,12 +4187,12 @@ function suggestTarget(rows, input, selection, now) {
   const issue = issueSuggestion(rows, { input, selection, now, registry: registry3 });
   if (issue) return issue;
   const repo = selection.repo || selection.issue?.repo;
-  const candidates = rows.filter((r2) => repo && repoMatches(r2.repo, repo) && r2.state === "idle" && r2.pid !== null && !r2.issue?.holder && r2.identity !== "unregistered");
+  const candidates = rows.filter((r2) => repo && repoMatches(r2.repo, repo) && r2.state === "idle" && r2[attributedProcess] !== void 0 && !r2.issue?.holder && r2.identity !== "unregistered");
   const roleRank = (r2) => input.lanes.find((l2) => l2.id === r2.lane)?.role === "repo-orch" ? 1 : 0;
   candidates.sort((a2, b) => roleRank(a2) - roleRank(b) || (b.idleMinutes ?? -1) - (a2.idleMinutes ?? -1) || a2.lane.localeCompare(b.lane));
   return candidates.length ? { target: candidates[0].lane, rule: "idle-in-repo", reason: "longest idle lane in repository (ties by lane id; workers before repo orchestrator)" } : { target: null, rule: "start-lane", reason: `no live lane for ${repo ?? "matching repositories"}` };
 }
-var HEARTBEAT_STALE_MIN, heldClaims, messageOrder;
+var HEARTBEAT_STALE_MIN, heldClaims, attributedProcess, messageOrder;
 var init_roster = __esm({
   "src/lanes/roster.ts"() {
     init_backend();
@@ -4177,6 +4204,7 @@ var init_roster = __esm({
     init_registration();
     HEARTBEAT_STALE_MIN = 15;
     heldClaims = /* @__PURE__ */ Symbol("held claims");
+    attributedProcess = /* @__PURE__ */ Symbol("attributed process");
     messageOrder = (a2, b) => b.at.getTime() - a2.at.getTime() || b.name.localeCompare(a2.name);
   }
 });
@@ -4201,6 +4229,29 @@ function writeRegistration(root, record3) {
 function retireRegistration(root, id, at) {
   const record3 = JSON.parse(readFileSync19(registrationPath(root, id), "utf8"));
   writeRegistration(root, { ...record3, retiredAt: at });
+}
+async function registerSession(root, input, ctx) {
+  if (!validId(input.id)) throw new UsageError("invalid registration id");
+  const existing = readRegistrations(root).values.find((record3) => record3.id === input.id);
+  if (existing && await sameLiveOwner(existing, input, ctx)) return;
+  writeRegistration(root, { ...input, startedAt: ctx.now().toISOString() });
+}
+async function sameLiveOwner(existing, input, ctx) {
+  const [checked] = checkRegistrations([existing], await runningPiChecked(ctx), ctx);
+  if (!checked.alive) return false;
+  if (existing.pid !== input.pid) throw new Error(`${input.id} already registered to pid ${existing.pid} (${existing.cwd})`);
+  return true;
+}
+function unregisterSession(root, id, ctx) {
+  if (!validId(id)) throw new UsageError("invalid registration id");
+  let record3;
+  try {
+    record3 = JSON.parse(readFileSync19(registrationPath(root, id), "utf8"));
+  } catch (e) {
+    if (e.code === "ENOENT") throw new Error(`${id} not registered`);
+    throw e;
+  }
+  if (!record3.retiredAt) retireRegistration(root, id, ctx.now().toISOString());
 }
 function parseableAt(value) {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
@@ -4266,17 +4317,120 @@ function checkRegistrations(records, processes, ctx) {
     return { ...record3, cwd, alive: Boolean(alive3) };
   });
 }
-function launchedRows(rows, input, empty) {
-  const registrations = [...input.registrations ?? []].sort((a2, b) => Number(b.alive) - Number(a2.alive));
-  for (const record3 of registrations) {
-    if (rows.some((r2) => r2.lane === record3.id)) continue;
-    const detected = record3.alive && rows.find((r2) => r2.identity === "unregistered" && r2.worktree === record3.cwd);
-    if (detected) {
-      detected.lane = record3.id;
-      detected.identity = "launched";
-      detected.notes = detected.notes.filter((note2) => note2 !== "identity unavailable: unregistered");
-    } else rows.push({ ...empty(record3.id), worktree: record3.cwd });
+async function registrationParents(records, ctx) {
+  if (!records.some((record3) => record3.alive)) return void 0;
+  try {
+    const result3 = await ctx.run("ps", ["-A", "-o", "pid=,ppid="], { timeoutMs: 1e4 });
+    if (result3.code !== 0 || result3.timedOut) return void 0;
+    const parents = /* @__PURE__ */ new Map();
+    for (const line of result3.stdout.split("\n")) {
+      const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+      if (match) parents.set(Number(match[1]), Number(match[2]));
+    }
+    return result3.stdout.trim() && !parents.size ? void 0 : parents;
+  } catch {
+    return void 0;
   }
+}
+function verifiedLeasePid(lease, data) {
+  const live = data.liveness.get(lease.sessionId);
+  return live?.status === "live" && live.pid === lease.pid;
+}
+function verifiedPidSessions(pids, data) {
+  return [...new Set(data.leases.filter((lease) => verifiedLeasePid(lease, data) && pids.includes(lease.pid)).map((lease) => lease.sessionId))];
+}
+function livePiProcesses(procs, register2) {
+  const found = new Map(procs.map((process2) => [process2.pid, process2]));
+  for (const lease of register2.leases) {
+    if (!verifiedLeasePid(lease, register2) || found.has(lease.pid)) continue;
+    found.set(lease.pid, { pid: lease.pid, cwd: lease.cwd ?? "" });
+  }
+  return [...found.values()];
+}
+function latestHeartbeat(process2, input) {
+  return input.heartbeats.filter((heartbeat) => heartbeat.pid === process2.pid).sort((a2, b) => b.at.localeCompare(a2.at))[0];
+}
+function attributeExactPids(build) {
+  for (const process2 of build.processes) {
+    const record3 = build.records.find((record4) => record4.pid === process2.pid);
+    if (record3) build.identities.set(process2.pid, { identity: record3.id, source: "registration-pid" });
+  }
+}
+function wrapperAncestor(process2, wrappers, parents) {
+  const visited = /* @__PURE__ */ new Set();
+  let pid = process2.pid;
+  for (let hops = 0; hops < 64; hops++) {
+    if (visited.has(pid)) return void 0;
+    visited.add(pid);
+    const parent = parents.get(pid);
+    if (parent === void 0) return void 0;
+    const record3 = wrappers.get(parent);
+    if (record3) return record3;
+    pid = parent;
+  }
+  return void 0;
+}
+function wrapperRecords(build) {
+  const piPids2 = new Set(build.processes.map((process2) => process2.pid));
+  return build.records.filter((record3) => !piPids2.has(record3.pid));
+}
+function attributeDescendants(build) {
+  const parents = build.input.registrationParents;
+  if (!parents) return;
+  const wrappers = new Map(wrapperRecords(build).map((record3) => [record3.pid, record3]));
+  for (const process2 of build.processes) {
+    if (build.identities.has(process2.pid)) continue;
+    const record3 = wrapperAncestor(process2, wrappers, parents);
+    if (record3) build.identities.set(process2.pid, { identity: record3.id, source: "registration-descendant" });
+  }
+}
+function attributeOrch(build) {
+  for (const process2 of build.processes) {
+    if (build.identities.has(process2.pid)) continue;
+    const session = build.input.sessions.find((session2) => session2.pid === process2.pid);
+    const id = session?.id || latestHeartbeat(process2, build.input)?.id;
+    if (id) build.identities.set(process2.pid, { identity: id, source: "orch" });
+  }
+}
+function attributeSeeds(build) {
+  const used = new Set([...build.identities.values()].map((attribution) => attribution.identity));
+  for (const process2 of build.processes) {
+    if (build.identities.has(process2.pid)) continue;
+    const seed = build.input.lanes.find((seed2) => seed2.cwd && seed2.cwd === process2.cwd);
+    if (!seed || used.has(seed.id)) continue;
+    build.identities.set(process2.pid, { identity: seed.id, source: "seed" });
+    used.add(seed.id);
+  }
+}
+function attributeFallback(build) {
+  if (build.input.registrationParents !== void 0) return;
+  for (const record3 of wrapperRecords(build)) {
+    if ([...build.identities.values()].some((attribution) => attribution.identity === record3.id)) continue;
+    const candidates = build.processes.filter((process2) => !build.identities.has(process2.pid) && process2.cwd === record3.cwd);
+    if (candidates.length !== 1) continue;
+    build.identities.set(candidates[0].pid, { identity: record3.id, source: "registration-cwd" });
+  }
+}
+function processAttribution(process2, build) {
+  const attribution = build.identities.get(process2.pid) ?? { identity: `unregistered-p${process2.pid}`, source: "unregistered" };
+  const sessions = verifiedPidSessions([process2.pid], build.input.register);
+  const orch = build.input.sessions.find((session) => session.pid === process2.pid);
+  const heartbeat = latestHeartbeat(process2, build.input);
+  return { ...attribution, process: process2, sessions, sessionId: sessions[0] || orch?.sessionId || heartbeat?.sessionId || null, orch, heartbeat };
+}
+function attributeProcesses(input) {
+  const build = {
+    input,
+    processes: livePiProcesses(input.processes.procs, input.register),
+    records: (input.registrations ?? []).filter((record3) => record3.alive && !record3.retiredAt),
+    identities: /* @__PURE__ */ new Map()
+  };
+  attributeExactPids(build);
+  attributeDescendants(build);
+  attributeOrch(build);
+  attributeSeeds(build);
+  attributeFallback(build);
+  return new Map(build.processes.map((process2) => [process2.pid, processAttribution(process2, build)]));
 }
 function joinRegistration(row, input) {
   const record3 = input.registrations?.find((r2) => r2.id === row.lane);
@@ -4294,6 +4448,8 @@ function registrationState(row, input) {
 var registrationDir;
 var init_registration = __esm({
   "src/lanes/registration.ts"() {
+    init_config();
+    init_processes();
     init_names();
     init_roster();
     registrationDir = (root) => join34(root, ".state/roster");
@@ -4651,9 +4807,9 @@ import { existsSync as existsSync14, statSync as statSync10 } from "node:fs";
 import { join as join37 } from "node:path";
 function nativeSpawn(exe, args, options) {
   const child = spawn2(exe, args, { ...options, stdio: "inherit", shell: false });
-  const done = new Promise((resolve15, reject) => {
+  const done = new Promise((resolve16, reject) => {
     child.once("error", reject);
-    child.once("exit", (code, signal) => resolve15({ code, signal }));
+    child.once("exit", (code, signal) => resolve16({ code, signal }));
   });
   return { pid: child.pid ?? 0, done, signal: (signal) => {
     child.kill(signal);
@@ -4706,8 +4862,8 @@ async function run(id, opts, c2, root, ctx, beforeLaunch) {
     }
   }
   let verified;
-  const identity2 = new Promise((resolve15) => {
-    verified = resolve15;
+  const identity2 = new Promise((resolve16) => {
+    verified = resolve16;
   });
   const handlers = /* @__PURE__ */ new Map();
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -4912,17 +5068,12 @@ import { readFileSync as readFileSync21 } from "node:fs";
 import { resolve as resolve10 } from "node:path";
 async function send(args, opts, c2, root, ctx) {
   let [to, topic, file] = args;
-  const from = opts.from || ctx.env.PI_ORCH_ID;
-  if (!from) throw new UsageError("set --from or PI_ORCH_ID");
-  if (!validId(from)) throw new UsageError("invalid from");
-  if (!validId(to)) throw new UsageError("invalid to");
-  if (!validTopic(topic)) throw new UsageError("invalid topic");
-  if (opts.m !== void 0 && file !== void 0) throw new UsageError("choose a file or -m, not both");
+  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to, topic, file }, opts);
   const known = [c2.coordinator.id, "ALL", c2.messages.broadcast, ...c2.lanes.flatMap((l2) => [l2.id, l2.group])];
-  if (!known.includes(to)) ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  if (!known.includes(to)) await warnUnknown(to, { c: c2, root, ctx });
   const refusal = await guardIssue(to, opts, { c: c2, root, ctx });
   if (refusal) return refusal;
-  let body = opts.m !== void 0 ? opts.m : file && file !== "-" ? readFileSync21(resolve10(ctx.cwd, file), "utf8") : file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+  let body = await messageBody(file, opts, ctx);
   if (!body.trim()) throw new UsageError("empty message body");
   if (opts.force !== void 0) body = `Ownership override (--force): ${opts.force}
 
@@ -4930,6 +5081,60 @@ ${body}`;
   to = route({ to, from, direct: opts.direct }, c2, ctx);
   ctx.out((await backendFor(c2, ctx, root).send({ from, to, topic, body })).path);
   return 0;
+}
+function validateMessage(input, opts) {
+  if (!input.from) throw new UsageError("set --from or PI_ORCH_ID");
+  if (!validId(input.from)) throw new UsageError("invalid from");
+  if (!validId(input.to)) throw new UsageError("invalid to");
+  if (!validTopic(input.topic)) throw new UsageError("invalid topic");
+  if (opts.m !== void 0 && input.file !== void 0) throw new UsageError("choose a file or -m, not both");
+  return input.from;
+}
+async function messageBody(file, opts, ctx) {
+  if (opts.m !== void 0) return opts.m;
+  if (file && file !== "-") return readFileSync21(resolve10(ctx.cwd, file), "utf8");
+  return file === "-" || !ctx.stdinTTY ? await ctx.readStdin() : "";
+}
+async function liveRoster({ c: c2, root, ctx }) {
+  try {
+    const input = await readRoster(c2, root, ctx);
+    const registered = new Set(input.registrations?.filter((r2) => r2.alive).map((r2) => r2.id));
+    const rows = buildRoster(input, ctx.now()).rows.filter((row) => liveCandidate(row, registered));
+    return { rows, registered };
+  } catch {
+    return { rows: [], registered: /* @__PURE__ */ new Set() };
+  }
+}
+function liveCandidate(row, registered) {
+  if (["retired", "stopped", "unknown"].includes(row.state)) return false;
+  return row.pid !== null || registered.has(row.lane);
+}
+function sharedPrefix(a2, b) {
+  let length = 0;
+  while (length < Math.min(a2.length, b.length) && a2[length] === b[length]) length++;
+  return length;
+}
+function editDistance(a2, b) {
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i2 = 0; i2 < a2.length; i2++) {
+    const current = [i2 + 1];
+    for (let j = 0; j < b.length; j++) current.push(Math.min(current[j] + 1, previous[j + 1] + 1, previous[j] + Number(a2[i2] !== b[j])));
+    previous = current;
+  }
+  return previous[b.length];
+}
+function closestLive(to, rows) {
+  const target = to.toLowerCase();
+  const ranked = rows.map((row) => ({ row, prefix: sharedPrefix(target, row.lane.toLowerCase()), distance: editDistance(target, row.lane.toLowerCase()) }));
+  ranked.sort((a2, b) => b.prefix - a2.prefix || a2.distance - b.distance || Number(b.row.state === "idle") - Number(a2.row.state === "idle") || a2.row.lane.localeCompare(b.row.lane));
+  return ranked.slice(0, 3).map(({ row }) => `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${row.state}`).join(", ");
+}
+async function warnUnknown(to, deps) {
+  const live = await liveRoster(deps);
+  if (live.registered.has(to)) return;
+  deps.ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  const candidates = closestLive(to, live.rows);
+  if (candidates) deps.ctx.err(`closest live: ${candidates}`);
 }
 function assignmentRepo(to, c2) {
   const lanes = c2.lanes.filter((l2) => l2.id === to && !l2.retired && !l2.closed);
@@ -4974,10 +5179,8 @@ function forceNote(opts, ctx) {
 }
 async function recipientSessions(to, deps, data) {
   const input = await readRoster(deps.c, deps.root, deps.ctx, data);
-  const recipient2 = buildRoster(input, deps.ctx.now()).rows.find((r2) => r2.lane === to);
-  if (!recipient2) return [];
-  const pids = input.processes.procs.filter((p) => p.cwd && p.cwd === recipient2.worktree).map((p) => p.pid);
-  return matchedSessions(recipient2.worktree, pids, data);
+  const recipients = buildRoster(input, deps.ctx.now()).rows.filter((row) => row.lane === to);
+  return [...new Set(recipients.flatMap(sessionsForRow))];
 }
 async function conflictingOwner(to, issue, deps, data) {
   const view = foldRegistry(data.events).get(issueKey(issue.repo, issue.number));
@@ -5701,6 +5904,54 @@ var init_unacked = __esm({
   }
 });
 
+// src/lanes/commands/register.ts
+import { statSync as statSync15 } from "node:fs";
+import { resolve as resolve11 } from "node:path";
+function explicitPid(value) {
+  const pid = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(pid) || pid <= 0) throw new UsageError("--pid must be a positive integer");
+  return pid;
+}
+async function registrationPid(value, ctx) {
+  const pid = value === void 0 ? await ancestorChain(ctx) : explicitPid(value);
+  if (pid === void 0) throw new Error("no pi process found among ancestors; pass --pid");
+  if (!(ctx.pidAlive ?? pidAlive)(pid)) throw new Error(`pid ${pid} is not alive`);
+  return pid;
+}
+async function registrationCwd(opts, pid, ctx) {
+  let cwd = opts.cwd;
+  if (cwd === void 0) {
+    try {
+      cwd = await processCwd2(ctx, pid);
+    } catch {
+    }
+  }
+  const canonical3 = ctx.realpath(resolve11(ctx.cwd, cwd ?? ctx.cwd));
+  if (!statSync15(canonical3).isDirectory()) throw new Error(`not a directory: ${canonical3}`);
+  return canonical3;
+}
+async function register(id, opts, root, ctx) {
+  if (!validId(id)) throw new UsageError("invalid registration id");
+  const pid = await registrationPid(opts.pid, ctx);
+  const cwd = await registrationCwd(opts, pid, ctx);
+  await registerSession(root, { id, pid, cwd }, ctx);
+  ctx.out(`registered ${id} pid=${pid} cwd=${cwd}`);
+  return 0;
+}
+function unregister(id, root, ctx) {
+  unregisterSession(root, id, ctx);
+  ctx.out(`unregistered ${id}`);
+  return 0;
+}
+var init_register = __esm({
+  "src/lanes/commands/register.ts"() {
+    init_config();
+    init_names();
+    init_processes();
+    init_registration();
+  }
+});
+
 // src/lanes/main.ts
 function parseOption(argv, i2, opts) {
   const token = argv[i2];
@@ -5763,6 +6014,8 @@ function validateInvocation({ command, positional, opts }) {
     who: [0, 0],
     status: [0, 0],
     messages: [1, 1],
+    register: [1, 1],
+    unregister: [1, 1],
     unacked: [0, 0],
     "idle-check": [0, 0],
     nudge: [2, 2],
@@ -5796,6 +6049,8 @@ async function dispatch(input, env) {
     send: () => send(args, opts, c2, root, ctx),
     who: () => who(args, opts, c2, root, ctx),
     unacked: () => unacked(args, opts, c2, root, ctx),
+    register: () => register(args[0], opts, root, ctx),
+    unregister: () => unregister(args[0], root, ctx),
     "idle-check": () => idleCheck(opts, c2, root, ctx),
     nudge: () => nudge(args[0], args[1], opts, c2, root, ctx),
     "resume-check": () => resumeCheck(c2, root, ctx),
@@ -5890,6 +6145,7 @@ var init_main = __esm({
     init_status();
     init_who();
     init_unacked();
+    init_register();
     HELP = `Usage: lanes [--dir root] <command> [options]
   adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
   init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
@@ -5898,6 +6154,8 @@ var init_main = __esm({
   start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
   run <ID>|coordinator [--from-handoff ID|file]
   resume <ID> [--terminal backend]
+  register <ID> [--cwd DIR] [--pid PID]
+  unregister <ID>
   send <TO> <topic> [file|-] [-m text] [--from ID] [--direct] [--issue N|OWNER/REPO#N] [--force reason]
   who [--repo R] [--issue N|OWNER/REPO#N] [--json]
   unacked [--json] [--minutes N] [--hours N] [--include-retired]
@@ -5950,6 +6208,8 @@ Legacy prune considers only regular, non-dot *.md files not owned by the bus bac
       send: ["m", "from", "direct", "issue", "force"],
       who: ["repo", "issue", "json"],
       unacked: ["json", "minutes", "hours", "include-retired"],
+      register: ["cwd", "pid"],
+      unregister: [],
       status: ["all"],
       messages: ["dry-run", "json", "legacy", "legacy-age", "apply"],
       "idle-check": ["minutes"],
@@ -6114,7 +6374,7 @@ import {
   readdirSync as readdirSync17,
   realpathSync as realpathSync3,
   renameSync as renameSync7,
-  statSync as statSync15,
+  statSync as statSync16,
   utimesSync as utimesSync2,
   writeSync
 } from "node:fs";
@@ -6135,7 +6395,7 @@ function listFiles(dir, base = "") {
 }
 function backupCopy(from, to) {
   copyFileSync3(from, to);
-  const st = statSync15(from);
+  const st = statSync16(from);
   chmodSync(to, st.mode & 4095);
   utimesSync2(to, st.atime, st.mtime);
 }
@@ -6299,7 +6559,7 @@ var init_manifest = __esm({
 
 // src/packages.ts
 import { existsSync as existsSync23, readFileSync as readFileSync25 } from "node:fs";
-import { join as join47, resolve as resolve11 } from "node:path";
+import { join as join47, resolve as resolve12 } from "node:path";
 function packageBinLinks(piDir, home) {
   return PACKAGE_BINS.map(([pkg, cmd]) => ({ path: join47(home, ".local/bin", cmd), target: join47(piDir, "npm/node_modules/@woksin", pkg, "bin", cmd) })).filter((link) => existsSync23(link.target));
 }
@@ -6350,7 +6610,7 @@ function refersTo(value, name, piDir) {
   if (source === `npm:${name}` || source.startsWith(`npm:${name}@`)) return true;
   if (source.endsWith(`/local-packages/${name.split("/")[1]}`)) return true;
   if (!source || source.includes(":")) return false;
-  const path2 = source.startsWith("~/") ? resolve11(piDir, "../..", source.slice(2)) : resolve11(piDir, source);
+  const path2 = source.startsWith("~/") ? resolve12(piDir, "../..", source.slice(2)) : resolve12(piDir, source);
   return readPackage(path2).name === name;
 }
 function pinOperation(list, pkg, context) {
@@ -6397,7 +6657,7 @@ var init_packages = __esm({
       { name: "@woksin/pi-jobs", version: "0.5.0" },
       { name: "@woksin/pi-context-budget", version: "0.5.0" },
       { name: "@woksin/pi-recover", version: "0.1.1" },
-      { name: "@woksin/pi-orch", version: "0.2.0" }
+      { name: "@woksin/pi-orch", version: "0.3.0" }
     ];
     PACKAGE_BINS = [
       ["pi-context-budget", "pi-session"],
@@ -6411,7 +6671,7 @@ var init_packages = __esm({
 });
 
 // src/backups.ts
-import { existsSync as existsSync24, mkdirSync as mkdirSync15, readdirSync as readdirSync18, rmdirSync as rmdirSync2, rmSync, statSync as statSync16, unlinkSync as unlinkSync6 } from "node:fs";
+import { existsSync as existsSync24, mkdirSync as mkdirSync15, readdirSync as readdirSync18, rmdirSync as rmdirSync2, rmSync, statSync as statSync17, unlinkSync as unlinkSync6 } from "node:fs";
 import { dirname as dirname11, join as join48, relative as relative9 } from "node:path";
 function filesBelow(dir, base = "") {
   const out = [];
@@ -6462,7 +6722,7 @@ function prune2(piDir, keep2, pinned, dryRun) {
 }
 function tidy(piDir) {
   const base = backupsDir(piDir);
-  if (existsSync24(base) && statSync16(base).isDirectory()) pruneEmptyDirs(base);
+  if (existsSync24(base) && statSync17(base).isDirectory()) pruneEmptyDirs(base);
   const data = dirname11(base);
   if (existsSync24(data) && readdirSync18(data).length === 0) rmdirSync2(data);
 }
@@ -6535,7 +6795,7 @@ import {
   lstatSync as lstatSync8,
   mkdirSync as mkdirSync16,
   readFileSync as readFileSync26,
-  statSync as statSync17,
+  statSync as statSync18,
   symlinkSync,
   utimesSync as utimesSync3,
   writeFileSync as writeFileSync11
@@ -6576,7 +6836,7 @@ function needsNpm(actions, piDir, manifest, force = false) {
     return now?.packageJson !== known.packageJson || now?.lock !== known.lock;
   }
   if (!existsSync25(lock)) return true;
-  return statSync17(pkg).mtimeMs > statSync17(lock).mtimeMs;
+  return statSync18(pkg).mtimeMs > statSync18(lock).mtimeMs;
 }
 async function apply(ctx, actions, options, manifest) {
   const piDir = join49(ctx.home, ".pi", "agent");
@@ -6679,7 +6939,7 @@ var init_apply = __esm({
     init_backups();
     init_manifest();
     KEEP_RUNS = 10;
-    modeOf = (path2) => statSync17(path2).mode & 4095;
+    modeOf = (path2) => statSync18(path2).mode & 4095;
     Run = class {
       backups;
       next;
@@ -6707,7 +6967,7 @@ var init_apply = __esm({
       }
       backedUp = 0;
       backupIfThere(path2) {
-        if (!existsSync25(path2) || !statSync17(path2).isFile()) return void 0;
+        if (!existsSync25(path2) || !statSync18(path2).isFile()) return void 0;
         this.backedUp++;
         return this.backups.backup(path2);
       }
@@ -6821,7 +7081,7 @@ var init_apply = __esm({
       /** Only for a file this run wrote or adopted; a kept (user-modified) file is never touched. */
       chmodX(path2) {
         if (!this.written.has(path2) || !existsSync25(path2)) return;
-        const mode = statSync17(path2).mode;
+        const mode = statSync18(path2).mode;
         if ((mode & 73) === 0) {
           chmodSync2(path2, mode | 73);
           this.wrote = true;
@@ -6971,9 +7231,9 @@ var init_prereqs = __esm({
 
 // src/shell-path.ts
 import { appendFileSync as appendFileSync3, copyFileSync as copyFileSync4, mkdirSync as mkdirSync17, readFileSync as readFileSync28 } from "node:fs";
-import { basename as basename7, delimiter as delimiter3, dirname as dirname13, join as join51, resolve as resolve12 } from "node:path";
+import { basename as basename7, delimiter as delimiter3, dirname as dirname13, join as join51, resolve as resolve13 } from "node:path";
 function missingBinDirs(ctx) {
-  const paths = (ctx.env.PI_SETUP_USER_PATH ?? ctx.env.PATH ?? "").split(delimiter3).map((p) => resolve12(ctx.cwd, p));
+  const paths = (ctx.env.PI_SETUP_USER_PATH ?? ctx.env.PATH ?? "").split(delimiter3).map((p) => resolve13(ctx.cwd, p));
   return [".local/bin", ".pi/agent/bin"].filter((p) => !paths.includes(join51(ctx.home, p)));
 }
 function shellPath(ctx) {
@@ -7149,7 +7409,7 @@ var init_profiles = __esm({
 });
 
 // src/components.ts
-import { existsSync as existsSync27, readdirSync as readdirSync20, readFileSync as readFileSync30, statSync as statSync18 } from "node:fs";
+import { existsSync as existsSync27, readdirSync as readdirSync20, readFileSync as readFileSync30, statSync as statSync19 } from "node:fs";
 import { join as join53 } from "node:path";
 function available(id, ctx) {
   if (id === "docker-guardian") return ctx.platform === "darwin" ? true : "needs Docker Desktop on macOS";
@@ -7188,7 +7448,7 @@ function currentState(ctx) {
 }
 function isDir(path2) {
   try {
-    return statSync18(path2).isDirectory();
+    return statSync19(path2).isDirectory();
   } catch {
     return false;
   }
@@ -7316,16 +7576,16 @@ var init_components = __esm({
 });
 
 // src/plan.ts
-import { existsSync as existsSync28, lstatSync as lstatSync9, readdirSync as readdirSync21, readFileSync as readFileSync31, readlinkSync as readlinkSync2, statSync as statSync19 } from "node:fs";
+import { existsSync as existsSync28, lstatSync as lstatSync9, readdirSync as readdirSync21, readFileSync as readFileSync31, readlinkSync as readlinkSync2, statSync as statSync20 } from "node:fs";
 import { join as join54 } from "node:path";
 function fromSource(src, settings3) {
   const raw = readFileSync31(src);
-  const st = statSync19(src);
+  const st = statSync20(src);
   const mode = st.mode & 4095;
   return hasTokens(raw) ? { content: src.endsWith("/pi-phase/config.json") ? Buffer.from(raw.toString("utf8").split("{{REPOS_ROOT}}").join(JSON.stringify(settings3.reposRoot).slice(1, -1))) : render(raw, settings3), mode } : { content: raw, mode, mtimeMs: st.mtimeMs };
 }
 function sameBytes(dest, content) {
-  return existsSync28(dest) && statSync19(dest).isFile() && readFileSync31(dest).equals(content);
+  return existsSync28(dest) && statSync20(dest).isFile() && readFileSync31(dest).equals(content);
 }
 function put(actions, dest, desired) {
   if (sameBytes(dest, desired.content)) {
@@ -7379,7 +7639,7 @@ function agentsMd(input, live) {
     delete base.mtimeMs;
     input.notes?.push(...stripped.warnings);
   }
-  const existing = existsSync28(live) && statSync19(live).isFile() ? readFileSync31(live) : void 0;
+  const existing = existsSync28(live) && statSync20(live).isFile() ? readFileSync31(live) : void 0;
   const noMarkers = existing !== void 0 && !hasRoutingMarkers(existing);
   if (!input.overlay.routing) return { ...base, noMarkers };
   return { content: spliceRouting(base.content, input.overlay.routing, noMarkers ? void 0 : existing), mode: base.mode, noMarkers };
@@ -7397,7 +7657,7 @@ function registerJson(actions, path2, edit) {
   const before = structuredClone(data);
   const jsonOps = edit(data, Boolean(pending2));
   if (jsonOps.length === 0 && deepEqual(before, data)) return;
-  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync19(path2).mode & 4095;
+  const mode = pending2 && pending2.op === "install" ? pending2.mode : statSync20(path2).mode & 4095;
   const next = Buffer.from(`${JSON.stringify(data, null, 2)}
 `);
   if (pending2 && pending2.op === "install") {
@@ -7545,7 +7805,7 @@ var init_plan = __esm({
 
 // src/doctor-checks.ts
 import { existsSync as existsSync29, lstatSync as lstatSync10, readdirSync as readdirSync22, readFileSync as readFileSync32, readlinkSync as readlinkSync3 } from "node:fs";
-import { basename as basename8, dirname as dirname14, join as join55, resolve as resolve13 } from "node:path";
+import { basename as basename8, dirname as dirname14, join as join55, resolve as resolve14 } from "node:path";
 function setupCmd(ctx) {
   if (ctx.which("pi-setup")) return "pi-setup";
   if (ctx.cwd === ctx.repoDir) return "./install.sh";
@@ -7598,7 +7858,7 @@ function state(ctx, facts) {
   for (const [rel, link] of Object.entries(s.manifest?.symlinks ?? {})) {
     const path2 = fromHomeRel(ctx.home, rel);
     try {
-      if (!lstatSync10(path2).isSymbolicLink() || resolve13(dirname14(path2), readlinkSync3(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
+      if (!lstatSync10(path2).isSymbolicLink() || resolve14(dirname14(path2), readlinkSync3(path2)) !== symlinkTarget(ctx.home, link.target)) s.missing.push(rel);
     } catch {
       s.missing.push(rel);
     }
@@ -7645,7 +7905,7 @@ function npm(s) {
     if (spec.startsWith("npm:")) {
       const finding = npmPackageCheck(spec, s.piDir);
       if (finding) result3.push(finding);
-    } else if (spec.startsWith(".") && !existsSync29(resolve13(s.piDir, spec))) result3.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
+    } else if (spec.startsWith(".") && !existsSync29(resolve14(s.piDir, spec))) result3.push(check(`package:${spec}`, "warn", "local package is missing", `edit ~/.pi/agent/settings.json`));
   }
   return result3;
 }
@@ -8259,8 +8519,8 @@ var init_prereqs_run = __esm({
 });
 
 // src/services.ts
-import { existsSync as existsSync33, mkdirSync as mkdirSync19, readFileSync as readFileSync35, statSync as statSync20 } from "node:fs";
-import { join as join60, resolve as resolve14 } from "node:path";
+import { existsSync as existsSync33, mkdirSync as mkdirSync19, readFileSync as readFileSync35, statSync as statSync21 } from "node:fs";
+import { join as join60, resolve as resolve15 } from "node:path";
 import { userInfo } from "node:os";
 function serviceUser(env) {
   return (env.USER ?? "").replace(/[^A-Za-z0-9-]/g, "") || "pi-setup";
@@ -8325,7 +8585,7 @@ function planServices(ctx, manifest, on) {
     const actions = [];
     for (const u3 of units) {
       const rel = homeRel(ctx.home, u3.path);
-      const there = existsSync33(u3.path) && statSync20(u3.path).isFile();
+      const there = existsSync33(u3.path) && statSync21(u3.path).isFile();
       if (!there) actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: false, decision: "new" });
       else if (readFileSync35(u3.path).equals(u3.content)) actions.push({ op: "adopt", path: u3.path });
       else if (manifest?.files[rel] && fileSha(u3.path) === manifest.files[rel].sha256) {
@@ -8342,7 +8602,7 @@ function planServices(ctx, manifest, on) {
 }
 function launchdSkipReason(ctx) {
   if (ctx.noLaunchd) return "--no-launchd was given";
-  if (resolve14(ctx.home) !== resolve14(ctx.userHome ?? userInfo().homedir)) return "HOME is not the real user home";
+  if (resolve15(ctx.home) !== resolve15(ctx.userHome ?? userInfo().homedir)) return "HOME is not the real user home";
   return void 0;
 }
 function skipLaunchd(ctx) {
@@ -8431,7 +8691,7 @@ var init_services = __esm({
 });
 
 // src/doctor-components.ts
-import { existsSync as existsSync34, lstatSync as lstatSync11, readlinkSync as readlinkSync4, statSync as statSync21 } from "node:fs";
+import { existsSync as existsSync34, lstatSync as lstatSync11, readlinkSync as readlinkSync4, statSync as statSync22 } from "node:fs";
 import { join as join61 } from "node:path";
 async function isLoaded(ctx, kind, label) {
   try {
@@ -8511,7 +8771,7 @@ async function componentChecks(ctx, manifest) {
     const dir = join61(ctx.home, ".agents/skills");
     const missing = CS_SKILLS.filter((n3) => {
       try {
-        return !statSync21(join61(dir, n3)).isDirectory();
+        return !statSync22(join61(dir, n3)).isDirectory();
       } catch {
         return true;
       }
@@ -8802,7 +9062,7 @@ import {
   readlinkSync as readlinkSync5,
   renameSync as renameSync8,
   rmdirSync as rmdirSync3,
-  statSync as statSync22,
+  statSync as statSync23,
   unlinkSync as unlinkSync7
 } from "node:fs";
 import { dirname as dirname16, join as join63 } from "node:path";
@@ -8915,7 +9175,7 @@ function revertOps(ctx, m2, rel, match, dryRun) {
     const wasTracked = Boolean(tracked) && fileSha(path2) === tracked.sha256;
     entry2.edited ||= fileSha(path2) !== entry2.sha256After;
     atomicWrite(path2, `${JSON.stringify(data, null, 2)}
-`, statSync22(path2).mode & 4095);
+`, statSync23(path2).mode & 4095);
     const sha2 = sha256(readFileSync36(path2));
     entry2.sha256After = sha2;
     if (wasTracked) tracked.sha256 = sha2;
@@ -9117,7 +9377,7 @@ var init_uninstall = __esm({
           delete this.remaining.json[rel];
           return;
         }
-        const mode = statSync22(path2).mode & 4095;
+        const mode = statSync23(path2).mode & 4095;
         atomicWrite(path2, `${JSON.stringify(data, null, 2)}
 `, mode);
         if (left.length === 0) {
