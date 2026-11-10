@@ -19,11 +19,15 @@ Usage: pi-cleanup [--apply] [--only STEPS] [--idle-days N] [--worktree-min-idle-
                      --scheduled and not given, only the build step uses 0.25)
   --worktree-min-idle-days N  minimum idle age for worktree removal (default 1; may be 0).
                      Effective worktree idle threshold = max(--idle-days, this value)
-  --nuget-age-days N remote-sourced ~/.nuget/packages versions whose newest file
-                     atime/mtime/ctime is older than N days are removed by the caches step
-                     (default 7); runs even while dotnet is running
+  --nuget-age-days N (alias --nuget-unused-days) remote-sourced NuGet global-packages versions
+                     whose newest file mtime is older than N days are removed by the
+                     caches step (default 7; atime is ignored, it is unreliable on APFS); runs
+                     even while dotnet runs. The folder is $NUGET_PACKAGES, else `dotnet nuget
+                     locals global-packages`, else NuGet.Config, else ~/.nuget/packages.
+                     Versions with open files and local-feed versions are always kept
+  --nuget-unused-days-low N  the threshold while free space is below --if-free-below (default 1)
   --nuget-keep-versions N  the newest N versions of every package id are never removed
-                     (default 3; at least one version always stays)
+                     (default 0: unused versions are removed whatever their rank)
   --session-age-days N pi session .jsonl files not modified for N days are gzipped in
                      place by the caches step (default 30)
   --handoff-age-days N context-budget handoff files (.ai-work/handoffs) older than N days are
@@ -86,7 +90,7 @@ Steps
              go/compile/golangci-lint/gopls process); NuGet http-cache and temp, and
              ~/.nuget/packages versions whose .nupkg.metadata source is
              https://api.nuget.org/ or https://pkgs.dev.azure.com/dnceng/ and that are
-             unused for --nuget-age-days and not among the newest --nuget-keep-versions
+             unused for --nuget-age-days and not among the newest --nuget-keep-versions (default 0)
              (never local/file feeds; http-cache/temp clearing is skipped while a
              dotnet/MSBuild/VBCSCompiler process runs); `yarn cache clean` and
              `npm cache clean --force`; gzip in place of old, unopened pi session
@@ -1405,7 +1409,49 @@ EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/local/share/dotnet", 
 NUGET_REMOTE_PREFIXES = ("https://api.nuget.org/", "https://pkgs.dev.azure.com/dnceng/")
 GO_CACHE_MIN = 10 * 1024 ** 3
 SESSIONS_DIR = os.path.expanduser("~/.pi/agent/sessions")
-NUGET_PACKAGES = os.path.expanduser("~/.nuget/packages")
+NUGET_DEFAULT_PACKAGES = os.path.expanduser("~/.nuget/packages")
+_nuget_dir_cache = []
+
+
+def nuget_configured_dir():
+    """Where NuGet says the global-packages folder is: $NUGET_PACKAGES, then `dotnet nuget locals
+    global-packages --list`, then NuGet.Config's globalPackagesFolder, then ~/.nuget/packages."""
+    env = os.environ.get("NUGET_PACKAGES")
+    if env:
+        return os.path.expanduser(env)
+    rc, out, _ = run(["dotnet", "nuget", "locals", "global-packages", "--list"], timeout=15)
+    if rc == 0:
+        for line in out.splitlines():
+            if line.strip().lower().startswith("global-packages:"):
+                value = line.split(":", 1)[1].strip()
+                if value:
+                    return os.path.expanduser(value)
+    try:
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(os.path.expanduser("~/.nuget/NuGet/NuGet.Config"))
+        for node in tree.iter("add"):
+            if (node.get("key") or "").lower() == "globalpackagesfolder" and node.get("value"):
+                return os.path.expanduser(node.get("value"))
+    except Exception:  # unreadable or malformed config: fall back to the default location
+        pass
+    return NUGET_DEFAULT_PACKAGES
+
+
+def nuget_packages_dir():
+    """Realpath of the NuGet global-packages folder, or "" when it cannot be trusted (fail closed:
+    missing, not a directory, not named like a packages folder, `/` or the home directory)."""
+    if _nuget_dir_cache:
+        return _nuget_dir_cache[0]
+    resolved = ""
+    try:
+        real = os.path.realpath(nuget_configured_dir())
+        if (os.path.isdir(real) and "packages" in os.path.basename(real).lower()
+                and real != "/" and real != os.path.realpath(os.path.expanduser("~"))):
+            resolved = real
+    except OSError:
+        pass
+    _nuget_dir_cache.append(resolved)
+    return resolved
 
 
 def extend_path() -> None:
@@ -1434,11 +1480,10 @@ def procs_running(names):
 
 def tree_usage(vd: str, stop_at=None):
     """Walk `vd` without following symlinks. Returns (newest, bytes, ok): newest is the max
-    of atime/mtime/ctime over the dir and every entry in it; bytes is allocated size; ok is
-    False if ANY stat/walk error happened (callers must then treat the dir as in use). The
-    atime of `.nupkg.metadata` is ignored (only its mtime/ctime count): pi-cleanup itself
-    reads that file, which would otherwise make every scanned version look freshly used.
-    When `stop_at` is given the walk stops at the first entry newer than it."""
+    of mtime over the dir and every entry in it (atime is ignored, it is unreliable on APFS;
+    ctime is ignored so a restored mtime of a downloaded package counts); bytes is allocated
+    size; ok is False if ANY stat/walk error happened (callers must then treat the dir as in
+    use). When `stop_at` is given the walk stops at the first entry newer than it."""
     state = {"ok": True}
 
     def onerror(_e):
@@ -1453,8 +1498,7 @@ def tree_usage(vd: str, stop_at=None):
             except OSError:
                 state["ok"] = False
                 continue
-            ct = 0.0 if name == ".nupkg.metadata" else st.st_ctime
-            newest = max(newest, st.st_atime, st.st_mtime, ct)
+            newest = max(newest, st.st_mtime)  # mtime only: atime is unreliable on APFS
             total += st.st_blocks * 512
             if stop_at is not None and newest >= stop_at:
                 return newest, total, state["ok"]
@@ -1496,14 +1540,27 @@ def nuget_valid_versions(idp: str, names):
 
 
 def nuget_newest(versions, keep: int):
-    """The `keep` newest (NuGet semver order, at least 1) of validated `versions`."""
+    """The `keep` newest (NuGet semver order) of validated `versions`; none when keep <= 0."""
     order = sorted(versions, key=nuget_version_key, reverse=True)
-    return set(order[:max(1, keep)])
+    return set(order[:max(0, keep)])
+
+
+def nuget_unused_days(args):
+    """Unused threshold in days: the stricter --nuget-unused-days-low while free space is low."""
+    days = args.nuget_age_days
+    if getattr(args, "low_space", False):
+        days = min(days, getattr(args, "nuget_unused_days_low", days))
+    return days
+
+
+def nuget_held(ctx, vd):
+    """True unless the process snapshot proves nothing has files open inside `vd` (fail closed)."""
+    return ctx.snap is None or bool(ctx.snap.first_inside(vd))
 
 
 def nuget_eligible(vd: str, cutoff: float, root_real: str):
     """True if version dir `vd` is a remote-sourced, symlink-free package version whose
-    newest atime/mtime/ctime (any file inside) is older than `cutoff`.
+    newest mtime (any file inside) is older than `cutoff`.
     Returns (eligible, is_local_source)."""
     ok, local, _ = nuget_check(vd, cutoff, root_real)
     return ok, local
@@ -1513,7 +1570,7 @@ def nuget_check(vd: str, cutoff: float, root_real: str):
     """Like nuget_eligible, plus the bytes of the version dir when it was fully walked."""
     try:
         idp = os.path.dirname(vd)
-        if os.path.dirname(idp) != NUGET_PACKAGES:
+        if not root_real or os.path.dirname(idp) != nuget_packages_dir():
             return False, False, 0
         for q in (idp, vd):
             if not statmod.S_ISDIR(os.lstat(q).st_mode):  # lstat: symlinks are not dirs
@@ -1547,16 +1604,16 @@ def nuget_check(vd: str, cutoff: float, root_real: str):
 
 def plan_nuget_trim(ctx: Ctx):
     """Returns (candidates, kept_local_count, kept_local_bytes, candidate_bytes)."""
-    cutoff = ctx.now - ctx.args.nuget_age_days * 86400
-    keep = getattr(ctx.args, "nuget_keep_versions", 3)
+    cutoff = ctx.now - nuget_unused_days(ctx.args) * 86400
+    keep = getattr(ctx.args, "nuget_keep_versions", 0)
     cands, kept_local, local_bytes, cand_bytes = [], 0, 0, 0
     try:
-        root_real = os.path.realpath(NUGET_PACKAGES)
-        ids = sorted(os.listdir(NUGET_PACKAGES))
+        root_real = nuget_packages_dir()
+        ids = sorted(os.listdir(nuget_packages_dir()))
     except OSError:
         return cands, kept_local, local_bytes, cand_bytes
     for pid in ids:
-        idp = os.path.join(NUGET_PACKAGES, pid)
+        idp = os.path.join(nuget_packages_dir(), pid)
         try:
             if not statmod.S_ISDIR(os.lstat(idp).st_mode):
                 continue
@@ -1571,7 +1628,7 @@ def plan_nuget_trim(ctx: Ctx):
                 ok, local, _ = nuget_check(vd, 0.0, root_real)
             else:
                 ok, local, size = nuget_check(vd, cutoff, root_real)
-                if ok:
+                if ok and not nuget_held(ctx, vd):
                     cands.append(vd)
                     cand_bytes += size
             if local:
@@ -1598,11 +1655,11 @@ def find_nuget_trash(root_real: str):
     name, a real directory (not a symlink) under the real root, pid not a live process."""
     found = []
     try:
-        ids = os.listdir(NUGET_PACKAGES)
+        ids = os.listdir(nuget_packages_dir())
     except OSError:
         return found
     for pid in ids:
-        idp = os.path.join(NUGET_PACKAGES, pid)
+        idp = os.path.join(nuget_packages_dir(), pid)
         try:
             if not statmod.S_ISDIR(os.lstat(idp).st_mode):
                 continue
@@ -1939,7 +1996,7 @@ def plan_caches(ctx: Ctx, checkouts, include_tmp=True, consume=None):
             cands, kept_local, local_bytes, cand_bytes = [], 0, 0, 0
         else:
             cands, kept_local, local_bytes, cand_bytes = plan_nuget_trim(ctx)
-        trash = [] if ctx.deadline else find_nuget_trash(os.path.realpath(NUGET_PACKAGES))
+        trash = [] if ctx.deadline else find_nuget_trash(nuget_packages_dir())
         item("nuget packages trim", "run" if ctx.deadline or cands or trash else "skip", None if ctx.deadline or cands or trash else "nothing old enough",
              **({"scheduled_trim": True} if ctx.deadline else {}),
              paths=cands, size=cand_bytes, trash=len(trash),
@@ -2095,8 +2152,8 @@ NUGET_PROCS = ["dotnet", "MSBuild", "VBCSCompiler"]
 
 def apply_nuget_paths(ctx, it):
     res = {"deleted": 0, "failed": 0, "skipped": 0, "recovered": 0}
-    cutoff = ctx.now - ctx.args.nuget_age_days * 86400
-    root_real = os.path.realpath(NUGET_PACKAGES)
+    cutoff = ctx.now - nuget_unused_days(ctx.args) * 86400
+    root_real = nuget_packages_dir()
     ids = set()
     for tp in ctx.items(find_nuget_trash(root_real) if it.get("recover_trash", True) else []):
         try:
@@ -2108,7 +2165,7 @@ def apply_nuget_paths(ctx, it):
     for vd in ctx.items(it["paths"]):
         reason = retained_reason(vd)
         ok, _ = nuget_eligible(vd, cutoff, root_real)
-        if reason or not ok:
+        if reason or not ok or nuget_held(ctx, vd):
             res["skipped"] += 1
             if reason:
                 it.setdefault("retained", []).append({"path": vd, "reason": reason})
@@ -2135,11 +2192,11 @@ def scheduled_nuget_versions(ctx):
     """List version identities only; expensive checks happen in rotating order."""
     versions = []
     try:
-        ids = sorted(os.listdir(NUGET_PACKAGES))
+        ids = sorted(os.listdir(nuget_packages_dir()))
     except OSError:
         return versions
     for pid in ids:
-        idp = os.path.join(NUGET_PACKAGES, pid)
+        idp = os.path.join(nuget_packages_dir(), pid)
         try:
             if not statmod.S_ISDIR(os.lstat(idp).st_mode):
                 continue
@@ -2157,8 +2214,8 @@ def apply_scheduled_nuget(ctx, it):
     it["result"] = recovery["result"]
     if not ctx.ready():
         return
-    root_real = os.path.realpath(NUGET_PACKAGES)
-    cutoff = ctx.now - ctx.args.nuget_age_days * 86400
+    root_real = nuget_packages_dir()
+    cutoff = ctx.now - nuget_unused_days(ctx.args) * 86400
     kept_local, local_bytes = 0, 0
     for vd, protected in ctx.items(scheduled_nuget_versions(ctx)):
         ok, local, size = nuget_check(vd, 0.0 if protected else cutoff, root_real)
@@ -2986,8 +3043,10 @@ def parse_args(argv):
     ap.add_argument("--merged-idle-hours", type=nonneg_float, default=4, metavar="HOURS",
                     help="a clean worktree proven merged (on the default branch or a merged PR) is removable after "
                          "this idle time (default 4; never longer than --idle-days/--worktree-min-idle-days)")
-    ap.add_argument("--nuget-age-days", type=nonneg_float, default=7)
-    ap.add_argument("--nuget-keep-versions", type=int, default=3)
+    ap.add_argument("--nuget-age-days", "--nuget-unused-days", dest="nuget_age_days", type=nonneg_float, default=7)
+    ap.add_argument("--nuget-unused-days-low", type=nonneg_float, default=1, metavar="DAYS",
+                    help="stricter unused threshold while free space is below --if-free-below (default 1)")
+    ap.add_argument("--nuget-keep-versions", type=int, default=0)
     ap.add_argument("--session-age-days", type=nonneg_float, default=30)
     ap.add_argument("--handoff-age-days", type=nonneg_float, default=14)
     ap.add_argument("--handoff-keep-newest", type=positive_int, default=3)
@@ -3160,6 +3219,7 @@ def main(argv=None):
                 _log_line(f"free space OK (>= {args.if_free_below:g} GiB on {', '.join(p['path'] for p in probes if 'free' in p)}); nothing to do")
             return 0
         if low:
+            args.low_space = True
             notes.append("low free space: " + "; ".join(low))
         if failed:
             notes.append("free-space probe failed, proceeding with cleanup: " + "; ".join(failed))
