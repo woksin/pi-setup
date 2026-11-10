@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 9182341dc14db721645d9615ccbd16a4e11f565bedefd78a8123673be87a7227
+// pi-setup-source-sha256: 201178e47ad28ad43949255b241b1affee64e0862f1ef8f53a658af2f2868583
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5588,11 +5588,10 @@ async function git(ctx, dir, args) {
 }
 function foreign(porcelain) {
   return porcelain.split("\n").filter((l2) => l2.trim()).filter((l2) => {
-    const path2 = l2.slice(3).replace(/^"|"$/g, "");
-    return path2 !== AI_WORK && path2 !== `${AI_WORK}/` && !path2.startsWith(`${AI_WORK}/`);
+    return !inAiWork(l2.slice(3).replace(/^"|"$/g, ""));
   });
 }
-async function isClean(ctx, cwd) {
+async function isClean(ctx, { cwd }) {
   const top = await git(ctx, cwd, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
   const root = top?.code === 0 ? real(top.out.trim()) : void 0;
   if (!root || root !== real(cwd)) return left("worktree root could not be verified");
@@ -5601,7 +5600,7 @@ async function isClean(ctx, cwd) {
   const other = foreign(status2.out);
   return other.length ? left(`worktree is dirty (${other.length} path${other.length === 1 ? "" : "s"}, e.g. ${other[0].trim()})`) : { ok: true };
 }
-async function isMerged(ctx, clone, cwd) {
+async function isMerged(ctx, { clone, cwd }) {
   const head = await git(ctx, clone, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
   const ref = head?.code === 0 ? head.out.trim() : "";
   if (!ref) return left("default branch unknown");
@@ -5610,7 +5609,7 @@ async function isMerged(ctx, clone, cwd) {
   if (merged.code === 1) return left("not merged");
   return merged.code === 0 ? { ok: true } : left("merge check failed");
 }
-async function archive3(ctx, clone, cwd) {
+async function archive3(ctx, { clone, cwd }) {
   const src = join43(cwd, AI_WORK);
   if (!existsSync19(src)) return { ok: true };
   const base = join43(clone, AI_WORK, "keep", "removed-worktrees", basename6(cwd));
@@ -5625,10 +5624,10 @@ async function archive3(ctx, clone, cwd) {
   }
   return { ok: true };
 }
-async function checks(id, cwd, clone, ctx) {
-  if (!existsSync19(cwd)) return left("worktree already removed");
-  if (await piIn(cwd, ctx)) return left(`${id} is still running`);
-  for (const step of [() => isClean(ctx, cwd), () => isMerged(ctx, clone, cwd), () => archive3(ctx, clone, cwd)]) {
+async function checks(wt, ctx) {
+  if (!existsSync19(wt.cwd)) return left("worktree already removed");
+  if (await piIn(wt.cwd, ctx)) return left(`${wt.id} is still running`);
+  for (const step of [() => isClean(ctx, wt), () => isMerged(ctx, wt), () => archive3(ctx, wt)]) {
     const verdict2 = await step();
     if (!verdict2.ok) return verdict2;
   }
@@ -5636,7 +5635,8 @@ async function checks(id, cwd, clone, ctx) {
 }
 async function tryRemove(id, cwd, clone, ctx) {
   if (!clone) return "worktree left: clone could not be determined";
-  const verdict2 = await checks(id, cwd, clone, ctx);
+  const wt = { id, cwd, clone };
+  const verdict2 = await checks(wt, ctx);
   if (!verdict2.ok) return `worktree left: ${verdict2.why}`;
   await git(ctx, clone, ["worktree", "unlock", cwd]);
   const removed = await git(ctx, clone, ["worktree", "remove", cwd]);
@@ -5644,7 +5644,7 @@ async function tryRemove(id, cwd, clone, ctx) {
   await git(ctx, clone, ["worktree", "lock", "--reason", `lanes ${id}`, cwd]);
   return "worktree left: git refused to remove it (re-locked)";
 }
-var GIT_MS, AI_WORK, left, real;
+var GIT_MS, AI_WORK, left, real, inAiWork;
 var init_close_remove = __esm({
   "src/lanes/commands/close-remove.ts"() {
     init_sessions();
@@ -5658,6 +5658,7 @@ var init_close_remove = __esm({
         return void 0;
       }
     };
+    inAiWork = (path2) => path2 === AI_WORK || path2.startsWith(`${AI_WORK}/`);
   }
 });
 
@@ -5677,29 +5678,34 @@ function closeBody(id, to, reason, unread2) {
   return `${body.join("\n")}
 `;
 }
-async function quit(id, pid, cwd, c2, root, ctx) {
-  const busy = (await descendants2(ctx, pid)).filter((cmd) => /\bpi-phase run\b/.test(cmd) || /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i.test(basename7(cmd.split(/\s+/)[0])));
-  if (busy.length) {
-    ctx.err(`REFUSED: busy children: ${busy.join(" ")}`);
-    return false;
-  }
-  const age2 = idleMinutes2(cwd, ctx);
-  if (age2 !== void 0 && age2 < 3) {
-    ctx.err("REFUSED: session wrote less than 180s ago");
-    return false;
-  }
-  if (await nudge(id, "/quit", {}, c2, root, ctx) !== 0) return false;
+async function quitRefusal(session, ctx) {
+  const busy = (await descendants2(ctx, session.pid)).filter(isBusyChild);
+  if (busy.length) return `busy children: ${busy.join(" ")}`;
+  const age2 = idleMinutes2(session.cwd, ctx);
+  return age2 !== void 0 && age2 < 3 ? "session wrote less than 180s ago" : void 0;
+}
+async function awaitExit2(pid, ctx) {
   for (let i2 = 0; i2 < 10; i2++) {
     await (ctx.sleep ? ctx.sleep(1e3) : new Promise((done) => setTimeout(done, 1e3)));
     if (!await alive(ctx, pid)) return true;
   }
-  ctx.err(`REFUSED: pi ${pid} did not quit`);
+  return false;
+}
+async function quit(session, c2, root, ctx) {
+  const refusal = await quitRefusal(session, ctx);
+  if (refusal) {
+    ctx.err(`REFUSED: ${refusal}`);
+    return false;
+  }
+  if (await nudge(session.id, "/quit", {}, c2, root, ctx) !== 0) return false;
+  if (await awaitExit2(session.pid, ctx)) return true;
+  ctx.err(`REFUSED: pi ${session.pid} did not quit`);
   return false;
 }
 async function removalHint(cwd, ctx) {
   if (!existsSync20(cwd)) return { text: "worktree already removed; no removal hint" };
   const common = await ctx.run("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 });
-  if (common.code !== 0 || common.timedOut || !common.stdout.trim()) throw new Error("cannot find clone for worktree removal hint");
+  if (!gitAnswered(common)) throw new Error("cannot find clone for worktree removal hint");
   const dir = dirname9(common.stdout.trim());
   const clone = shellQuote(dir);
   const wt = shellQuote(cwd);
@@ -5713,41 +5719,58 @@ function persistClosed(c2, root, record3) {
     throw new Error(`cannot write closed state to lanes.json: ${error.message}`);
   }
 }
-async function close(id, opts, c2, root, ctx) {
+function parseClose(id, opts, c2, ctx) {
   if (!c2.lanes.some((l2) => l2.id === id)) throw new UsageError(`not a lane: ${id}`);
   const to = opts["reassign-to"];
   const from = opts.from || ctx.env.PI_ORCH_ID || c2.coordinator.id;
-  if (to && (!validId(to) || to === id)) throw new UsageError("--reassign-to must be a valid id different from the closed lane");
+  if (to && !isValidOther(to, id)) throw new UsageError("--reassign-to must be a valid id different from the closed lane");
   if (!validId(from)) throw new UsageError("invalid sender id");
-  if (to && to !== c2.coordinator.id && !c2.lanes.some((l2) => l2.id === to)) ctx.err(`unknown reassignment target: ${to}`);
+  if (to && !isKnownParty(to, c2)) ctx.err(`unknown reassignment target: ${to}`);
+  return { to, from };
+}
+async function announce(closing, unread2, backend, ctx, at) {
+  const { id, to, from, reason } = closing;
+  const line = closedLine(to, reason, at);
+  await backend.setStatus(id, line);
+  const topic = `lane-closed-${id.toLowerCase()}`;
+  const message = await backend.postPassive({ topic, body: closeBody(id, to, reason, unread2) });
+  ctx.out(`${id}: ${line}`);
+  ctx.out(message.path);
+  if (!to || to === from) return;
+  const wake = await backend.send({ from, to, topic, body: `Lane ${id} closed, pick up its work; details in ${message.name}
+` });
+  ctx.out(wake.path);
+}
+async function removeWorktree(id, cwd, clone, keep2, ctx) {
+  if (!existsSync20(cwd)) return false;
+  const status2 = keep2 ? "worktree left: --keep-worktree" : await tryRemove(id, cwd, clone, ctx);
+  ctx.out(status2);
+  return status2.startsWith("worktree removed");
+}
+async function stopSession(id, session, quitRequested, c2, root, ctx) {
+  if (!session) return true;
+  if (!quitRequested) {
+    ctx.err(`${id} is still running; type /quit in its session or use --quit`);
+    return true;
+  }
+  return quit(session, c2, root, ctx);
+}
+async function close(id, opts, c2, root, ctx) {
+  const { to, from } = parseClose(id, opts, c2, ctx);
   const target = laneTarget(id, c2, root, ctx);
   const hint = await removalHint(target.cwd, ctx);
   const backend = backendFor(c2, ctx, root);
   const unread2 = await backend.unread(id, { groups: target.lane?.group ? [target.lane.group] : [] });
   const pid = existsSync20(target.cwd) ? await piIn(target.cwd, ctx) : void 0;
-  if (pid && opts.quit && !await quit(id, pid, target.cwd, c2, root, ctx)) return 1;
-  if (pid && !opts.quit) ctx.err(`${id} is still running; type /quit in its session or use --quit`);
+  if (!await stopSession(id, pid ? { id, pid, cwd: target.cwd } : void 0, Boolean(opts.quit), c2, root, ctx)) return 1;
   const at = ctx.now();
   persistClosed(c2, root, { id, reason: opts.reason || "", by: from, at });
-  const line = closedLine(to, opts.reason, at);
-  await backend.setStatus(id, line);
-  const topic = `lane-closed-${id.toLowerCase()}`;
-  const message = await backend.postPassive({ topic, body: closeBody(id, to, opts.reason, unread2) });
-  ctx.out(`${id}: ${line}`);
-  ctx.out(message.path);
-  if (to && to !== from) {
-    const wake = await backend.send({ from, to, topic, body: `Lane ${id} closed, pick up its work; details in ${message.name}
-` });
-    ctx.out(wake.path);
-  }
-  if (existsSync20(target.cwd)) {
-    const status2 = opts["keep-worktree"] ? "worktree left: --keep-worktree" : await tryRemove(id, target.cwd, hint.clone, ctx);
-    ctx.out(status2);
-    if (status2.startsWith("worktree removed")) return 0;
-  }
+  await announce({ id, to, from, reason: opts.reason }, unread2, backend, ctx, at);
+  if (await removeWorktree(id, target.cwd, hint.clone, Boolean(opts["keep-worktree"]), ctx)) return 0;
   ctx.out(hint.text);
   return 0;
 }
+var BUSY_CHILD, isBusyChild, gitAnswered, isValidOther, isKnownParty;
 var init_close = __esm({
   "src/lanes/commands/close.ts"() {
     init_backend();
@@ -5759,6 +5782,11 @@ var init_close = __esm({
     init_terminal();
     init_close_remove();
     init_nudge();
+    BUSY_CHILD = /^(dotnet|vstest.*|testhost.*|npm|yarn|pnpm|pi-phase|git|docker|make)$/i;
+    isBusyChild = (cmd) => /\bpi-phase run\b/.test(cmd) || BUSY_CHILD.test(basename7(cmd.split(/\s+/)[0]));
+    gitAnswered = (r2) => r2.code === 0 && !r2.timedOut && r2.stdout.trim() !== "";
+    isValidOther = (candidate, id) => validId(candidate) && candidate !== id;
+    isKnownParty = (candidate, c2) => candidate === c2.coordinator.id || c2.lanes.some((l2) => l2.id === candidate);
   }
 });
 
