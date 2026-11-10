@@ -557,6 +557,12 @@ def wt_idle_days(args):
     return max(args.idle_days, args.worktree_min_idle_days)
 
 
+def merged_idle_days(args):
+    """Idle threshold of a worktree PROVEN merged (on the default branch or a merged PR): never longer than the
+    general worktree threshold, so a stricter --idle-days still wins when it is shorter."""
+    return min(wt_idle_days(args), getattr(args, "merged_idle_hours", 4) / 24)
+
+
 def age_str(seconds: float) -> str:
     return f"{seconds / 3600:.0f}h" if seconds < 48 * 3600 else f"{seconds / 86400:.1f}d"
 
@@ -647,7 +653,7 @@ class Ctx:
         if reason:
             return reason
         if worktree:
-            idle = wt_idle_days(self.args)
+            idle = merged_idle_days(self.args) if idle is None else idle
         else:
             idle = self.args.idle_days if idle is None else idle
         hit = held_inside(self.snap, c.path, build_output)
@@ -867,7 +873,9 @@ def merged_pr(parent: str, branch: str, head: str, base: str):
 
 
 def plan_worktrees(ctx: Ctx, checkouts, notes):
-    idle_s = wt_idle_days(ctx.args) * 86400
+    # Only a merge-proven worktree can be removed (every other row carries a merge blocker), so the short
+    # merged threshold is applied up front; the longer general threshold never decides a removal.
+    idle_s = merged_idle_days(ctx.args) * 86400
     rows = []
     linked = [c for c in checkouts if c.kind == "linked"]
 
@@ -2975,6 +2983,9 @@ def parse_args(argv):
     ap.add_argument("--only", default=",".join(STEPS_ALL), help="comma list of " + ",".join(STEPS_ALL))
     ap.add_argument("--idle-days", type=nonneg_float, default=None)
     ap.add_argument("--worktree-min-idle-days", type=nonneg_float, default=1)
+    ap.add_argument("--merged-idle-hours", type=nonneg_float, default=4, metavar="HOURS",
+                    help="a clean worktree proven merged (on the default branch or a merged PR) is removable after "
+                         "this idle time (default 4; never longer than --idle-days/--worktree-min-idle-days)")
     ap.add_argument("--nuget-age-days", type=nonneg_float, default=7)
     ap.add_argument("--nuget-keep-versions", type=int, default=3)
     ap.add_argument("--session-age-days", type=nonneg_float, default=30)
