@@ -1887,7 +1887,7 @@
  {
   "id": "local-docker-2026-10-20-docker-must-keep-working-without-a-human-2-011728be",
   "section": "local-docker-2026-10-20-docker-must-keep-working-without-a-human",
-  "text": "Image cleanup waits for no integration phase; it keeps pinned globs (`~/.pi/agent/docker-guardian/pinned.txt`), all container-used images, images younger than 6 h and floating tags, and uses only `docker rmi` without force."
+  "text": "Image cleanup waits for no integration phase; it keeps pinned globs (`~/.pi/agent/docker-guardian/pinned.txt`), all container-used images, images younger than 6 h and floating tags (pinned globs, the age rule and floating-tag protection apply only while free space is at or above the 40 GiB cleanup floor; below it only container-used images and images younger than 1 h stay, and build cache above 0 is pruned), and uses only `docker rmi` without force."
  },
  {
   "id": "local-docker-2026-10-20-docker-must-keep-working-without-a-human-3-17d25f9f",
@@ -1927,7 +1927,7 @@
  {
   "id": "local-docker-2026-10-20-docker-must-keep-working-without-a-human-10-e9a9fcc2",
   "section": "local-docker-2026-10-20-docker-must-keep-working-without-a-human",
-  "text": "Never `docker image prune -a` or `docker system prune -a` (pinned integration images must stay)."
+  "text": "Never `docker image prune -a` or `docker system prune -a` by hand: above the 40 GiB cleanup floor pinned integration images must stay; below it `pi-cleanup` and `docker-guardian` remove every image no container uses with `docker rmi` (pins ignored), because images are a restorable cache and integration specs re-pull what they need."
  },
  {
   "id": "cancelling-unnecessary-runs-2026-10-20-1-4c819eb1",
