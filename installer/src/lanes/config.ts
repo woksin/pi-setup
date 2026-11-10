@@ -21,7 +21,7 @@ export interface Config {
   coordinator: { id: string; cwd: string; prompt: string; maxRunning: number; [key: string]: unknown };
   messages: { dir: string; broadcast: string; ackMinutes?: number; ackLookbackHours?: number; retention?: Retention; [key: string]: unknown };
   terminal: { backend: string; [key: string]: unknown };
-  launch: { wrapper: string; preapproveMcp: boolean; unsetEnv: string[]; [key: string]: unknown };
+  launch: { wrapper: string; preapproveMcp: boolean; approveProjectTrust?: boolean; unsetEnv: string[]; [key: string]: unknown };
   idle?: { minutes: number };
   github?: { repos: string[]; author: string; excludeLabels: string[] };
   lanes: Lane[]; [key: string]: unknown;
@@ -36,7 +36,7 @@ export function defaults(root: string, home: string, reposRoot?: string): Config
     version: 1, reposRoot: reposRoot || dirname(root), worktreesDir: "${reposRoot}/.worktrees", baseBranch: "origin/main", repos: {},
     coordinator: { id: "L0", cwd: "${root}", prompt: "prompts/coordinator.md", maxRunning: 6 },
     messages: { dir: "messages", broadcast: "ALL", retention: { mode: "archive", maxAgeDays: 14, archiveDir: "archive", archiveMaxAgeDays: null, keepUnread: true, auto: true } }, terminal: { backend: "auto" },
-    launch: { wrapper: "pi-session", preapproveMcp: false, unsetEnv: ["PI_MCP_CONFIG_MODE"] }, lanes: [],
+    launch: { wrapper: "pi-session", preapproveMcp: false, approveProjectTrust: false, unsetEnv: ["PI_MCP_CONFIG_MODE"] }, lanes: [],
   };
 }
 /** Installed defaults apply only when creating a new coordination folder. */
@@ -81,6 +81,7 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
   require(c.terminal && BACKENDS.includes(c.terminal.backend), "terminal.backend");
   require(c.launch && text(c.launch.wrapper), "launch.wrapper");
   require(typeof c.launch.preapproveMcp === "boolean", "launch.preapproveMcp");
+  require(c.launch.approveProjectTrust === undefined || typeof c.launch.approveProjectTrust === "boolean", "launch.approveProjectTrust");
   require(Array.isArray(c.launch.unsetEnv) && c.launch.unsetEnv.every((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s)), "launch.unsetEnv");
   if (c.idle !== undefined) require(c.idle && Number.isInteger(c.idle.minutes) && c.idle.minutes > 0, "idle.minutes");
   if (c.github !== undefined) {

@@ -21,7 +21,7 @@ import { register, unregister } from "./commands/register.ts";
 
 export const HELP = `Usage: lanes [--dir root] <command> [options]
   adopt [--messages dir] [--coordinator ID] [--exclude-tty ttysNNN ...] [--inventory file] [--role ID=role ...] [--orchestrates ID=owner/repo,owner/repo ...] [--write]
-  init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp]
+  init [dir] [--repos-root p] [--coordinator ID] [--terminal backend] [--preapprove-mcp] [--approve-project-trust]
   add <ID> --repo owner/name [--issue n] [--goal text] [--group G] [--branch b] [--base ref] [--path clone]
     [--orchestrator ID | --orchestrator-id ID | --no-orchestrator]
   start <ID>|coordinator [--terminal backend] [--from-handoff ID|file]
@@ -59,10 +59,12 @@ Legacy prune considers only regular, non-dot *.md files not owned by the bus bac
   changes the threshold. --apply archives (never deletes) into the configured prune
   archive, or archive/legacy/ without retention settings. Recent files, bus messages,
   backend state, directories and symlinks are untouched; normal prune is unchanged.
---preapprove-mcp trusts project MCP server definitions in explicitly added repositories.`;
+--preapprove-mcp trusts project MCP server definitions in explicitly added repositories.
+--approve-project-trust passes --approve to pi in lanes-created worktrees (loads their .pi settings, extensions and
+  project packages: code from the checked-out branch). Off by default; enable only for repositories you control.`;
 const OPTIONS: Record<string, string[]> = {
   adopt: ["messages", "coordinator", "exclude-tty", "inventory", "role", "orchestrates", "write"],
-  init: ["repos-root", "coordinator", "terminal", "preapprove-mcp"],
+  init: ["repos-root", "coordinator", "terminal", "preapprove-mcp", "approve-project-trust"],
   add: ["repo", "issue", "goal", "group", "branch", "base", "path",
     "orchestrator", "orchestrator-id", "no-orchestrator"],
   run: ["from-handoff", "handoff-digest"], start: ["terminal", "from-handoff"], resume: ["terminal"], send: ["m", "from", "direct", "issue", "force"], who: ["repo", "issue", "json"],
@@ -74,7 +76,7 @@ const OPTIONS: Record<string, string[]> = {
   snooze: ["until", "clear"],
   close: ["reassign-to", "reason", "from", "quit", "inactive", "json", "minutes", "dry-run", "apply", "handoff-to"],
 };
-const FLAGS = ["write", "preapprove-mcp", "new", "ack", "quit", "dry-run", "json", "direct", "all",
+const FLAGS = ["write", "preapprove-mcp", "approve-project-trust", "new", "ack", "quit", "dry-run", "json", "direct", "all",
   "no-orchestrator", "inactive", "clear", "apply", "accept", "legacy", "include-retired"];
 interface Invocation { command: string; positional: string[]; opts: Record<string, string> }
 interface CommandEnv { c: Config; root: string; ctx: LanesCtx }
