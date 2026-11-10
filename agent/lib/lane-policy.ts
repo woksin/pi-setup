@@ -87,7 +87,14 @@ export function savePolicy(policy: Policy, expected: string, file = policyPath()
 }
 const GIT_TIMEOUT_MS = 5000;
 function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 65536, stdio: ["ignore", "pipe", "ignore"] }).trim();
+	return gitBefore(performance.now() + GIT_TIMEOUT_MS, cwd, ...args);
+}
+function gitBefore(deadline: number, cwd: string, ...args: string[]): string {
+	const timeout = Math.ceil(deadline - performance.now());
+	if (timeout <= 0) throw Object.assign(new Error("git timed out"), { code: "ETIMEDOUT" });
+	const output = execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", timeout, maxBuffer: 65536, stdio: ["ignore", "pipe", "ignore"] }).trim();
+	if (performance.now() >= deadline) throw Object.assign(new Error("git timed out"), { code: "ETIMEDOUT" });
+	return output;
 }
 function identityFailureReason(error: unknown): string {
 	if (!object(error)) return "repository lookup failed";
@@ -97,11 +104,17 @@ function identityFailureReason(error: unknown): string {
 	return "repository lookup failed";
 }
 export function identity(cwd: string, onFailure?: (reason: string) => void): Identity | undefined {
+	const deadline = performance.now() + GIT_TIMEOUT_MS;
+	const query = (...args: string[]) => gitBefore(deadline, cwd, ...args);
 	try {
-		const common = realpathSync(resolve(cwd, git(cwd, "rev-parse", "--git-common-dir")));
-		const root = realpathSync(git(cwd, "rev-parse", "--show-toplevel"));
+		const common = realpathSync(resolve(cwd, query("rev-parse", "--git-common-dir")));
+		const root = realpathSync(query("rev-parse", "--show-toplevel"));
 		let branch = "";
-		try { branch = git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD"); } catch { /* detached HEAD has no branch authority */ }
+		try { branch = query("symbolic-ref", "--quiet", "--short", "HEAD"); } catch (error) {
+			if (object(error) && error.code === "ETIMEDOUT") throw error;
+			/* detached HEAD has no branch authority */
+		}
+		if (performance.now() >= deadline) throw Object.assign(new Error("git timed out"), { code: "ETIMEDOUT" });
 		return { common, root, branch };
 	} catch (error) {
 		onFailure?.(identityFailureReason(error));
@@ -238,8 +251,9 @@ function gitCommand(policy: Policy, ctx: Context, raw: string[], namedScope: boo
 	if (!gitPublication(raw)) return;
 	const targetContext = gitTarget(raw, ctx.cwd);
 	const { args, cwd } = targetContext;
-	const id = identity(cwd);
-	if (targetContext.targeted && !id) return denial(policy, scopedRepository(policy, ctx), ctx, "push", "", "Publication target directory cannot be resolved; use an attributable direct command.");
+	let identityReason = "repository lookup failed";
+	const id = identity(cwd, reason => { identityReason = reason; });
+	if (targetContext.targeted && !id) return denial(policy, scopedRepository(policy, ctx), ctx, "push", "", `Publication target directory cannot be resolved; use an attributable direct command. ${identityReason}.`);
 	const repo = policy.repositories.find(r => r.common === id?.common);
 	const scoped = !!repo || !!scopedRepository(policy, ctx) || namedScope;
 	if (!scoped) return;
@@ -247,7 +261,7 @@ function gitCommand(policy: Policy, ctx: Context, raw: string[], namedScope: boo
 	if (targetContext.error) return deny(targetContext.error);
 	if (args.length === 2 && args[0] === "stash" && args[1] === "push") return;
 	if (args[0] !== "push") return deny("Git publication tokens/configuration outside direct push are deny-only (only exact stash push is exempt); hand off to the train writer/operator.");
-	if (!repo) return deny("Push target repository is not enrolled/resolved.");
+	if (!repo) return deny(`Push target repository is not enrolled/resolved.${!id ? ` ${identityReason}.` : ""}`);
 	const flags = args.slice(1).filter(a => a.startsWith("-"));
 	if (flags.some(a => !["-u", "--set-upstream", "--force-with-lease"].includes(a))) return deny("Unsupported/ambiguous push options.");
 	const positional = args.slice(1).filter(a => !a.startsWith("-"));
@@ -301,7 +315,8 @@ function ghCommand(policy: Policy, ctx: Context, raw: string[], namedScope: bool
 	const action = ghAction(args);
 	if (!action) return;
 	const explicit = option(args, "--repo", "-R");
-	const id = identity(ctx.cwd);
+	let identityReason = "repository lookup failed";
+	const id = identity(ctx.cwd, reason => { identityReason = reason; });
 	const repo = explicit ? policy.repositories.find(r => r.slug.toLowerCase() === explicit.toLowerCase()) : policy.repositories.find(r => r.common === id?.common);
 	const current = scopedRepository(policy, ctx);
 	if (!repo && !current && !namedScope) return;
@@ -309,7 +324,7 @@ function ghCommand(policy: Policy, ctx: Context, raw: string[], namedScope: bool
 	const deny = (why: string) => denial(policy, repo ?? current, ctx, action, branch, why);
 	if (action === "pr-merge") return deny("PR merge is deny-only: hand off to the train writer/operator; no local grant enables merge.");
 	if (!["pr-create", "pr-comment", "issue-write"].includes(action)) return deny(`${action} has no supported scoped grant in this slice; hand off to the train writer/operator.`);
-	if (!repo || !id || id.common !== repo.common || !explicit) return deny("Mismatched repository or missing exact --repo owner/repo.");
+	if (!repo || !id || id.common !== repo.common || !explicit) return deny(`Mismatched repository or missing exact --repo owner/repo.${!id ? ` ${identityReason}.` : ""}`);
 	if (!branch || protectedBranch(branch)) return deny("Missing/non-writer branch.");
 	if (action === "pr-create") return permit(policy, repo, ctx, action, branch, branch);
 	const target = args[2];

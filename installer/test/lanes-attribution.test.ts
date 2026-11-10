@@ -14,6 +14,17 @@ function fixture(): RosterInputs {
     sessions: [], statuses: new Map(), messages: [], idle: new Map(), sources: {}, broadcast: "ALL" };
 }
 function row(data: RosterInputs, id: string) { return buildRoster(data, now).rows.find(row => row.lane === id)!; }
+test("a session without a launch record still matches its unique configured cwd", () => {
+  const data = fixture(); data.registrations = [];
+  data.sessions = [{ pid: 701, cwd: "/home", sessionId: "holder" }];
+  data.register.events.push({ ts: now.toISOString(), repo: "example/alpha", issue: 42, sessionId: "holder", state: "in-progress", source: "tool" });
+  const rows = buildRoster(data, now).rows; const seed = rows.find(row => row.lane === "L0")!;
+  assert.equal(rows.length, 1); assert.equal(seed.identity, "registered");
+  assert.equal(seed.pid, 701); assert.equal(seed.sessionId, "holder"); assert.equal(seed.worktree, "/home");
+  assert.equal(seed.state, "working"); assert.equal(seed.issue?.number, 42);
+  assert.ok(seed.evidence.includes("orch-session")); assert.ok(seed.evidence.includes("lease"));
+  assert.ok(seed.evidence.includes("heartbeat(fresh)"));
+});
 test("a successfully read non-descendant parent map never lets a wrapper hijack a seed's process", () => {
   const data = fixture(); const rows = buildRoster(data, now).rows;
   const wrapper = rows.find(row => row.lane === "X")!; const seed = rows.find(row => row.lane === "L0")!;
