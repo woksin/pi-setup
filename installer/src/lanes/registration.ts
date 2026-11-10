@@ -95,17 +95,74 @@ export function checkRegistrations(records: Registration[], processes: RosterInp
     return { ...record, cwd, alive: Boolean(alive) };
   });
 }
-export function launchedRows(rows: RosterRow[], input: RosterInputs, empty: (id: string) => RosterRow): void {
-  const registrations = [...(input.registrations ?? [])].sort((a, b) => Number(b.alive) - Number(a.alive));
-  for (const record of registrations) {
-    if (rows.some(r => r.lane === record.id)) continue;
-    const detected = record.alive && rows.find(r => r.identity === "unregistered" && r.worktree === record.cwd);
-    if (detected) {
-      detected.lane = record.id; detected.identity = "launched";
-      detected.notes = detected.notes.filter(note => note !== "identity unavailable: unregistered");
+export async function registrationParents(records: CheckedRegistration[], ctx: LanesCtx): Promise<Map<number, number>> {
+  const parents = new Map<number, number>();
+  if (!records.some(record => record.alive)) return parents;
+  try {
+    const result = await ctx.run("ps", ["-A", "-o", "pid=,ppid="], { timeoutMs: 10000 });
+    if (result.code !== 0 || result.timedOut) return parents;
+    for (const line of result.stdout.split("\n")) {
+      const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+      if (match) parents.set(Number(match[1]), Number(match[2]));
     }
-    else rows.push({ ...empty(record.id), worktree: record.cwd });
+  } catch { /* Missing ancestry permits only an unambiguous cwd fallback. */ }
+  return parents;
+}
+function descendsFrom(row: RosterRow, record: CheckedRegistration, parents: Map<number, number>): boolean {
+  const visited = new Set<number>(); let pid = row.pid;
+  for (let hops = 0; hops < 64 && pid !== null; hops++) {
+    if (visited.has(pid)) return false;
+    visited.add(pid);
+    const parent = parents.get(pid);
+    if (parent === record.pid) return true;
+    pid = parent ?? null;
   }
+  return false;
+}
+function onlyRow(rows: RosterRow[]): RosterRow | undefined { return rows.length === 1 ? rows[0] : undefined; }
+function attachRegistration(rows: RosterRow[], record: CheckedRegistration, processRow: RosterRow): void {
+  const target = rows.find(row => row !== processRow && row.lane === record.id);
+  if (target) {
+    target.pid = processRow.pid; target.evidence.push(...processRow.evidence);
+    rows.splice(rows.indexOf(processRow), 1);
+    return;
+  }
+  processRow.lane = record.id;
+  if (processRow.identity === "unregistered") processRow.identity = "launched";
+  processRow.notes = processRow.notes.filter(note => note !== "identity unavailable: unregistered");
+}
+interface RegistrationMatches { rows: RosterRow[]; claimed: Set<number>; attached: Set<CheckedRegistration> }
+type ProcessSelector = (available: RosterRow[], record: CheckedRegistration) => RosterRow | undefined;
+function availableProcesses(matches: RegistrationMatches): RosterRow[] {
+  return matches.rows.filter(row => row.pid !== null && !matches.claimed.has(row.pid));
+}
+function claimRegistrations(matches: RegistrationMatches, records: CheckedRegistration[], select: ProcessSelector): void {
+  for (const record of records) {
+    if (!record.alive || matches.attached.has(record)) continue;
+    const processRow = select(availableProcesses(matches), record);
+    if (!processRow) continue;
+    matches.claimed.add(processRow.pid!); matches.attached.add(record);
+    attachRegistration(matches.rows, record, processRow);
+  }
+}
+function registrationRow(matches: RegistrationMatches, record: CheckedRegistration, empty: (id: string) => RosterRow): void {
+  let row = matches.rows.find(row => row.lane === record.id);
+  if (!row) { row = { ...empty(record.id), worktree: record.cwd }; matches.rows.push(row); }
+  if (!record.alive || matches.attached.has(record)) return;
+  if (availableProcesses(matches).filter(process => process.worktree === record.cwd).length > 1) row.notes.push("ambiguous cwd");
+}
+export function launchedRows(rows: RosterRow[], input: RosterInputs, empty: (id: string) => RosterRow): Set<number> {
+  const registrations = input.registrations ?? [];
+  const matches: RegistrationMatches = { rows, claimed: new Set(), attached: new Set() };
+  const parents = input.registrationParents ?? new Map<number, number>();
+  const piPids = new Set(rows.map(row => row.pid));
+  const wrappers = registrations.filter(record => !piPids.has(record.pid));
+  // Reserve exact owners and descendants before any registration can fall back to cwd.
+  claimRegistrations(matches, registrations, (available, record) => available.find(row => row.pid === record.pid));
+  claimRegistrations(matches, wrappers, (available, record) => onlyRow(available.filter(row => descendsFrom(row, record, parents))));
+  claimRegistrations(matches, wrappers, (available, record) => onlyRow(available.filter(row => row.worktree === record.cwd)));
+  for (const record of registrations) registrationRow(matches, record, empty);
+  return matches.claimed;
 }
 /** Add identity and exit evidence without treating a wrapper PID as a Pi PID. */
 export function joinRegistration(row: RosterRow, input: RosterInputs): void {

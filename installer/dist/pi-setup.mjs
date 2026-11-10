@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 318fdaed23c5f4861c2a2be5cef3efc460d0a2d25641ad5b3e7d0af9ee99cfcf
+// pi-setup-source-sha256: 974116a6d0ffd7532da3109b1944ec018368f1ee0f82191428acf6e5684a3d5b
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -3873,6 +3873,8 @@ async function readRoster(c2, root, ctx, register2) {
   const data = register2 ?? await readIssueRegister(ctx);
   const processes = await runningPiChecked(ctx);
   const registrations = readRegistrations(root, registrationCutoff(c2, ctx.now()));
+  const checkedRegistrations = checkRegistrations(registrations.values, processes, ctx);
+  const parents = await registrationParents(checkedRegistrations, ctx);
   const orch = join33(ctx.home, ".pi/orch");
   const heartbeats = readJsonDir(join33(orch, "heartbeats"), (v) => v && Number.isInteger(v.pid) && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
   const sessions = readJsonDir(join33(orch, "sessions"), (v) => v && Number.isInteger(v.pid) && (v.id === void 0 || typeof v.id === "string"));
@@ -3886,7 +3888,8 @@ async function readRoster(c2, root, ctx, register2) {
   return {
     lanes,
     processes,
-    registrations: checkRegistrations(registrations.values, processes, ctx),
+    registrations: checkedRegistrations,
+    registrationParents: parents,
     register: data,
     heartbeats: heartbeats.values,
     sessions: sessions.values,
@@ -3958,18 +3961,24 @@ function rosterProcesses(procs, register2) {
   }
   return [...found.values()];
 }
+function seedAvailable(seed, liveRegistrations) {
+  if (!seed) return false;
+  if (seed.pid !== null) return false;
+  return !liveRegistrations.has(seed.lane);
+}
 function processRows(input) {
   const seeds = input.lanes.map((l2) => ({ ...emptyRow(l2.id, "registered"), repo: l2.repo ?? null, worktree: l2.cwd, branch: l2.branch ?? null, evidence: ["lanes.json"] }));
-  const rows = [...seeds];
-  for (const p of rosterProcesses(input.processes.procs, input.register)) {
-    const matched = seeds.find((r2) => r2.worktree && r2.worktree === p.cwd);
-    if (matched && matched.pid === null) {
-      matched.pid = p.pid;
-      continue;
-    }
-    rows.push(unregisteredProcess(p, input));
+  const processes = rosterProcesses(input.processes.procs, input.register).map((p) => unregisteredProcess(p, input));
+  const rows = [...seeds, ...processes];
+  const claimed = launchedRows(rows, input, (id) => emptyRow(id, "launched"));
+  const liveRegistrations = new Set(input.registrations?.filter((record3) => record3.alive).map((record3) => record3.id));
+  for (const p of processes) {
+    if (claimed.has(p.pid)) continue;
+    const matched = seeds.find((r2) => r2.worktree && r2.worktree === p.worktree);
+    if (!seedAvailable(matched, liveRegistrations)) continue;
+    matched.pid = p.pid;
+    rows.splice(rows.indexOf(p), 1);
   }
-  launchedRows(rows, input, (id) => emptyRow(id, "launched"));
   return rows;
 }
 function indexRosterRegistry(events) {
@@ -4007,7 +4016,14 @@ function joinIssue(row, sessions, input, registry3) {
     row.branch ??= latest.branch ?? null;
   }
 }
+function registrationOwnsIdentity(row, input) {
+  return row.identity === "launched" || Boolean(input.registrations?.some((record3) => record3.alive && record3.id === row.lane));
+}
 function rowSessions(row, input) {
+  if (row.pid === null && registrationOwnsIdentity(row, input)) return [];
+  return processSessions(row, input);
+}
+function processSessions(row, input) {
   const pids = row.pid === null ? [] : [row.pid];
   const sessions = matchedSessions(row.worktree, pids, input.register);
   if (sessions.length) {
@@ -4319,17 +4335,80 @@ function checkRegistrations(records, processes, ctx) {
     return { ...record3, cwd, alive: Boolean(alive3) };
   });
 }
-function launchedRows(rows, input, empty) {
-  const registrations = [...input.registrations ?? []].sort((a2, b) => Number(b.alive) - Number(a2.alive));
-  for (const record3 of registrations) {
-    if (rows.some((r2) => r2.lane === record3.id)) continue;
-    const detected = record3.alive && rows.find((r2) => r2.identity === "unregistered" && r2.worktree === record3.cwd);
-    if (detected) {
-      detected.lane = record3.id;
-      detected.identity = "launched";
-      detected.notes = detected.notes.filter((note2) => note2 !== "identity unavailable: unregistered");
-    } else rows.push({ ...empty(record3.id), worktree: record3.cwd });
+async function registrationParents(records, ctx) {
+  const parents = /* @__PURE__ */ new Map();
+  if (!records.some((record3) => record3.alive)) return parents;
+  try {
+    const result3 = await ctx.run("ps", ["-A", "-o", "pid=,ppid="], { timeoutMs: 1e4 });
+    if (result3.code !== 0 || result3.timedOut) return parents;
+    for (const line of result3.stdout.split("\n")) {
+      const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+      if (match) parents.set(Number(match[1]), Number(match[2]));
+    }
+  } catch {
   }
+  return parents;
+}
+function descendsFrom(row, record3, parents) {
+  const visited = /* @__PURE__ */ new Set();
+  let pid = row.pid;
+  for (let hops = 0; hops < 64 && pid !== null; hops++) {
+    if (visited.has(pid)) return false;
+    visited.add(pid);
+    const parent = parents.get(pid);
+    if (parent === record3.pid) return true;
+    pid = parent ?? null;
+  }
+  return false;
+}
+function onlyRow(rows) {
+  return rows.length === 1 ? rows[0] : void 0;
+}
+function attachRegistration(rows, record3, processRow) {
+  const target = rows.find((row) => row !== processRow && row.lane === record3.id);
+  if (target) {
+    target.pid = processRow.pid;
+    target.evidence.push(...processRow.evidence);
+    rows.splice(rows.indexOf(processRow), 1);
+    return;
+  }
+  processRow.lane = record3.id;
+  if (processRow.identity === "unregistered") processRow.identity = "launched";
+  processRow.notes = processRow.notes.filter((note2) => note2 !== "identity unavailable: unregistered");
+}
+function availableProcesses(matches) {
+  return matches.rows.filter((row) => row.pid !== null && !matches.claimed.has(row.pid));
+}
+function claimRegistrations(matches, records, select2) {
+  for (const record3 of records) {
+    if (!record3.alive || matches.attached.has(record3)) continue;
+    const processRow = select2(availableProcesses(matches), record3);
+    if (!processRow) continue;
+    matches.claimed.add(processRow.pid);
+    matches.attached.add(record3);
+    attachRegistration(matches.rows, record3, processRow);
+  }
+}
+function registrationRow(matches, record3, empty) {
+  let row = matches.rows.find((row2) => row2.lane === record3.id);
+  if (!row) {
+    row = { ...empty(record3.id), worktree: record3.cwd };
+    matches.rows.push(row);
+  }
+  if (!record3.alive || matches.attached.has(record3)) return;
+  if (availableProcesses(matches).filter((process2) => process2.worktree === record3.cwd).length > 1) row.notes.push("ambiguous cwd");
+}
+function launchedRows(rows, input, empty) {
+  const registrations = input.registrations ?? [];
+  const matches = { rows, claimed: /* @__PURE__ */ new Set(), attached: /* @__PURE__ */ new Set() };
+  const parents = input.registrationParents ?? /* @__PURE__ */ new Map();
+  const piPids2 = new Set(rows.map((row) => row.pid));
+  const wrappers = registrations.filter((record3) => !piPids2.has(record3.pid));
+  claimRegistrations(matches, registrations, (available2, record3) => available2.find((row) => row.pid === record3.pid));
+  claimRegistrations(matches, wrappers, (available2, record3) => onlyRow(available2.filter((row) => descendsFrom(row, record3, parents))));
+  claimRegistrations(matches, wrappers, (available2, record3) => onlyRow(available2.filter((row) => row.worktree === record3.cwd)));
+  for (const record3 of registrations) registrationRow(matches, record3, empty);
+  return matches.claimed;
 }
 function joinRegistration(row, input) {
   const record3 = input.registrations?.find((r2) => r2.id === row.lane);
