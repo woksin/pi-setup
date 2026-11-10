@@ -56,6 +56,8 @@
  *   baseSha?: string — full base SHA; required to use caller-carried cachedReview.
  *   cachedReview?: object — previous passing result, unchanged; its slim receipt (reviewCacheKey, reviewers,
  *                        runtimeCallCount) is validated, see INSTALL.md for cache limitations.
+ *   repair?: object — previous coverage-incomplete full/deep result, unchanged; retry only its missing lanes
+ *                        with identical args and SHAs, without since/prior or cachedReview (at most two repairs).
  * }
  *
  * Gate: only BLOCKING findings fail a review — critical/major issues a maintainer would block merge on
@@ -75,7 +77,11 @@
  *   - passed: verdict, reviewCacheKey (when reusable) and a slim receipt per run {label, agentType, expected,
  *     effective, ok}, then capped advisory/coverage lines. The key and receipt come first and are never trimmed.
  *   - not passed: verdict, blocking findings (capped, then an explicit `…N more` entry; blockingCount is the real
- *     count), unverified, incomplete, one-line reviewers; never carries a cache key.
+ *     count), unverified, incomplete, one-line reviewers; never carries a cache key. Coverage-only failures
+ *     may carry repair evidence; a repaired result carries repaired/repairAttempt and is never cacheable.
+ * Repair keys, like reviewCacheKey, are non-cryptographic digests: identity and tamper-evidence against accidental
+ * edits, not authentication. The workflow realm has no secret or crypto; a caller who reimplements the digest
+ * can forge evidence, exactly as with cachedReview. The parent/orchestrator must pass the earlier result unchanged.
  * A cache hit validates the slim receipt only (unique labels, allowed roles, required lanes, exact
  * runtimeCallCount, every run ok on its current pinned model); full provenance was verified when the receipt
  * was issued. A failed, missing or incomplete review is never a pass — gate merges on `passed === true`,
@@ -170,6 +176,15 @@ if (input.headSha !== undefined && !sha(input.headSha)) problems.push('headSha m
 if (input.baseSha !== undefined && !sha(input.baseSha)) problems.push('baseSha must be the full base commit SHA, not a moving ref.')
 if (input.cachedReview !== undefined && (!input.cachedReview || typeof input.cachedReview !== 'object' || Array.isArray(input.cachedReview))) problems.push('cachedReview must be a previous review result object.')
 if (input.cachedReview !== undefined && input.baseSha === undefined) problems.push('cachedReview requires baseSha so a changed base cannot reuse a verdict.')
+const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value) &&
+  (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+const repairing = input.repair !== undefined
+if (repairing) {
+  if (!plainObject(input.repair)) problems.push('repair must be a previous review result object, passed unchanged.')
+  if (input.cachedReview !== undefined) problems.push('repair and cachedReview cannot be combined.')
+  if (!input.headSha || !input.baseSha) problems.push('repair requires headSha and baseSha for the original range.')
+  if (quick || input.since !== undefined || input.prior !== undefined) problems.push('repair cannot be combined with quick, since or prior; retry the original range.')
+}
 const reviewExample = '{"target":"git diff <baseSha>..<headSha> in <abs repo path>","context":"<intent, issue #>","author":"gpt","round":1,"headSha":"<full HEAD SHA>","baseSha":"<full base SHA>"}'
 const followUpExample = 'Round 2+: add "since":"<full SHA reviewed last>","prior":"<ONE string: blocking/unverified findings + dismissed findings with reasons>","round":2.'
 const shaHelp = 'Replace placeholders first: resolve SHAs with git rev-parse (40 hex for SHA-1, 64 for SHA-256), not short SHAs or moving refs; author is "claude" or "gpt".'
@@ -320,6 +335,8 @@ const RUNS_MAX = 6
 // Passed: verdict, cache key and receipt first. Not passed: verdict, blocking, unverified, incomplete first.
 const buildResult = r => {
   const out = { mode: r.mode, round, passed: r.passed, complete: r.complete, blockingCount: r.blockingCount, unverifiedCount: r.unverifiedCount, next: r.next }
+  if (r.repaired) { out.repaired = true; out.repairAttempt = r.repairAttempt }
+  if (r.repair) out.repair = r.repair
   if (r.cached !== undefined) out.cached = r.cached
   if (r.reviewedBy) out.reviewedBy = shown(r.reviewedBy, 40)
   if (r.reviewCacheKey) out.reviewCacheKey = r.reviewCacheKey
@@ -354,6 +371,55 @@ const receiptRoleOk = run => run !== null && typeof run === 'object' && typeof r
 const receiptModelOk = run => {
   const pinned = AGENT_MODELS[run.agentType]
   return run.expected === pinned && Array.isArray(run.effective) && run.effective.length > 0 && run.effective.every(model => model === pinned)
+}
+const laneLabels = lane => [`review:${lane.key}`, `verify:${lane.key}-by-${other(lane.side)}`]
+const repairDigest = evidence => 'review-repair-v1:' + fingerprint(JSON.stringify({ cacheKey, round,
+  attempt: evidence.attempt, missing: evidence.missing, completed: evidence.completed,
+  advisory: evidence.advisory, coverageNotes: evidence.coverageNotes, preExisting: evidence.preExisting }))
+const repairLinesOk = (value, cap, width) => Array.isArray(value) && value.length <= cap &&
+  value.every(item => typeof item === 'string' && item.length <= width + 1 && shown(item, width) === item)
+const repairRunsOk = (runs, missing, lanes) => {
+  if (!Array.isArray(runs) || runs.length > RUNS_MAX) return false
+  const labels = new Set(runs.map(run => run?.label))
+  const kept = lanes.filter(lane => !missing.includes(lane.key))
+  const allowed = new Set(kept.flatMap(laneLabels))
+  return labels.size === runs.length && kept.every(lane => labels.has(`review:${lane.key}`)) &&
+    runs.every(run => receiptRoleOk(run) && receiptModelOk(run) && !Object.hasOwn(run, 'provenance') && allowed.has(run.label))
+}
+const repairProblems = (r, lanes) => {
+  const errors = []
+  const e = r.repair
+  if (r.passed !== false || r.complete !== false || r.blockingCount !== 0 || r.unverifiedCount !== 0 ||
+      r.mode !== (deep ? 'deep' : 'full') || r.round !== round) errors.push('repair requires a coverage-incomplete result from this mode and round.')
+  if (!plainObject(e)) return [...errors, 'repair evidence is missing.']
+  if (Number.isInteger(e.attempt) && e.attempt > 2) errors.push('Repair attempt cap reached; ask the user rather than retry again.')
+  const keys = new Set(lanes.map(lane => lane.key))
+  const missingOk = Array.isArray(e.missing) && e.missing.length > 0 && e.missing.length < lanes.length &&
+    new Set(e.missing).size === e.missing.length && e.missing.every(key => typeof key === 'string' && keys.has(key))
+  if (e.v !== 1 || typeof e.key !== 'string' || !Number.isInteger(e.attempt) || e.attempt < 1 || e.attempt > 2 ||
+      e.round !== round || !missingOk || !repairRunsOk(e.completed, e.missing, lanes) ||
+      !repairLinesOk(e.advisory, 3, 90) || !repairLinesOk(e.coverageNotes, 3, 120) || !repairLinesOk(e.preExisting, 3, 100)) {
+    errors.push('repair evidence has invalid partitions, receipts or bounded fields.')
+  }
+  if (e.key !== repairDigest(e)) errors.push('repair evidence does not match this review identity or was altered')
+  return errors
+}
+const buildRepair = (lanes, completedKeys, preserved, notes) => {
+  const completed = [...preserved]
+  const missing = []
+  for (const lane of lanes) {
+    const labels = laneLabels(lane)
+    if (preserved.some(run => run.label === labels[0])) continue
+    const runs = runtimeReviewers().filter(run => labels.includes(run.label))
+    if (completedKeys.has(lane.key) && runs.some(run => run.label === labels[0]) && runs.every(reusableRun)) completed.push(...runs.map(slimRun))
+    else missing.push(lane.key)
+  }
+  if (missing.length === 0 || missing.length === lanes.length) return undefined
+  const evidence = { v: 1, attempt: repairing ? input.repair.repair.attempt + 1 : 1, round,
+    missing: missing.sort(), completed: completed.sort((a, b) => a.label.localeCompare(b.label)),
+    advisory: lines(notes.advisory, 3, 90).slice(0, 3), coverageNotes: lines(notes.coverageNotes, 3, 120).slice(0, 3),
+    preExisting: lines(notes.preExisting, 3, 100).slice(0, 3) }
+  return { v: evidence.v, key: repairDigest(evidence), ...evidence }
 }
 const receiptProblems = receipt => {
   const runs = Array.isArray(receipt.reviewers) ? receipt.reviewers : []
@@ -522,6 +588,15 @@ const securityPrompt =
   COVERAGE + ' Required security checks are the trust-boundary read of every touched path and the hostile-case spec check ' +
   'listed above, plus any checks the target/brief names as required (secret scan, dependency audit). Unrunnable other checks stay notes.'
 
+// The security lens runs on the provider that did NOT write the work and is verified by the other provider.
+const LANES = [
+  ...SIDES.map(side => ({ key: side, side, reviewer: REVIEWERS[side], prompt: reviewPrompt })),
+  { key: `security-${secSide}`, side: secSide, reviewer: { ...REVIEWERS[secSide], name: `${REVIEWERS[secSide].name} (security)` }, prompt: securityPrompt },
+]
+if (repairing) {
+  const problems = repairProblems(input.repair, LANES)
+  if (problems.length) return { passed: false, error: `Invalid review repair:\n- ${problems.join('\n- ')}`, problems }
+}
 phase('Review')
 
 if (quick) {
@@ -552,13 +627,9 @@ if (quick) {
   })
 }
 
-// The security lens runs on the provider that did NOT write the work and is verified by the other provider.
-const LANES = [
-  ...SIDES.map(side => ({ key: side, side, reviewer: REVIEWERS[side], prompt: reviewPrompt })),
-  { key: `security-${secSide}`, side: secSide, reviewer: { ...REVIEWERS[secSide], name: `${REVIEWERS[secSide].name} (security)` }, prompt: securityPrompt },
-]
+const lanes = repairing ? LANES.filter(lane => input.repair.repair.missing.includes(lane.key)) : LANES
 const results = await pipeline(
-  LANES,
+  lanes,
   lane =>
     reviewAgent(lane.prompt, {
       agentType: lane.reviewer.agentType,
@@ -601,10 +672,11 @@ const advisory = []
 const summaries = []
 const coverageNotes = []
 const incomplete = []
+const completedKeys = new Set()
 
 // A pipeline item that threw comes back as null; treat it as a failed review, never skip it.
 results.forEach((r, i) => {
-  if (!r) incomplete.push(`${LANES[i].reviewer.name} review did not complete`)
+  if (!r) incomplete.push(`${lanes[i].reviewer.name} review did not complete`)
 })
 
 for (const r of results.filter(Boolean)) {
@@ -616,6 +688,7 @@ for (const r of results.filter(Boolean)) {
     incomplete.push(`${by} review failed${why}`)
     continue
   }
+  const incompleteBefore = incomplete.length
   const cp = coverageProblem(by, r)
   if (cp) incomplete.push(cp)
   coverageNotes.push(...coverageNotesFor(by, r))
@@ -638,23 +711,43 @@ for (const r of results.filter(Boolean)) {
     else if (verdict.status === 'not-blocking') advisory.push({ ...item, severity: 'minor', downgradedBy: checker })
     else rejected.push({ ...item, rejectedBy: checker, reason: verdict.reason })
   })
+  if (incomplete.length === incompleteBefore) completedKeys.add(r.lane.key)
 }
 
 const order = { critical: 0, major: 1, minor: 2, nit: 3 }
 confirmed.sort((a, b) => order[a.severity] - order[b.severity])
 advisory.sort((a, b) => order[a.severity] - order[b.severity])
 incomplete.push(...runtimeProblems)
+const preserved = repairing ? input.repair.repair.completed : []
+const reviewers = repairing ? [...preserved, ...runtimeReviewers()].sort((a, b) => a.label.localeCompare(b.label)) : runtimeReviewers()
+if (repairing) {
+  for (const lane of lanes) {
+    const runs = runtimeReviewers().filter(run => laneLabels(lane).includes(run.label))
+    if (!runs.some(run => run.label === `review:${lane.key}`) || !runs.every(reusableRun)) incomplete.push(`${lane.reviewer.name} review has no reusable runtime provenance`)
+  }
+  if (!LANES.every(lane => reviewers.some(run => run.label === `review:${lane.key}`))) incomplete.push('Combined repair is missing a review lane.')
+}
 const complete = incomplete.length === 0
 const passed = complete && confirmed.length === 0 && unverified.length === 0
 log(`${confirmed.length} blocking, ${advisory.length} advisory, ${rejected.length} rejected, ${unverified.length} unverified — ${passed ? 'PASSED' : 'NOT PASSED'}`)
 if (!complete) log(`Incomplete: ${incomplete.join('; ')}`)
 
-const advisoryLines = advisory.map(f => oneLine(f))
-const reusable = passed && !since && !prior && input.headSha && input.baseSha && runtimeReviewers().every(reusableRun)
+const earlier = repairing ? input.repair.repair : { advisory: [], coverageNotes: [], preExisting: [] }
+const notes = {
+  advisory: [...earlier.advisory, ...advisory.map(f => oneLine(f))],
+  coverageNotes: [...earlier.coverageNotes, ...coverageNotes],
+  preExisting: [...earlier.preExisting, ...preExisting(advisory)],
+}
+const repair = !passed && confirmed.length === 0 && unverified.length === 0 && runtimeProblems.length === 0 &&
+  input.headSha && input.baseSha && !since && !prior ? buildRepair(LANES, completedKeys, preserved, notes) : undefined
+const reusable = !repairing && passed && !since && !prior && input.headSha && input.baseSha && runtimeReviewers().every(reusableRun)
 const verdict = buildResult({
-  mode: deep ? 'deep' : 'full', passed, ...(reusable ? { reviewCacheKey: cacheKey } : {}), complete, incomplete, coverageNotes, reviewers: runtimeReviewers(),
+  mode: deep ? 'deep' : 'full', passed, ...(reusable ? { reviewCacheKey: cacheKey } : {}), complete, incomplete, ...notes, reviewers,
+  ...(repairing ? { repaired: true, repairAttempt: input.repair.repair.attempt } : {}), ...(repair ? { repair } : {}),
   blockingCount: confirmed.length, unverifiedCount: unverified.length, summaries,
-  blocking: confirmed, unverified, advisory: advisoryLines, preExisting: preExisting(advisory), rejectedCount: rejected.length,
-  next: runtimeProblems.length ? runtimeNext : nextStep(passed),
+  blocking: confirmed, unverified, rejectedCount: rejected.length,
+  next: runtimeProblems.length ? runtimeNext : repair
+    ? `Incomplete: rerun with the same args plus repair: <this result> to retry only: ${repair.missing.join(', ')}. Do not use since/prior for this.`
+    : nextStep(passed),
 })
 return verdict

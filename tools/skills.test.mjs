@@ -158,7 +158,7 @@ async function runReview(args, { file = reviewFiles[0], override, agentError } =
   const calls = [];
   const models = modelMap(file);
   const agent = async (prompt, opts) => {
-    calls.push(opts);
+    calls.push({ ...opts, prompt });
     assert.ok(!prompt.includes("runtimeStamp"));
     assert.ok(!prompt.includes("model-provenance/tool-call/v1"));
     assert.ok(!JSON.stringify(opts.schema).includes("runtimeProvenance"));
@@ -173,6 +173,189 @@ async function runReview(args, { file = reviewFiles[0], override, agentError } =
 }
 
 const base = { target: "git diff A..B in /repo", context: "issue 60", author: "gpt", round: 1, baseSha: "a".repeat(40), headSha: "b".repeat(40) };
+
+const partialGpt = (opts, res) => ({ ...res, ...(opts.label === "review:gpt" ? { coverage: "partial" } : {}) });
+async function repairSeed(options = {}) {
+  return (await runReview(base, { override: partialGpt, ...options })).result;
+}
+async function assertRepairRejected(repair, change = {}) {
+  const run = await runReview({ ...base, repair, ...change });
+  assert.equal(run.calls, 0);
+  assert.equal(run.result.passed, false);
+  assert.ok(run.result.error);
+  return run.result;
+}
+
+for (const file of reviewFiles) {
+  test(`${file}: repair retries only the missing lane without mutating the earlier result`, async () => {
+    for (const mode of [{}, { deep: true, deepReason: "security", deepJustification: "auth change" }]) {
+      const args = { ...base, ...mode };
+      const missing = file.includes("openai-only") ? "astra" : "gpt";
+      const first = await runReview(args, { file, override: (opts, res) => {
+        withClaims(opts, res);
+        if (opts.label === `review:${missing}`) res.coverage = "partial";
+        return res;
+      } });
+      assert.equal(first.result.passed, false);
+      assert.deepEqual(first.result.repair.missing, [missing]);
+      assert.equal(first.result.reviewCacheKey, undefined);
+      assert.ok(first.result.repair.completed.some(r => r.label.startsWith("verify:")));
+      const before = structuredClone(first.result);
+      const fixed = await runReview({ ...args, repair: first.result }, { file });
+      assert.deepEqual(fixed.requests.map(r => r.label), [`review:${missing}`]);
+      assert.equal(fixed.result.passed, true);
+      assert.equal(fixed.result.repaired, true);
+      assert.equal(fixed.result.repairAttempt, 1);
+      assert.equal(fixed.result.reviewCacheKey, undefined);
+      assert.equal(fixed.result.reviewers.length, 5);
+      assert.deepEqual(fixed.result.reviewers.filter(r => r.label.startsWith("review:")).map(r => r.label), first.requests.filter(r => r.label.startsWith("review:")).map(r => r.label).sort());
+      assert.deepEqual(first.result, before);
+    }
+  });
+}
+
+test("repair retries are bounded independently of the unchanged review round", async () => {
+  const first = await repairSeed();
+  const second = await runReview({ ...base, repair: first }, { override: partialGpt });
+  assert.equal(second.result.passed, false);
+  assert.equal(second.result.complete, false);
+  assert.equal(second.result.repair.attempt, 2);
+  assert.equal(second.result.round, 1);
+  const third = await runReview({ ...base, repair: second.result }, { override: partialGpt });
+  assert.equal(third.result.repair.attempt, 3);
+  assert.match((await assertRepairRejected(third.result)).error, /ask the user/);
+});
+
+test("a still-incomplete repair preserves newly completed lanes for the last attempt", async () => {
+  const first = await runReview(base, { override: (opts, res) => ({ ...res, coverage: opts.label === "review:claude" ? "complete" : "partial" }) });
+  assert.deepEqual(first.result.repair.missing, ["gpt", "security-claude"]);
+  const second = await runReview({ ...base, repair: first.result }, { override: partialGpt });
+  assert.deepEqual(second.requests.map(r => r.label), ["review:gpt", "review:security-claude"]);
+  assert.deepEqual(second.result.repair.missing, ["gpt"]);
+  assert.deepEqual(second.result.repair.completed.map(r => r.label), ["review:claude", "review:security-claude"]);
+  const fixed = await runReview({ ...base, repair: second.result });
+  assert.equal(fixed.result.passed, true);
+  assert.equal(fixed.result.repairAttempt, 2);
+  assert.deepEqual(fixed.requests.map(r => r.label), ["review:gpt"]);
+  assert.equal(fixed.result.reviewers.length, 3);
+});
+
+test("repair rejects identity drift and incompatible arguments before spending", async () => {
+  const repair = await repairSeed();
+  for (const change of [
+    { headSha: "c".repeat(40) }, { baseSha: "c".repeat(40) }, { headSha: undefined }, { baseSha: undefined },
+    { target: "other scope" }, { context: "other intent" }, { author: "claude" }, { round: 2 },
+    { deep: true, deepReason: "security", deepJustification: "auth change" }, { quick: true },
+    { since: "c".repeat(40), prior: "none", round: 2 }, { prior: "none", round: 2 }, { cachedReview: {} },
+  ]) await assertRepairRejected(repair, change);
+  for (const invalid of [null, [], "result", {}, { ...repair, repair: undefined }, { ...repair, passed: true },
+    { ...repair, mode: "quick" }, { ...repair, mode: "deep" }, (await runReview(base)).result]) {
+    await assertRepairRejected(invalid);
+  }
+});
+
+test("repair rejects altered evidence, including malformed partition receipts", async () => {
+  const first = await repairSeed();
+  const edits = [
+    r => { r.repair.missing = []; }, r => { delete r.repair.missing; },
+    r => { r.repair.missing = ["unknown"]; }, r => { r.repair.missing.push("gpt"); },
+    r => { r.repair.missing = ["claude"]; }, r => { r.repair.completed.pop(); },
+    r => { r.repair.completed.push(r.repair.completed[0]); },
+    r => { r.repair.completed.push({ ...r.repair.completed[0], label: "review:gpt" }); },
+    r => { r.repair.completed[0].expected = "other/model"; },
+    r => { r.repair.completed[0].effective = ["other/model"]; },
+    r => { r.repair.completed[0].ok = false; }, r => { r.repair.completed[0].agentType = "other"; },
+    r => { r.repair.completed[0].provenance = "unavailable (pre-update session)"; },
+    r => { r.repair.advisory.push("new advisory"); }, r => { r.repair.coverageNotes.push("new note"); },
+    r => { r.repair.preExisting.push("new hole"); }, r => { r.repair.attempt++; },
+    r => { r.repair.round++; }, r => { r.round++; }, r => { r.repair.key += "x"; },
+    r => { r.repair.missing = []; r.repair.completed = Array.from({ length: 3 }, (_, i) => ({ ...r.repair.completed[0], label: `review:${i}` })); },
+  ];
+  for (const edit of edits) { const altered = structuredClone(first); edit(altered); await assertRepairRejected(altered); }
+});
+
+test("blocking, unverified, all-missing and runtime failures never issue repair evidence", async () => {
+  for (const status of ["blocks", "uncertain"]) {
+    const run = await runReview(base, { override: (opts, res) => {
+      if (opts.label === "review:gpt") res.coverage = "partial";
+      if (opts.label === "review:claude") res.findings = [blockingClaim(0)];
+      if (opts.label.startsWith("verify:")) res.verdicts = [{ index: 0, status, reason: "checked" }];
+      return res;
+    } });
+    assert.equal(run.result.passed, false);
+    assert.equal(run.result.repair, undefined);
+  }
+  const first = await repairSeed();
+  const blocked = await runReview({ ...base, repair: first }, { override: (opts, res) => {
+    if (opts.label.startsWith("review:")) res.findings = [blockingClaim(0)];
+    else res.verdicts = [{ index: 0, status: "blocks", reason: "confirmed" }];
+    return res;
+  } });
+  assert.equal(blocked.result.passed, false);
+  assert.equal(blocked.result.blockingCount, 1);
+  assert.equal(blocked.result.repair, undefined);
+  const allMissing = await runReview(base, { override: (_opts, res) => ({ ...res, coverage: "partial" }) });
+  assert.equal(allMissing.result.repair, undefined);
+  const fallback = await runReview(base, { override: (opts, res) => opts.label === "review:gpt"
+    ? withFallback({ ...res, coverage: "partial" }, ["kimi/moonshot-v1-128k"]) : res });
+  assert.equal(fallback.result.repair, undefined);
+  const wrong = await runReview({ ...base, repair: first }, { override: (_opts, res) => withFallback(res, ["kimi/moonshot-v1-128k"]) });
+  assertUncertified(wrong.result);
+  assert.equal(wrong.result.repair, undefined);
+});
+
+test("repair preserves advisory and security scope and requires reusable original provenance", async () => {
+  const seed = await runReview(base, { override: (opts, res) => {
+    if (opts.label === "review:security-claude") res.coverage = "partial";
+    if (opts.label === "review:claude") {
+      res.findings = [{ ...blockingClaim(0), blocking: false, problem: "PRE-EXISTING: preserved hole" }];
+      res.coverageNote = "UNRUN: browser: unavailable";
+    }
+    return res;
+  } });
+  const fixed = await runReview({ ...base, repair: seed.result });
+  assert.equal(fixed.result.passed, true);
+  assert.deepEqual(fixed.requests.map(r => r.label), ["review:security-claude"]);
+  assert.match(fixed.requests[0].prompt, /SECURITY lens/);
+  assert.match(fixed.requests[0].prompt, /git diff A\.\.B/);
+  assert.ok(fixed.result.advisory.some(line => line.includes("preserved hole")));
+  assert.ok(fixed.result.preExistingSecurity.some(line => line.includes("preserved hole")));
+  assert.ok(fixed.result.coverageNotes.some(line => line.includes("UNRUN")));
+  const absent = await runReview(base, { override: (opts, res) => {
+    if (opts.label === "review:claude") res.runtimeProvenance = undefined;
+    return partialGpt(opts, res);
+  } });
+  assert.deepEqual(absent.result.repair.missing, ["claude", "gpt"]);
+  assert.deepEqual(absent.result.repair.completed.map(r => r.label), ["review:security-claude"]);
+  const unavailable = await runReview({ ...base, repair: seed.result }, { override: (_opts, res) => ({ ...res, runtimeProvenance: undefined }) });
+  assert.equal(unavailable.result.passed, false);
+  assert.equal(unavailable.result.complete, false);
+  assert.deepEqual(unavailable.result.repair.missing, ["security-claude"]);
+});
+
+test("repair receipts and combined results fit the notification bound", async () => {
+  const seed = await runReview(base, { override: (opts, res) => {
+    withClaims(opts, res);
+    res.coverageNote = "UNRUN: " + "x".repeat(300);
+    if (opts.label === "review:gpt") res.coverage = "partial";
+    else if (opts.label.startsWith("review:")) res.findings.push(...Array.from({ length: 5 }, (_, i) => ({ ...blockingClaim(i), blocking: false, problem: "PRE-EXISTING: " + "x".repeat(300) })));
+    return res;
+  } });
+  assert.ok(seed.result.repair);
+  assert.ok(JSON.stringify(seed.result, null, 2).length <= 3900, JSON.stringify(seed.result, null, 2).length);
+  const fixed = await runReview({ ...base, repair: seed.result }, { override: withClaims });
+  assert.equal(fixed.result.passed, true);
+  assert.ok(JSON.stringify(fixed.result, null, 2).length <= 3900, JSON.stringify(fixed.result, null, 2).length);
+  const again = await runReview({ ...base, repair: seed.result }, { override: (opts, res) => {
+    withClaims(opts, res);
+    res.coverage = "partial";
+    res.coverageNote = "x".repeat(300);
+    res.findings.push(...Array.from({ length: 5 }, (_, i) => ({ ...blockingClaim(i), blocking: false, problem: "PRE-EXISTING: " + "x".repeat(300) })));
+    return res;
+  } });
+  assert.ok(again.result.repair);
+  assert.ok(JSON.stringify(again.result, null, 2).length <= 3900, JSON.stringify(again.result, null, 2).length);
+});
 
 test("an unchanged passing full result is reused with zero reviewer calls", async () => {
   const first = await runReview(base);
