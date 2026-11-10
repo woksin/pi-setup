@@ -20,6 +20,7 @@ export interface FloorInput {
 	/** The tools sent to the model (active ones). */
 	tools: FloorTool[];
 }
+export interface PrefixTotal { count: number; bytes: number }
 export interface FloorMeasurement {
 	/** Bytes per top-level system prompt section; the untagged lead is `preamble`. */
 	sections: Record<string, number>;
@@ -28,6 +29,8 @@ export interface FloorMeasurement {
 	/** Tools sorted by size, largest first. */
 	tools: { name: string; bytes: number }[];
 	toolsBytes: number;
+	/** Active tools grouped by the name text before the first `_` (`other` for names without one). */
+	prefixes: Record<string, PrefixTotal>;
 	promptBytes: number;
 	totalBytes: number;
 	estTokens: number;
@@ -61,17 +64,36 @@ export function splitSections(prompt: string): Record<string, number> {
 	return result;
 }
 
+export const toolBytes = (tool: FloorTool): number => byteLength(tool.description ?? "") + byteLength(JSON.stringify(tool.parameters ?? {}));
+
+/** Groups tools by the name text before the first `_`; names without one go under `other`. */
+export function groupByPrefix(tools: FloorTool[]): Record<string, PrefixTotal> {
+	const result: Record<string, PrefixTotal> = {};
+	for (const tool of tools) {
+		const cut = tool.name.indexOf("_");
+		const key = cut > 0 ? tool.name.slice(0, cut) : "other";
+		const entry = (result[key] ??= { count: 0, bytes: 0 });
+		entry.count += 1;
+		entry.bytes += toolBytes(tool);
+	}
+	return result;
+}
+
+/** The `n` largest prefix groups, largest first. */
+export const topPrefixes = (groups: Record<string, PrefixTotal>, n = 8): Record<string, PrefixTotal> =>
+	Object.fromEntries(Object.entries(groups).sort((a, b) => b[1].bytes - a[1].bytes || a[0].localeCompare(b[0])).slice(0, n));
+
 export function measureFloor(input: FloorInput): FloorMeasurement {
 	const sections = splitSections(input.systemPrompt ?? "");
 	const contextFileBytes: Record<string, number> = {};
 	for (const file of input.systemPromptOptions?.contextFiles ?? []) contextFileBytes[file.path] = byteLength(file.content ?? "");
 	const tools = (input.tools ?? [])
-		.map((tool) => ({ name: tool.name, bytes: byteLength(tool.description ?? "") + byteLength(JSON.stringify(tool.parameters ?? {})) }))
+		.map((tool) => ({ name: tool.name, bytes: toolBytes(tool) }))
 		.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
 	const toolsBytes = tools.reduce((sum, tool) => sum + tool.bytes, 0);
 	const promptBytes = byteLength(input.systemPrompt ?? "");
 	const totalBytes = promptBytes + toolsBytes;
-	return { sections, skillsBytes: sections.skills ?? 0, contextFileBytes, tools, toolsBytes, promptBytes, totalBytes, estTokens: estimateTokens(totalBytes) };
+	return { sections, skillsBytes: sections.skills ?? 0, contextFileBytes, tools, toolsBytes, prefixes: groupByPrefix(input.tools ?? []), promptBytes, totalBytes, estTokens: estimateTokens(totalBytes) };
 }
 
 export const formatKb = (bytes: number): string => `${(bytes / 1024).toFixed(1)} KB`;
@@ -79,12 +101,18 @@ export const statusText = (m: FloorMeasurement, warnTokens = DEFAULT_WARN_TOKENS
 	`floor ~${Math.round(m.estTokens / 1000)}k${m.estTokens > warnTokens ? " !" : ""}`;
 
 /** Human-readable table for `/floor`. */
-export function formatFloor(m: FloorMeasurement, warnTokens = DEFAULT_WARN_TOKENS): string {
+export function formatFloor(m: FloorMeasurement, warnTokens = DEFAULT_WARN_TOKENS, allPrefixes?: Record<string, PrefixTotal>): string {
 	const lines = [`${statusText(m, warnTokens)} tokens (est.), ${formatKb(m.totalBytes)} total: prompt ${formatKb(m.promptBytes)}, tools ${formatKb(m.toolsBytes)} (${m.tools.length})`];
 	lines.push("Sections:");
 	for (const [name, bytes] of Object.entries(m.sections).sort((a, b) => b[1] - a[1])) lines.push(`  ${name}: ${formatKb(bytes)}`);
 	const files = Object.entries(m.contextFileBytes).sort((a, b) => b[1] - a[1]);
 	if (files.length) { lines.push("Context files:"); for (const [path, bytes] of files) lines.push(`  ${path}: ${formatKb(bytes)}`); }
+	const groups = (title: string, g: Record<string, PrefixTotal>) => {
+		lines.push(title);
+		for (const [name, t] of Object.entries(topPrefixes(g))) lines.push(`  ${name}_*: ${formatKb(t.bytes)} (${t.count})`);
+	};
+	groups("Active tools by prefix:", m.prefixes);
+	if (allPrefixes) groups("All registered tools by prefix (active or not):", allPrefixes);
 	lines.push("Largest tools:");
 	for (const tool of m.tools.slice(0, 10)) lines.push(`  ${tool.name}: ${formatKb(tool.bytes)}`);
 	return lines.join("\n");
