@@ -51,9 +51,12 @@ test("before_agent_start compacts project skills, sets the status, logs sizes on
 	const record = JSON.parse(lines[0]);
 	assert.equal(record.skillsCompacted, 20);
 	assert.equal(record.toolCount, 1);
+	assert.deepEqual(record.activePrefixes, { other: { count: 1, bytes: record.activePrefixes.other.bytes } });
+	assert.equal(record.allPrefixes.other.count, 2, "all-tools totals include inactive tools");
 	assert.ok(!lines[0].includes("More words"), "no prompt text in the log");
 
 	await commands.floor.handler("", ctx);
 	assert.match(notes[0], /Largest tools:\n {2}read:/);
 	assert.doesNotMatch(notes[0], /off:/);
+	assert.match(notes[0], /All registered tools by prefix/);
 });

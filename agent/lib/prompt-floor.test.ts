@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { estimateTokens, formatFloor, loadFloorConfig, measureFloor, splitSections, statusText } from "./prompt-floor.ts";
+import { estimateTokens, formatFloor, groupByPrefix, loadFloorConfig, measureFloor, splitSections, statusText } from "./prompt-floor.ts";
 
 const block = (name: string, body: string) => `<${name}>\n${body}\n</${name}>`;
 const prompt = ["You are a coding assistant.\n\nSecond preamble paragraph.", block("rules", "r".repeat(100)), block("skills", "s".repeat(500) + "\n<available_skills>\n  <skill>\n</available_skills>"), "<cwd>\n/work\n</cwd>"].join("\n\n");
@@ -63,4 +63,16 @@ test("config: missing file gives defaults; file, keepFull env and PI_FLOOR=off a
 	assert.equal(loadFloorConfig({ PI_FLOOR: "off" }, file).skills.projectMode, "full");
 	writeFileSync(file, "{ broken");
 	assert.equal(loadFloorConfig({}, file).warnTokens, 100_000);
+});
+
+test("tools are grouped by name prefix; names without an underscore go under other", () => {
+	const tools = [{ name: "browser_a", description: "aaaa" }, { name: "browser_b", description: "bb" }, { name: "web_x", description: "x" }, { name: "read", description: "r" }];
+	const groups = groupByPrefix(tools);
+	assert.equal(groups.browser.count, 2);
+	assert.equal(groups.browser.bytes, 4 + 2 + 2 * 2);
+	assert.equal(groups.web.count, 1);
+	assert.equal(groups.other.count, 1);
+	const m = measureFloor({ systemPrompt: "x", tools });
+	assert.deepEqual(m.prefixes, groups);
+	assert.match(formatFloor(m, 100_000, { browser: { count: 9, bytes: 20_480 } }), /All registered tools by prefix[^\n]*\n {2}browser_\*: 20\.0 KB \(9\)/);
 });

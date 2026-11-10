@@ -129,6 +129,12 @@ The `prompt-floor` extension measures the fixed prompt each turn starts from (sy
 { "warnTokens": 100000, "skills": { "projectMode": "compact", "keepFull": [], "descChars": 80, "maxBytes": 24000 } }
 ```
 
+### Browser gate
+
+The `browser-gate` extension hides the ~35 pi-browser-use `browser_*` tool schemas (a large share of the tool floor; `/floor` shows "Active tools by prefix" and "All registered tools by prefix") until the model calls the `browser_enable` loader, like pi-web-access's `web_enable`. The tools appear on the next model request and stay enabled for the session (including resume). Enabling mid-conversation changes the tool set, which can cost one prompt-cache miss on some models. The browser runtime still starts; only prompt bytes are saved. Subagents whose `extensions:` list names `pi-browser-use` without `browser-gate` keep the tools eager.
+
+- **Opt out:** `PI_BROWSER_GATE=off`, or `~/.pi/agent/browser-gate.json` containing `{ "mode": "eager" }` (`PI_BROWSER_GATE_FILE` overrides the path). The env var (`on`/`off`) beats the file; default is gated.
+
 - `skills.keepFull`: name globs that keep the full listing (also `PI_FLOOR_FULL_SKILLS=a,b-*`). `skills.maxBytes`: when exceeded, hints shrink step by step; a skill is never dropped.
 - **Off switch:** `PI_FLOOR=off` or `skills.projectMode: "full"` restores Pi's listing; the meter keeps running.
 
