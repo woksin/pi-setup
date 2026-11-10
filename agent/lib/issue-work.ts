@@ -766,16 +766,18 @@ export const STATUS_MISMATCH_EXIT = 3;
  * Write the status text. `expected` is the exact text between the markers it was based on, as
  * fetched (undefined = no block); the script refuses with exit 3 when the block differs.
  */
-async function writeStatus(d: Deps, repo: string, issue: number, text: string, expected: string | undefined, sessionId: string): Promise<string> {
+async function writeStatus(d: Deps, repo: string, issue: number, text: string, expected: string | undefined, session: SessionInfo): Promise<string> {
 	await mkdir(paths(d).tmp, { recursive: true });
-	const base = join(paths(d).tmp, `${short(sessionId)}-${repo.replace(/\//g, "_")}-${issue}-${randomBytes(4).toString("hex")}`);
+	const liveCwd = await stat(session.cwd).then(info => info.isDirectory()).catch(() => false);
+	const cwd = liveCwd ? session.cwd : paths(d).tmp;
+	const base = join(paths(d).tmp, `${short(session.sessionId)}-${repo.replace(/\//g, "_")}-${issue}-${randomBytes(4).toString("hex")}`);
 	const file = `${base}.md`;
 	const expectFile = `${base}.expected.md`;
 	await writeFile(file, `${text}\n`, "utf8");
 	if (expected !== undefined) await writeFile(expectFile, expected, "utf8"); // byte-exact
 	const expectArgs = expected === undefined ? ["--expect-absent"] : ["--expect-file", expectFile];
 	try {
-		const r = await d.run("python3", [d.statusScript, "update", "--repo", repo, "--issue", String(issue), "--file", file, ...expectArgs], { timeout: 60000 });
+		const r = await d.run("python3", [d.statusScript, "update", "--repo", repo, "--issue", String(issue), "--file", file, ...expectArgs], { timeout: 60000, cwd });
 		return r.stdout.trim();
 	} finally {
 		await rm(file, { force: true }).catch(() => {});
@@ -792,7 +794,7 @@ async function writeRewritten(d: Deps, s: SessionInfo, repo: string, issue: numb
 		const block = extractStatusBlock(data.body);
 		const text = rewriteStatusBlock(block, change);
 		try {
-			return { data, text, out: await writeStatus(d, repo, issue, text, rawStatusBlock(data.body), s.sessionId) };
+			return { data, text, out: await writeStatus(d, repo, issue, text, rawStatusBlock(data.body), s) };
 		} catch (e) {
 			const mismatch = (e as any)?.code === STATUS_MISMATCH_EXIT;
 			if (!mismatch || attempt >= 1) throw new Error(`issue-status.py update failed: ${errorText(e)}${mismatch ? " (the status block keeps changing concurrently; nothing written)" : ""}`);
