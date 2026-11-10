@@ -134,3 +134,12 @@ test("no setActiveTools call when nothing changes", async () => {
 	await s.handlers.session_tree({}, {});
 	assert.equal(s.calls.set, after);
 });
+
+test("a browser tool reactivated externally before browser_enable is pruned again", async () => {
+	const s = setup();
+	await s.handlers.session_start({}, {});
+	assert.deepEqual(s.getActive(), ["read", "browser_enable"]);
+	s.pi.setActiveTools([...s.getActive(), "browser_click"]);
+	await s.handlers.before_agent_start({}, {});
+	assert.deepEqual(s.getActive(), ["read", "browser_enable"]);
+});

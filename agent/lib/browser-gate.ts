@@ -22,14 +22,14 @@ export interface DesiredActive { active: string[]; seen: string[] }
 
 /**
  * The active tool set the gate wants, derived from the current one so other extensions' choices survive.
- * Only browser tools not seen before are touched: hidden while not enabled, activated once enabled. Tools seen
+ * While not enabled every registered browser tool is hidden; once enabled only tools not seen before are activated. Tools seen
  * earlier keep whatever state they have, so a tool another extension deactivated stays off. Eager mode carries no
  * loader; gated sessions with browser tools show it.
  */
 export function desiredActive({ active, browserNames, seen, enabled, mode }: DesiredActiveInput): DesiredActive {
 	if (mode === "eager") return { active: active.filter((name) => name !== LOADER_NAME), seen };
 	const fresh = browserNames.filter((name) => !seen.includes(name));
-	let next = active.filter((name) => name !== LOADER_NAME && !(!enabled && fresh.includes(name)));
+	let next = active.filter((name) => name !== LOADER_NAME && !(!enabled && browserNames.includes(name)));
 	if (enabled) next = [...new Set([...next, ...fresh])];
 	if (browserNames.length > 0) next.push(LOADER_NAME);
 	return { active: next, seen: [...seen, ...fresh] };
