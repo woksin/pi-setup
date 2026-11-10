@@ -12,13 +12,15 @@ test("splitBrowserTools selects browser_ names, never the loader or lookalikes",
 	assert.deepEqual(splitBrowserTools(tools, ["web_"]), ["web_search"]);
 });
 
-test("desiredActive hides browser tools until enabled and keeps other extensions' tools", () => {
+test("desiredActive hides new browser tools until enabled and only touches tools not seen before", () => {
 	const browserNames = ["browser_click", "browser_new_page"];
 	const active = ["read", "custom", "browser_click", "browser_new_page"];
-	assert.deepEqual(desiredActive({ active, browserNames, enabled: false, mode: "gated" }), ["read", "custom", "browser_enable"]);
-	assert.deepEqual(desiredActive({ active: ["read"], browserNames, enabled: true, mode: "gated" }), ["read", "browser_click", "browser_new_page", "browser_enable"]);
-	assert.deepEqual(desiredActive({ active: ["read", "browser_enable", ...browserNames], browserNames, enabled: false, mode: "eager" }), ["read", ...browserNames]);
-	assert.deepEqual(desiredActive({ active: ["read", "browser_enable"], browserNames: [], enabled: false, mode: "gated" }), ["read"]);
+	assert.deepEqual(desiredActive({ active, browserNames, seen: [], enabled: false, mode: "gated" }), { active: ["read", "custom", "browser_enable"], seen: browserNames });
+	assert.deepEqual(desiredActive({ active: ["read"], browserNames, seen: [], enabled: true, mode: "gated" }), { active: ["read", ...browserNames, "browser_enable"], seen: browserNames });
+	// seen tools keep their state: a deliberately deactivated tool stays off, a tool outside the set stays on
+	assert.deepEqual(desiredActive({ active: ["read", "browser_new_page", "browser_enable"], browserNames, seen: browserNames, enabled: true, mode: "gated" }).active, ["read", "browser_new_page", "browser_enable"]);
+	assert.deepEqual(desiredActive({ active: ["read", "browser_enable"], browserNames: [], seen: [], enabled: false, mode: "gated" }).active, ["read"]);
+	assert.deepEqual(desiredActive({ active: ["read", "browser_enable", ...browserNames], browserNames, seen: [], enabled: false, mode: "eager" }).active, ["read", ...browserNames]);
 });
 
 test("config: default gated; env beats file; broken file gives defaults", () => {
@@ -40,9 +42,12 @@ test("transcript scan applies toolsAdded/toolsRemoved in order and is undefined 
 		{ role: "system", toolsRemoved: [{ name: "read" }] },
 	];
 	assert.deepEqual([...transcriptToolNames(messages)!], ["browser_click"]);
-	assert.equal(enabledFromTranscript(messages, ["browser_click"], true), true);
-	assert.equal(enabledFromTranscript(messages, ["browser_new_page"], true), false);
-	assert.equal(enabledFromTranscript([{ role: "user" }], ["browser_click"], true), true);
-	assert.equal(enabledFromTranscript([{ role: "user" }], ["browser_click"], false), undefined);
-	assert.equal(enabledFromTranscript([], ["browser_click"], true), undefined);
+	assert.equal(enabledFromTranscript(messages, true), true);
+	assert.equal(enabledFromTranscript([{ role: "system", toolsAdded: [{ name: "read" }] }], true), undefined);
+	assert.equal(enabledFromTranscript([{ role: "user" }], true), true, "legacy transcript keeps eager tools");
+	assert.equal(enabledFromTranscript([{ role: "user" }], false), undefined);
+	assert.equal(enabledFromTranscript([], true), undefined);
+	const call = (name: string) => ({ role: "assistant", content: [{ type: "toolCall", name }] });
+	assert.equal(enabledFromTranscript([{ role: "system", toolsAdded: [{ name: "read" }] }, call("browser_enable")], false), true);
+	assert.equal(enabledFromTranscript([{ role: "system", toolsAdded: [{ name: "read" }] }, { role: "toolResult", toolName: "browser_click" }], false), true);
 });

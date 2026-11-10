@@ -17,18 +17,22 @@ export function splitBrowserTools(tools: { name: string }[], prefixes: string[] 
 	return tools.map((tool) => tool.name).filter((name) => name !== LOADER_NAME && prefixes.some((prefix) => name.startsWith(prefix)));
 }
 
-export interface DesiredActiveInput { active: string[]; browserNames: string[]; enabled: boolean; mode: GateMode }
+export interface DesiredActiveInput { active: string[]; browserNames: string[]; seen: string[]; enabled: boolean; mode: GateMode }
+export interface DesiredActive { active: string[]; seen: string[] }
 
 /**
- * The active tool set the gate wants. Always derived from the current active set so other extensions' choices
- * survive. Eager mode and sessions without browser tools carry no loader; gated sessions show the loader and,
- * once enabled, every browser tool.
+ * The active tool set the gate wants, derived from the current one so other extensions' choices survive.
+ * Only browser tools not seen before are touched: hidden while not enabled, activated once enabled. Tools seen
+ * earlier keep whatever state they have, so a tool another extension deactivated stays off. Eager mode carries no
+ * loader; gated sessions with browser tools show it.
  */
-export function desiredActive({ active, browserNames, enabled, mode }: DesiredActiveInput): string[] {
-	const others = active.filter((name) => name !== LOADER_NAME && !browserNames.includes(name));
-	if (mode === "eager") return [...new Set(active.filter((name) => name !== LOADER_NAME))];
-	if (browserNames.length === 0) return others;
-	return [...new Set([...others, ...(enabled ? browserNames : []), LOADER_NAME])];
+export function desiredActive({ active, browserNames, seen, enabled, mode }: DesiredActiveInput): DesiredActive {
+	if (mode === "eager") return { active: active.filter((name) => name !== LOADER_NAME), seen };
+	const fresh = browserNames.filter((name) => !seen.includes(name));
+	let next = active.filter((name) => name !== LOADER_NAME && !(!enabled && fresh.includes(name)));
+	if (enabled) next = [...new Set([...next, ...fresh])];
+	if (browserNames.length > 0) next.push(LOADER_NAME);
+	return { active: next, seen: [...seen, ...fresh] };
 }
 
 /** `PI_BROWSER_GATE=off|on` beats `browser-gate.json` (`{"mode":"eager"|"gated"}`); default gated; broken file = defaults. */
@@ -56,13 +60,26 @@ export function transcriptToolNames(messages: any[]): Set<string> | undefined {
 	return tools;
 }
 
+const isBrowserName = (name: unknown): boolean => typeof name === "string" && BROWSER_PREFIXES.some((prefix) => name.startsWith(prefix));
+
+/** Whether a recorded transcript shows browser tools in use: declared, called, or the loader called. Independent of what is registered now. */
+function usedBrowserTools(messages: any[]): boolean {
+	for (const message of messages ?? []) {
+		if (message?.role === "toolResult" && isBrowserName(message.toolName)) return true;
+		const content = message?.role === "assistant" && Array.isArray(message.content) ? message.content : [];
+		if (content.some((block: any) => block?.type === "toolCall" && isBrowserName(block.name))) return true;
+	}
+	return false;
+}
+
 /**
- * Whether the browser tools are already enabled in a recorded session. A transcript that declared its tools is
- * authoritative; an undeclared transcript with messages predates declarations and keeps its (eager) tools only
- * when `legacyKeeps`; an empty one starts gated.
+ * Whether the browser tools were already enabled in a recorded session. A transcript that declared its tools is
+ * authoritative, plus any browser call; an undeclared transcript with messages predates declarations and keeps its
+ * (eager) tools only when `legacyKeeps`; otherwise undefined (no evidence).
  */
-export function enabledFromTranscript(messages: any[], browserNames: string[], legacyKeeps: boolean): boolean | undefined {
+export function enabledFromTranscript(messages: any[], legacyKeeps: boolean): boolean | undefined {
 	const declared = transcriptToolNames(messages);
-	if (declared) return browserNames.some((name) => declared.has(name));
+	if (usedBrowserTools(messages) || (declared && [...declared].some((name) => name !== LOADER_NAME && isBrowserName(name)))) return true;
+	if (declared) return undefined;
 	return legacyKeeps && (messages ?? []).length > 0 ? true : undefined;
 }

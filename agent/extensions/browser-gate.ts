@@ -5,7 +5,7 @@
  * Opt out with PI_BROWSER_GATE=off or browser-gate.json {"mode":"eager"}. Never throws into the session.
  */
 import { buildSessionContext, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { desiredActive, enabledFromTranscript, LOADER_NAME, loadGateConfig, splitBrowserTools } from "../lib/browser-gate.ts";
+import { desiredActive, enabledFromTranscript, LOADER_NAME, loadGateConfig, splitBrowserTools, type GateMode } from "../lib/browser-gate.ts";
 
 export const GUIDELINE = "browser_* skills: call browser_enable before any browser_* tool.";
 const text = (value: string) => [{ type: "text" as const, text: value }];
@@ -15,20 +15,32 @@ const readMessages = (ctx: any): any[] => buildSessionContext(ctx.sessionManager
 export function registerBrowserGate(pi: ExtensionAPI, messagesOf: (ctx: any) => any[] = readMessages): void {
 	if (typeof pi.getAllTools !== "function" || typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
 	let enabled = false;
+	let seen: string[] = [];
+	let mode: GateMode | undefined; // latched at session_start so a config flip mid-session never strands hidden tools
 	const browserNames = () => splitBrowserTools(pi.getAllTools());
+	const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((name, i) => name === b[i]);
 
 	const apply = () => {
 		try {
+			mode ??= loadGateConfig().mode;
 			const active = pi.getActiveTools();
-			const next = desiredActive({ active, browserNames: browserNames(), enabled, mode: loadGateConfig().mode });
-			if (next.length !== active.length || next.some((name, i) => name !== active[i])) pi.setActiveTools(next);
+			const next = desiredActive({ active, browserNames: browserNames(), seen, enabled, mode });
+			seen = next.seen;
+			if (!sameSet(next.active, active)) pi.setActiveTools(next.active);
 		} catch { /* the gate must never disturb a turn */ }
 	};
+	/** Latches enablement and activates every registered browser tool; tools registered later are activated by apply(). */
+	const enable = (names: string[]) => {
+		enabled = true;
+		seen = [...new Set([...seen, ...names])];
+		const active = pi.getActiveTools();
+		const next = [...new Set([...active, ...names])];
+		if (!sameSet(next, active)) pi.setActiveTools(next);
+	};
 	const fromSession = (ctx: any, isStart: boolean) => {
+		if (isStart) { enabled = false; seen = []; mode = loadGateConfig().mode; }
 		try {
-			const state = enabledFromTranscript(messagesOf(ctx), browserNames(), isStart);
-			if (state !== undefined) enabled = state;
-			else if (isStart) enabled = false;
+			if (!enabled && enabledFromTranscript(messagesOf(ctx), isStart)) enable(browserNames());
 		} catch { /* keep the in-memory state */ }
 		apply();
 	};
@@ -45,12 +57,11 @@ export function registerBrowserGate(pi: ExtensionAPI, messagesOf: (ctx: any) => 
 			const names = browserNames();
 			if (names.length === 0) return { isError: true, content: text("No browser_* tools are registered (pi-browser-use not loaded or not started)."), details: { enabled: [] } };
 			try {
-				pi.setActiveTools([...new Set([...pi.getActiveTools(), ...names])]);
+				enable(names);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return { isError: true, content: text(`Activation failed: ${message}.`), details: { error: message } };
 			}
-			enabled = true;
 			return { content: text(`Enabled: ${names.join(", ")}.`), details: { enabled: names } };
 		},
 	});
