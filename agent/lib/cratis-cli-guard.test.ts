@@ -1,7 +1,7 @@
 /** cratis-cli-guard: command-position parsing, prose/heredoc skip, read-only list, production match, orchestration deny. Complements guards.test.ts. */
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import childProcess from "node:child_process";
@@ -40,6 +40,7 @@ beforeEach(() => {
 	delete (globalThis as any)[Symbol.for("pi.guards")];
 });
 afterEach(() => {
+	rmSync(dir, { recursive: true, force: true });
 	for (const [n, v] of Object.entries(saved)) if (v === undefined) delete process.env[n]; else process.env[n] = v;
 	Object.assign(productionSources, origSources);
 	delete (globalThis as any)[Symbol.for("pi.guards")];
