@@ -1,4 +1,7 @@
-// Credential reads are isolated test fixtures; no real keychain or environment access.
+// Copyright (c) Cratis. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
+// Credential reads are isolated fixtures; the subprocess test uses a fake keychain executable.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
@@ -64,13 +67,34 @@ test("proof files inside cwd/worktree, through symlinks, or with wrong mode are 
 	}
 	await assert.rejects(new DirectCredentials().launchProof({ env: { DIRECT_LINK_LAUNCH_PROOF_FILE: inside }, worktree: outside, cwd: worktree }));
 });
-test("child environment is a scrubbed copy retaining only non-secret Direct metadata", () => {
+test("every child environment is an allow-listed copy without launch metadata or other secrets", () => {
 	const env = { DIRECT_PAT: "dpat_FAKE0000", DIRECT_LINK_LAUNCH_PROOF: "FAKE_PROOF", DIRECT_LINK_LAUNCH_PROOF_FILE: "/fake/proof", DIRECT_TOKEN: "FAKE", DIRECT_SECRET: "FAKE", DIRECT_PASSWORD: "FAKE", DIRECT_DPAT: "FAKE", DIRECT_LINK_SESSION: "session-fake", DIRECT_LINK_HARNESS: "pi", PATH: "/fake/bin", OTHER_TOKEN: "FAKE_OTHER" };
-	assert.deepEqual(scrubChildEnv(env), { DIRECT_LINK_SESSION: "session-fake", DIRECT_LINK_HARNESS: "pi", PATH: "/fake/bin", OTHER_TOKEN: "FAKE_OTHER" });
+	assert.deepEqual(scrubChildEnv(env), { PATH: "/fake/bin" });
 	assert.equal(env.DIRECT_LINK_LAUNCH_PROOF, "FAKE_PROOF");
 });
+test("insecure proof files are unlinked even when location or mode validation fails", async () => {
+	const worktree = tempDir("direct-link-invalid-proof-");
+	for (const [directory, mode] of [[worktree, 0o600], [tempDir("direct-link-mode-proof-"), 0o644]] as const) {
+		const path = join(directory, "proof"); writeFileSync(path, "FAKE_PROOF", { mode }); chmodSync(path, mode);
+		await assert.rejects(new DirectCredentials().launchProof({ env: { DIRECT_LINK_LAUNCH_PROOF_FILE: path }, worktree }));
+		assert.equal(existsSync(path), false);
+	}
+});
+test("keychain subprocess receives only the same allow-list as bash and git", async () => {
+	const bin = tempDir("direct-link-security-");
+	const executable = join(bin, "security");
+	writeFileSync(executable, '#!/bin/sh\n[ -z "$DIRECT_PAT$DIRECT_LINK_LAUNCH_PROOF_FILE$DIRECT_LINK_SESSION$GH_TOKEN$NODE_OPTIONS" ] || exit 1\nprintf "dpat_FAKE_CHILD"\n', { mode: 0o700 });
+	const keys = ["PATH", "DIRECT_PAT", "DIRECT_LINK_LAUNCH_PROOF_FILE", "DIRECT_LINK_SESSION", "GH_TOKEN", "NODE_OPTIONS"];
+	const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+	try {
+		Object.assign(process.env, { PATH: bin, DIRECT_PAT: "dpat_FAKE_PARENT", DIRECT_LINK_LAUNCH_PROOF_FILE: "/fake/proof", DIRECT_LINK_SESSION: "fake-session", GH_TOKEN: "FAKE_GH", NODE_OPTIONS: "FAKE_OPTIONS" });
+		assert.equal(await new DirectCredentials().pat(), "dpat_FAKE_CHILD");
+	} finally {
+		for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; }
+	}
+});
 test("runner stores, keychain references, PAT files and injected patterns are forbidden", () => {
-	for (const path of ["keychain:direct-runner", "~/Library/Keychains/login.keychain-db", "~/.config/direct/runner-credentials.json", "~/Library/Application Support/Direct/runner-secret", "~/.config/direct/pat", "~/.config/direct/interface-token"]) assert.equal(isForbiddenSecretPath(path), true, path);
+	for (const path of ["~/.config/direct/credentials/pat", "~/.config/direct/run/proof", "~/Library/Application Support/Direct/credentials", "~/Library/Application Support/Direct/run/proof", "keychain:direct-runner", "~/Library/Keychains/login.keychain-db", "~/.config/direct/runner-credentials.json", "~/Library/Application Support/Direct/runner-secret", "~/.config/direct/pat", "~/.config/direct/interface-token"]) assert.equal(isForbiddenSecretPath(path), true, path);
 	assert.equal(isForbiddenSecretPath("~/safe/code.ts"), false);
 	assert.equal(isForbiddenSecretPath("~/custom/store", { patterns: [/custom\/store/g] }), true);
 	assert.equal(isForbiddenSecretPath("~/custom/pat", { secretPaths: ["/fake-home/custom/pat"], home: "/fake-home" }), true);

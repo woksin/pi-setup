@@ -1,3 +1,6 @@
+// Copyright (c) Cratis. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
 // r2 JSON-RPC schemas and typed, secret-safe refusals.
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -43,6 +46,38 @@ test("four tools send the exact r2 arguments with PAT and no redirects", async (
 	assert.deepEqual(writes[2].params.arguments, { ...context, kind: "progress", note: "implemented", idempotencyKey: "report-key" });
 	assert.deepEqual(writes[3].params.arguments, { ...context, outcome: "abandoned", note: "stopped", idempotencyKey: "release-key" });
 	assert.equal(new Set(writes.map((w) => w.id)).size, 4);
+});
+test("only HTTPS or exact loopback HTTP endpoints can receive credentials", async () => {
+	let calls = 0;
+	const fetch: Fetch = async () => { calls++; return Response.json({}); };
+	for (const url of ["http://direct.invalid/mcp", "http://192.168.1.2/mcp", "http://localhost.evil.invalid/mcp", "ftp://127.0.0.1/mcp", "https://user:pass@direct.invalid/mcp"]) {
+		assert.throws(() => new DirectMcp(url, "dpat_FAKE0000", fetch), { message: "Invalid Direct endpoint" });
+	}
+	assert.equal(calls, 0);
+	for (const host of ["127.0.0.1", "[::1]", "localhost"]) await new DirectMcp(`http://${host}/mcp`, "dpat_FAKE0000", fetch).claim(claim);
+	assert.equal(calls, 3);
+});
+test("request timeout aborts a hung transport and hung response decoding", async () => {
+	for (const decoding of [false, true]) {
+		let signal: AbortSignal | undefined;
+		const client = new DirectMcp("https://direct.invalid/mcp", "dpat_FAKE0000", async (_url, init) => {
+			signal = init.signal!;
+			if (!decoding) return new Promise(() => {});
+			const response = Response.json({}); response.json = () => new Promise(() => {}); return response;
+		}, { key: () => "fake-id", timeoutMs: 10 });
+		assert.deepEqual(await client.claim(claim), { ok: false, error: { kind: "unavailable" } });
+		assert.equal(signal?.aborted, true);
+	}
+});
+test("an invalidated write is fenced before sending any request", async () => {
+	const controller = new AbortController(); controller.abort();
+	const client = new DirectMcp("https://direct.invalid/mcp", "dpat_FAKE0000", async () => { assert.fail("must not send"); });
+	assert.equal((await client.report({ ...context, signal: controller.signal }, {})).ok, false);
+});
+test("claim text masks learned credentials without discarding the spent-proof response", async () => {
+	const client = new DirectMcp("https://direct.invalid/mcp", "dpat_FAKE0000", async (_url, init) => Response.json({ jsonrpc: "2.0", id: JSON.parse(String(init.body)).id, result: { structuredContent: { brief: "Use FAKE_PROOF or dpat_FAKE0000", sha: "a".repeat(64) } } }));
+	const result = await client.claim(claim); assert.ok(result.ok);
+	assert.deepEqual(result.value, { brief: "Use [REDACTED:direct] or [REDACTED:direct]", sha: "a".repeat(64) });
 });
 test("an explicit retry keeps its idempotency key but gets a new RPC request id", async () => {
 	const keys: string[] = []; const ids: string[] = [];

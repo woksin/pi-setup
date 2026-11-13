@@ -1,5 +1,8 @@
+// Copyright (c) Cratis. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
 // Accept means the person's own daemon accepted, not proof of a human click.
-import { protocol } from "./direct-link-mcp.ts";
+import { boundedRequest, protocol } from "./direct-link-mcp.ts";
 import type { Fetch } from "./direct-link-mcp.ts";
 export interface Offer { offerId: string; workHandle: string; title: string; repository: string; harness: string; expiresAt: string; state: string }
 export interface RunnerSession { session: string; workHandle: string; harness: string; state: string }
@@ -16,13 +19,15 @@ export class DirectDaemon {
 	}
 	async #call<T>(path: string, body?: object): Promise<T> {
 		try {
-			const response = await this.#fetch(new URL(path, this.#url).href, {
-				method: body === undefined ? "GET" : "POST", redirect: "error",
-				headers: { "Content-Type": "application/json", [protocol.interfaceHeader]: this.#token },
-				body: body === undefined ? undefined : JSON.stringify(body),
+			return await boundedRequest(async (signal) => {
+				const response = await this.#fetch(new URL(path, this.#url).href, {
+					method: body === undefined ? "GET" : "POST", redirect: "error", signal,
+					headers: { "Content-Type": "application/json", [protocol.interfaceHeader]: this.#token },
+					body: body === undefined ? undefined : JSON.stringify(body),
+				});
+				if (!response.ok || response.redirected) throw new Error();
+				return await response.json() as T;
 			});
-			if (!response.ok || response.redirected) throw new Error();
-			return await response.json() as T;
 		} catch { throw new Error("Direct daemon request refused"); }
 	}
 	#offerPath(template: string, offerId: string): string { return template.replace("{offerId}", encodeURIComponent(offerId)); }

@@ -74,7 +74,10 @@ export default function directLink(pi: ExtensionAPI, services: DirectLinkService
 		context?.abort();
 	};
 	const checked = <T>(result: Result<T>): boolean => {
-		if (!result.ok) { lose(); return false; }
+		if (!result.ok) {
+			if (result.error.kind !== "unavailable" || lease?.lost) lose();
+			return false;
+		}
 		return true;
 	};
 	const ready = () => {
@@ -84,7 +87,8 @@ export default function directLink(pi: ExtensionAPI, services: DirectLinkService
 	const schedule = () => {
 		if (!ready()) return;
 		timer = clock.setTimeout(async () => {
-			if (checked(await lease!.renew(state))) schedule();
+			checked(await lease!.renew(state));
+			if (ready()) schedule();
 		}, Math.max(1, lease!.interval));
 	};
 	const changeState = async (next: WorkState) => {
@@ -100,16 +104,20 @@ export default function directLink(pi: ExtensionAPI, services: DirectLinkService
 		try {
 			// Consume the file even if subsequent configuration/keychain lookup fails. No legacy env fallback.
 			const proof = await credentials.launchProof({ env: launchEnv, cwd: ctx.cwd, worktree: ctx.cwd });
+			if (!launchEnv.DIRECT_LINK_MCP_URL) {
+				tell("Direct requires DIRECT_LINK_MCP_URL from L101; loopback MCP discovery is not defined. Request a new Launch with this setting.");
+				lose(); return;
+			}
 			const pat = await credentials.pat({ env: {} });
-			const mcp = new DirectMcp(launchEnv.DIRECT_LINK_MCP_URL ?? "", pat, services.fetch ?? fetch);
+			const mcp = new DirectMcp(launchEnv.DIRECT_LINK_MCP_URL, pat, services.fetch ?? fetch);
 			const claimed = await claimAtStartup({
 				env: launchEnv, cwd: ctx.cwd, worktree: ctx.cwd, harnessVersion: VERSION, mcp,
-				credentials: { launchProof: async () => proof }, clock: services.clock,
+				credentials: { launchProof: async () => proof }, clock, onLost: lose,
 			});
 			if (!claimed.ok) { lose(); return; }
 			if (phase !== "starting") { claimed.value.stop(); return; }
 			lease = claimed.value; reporter = new DirectReporter(lease, mcp); phase = "active";
-			tell("Direct claimed this Launch for harness pi. Delivery requires branch, SHA, and gate evidence; no PR is created.");
+			tell(`Direct claimed this Launch for harness pi: ${lease.summary}. Delivery requires branch, SHA, and gate evidence; no PR is created.`);
 			schedule();
 		} catch { lose(); }
 	};
@@ -132,7 +140,7 @@ export default function directLink(pi: ExtensionAPI, services: DirectLinkService
 		if (!end) return reply("Direct report recorded.");
 		if (end === "delivered" && !deliveryEvidence(evidence)) return reply("Delivery requires branch, full SHA, and gate evidence.", true);
 		outcome = end;
-		if (!checked(await lease!.release({ outcome }))) return reply("Direct lease lost.", true);
+		if (!checked(await lease!.release({ outcome }))) return reply(ready() ? "Direct report unavailable. Retry before lease expiry." : "Direct lease lost.", true);
 		phase = "released"; stop();
 		return reply("Direct report recorded.");
 	};
@@ -144,7 +152,7 @@ export default function directLink(pi: ExtensionAPI, services: DirectLinkService
 			try {
 				const { report, state: next, outcome: end } = parseSubmission(value);
 				if (JSON.stringify(clean(report)) !== JSON.stringify(report)) throw new Error();
-				if (!checked(await reporter.report(report))) return reply("Direct lease lost.", true);
+				if (!checked(await reporter.report(report))) return reply(ready() ? "Direct report unavailable. Retry before lease expiry." : "Direct lease lost.", true);
 				if (report.kind === "artifact") Object.assign(evidence, report);
 				if (next) await changeState(next);
 				if (!ready()) return reply("Direct lease lost.", true);
@@ -170,8 +178,10 @@ export default function directLink(pi: ExtensionAPI, services: DirectLinkService
 	pi.on("user_bash", () => ({ result: { output: "Direct harness: use the guarded bash tool; shell escapes have no output masking hook.", exitCode: 1, cancelled: false, truncated: false } }));
 	pi.on("session_shutdown", async () => {
 		if (startup) await startup;
-		stop();
+		if (timer !== undefined) clock.clearTimeout(timer);
+		timer = undefined;
 		if (ready() && checked(await lease!.release({ outcome }))) phase = "released";
+		stop();
 	});
 	pi.registerCommand("direct", {
 		description: "Show Direct launch/lease status (never accepts offers or claims work)",

@@ -64,7 +64,7 @@ test("path guard covers relative paths, nested tools, symlinks, runner stores an
 	const { credentials, launch } = await fixture();
 	const alias = join(dirname(launch.launchProofFile), "proof-alias");
 	symlinkSync(launch.launchProofFile, alias); cleanup.push(() => unlinkSync(alias));
-	for (const input of [{ path: alias }, { tool_uses: [{ parameters: { path: launch.launchProofFile } }] }, { command: "cat ~/.config/direct/runner-secret" }, { command: "security find-generic-password -w" }, { command: "gh pr create --title test" }, { command: "printenv" }]) {
+	for (const input of [{ path: alias }, { tool_uses: [{ parameters: { path: launch.launchProofFile } }] }, { command: "cat ~/.config/direct/runner-secret" }, { command: "security find-generic-password -w" }, { command: "security -q find-generic-password -w" }, { command: "gh pr create --title test" }, { command: "gh pr new --title test" }, { command: "gh api -X POST repos/fake/repo/pulls -f title=fake" }, { command: "gh api repos/fake/repo/pulls --input fixture.json" }, { command: "cat ~/.config/direct/credentials" }, { command: "cat ~/.config/direct/*" }, { command: "less ~/.config/direct/cred*" }, { command: "cp ~/.config/direct/run/* /fake/destination" }, { command: `cat ${dirname(launch.launchProofFile)}/*` }, { command: "printenv" }]) {
 		assert.equal(directToolDenied(input, process.cwd(), credentials, [launch.launchProofFile]), true);
 	}
 	assert.equal(directToolDenied({ path: "docs/direct-link.md" }, process.cwd(), credentials, [launch.launchProofFile]), false);
@@ -91,6 +91,32 @@ test("startup consumes proof before tool readiness, scrubs env, claims once and 
 	await app.handlers.session_start({}, app.ctx);
 	assert.equal(stub.facts.filter(f => f.kind === "claim").length, 1);
 	assert.equal(app.aborted(), true); assert.match(app.notes.at(-1)!, /new Launch/);
+});
+test("missing L101 MCP URL fails closed with actionable contract guidance", async () => {
+	const stub = new DirectStub(); cleanup.push(() => stub.dispose());
+	await new DirectDaemon("http://127.0.0.1:7777", "FAKE_INTERFACE_TOKEN", stub.fetch).accept("offer-fake", { person: true });
+	const launch = stub.launch()!;
+	const credentials = new DirectCredentials(); credentials.pat = async () => { assert.fail("URL is required before PAT lookup"); };
+	const app = harness({ DIRECT_LINK_WORK_HANDLE: launch.workHandle, DIRECT_LINK_SESSION: launch.session, DIRECT_LINK_HARNESS: "pi", DIRECT_LINK_LAUNCH_PROOF_FILE: launch.launchProofFile, DIRECT_LINK_LOOPBACK_URL: "http://127.0.0.1:7777" }, { credentials, fetch: stub.fetch });
+	await app.handlers.session_start({}, app.ctx);
+	assert.equal(existsSync(launch.launchProofFile), false); assert.equal(app.aborted(), true);
+	assert.equal(stub.facts.some(fact => fact.kind === "claim"), false);
+	assert.ok(app.notes.some(note => /DIRECT_LINK_MCP_URL.*L101.*discovery/.test(note)));
+});
+test("claimed work text is masked without rejecting a consumed proof", async () => {
+	let transport!: Fetch;
+	const forwarding: Fetch = async (url, init) => {
+		const response = await transport(url, init);
+		if (JSON.parse(String(init.body)).params.name !== "direct_work_claim") return response;
+		const body = await response.json(), payload = body.result.structuredContent.payload;
+		payload.title = "Use dpat_FAKE_IN_TITLE"; payload.brief = "Use Bearer FAKE_IN_BRIEF";
+		payload.acceptanceCriteria = ["a".repeat(64)];
+		return Response.json(body);
+	};
+	const f = await fixture({ fetch: forwarding }); transport = f.stub.fetch;
+	await f.app.handlers.session_start({}, f.app.ctx);
+	assert.equal(f.app.aborted(), false); assert.equal(existsSync(f.launch.launchProofFile), false);
+	const notices = f.app.notes.join("\n"); assert.match(notices, /claimed.*\[REDACTED:direct\]/); assert.doesNotMatch(notices, /dpat_FAKE|FAKE_IN_BRIEF/);
 });
 test("missing proof fails closed without claim, including legacy proof environment", async () => {
 	const { app, launch, stub } = await fixture(); unlinkSync(launch.launchProofFile);
@@ -139,14 +165,43 @@ test("heartbeat follows the lease interval and refusal stops rescheduling and wr
 	const clock = { now: () => now, setTimeout: (fn: () => void, ms: number) => { const id = ++sequence; timers.set(id, { fn, ms }); return id; }, clearTimeout: (id: unknown) => { timers.delete(id as number); } };
 	const { app, stub, requests } = await fixture({ clock }); await app.handlers.session_start({}, app.ctx);
 	const tick = async () => {
-		const [id, timer] = [...timers][0]; timers.delete(id); now += timer.ms; await timer.fn();
+		const [id, timer] = [...timers].sort((a, b) => a[1].ms - b[1].ms)[0]; timers.delete(id); now += timer.ms; await timer.fn();
 	};
-	assert.equal([...timers.values()][0].ms, 20_000);
+	assert.equal(Math.min(...[...timers.values()].map(timer => timer.ms)), 20_000);
 	await tick(); assert.equal(requests.filter(name => name === "direct_work_heartbeat").length, 1);
-	assert.equal(timers.size, 1);
+	assert.equal(timers.size, 2);
 	stub.takeover(); await tick(); assert.equal(timers.size, 0); assert.equal(app.aborted(), true);
 	const count = stub.facts.length;
 	await app.handlers.agent_start(); assert.equal(stub.facts.length, count);
+});
+test("transient heartbeat and report failures stay recoverable before expiry", async () => {
+	let fail = false, transport!: Fetch;
+	const forwarding: Fetch = async (url, init) => fail ? new Response("", { status: 503 }) : transport(url, init);
+	const f = await fixture({ fetch: forwarding }); transport = f.stub.fetch;
+	const app = f.app;
+	await app.handlers.session_start({}, app.ctx);
+	fail = true;
+	assert.equal((await app.tools.direct_work_report.execute("report", { kind: "progress", note: "retry" })).isError, true);
+	await app.handlers.agent_start(); assert.equal(app.aborted(), false);
+	assert.equal(await app.handlers.tool_call({ toolName: "read", input: { path: "README.md" } }, app.ctx), undefined);
+	fail = false;
+	assert.equal((await app.tools.direct_work_report.execute("report", { kind: "progress", note: "retry" })).isError, false);
+});
+test("expiry aborts active extension work even when a heartbeat never settles", async () => {
+	let now = Date.now(), sequence = 0;
+	const timers = new Map<number, { fn: () => void; at: number }>();
+	const clock = { now: () => now, setTimeout: (fn: () => void, ms: number) => { const id = ++sequence; timers.set(id, { fn, at: now + ms }); return id; }, clearTimeout: (id: unknown) => { timers.delete(id as number); } };
+	let transport!: Fetch;
+	const forwarding: Fetch = async (url, init) => JSON.parse(String(init.body)).params.name === "direct_work_heartbeat" ? new Promise(() => {}) : transport(url, init);
+	const f = await fixture({ clock, fetch: forwarding }); transport = f.stub.fetch;
+	await f.app.handlers.session_start({}, f.app.ctx);
+	const pending = f.app.handlers.agent_start(); await new Promise(setImmediate);
+	// The watchdog exists independently of the hung heartbeat.
+	now += 100_000;
+	const watchdog = [...timers.values()].sort((a, b) => b.at - a.at)[0];
+	watchdog.fn(); await pending;
+	assert.equal(f.app.aborted(), true); assert.equal(timers.size, 0);
+	assert.equal((await f.call({ kind: "progress" })).isError, true);
 });
 test("tool results redact learned proof/PAT in text and details before session storage", async () => {
 	const { app, credentials } = await fixture(); await app.handlers.session_start({}, app.ctx);

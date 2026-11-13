@@ -1,3 +1,6 @@
+// Copyright (c) Cratis. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
 // Harness-side Layer A proof against the r2 admission, fencing and observation contract.
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
@@ -43,8 +46,11 @@ test("same PAT with wrong session, work, harness, missing or wrong proof is refu
 test("proof is single-use even with the same PAT, session and RPC arguments", async () => {
 	const f = await launched(); assert.deepEqual(await f.mcp.claim(f.request), { ok: false, error: { kind: "launch-not-authorized" } });
 });
+test("launch proof is valid just before the 120-second default lifetime", async () => {
+	const f = await prepared(); f.advance(119_999); assert.equal((await f.mcp.claim(f.request)).ok, true);
+});
 test("expired launch proof cannot claim", async () => {
-	const f = await prepared(); f.advance(60_000);
+	const f = await prepared(); f.advance(120_000);
 	assert.deepEqual(await f.mcp.claim(f.request), { ok: false, error: { kind: "launch-not-authorized" } });
 });
 test("stale epoch after takeover is refused by server and fences the old lease locally", async () => {

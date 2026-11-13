@@ -1,3 +1,6 @@
+// Copyright (c) Cratis. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
 // Claim payload validation. Direct text is data, never session authority.
 export interface LaunchInputs { workHandle: string; session: string; launchProof: string }
 export function parseLaunchInputs(payload: unknown): LaunchInputs {
@@ -16,7 +19,17 @@ export interface WorkItem {
 	subject: Subject; title: string; brief: Untrusted<string>; acceptanceCriteria: Untrusted<string[]>;
 	baseBranch: string; suggestedBranch: string; gateNames: string[]; grantExpiresAt: string;
 }
-const CREDENTIAL = /dpat_|Bearer\s|ghp_|github_pat_|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{64,}={0,2}(?=$|[^A-Za-z0-9+/])/i;
+const CREDENTIAL = /dpat_[A-Za-z0-9_-]*|Bearer\s+\S*|ghp_[A-Za-z0-9_]*|github_pat_[A-Za-z0-9_]*|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)|(?<![A-Za-z0-9+/])(?!(?:[0-9a-f]{64})(?=$|[^A-Za-z0-9+/]))[A-Za-z0-9+/]{64,}={0,2}(?=$|[^A-Za-z0-9+/])/i;
+export function maskWorkCredentials(value: unknown, secrets: readonly string[] = []): unknown {
+	if (typeof value === "string") {
+		let text = value.replace(new RegExp(CREDENTIAL.source, "gi"), "[REDACTED:direct]");
+		for (const secret of secrets.filter(Boolean)) text = text.split(secret).join("[REDACTED:direct]");
+		return text;
+	}
+	if (Array.isArray(value)) return value.map(item => maskWorkCredentials(item, secrets));
+	if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, maskWorkCredentials(item, secrets)]));
+	return value;
+}
 const CREDENTIAL_FIELD = /token|password|secret|credential|authorization|private.?key|api.?key/i;
 export function containsCredential(value: unknown): boolean {
 	if (typeof value === "string") return CREDENTIAL.test(value);
@@ -27,8 +40,12 @@ export function containsCredential(value: unknown): boolean {
 export function renderUntrusted(value: Untrusted<unknown>): string {
 	return "```untrusted-data\n" + JSON.stringify(value.value).replaceAll("`", "\\u0060") + "\n```";
 }
+function isRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object") return false;
+	return !Array.isArray(value);
+}
 function object(value: unknown, fields: string[]): Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid work payload");
+	if (!isRecord(value)) throw new Error("Invalid work payload");
 	if (Object.keys(value).some((key) => !fields.includes(key))) throw new Error("Unknown work payload field");
 	return value as Record<string, unknown>;
 }
@@ -60,8 +77,7 @@ function issueRef(value: unknown): string | number {
 	return value;
 }
 export function parseWorkItem(payload: unknown, now = Date.now()): WorkItem {
-	if (containsCredential(payload)) throw new Error("Credential material refused in work payload");
-	const claim = object(payload, ["claimId", "epoch", "leaseUntil", "heartbeatEvery", "payload"]);
+	const claim = object(maskWorkCredentials(payload), ["claimId", "epoch", "leaseUntil", "heartbeatEvery", "payload"]);
 	const p = object(claim.payload, ["workHandle", "subject", "title", "brief", "acceptanceCriteria", "baseBranch", "suggestedBranch", "gateNames", "grantExpiresAt"]);
 	const s = object(p.subject, ["repository", "issue", "workId", "journeyId", "stage"]);
 	const issue = issueRef(s.issue);

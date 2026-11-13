@@ -3,6 +3,7 @@
 
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { scrubChildEnv } from "./direct-link-credentials.ts";
 import type { DirectCredentials } from "./direct-link-credentials.ts";
 import { containsCredential } from "./direct-link-workitem.ts";
 import type { Artifact, Report } from "./direct-link-report.ts";
@@ -10,10 +11,7 @@ import { protocol } from "./direct-link-mcp.ts";
 import type { Release, WorkState } from "./direct-link-mcp.ts";
 
 // Deliberately do not inherit credentials, launch metadata, shell startup hooks, or loader options.
-const CHILD_KEYS = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "TERM", "COLORTERM", "TZ", "SystemRoot", "COMSPEC", "PATHEXT"]);
-export function childEnvironment(env: Record<string, string | undefined>): Record<string, string | undefined> {
-	return Object.fromEntries(Object.entries(env).filter(([key]) => CHILD_KEYS.has(key) || /^LC_[A-Z_]+$/.test(key)));
-}
+export const childEnvironment = scrubChildEnv;
 export function maskDirect<T>(value: T, secrets: readonly string[]): T {
 	if (typeof value === "string") {
 		let text = value.replace(/dpat_[A-Za-z0-9_-]+/g, "[REDACTED:direct]");
@@ -30,18 +28,35 @@ function strings(value: unknown): string[] {
 	if (value && typeof value === "object") return Object.entries(value).flatMap(([key, item]) => [key, ...strings(item)]);
 	return [];
 }
+function blockedCommand(text: string): boolean {
+	if (/\bsecurity\b[^;|&\n]*\b(?:find-generic-password|find-internet-password|dump-keychain|export)\b|\b(?:printenv|env)\b|\bexport\s+-p\b|\bgh\s+pr\s+(?:create|new)\b/i.test(text)) return true;
+	if (!/\bgh\s+api\b/i.test(text) || !/\/pulls\b/i.test(text)) return false;
+	return /(?:\bPOST\b|--(?:raw-|input|field)|(?:^|\s)-[fF](?:\s|=))/i.test(text);
+}
+function expandPath(path: string, cwd: string): string {
+	return path.startsWith("~/") ? resolve(process.env.HOME ?? "", path.slice(2)) : resolve(cwd, path);
+}
+function globReadsSecret(path: string, cwd: string, forbidden: (path: string) => boolean, protectedPaths: readonly string[]): boolean {
+	const wildcard = path.search(/[*?\[]/);
+	if (wildcard < 0) return false;
+	const prefix = path.slice(0, wildcard);
+	const directory = prefix.slice(0, prefix.lastIndexOf("/") + 1);
+	if (["credentials", "run"].some(name => forbidden(`${directory}${name}`))) return true;
+	const expanded = expandPath(prefix, cwd);
+	return protectedPaths.some(secret => secret.startsWith(expanded));
+}
 export function directToolDenied(input: unknown, cwd: string, credentials: DirectCredentials, protectedPaths: readonly string[]): boolean {
 	const forbidden = (path: string) => {
-		const expanded = path.startsWith("~/") ? resolve(process.env.HOME ?? "", path.slice(2)) : resolve(cwd, path);
+		const expanded = expandPath(path, cwd);
 		let canonical = expanded;
 		try { canonical = realpathSync(expanded); } catch { /* Also guard literal paths that no longer exist. */ }
 		return [expanded, canonical].some(p => credentials.isForbiddenSecretPath(p) || protectedPaths.includes(p));
 	};
 	return strings(input).some(text => {
 		if (containsCredential(text) || credentials.secretsToMask().some(secret => text.includes(secret))) return true;
-		if (/\bsecurity\s+(?:find|dump|export)|\b(?:printenv|env)\b|\bexport\s+-p\b|\bgh\s+pr\s+create\b/i.test(text)) return true;
+		if (blockedCommand(text)) return true;
 		if (protectedPaths.some(path => text.includes(path))) return true;
-		return [text, ...text.split(/[\s'"=;|&<>()[\]{}]+/)].filter(Boolean).some(forbidden);
+		return [text, ...text.split(/[\s'"=;|&<>()[\]{}]+/)].filter(Boolean).some(path => forbidden(path) || globReadsSecret(path, cwd, forbidden, protectedPaths));
 	});
 }
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};

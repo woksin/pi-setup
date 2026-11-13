@@ -1,3 +1,6 @@
+// Copyright (c) Cratis. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
 // Read only the person's PAT and the daemon interface token; errors never echo secrets.
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
@@ -11,14 +14,16 @@ export const runnerSecretPatterns = [
 	/keychain:|runner[-_.]?(?:secret|credential)/i, /(?:^|\/)Library\/Keychains(?:\/|$)/i,
 	/(?:^|\/)(?:\.config|Library)\/.*(?:direct[-_/])?(?:pat|interface[-_]?token)(?:\.[^/]*)?$/i,
 	/(?:^|\/)(?:\.config|Library)\/.*(?:runner.*(?:secret|credential|token)|(?:secret|credential).*runner)/i,
+	/(?:^|\/)(?:\.config\/direct|Library\/(?:Application Support\/)?Direct)\/(?:credentials?|run)(?:\/|$)/i,
 ];
 export interface CredentialOptions {
 	runSecurity?: RunSecurity; env?: Record<string, string | undefined>; service?: string; account?: string;
 }
-const security: RunSecurity = async (args) => (await promisify(execFile)("security", args)).stdout;
+const security: RunSecurity = async (args) => (await promisify(execFile)("security", args, { env: scrubChildEnv(process.env), timeout: 2000 })).stdout;
 export interface ProofOptions { env?: Record<string, string | undefined>; cwd?: string; worktree: string }
+const CHILD_KEYS = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "TERM", "COLORTERM", "TZ", "SystemRoot", "COMSPEC", "PATHEXT"]);
 export function scrubChildEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
-	return Object.fromEntries(Object.entries(env).filter(([key]) => key !== "DIRECT_PAT" && !(/^DIRECT_/i.test(key) && /(TOKEN|SECRET|PASSWORD|DPAT|PROOF)/i.test(key))));
+	return Object.fromEntries(Object.entries(env).filter(([key]) => CHILD_KEYS.has(key) || /^LC_[A-Z_]+$/.test(key)));
 }
 const inside = (root: string, path: string) => { const part = relative(root, path); return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`)); };
 export class DirectCredentials {
@@ -56,22 +61,25 @@ export class DirectCredentials {
 	}
 	async #proofFile(path: string, options: ProofOptions): Promise<string> {
 		this.#paths.add(resolve(path));
-		const canonical = await realpath(path);
-		const roots = await Promise.all([realpath(options.cwd ?? process.cwd()), realpath(options.worktree)]);
-		if (roots.some((root) => inside(root, canonical))) throw new Error();
-		const proof = await this.#ownerFile(path);
-		await unlink(path);
-		return proof;
+		return this.#ownerFile(path, async () => {
+			const canonical = await realpath(path);
+			this.#paths.add(canonical);
+			const roots = await Promise.all([realpath(options.cwd ?? process.cwd()), realpath(options.worktree)]);
+			if (roots.some((root) => inside(root, canonical))) throw new Error();
+		}, true);
 	}
-	async #ownerFile(path: string): Promise<string> {
+	async #ownerFile(path: string, validate = async () => {}, consume = false): Promise<string> {
 		const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		try {
+			await validate();
 			const stat = await file.stat();
 			if (!stat.isFile()) throw new Error();
 			if ((stat.mode & 0o7777) !== 0o600) throw new Error();
 			if (stat.uid !== process.getuid?.()) throw new Error();
 			return (await file.readFile("utf8")).trim();
-		} finally { await file.close(); }
+		} finally {
+			try { await file.close(); } finally { if (consume) await unlink(path); }
+		}
 	}
 	async interfaceToken(path: string): Promise<string> {
 		this.#paths.add(resolve(path));
