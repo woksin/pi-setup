@@ -190,3 +190,11 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Cause:** tests inherit live HOME and agent-directory state unless explicitly isolated.
 - **Rule:** run these tests through `pi-setup-tests`, never against the live agent directory; it supplies an isolated HOME and `PI_CODING_AGENT_DIR` overlay.
 - **Enforced:** tool (`agent/bin/pi-setup-tests`).
+
+## 2026-11-13
+
+### Subagent pkill killed every lane
+- **Symptom:** at 23:08Z on 2026-11-13 all lanes (~30 pi sessions) died at once.
+- **Cause:** an `ops` subagent ran `pkill -f "bash -s" -P 1`. BSD pkill stops option parsing at the first operand, so the trailing `-P` and `1` became extra patterns ORed with the first; every user process with a "1" in its argv was SIGTERMed (pkill spares only its own ancestors). The subagent `extensions:` allowlists in `agent/agents/*.md` omitted `kill-guard`, so nothing blocked the command.
+- **Rule:** subagents load `kill-guard`; never `pkill`/`killall`, kill numeric PIDs you started only; on macOS put all options before the pattern.
+- **Enforced:** tool (`kill-guard` first in every agent `extensions:` allowlist; `agent/lib/agent-safety-extensions.test.ts` fails when an explicit allowlist omits it).
