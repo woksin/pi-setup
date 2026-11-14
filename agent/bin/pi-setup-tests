@@ -48,7 +48,7 @@ overlay="$(mktemp -d "${TMPDIR:-/tmp}/pi-setup-tests.XXXXXX")"
 trap 'rm -rf "$overlay"' EXIT
 fakeagent="$overlay/home/.pi/agent"
 mkdir -p "$fakeagent"
-for tree in lib extensions early-extensions; do
+for tree in lib extensions early-extensions agents; do
 	if [ -d "$agent/$tree" ]; then cp -R "$agent/$tree" "$fakeagent/$tree"; fi
 done
 # The publish tool suite smoke-runs the real launcher at ../bin/pi-publish; copy only that file (mode preserved).

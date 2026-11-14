@@ -5,7 +5,7 @@ description: Behaviour-preserving implementation worker for existing-code change
 color: cyan
 model: anthropic/claude-sonnet-5-5
 thinking: medium
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, subagent-cache, observation-mask, pi-mcp-adapter, pi-browser-use]
+extensions: [kill-guard, cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, cratis-rules, pi-context-budget, output-cap, subagent-cache, observation-mask, pi-mcp-adapter, pi-browser-use]
 skills: false
 prompt_mode: replace
 ---

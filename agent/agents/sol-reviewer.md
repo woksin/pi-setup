@@ -6,7 +6,7 @@ color: orange
 model: openai-codex/gpt-6.1-sol
 thinking: high
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, exact-model-guard, model-provenance, cratis-rules, pi-context-budget, output-cap, subagent-cache, observation-mask]
+extensions: [kill-guard, cratis-cli-guard, exact-model-guard, model-provenance, cratis-rules, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: replace
 ---
