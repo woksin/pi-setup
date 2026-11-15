@@ -8,7 +8,7 @@ import subprocess
 import time
 
 from memory_guard_config import LEVEL_NAMES, agent_dir
-from memory_guard_reclaim import phase_running, reclaim_candidates
+from memory_guard_reclaim import phase_running, reclaim_candidates, reclaim_reason
 from memory_guard_sampling import PS_COLUMNS, PS_TIMEOUT_S, parse_ps_table, run_text
 
 NOTIFY_EVERY_S = 1800
@@ -53,8 +53,8 @@ def plan_actions(move, limits):
 def pins(directory):
     try:
         lines = (directory / "pinned.txt").read_text().splitlines()
-    except OSError:
-        return []
+    except FileNotFoundError:
+        return []  # no pins file means nothing is pinned; any other read error propagates (fail closed)
     return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
 
 
@@ -74,6 +74,8 @@ class Actuator:
             self.log(f"level {level} {prefix}{action.name} ({'; '.join(reasons)})")
             if live:
                 getattr(self, action.name.replace("-", "_"))(action.argument, level, reasons)
+            elif self.execute and action.name == "reclaim":
+                self.reclaim_preview(action.argument, level)
             done.append(f"{prefix}{action.name}")
         return done
 
@@ -97,11 +99,35 @@ class Actuator:
                     + "\n\nAt level >= 2 new lanes and builds are refused; level 3 sheds idle lanes.\n")
             Path(directory, f"ALL-from-GUARD-memory-{time.strftime('%H%M')}.md").write_text(text)
 
-    def reclaim(self, limit, level, _reasons):
+    def reclaim_targets(self, limit, level):
+        """(table, running, [(pid, comm, why)]) from one ps snapshot."""
         table = parse_ps_table(self.quiet(["ps", "-axo", PS_COLUMNS], PS_TIMEOUT_S), os.getuid())
         running = phase_running(self.runner)
-        for pid, comm, why in reclaim_candidates(table, level, running, os.getpid())[:int(limit)]:
-            self.log(f"SIGTERM {pid} {comm}: {why}")
+        return table, running, reclaim_candidates(table, level, running, os.getpid())[:int(limit)]
+
+    @staticmethod
+    def target_line(verb, table, pid, comm, why):
+        return f"{verb} pid={pid} cmd={comm} category={table[pid]['category']} reason={why}"
+
+    def reclaim_preview(self, limit, level):
+        """Observe mode: name every process enforce would SIGTERM, without signalling."""
+        table, _running, targets = self.reclaim_targets(limit, level)
+        for pid, comm, why in targets:
+            self.log(self.target_line("would SIGTERM", table, pid, comm, why))
+
+    def still_target(self, pid, comm, level, running):
+        """Re-read one pid just before signalling: same uid, same command and still waste (guards PID reuse)."""
+        table = parse_ps_table(self.quiet(["ps", "-p", str(pid), "-o", PS_COLUMNS], PS_TIMEOUT_S), os.getuid())
+        entry = table.get(pid)
+        return bool(entry) and entry["comm"] == comm and reclaim_reason(entry, level, running) is not None
+
+    def reclaim(self, limit, level, _reasons):
+        table, running, targets = self.reclaim_targets(limit, level)
+        for pid, comm, why in targets:
+            if not self.still_target(pid, comm, level, running):
+                self.log(f"skip {pid} {comm}: changed since the snapshot")
+                continue
+            self.log(self.target_line("SIGTERM", table, pid, comm, why))
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError as exc:
@@ -122,7 +148,11 @@ class Actuator:
                  or "lane-cap: nothing shed")
 
     def docker_stop_unpinned(self, _argument, _level, _reasons):
-        pinned = pins(Path(os.environ.get("DOCKER_GUARDIAN_STATE") or agent_dir() / "docker-guardian"))
+        try:
+            pinned = pins(Path(os.environ.get("DOCKER_GUARDIAN_STATE") or agent_dir() / "docker-guardian"))
+        except OSError as exc:
+            self.log(f"cannot read pinned.txt ({exc}); not stopping any container")
+            return
         for line in self.quiet(["docker", "ps", "--format", "{{.ID}}\t{{.Image}}\t{{.Names}}"], 15).splitlines():
             ident, *refs = line.split("\t")
             if ident and not any(fnmatch.fnmatchcase(ref, pin) for ref in refs for pin in pinned):

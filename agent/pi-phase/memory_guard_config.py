@@ -11,7 +11,7 @@ DEFAULTS = dict(
     emergency_pressure_level=4, emergency_compressor_percent=45, emergency_ps_latency_s=20,
     shed_idle_s=1800, emergency_idle_s=600, lane_cap_script="",
     headroom_compressor_percent=20, headroom_swap_in_pages_per_s=100, headroom_ticks=3, level1_cap_reduction=6,
-    max_heavy_slots=4, max_fast_slots=4, reclaim_max_per_tick=40)
+    max_heavy_slots=4, max_fast_slots=4, reclaim_max_per_tick=40, max_sessions_for_heavy_growth=30)
 HEAVY_HARD_CEILING = 4  # config cannot raise max_heavy_slots above this
 NON_NUMERIC = ("mode", "lane_cap_script")
 MODES = ("off", "observe", "enforce")

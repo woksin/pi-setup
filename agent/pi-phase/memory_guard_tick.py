@@ -63,8 +63,7 @@ def tick(guard, inputs):
         reasons = [f"holding level {level} until {hysteresis.clear_ticks - hysteresis.clear} more clear tick(s)"]
     move = Transition(level, previous.get("level", 0), inputs.now, previous.get("lastNotify", 0))
     actions = plan_actions(move, settings)
-    done = guard.actuator.perform(level, actions, reasons)
     state = build_state(guard, inputs, enriched, (level, raw, reasons, hysteresis, actions))
     if guard.execute:
-        write_state(guard.directory, state)
-    return state, done
+        write_state(guard.directory, state)  # publish first: shedding and docker stops take minutes
+    return state, guard.actuator.perform(level, actions, reasons)

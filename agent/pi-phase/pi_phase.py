@@ -3419,10 +3419,16 @@ def guarded_limits(settings):
     result = PhaseConfig(effective["heavy"], effective["integration"],
                          dict(options, fast_lane=dict(fast, slots=effective["fast"])) if fast else options)
     result.guard_note = None
+    result.burst_blocked = info["level"] >= 2  # the guard forbids integration at level 2+; a burst must not undo it
     if info["level"] >= 2 or rules:
         result.guard_note = (f"memory guard level {info['level']}: {'; '.join(info.get('reasons') or ['ceilings'])}"
                              f" (slots {', '.join(f'{pool} {configured[pool]}->{effective[pool]}' for pool in rules)})")
     return result
+
+
+def burst_active(burst, limits, kind):
+    """True when an integration phase may use the burst slots (never while the guard blocks integration)."""
+    return bool(burst) and kind == "integration" and not getattr(limits, "burst_blocked", False)
 
 
 class AdmissionSet:
@@ -4736,13 +4742,14 @@ def run(args, state, configuration, output=None):
                 guard_noted = limits.guard_note
                 note(guard_noted or "memory guard: no ceilings lowered")
             heavy, integration = limits
-            if burst and admission_args.kind == "integration":
+            bursting = burst_active(burst, limits, admission_args.kind)
+            if bursting:
                 integration = burst.effective(integration, deadline)
             scan = {}
             held = claim(state, phase_candidates(state, admission_args, (heavy, integration, ci_key, token)),
                          deadline, lambda: bool(cancelled[0]),
                          token if waiter_fd is not None else None, PhaseConfig(heavy, integration, limits.options), admission,
-                         integration if burst and admission_args.kind == "integration" else None, scan=scan,
+                         integration if bursting else None, scan=scan,
                          pressure=pressure, cpu=cpu)
             observe_waiter(admission_args, ledger, scan)
             if cancelled[0]:

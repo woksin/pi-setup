@@ -95,12 +95,21 @@ class SlotTests(unittest.TestCase):
             self.assertEqual((slots["heavy"], slots["fast"], slots["integration"]), wanted, level)
 
     def test_heavy_four_only_at_level_zero_with_confirmed_headroom(self):
-        slots, rules = mg.effective_slots(mg.Capacity(0, 31, True), self.CONFIGURED, LIMITS)
+        slots, rules = mg.effective_slots(mg.Capacity(0, 30, True), self.CONFIGURED, LIMITS)
         self.assertEqual(slots["heavy"], 4)
         slots, rules = mg.effective_slots(mg.Capacity(0, 31, False), self.CONFIGURED, LIMITS)
         self.assertEqual(slots["heavy"], 3)
         self.assertIn("31 live pi", rules["heavy"])
         self.assertEqual(mg.effective_slots(mg.Capacity(1, 5, True), self.CONFIGURED, LIMITS)[0]["heavy"], 3)
+
+    def test_heavy_growth_needs_at_most_thirty_live_sessions(self):
+        for sessions in (31, 36, 42):
+            slots, rules = mg.effective_slots(mg.Capacity(0, sessions, True), self.CONFIGURED, LIMITS)
+            self.assertEqual(slots["heavy"], 3, sessions)
+            self.assertEqual(slots["fast"], 4)
+            self.assertIn(f"{sessions} live pi", rules["heavy"])
+        slots, _ = mg.effective_slots(mg.Capacity(0, 31, True), dict(heavy=4, fast=1, integration=1), LIMITS)
+        self.assertEqual(slots["heavy"], 3)
 
     def test_headroom_raises_low_configured_slots_up_to_the_ceilings(self):
         slots, rules = mg.effective_slots(mg.Capacity(0, 10, True), dict(heavy=2, fast=1, integration=1), LIMITS)
@@ -144,6 +153,15 @@ class SlotTests(unittest.TestCase):
             self.assertEqual(tuple(on), (1, 0))
             self.assertEqual(on.options["fast_lane"]["slots"], 1)
             self.assertIn("level 2", on.guard_note)
+            self.assertTrue(on.burst_blocked)
+
+    def test_integration_burst_cannot_undo_the_level_two_ceiling(self):
+        blocked, open_ = pi_phase.PhaseConfig(1, 0, {}), pi_phase.PhaseConfig(1, 1, {})
+        blocked.burst_blocked = True
+        self.assertFalse(pi_phase.burst_active(object(), blocked, "integration"))
+        self.assertTrue(pi_phase.burst_active(object(), pi_phase.PhaseConfig(1, 1, {}), "integration"))
+        self.assertFalse(pi_phase.burst_active(object(), open_, "heavy"))
+        self.assertFalse(pi_phase.burst_active(None, open_, "integration"))
 
 
 class SwapSignalTests(unittest.TestCase):
@@ -233,6 +251,10 @@ PS = """\
 905 800 501 9000 com.docker.backend
 906 1 501 50 launchd_helper
 907 1 999 5000 node
+200 1 501 90000 claude
+201 200 501 800 cs-mcp
+202 1 501 500 zsh
+203 202 501 300000 csc
 """
 
 
@@ -245,7 +267,7 @@ class ReclaimTests(unittest.TestCase):
         self.assertEqual(self.table[102]["category"], "mcp")
         self.assertEqual(self.table[903]["category"], "build-server")
         self.assertEqual(self.table[905]["category"], "docker")
-        self.assertEqual(mg.category_mb(self.table)["build-server"], round(1000000 / 1024))
+        self.assertEqual(mg.category_mb(self.table)["build-server"], round(1300000 / 1024))
         self.assertNotIn(907, self.table)  # other user's process
 
     def pids(self, level, running):
@@ -253,11 +275,11 @@ class ReclaimTests(unittest.TestCase):
 
     def test_orphans_listed_but_never_children_of_a_live_pi_or_docker(self):
         pids = self.pids(1, False)
-        self.assertEqual(pids, [900, 901, 902])
-        self.assertTrue({100, 101, 102, 905, 906} .isdisjoint(pids))
+        self.assertEqual(pids, [900, 902])  # launchd node (901) is a possible service: never reclaimed
+        self.assertTrue({100, 101, 102, 201, 203, 905, 906} .isdisjoint(pids))
 
     def test_build_servers_only_at_level_two_with_no_phase_running(self):
-        self.assertEqual(self.pids(2, False), [900, 901, 902, 903, 904])
+        self.assertEqual(self.pids(2, False), [900, 902, 903, 904])  # 203 is a live terminal-owned csc: not listed
         self.assertEqual(self.pids(2, True), [900])  # a running phase protects node/testhost/build servers
 
     def test_phase_running_uses_pgrep_and_fails_safe(self):
@@ -278,7 +300,42 @@ class ReclaimTests(unittest.TestCase):
                     patch.object(mg.os, "getuid", return_value=501), patch.object(mg_actions, "phase_running", return_value=False):
                 actuator.perform(1, [mg.Action("reclaim", True, 40)], ["x"])
         self.assertEqual([pid for mode, pid in killed if mode == "observe"], [])
-        self.assertEqual([pid for mode, pid in killed if mode == "enforce"], [900, 901, 902])
+        self.assertEqual([pid for mode, pid in killed if mode == "enforce"], [900, 902])
+
+    def reclaim(self, mode, runner=None):
+        logs, killed = [], []
+        actuator = mg.Actuator(dict(mg.guard_config(dict(mode=mode))), logs.append, runner or (lambda c, timeout=10: PS))
+        with patch.object(mg.os, "kill", lambda pid, sig: killed.append(pid)), patch.object(mg.os, "getuid", return_value=501), \
+                patch.object(mg_actions, "phase_running", return_value=False):
+            actuator.perform(1, [mg.Action("reclaim", True, 40)], ["x"])
+        return logs, killed
+
+    def test_observe_logs_each_would_sigterm_target_without_signalling(self):
+        logs, killed = self.reclaim("observe")
+        self.assertEqual(killed, [])
+        self.assertIn("would SIGTERM pid=900 cmd=chrome-devtools-mcp category=mcp reason=orphaned mcp (owner gone)", logs)
+        self.assertTrue(any("would SIGTERM pid=902 cmd=testhost category=testhost" in line for line in logs))
+
+    def test_reused_pid_is_not_signalled(self):
+        def runner(command, timeout=10):
+            if command[1] != "-p":
+                return PS
+            row = [line for line in PS.splitlines() if line.startswith(command[2] + " ")]
+            return "900 100 501 1 pi\n" if command[2] == "900" else "\n".join(row)  # pid 900 now a live lane
+        logs, killed = self.reclaim("enforce", runner)
+        self.assertEqual(killed, [902])
+        self.assertTrue(any(line.startswith("skip 900") for line in logs))
+
+    def test_unreadable_pins_stop_no_container(self):
+        calls = []
+        def runner(command, timeout=10):
+            calls.append(command)
+            return "abc\timg\tname\n"
+        actuator = mg.Actuator(dict(mg.guard_config(dict(mode="enforce"))), lambda line: None, runner)
+        with patch.object(mg_actions, "pins", side_effect=PermissionError("denied")):
+            actuator.perform(4, [mg.Action("docker-stop-unpinned", True)], ["x"])
+        self.assertFalse(any("stop" in command for command in calls))
+        self.assertFalse(mg.pins(Path("/nonexistent-dir-xyz")))  # a missing pins file still means none pinned
 
 
 class Recorder:
@@ -291,6 +348,18 @@ class Recorder:
 
 
 class TickTests(unittest.TestCase):
+    def test_new_level_is_published_before_slow_actions_run(self):
+        seen = []
+
+        class Spy:
+            def perform(self, level, actions, reasons):
+                seen.append(mg.read_level(tmp, now=2000.0)["level"])
+                return []
+        with tempfile.TemporaryDirectory() as tmp:
+            mg.tick(mg.Guard(mg.guard_config(dict(mode="enforce")), tmp, Spy(), True),
+                    mg.TickInput(sample(pl=4), {}, 2000.0))
+        self.assertEqual(seen, [4])
+
     def run_tick(self, mode, current, previous=None, execute=True):
         settings = mg.guard_config(dict(mode=mode))
         lines, runner = [], Recorder()

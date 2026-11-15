@@ -10,9 +10,13 @@ POOLS_BY_LEVEL = {0: {}, 1: {}, 2: dict(heavy=1, fast=1, integration=0), 3: dict
                   4: dict(heavy=0, fast=0, integration=0)}
 
 
+def has_swap_ins(sample):
+    return bool(sample) and "swapIns" in sample
+
+
 def swap_in_rate(previous, current):
     """Pages/s between two samples (Swapins counter delta); None without a usable pair."""
-    if not (previous and current and "swapIns" in previous and "swapIns" in current):
+    if not (has_swap_ins(previous) and has_swap_ins(current)):
         return None
     span = current["t"] - previous["t"]
     delta = current["swapIns"] - previous["swapIns"]
@@ -151,8 +155,9 @@ class Capacity:
     headroom: bool = False
 
 
-def target_slots(pool, wanted, grow, limits):
+def target_slots(pool, wanted, grows, limits):
     """The slot count a pool aims for before the level table caps it (headroom raises heavy/fast only)."""
+    grow = grows.get(pool)
     if grow and pool == "heavy":
         return max(wanted, min(limits["max_heavy_slots"], HEAVY_HARD_CEILING))
     if grow and pool == "fast":
@@ -160,7 +165,8 @@ def target_slots(pool, wanted, grow, limits):
     return wanted
 
 
-def slot_rule(pool, wanted, effective, capacity, ceiling):
+def slot_rule(pool, counts, capacity, ceiling):
+    wanted, effective = counts
     if effective < wanted:
         if pool in POOLS_BY_LEVEL[min(capacity.level, 4)]:
             return f"guard level {capacity.level}"
@@ -170,17 +176,19 @@ def slot_rule(pool, wanted, effective, capacity, ceiling):
 
 def effective_slots(capacity, configured, limits=None):
     """({heavy, fast, integration}, {pool: reason}). Falls with the level; with headroom at level 0 heavy and fast
-    rise to the configured ceilings (max_heavy_slots <= 4, max_fast_slots); otherwise heavy never exceeds 3."""
+    rise to the configured ceilings (max_heavy_slots <= 4, max_fast_slots); heavy needs <= max_sessions_for_heavy_growth
+    live pi sessions too, otherwise it never exceeds 3."""
     limits = limits or DEFAULTS
     grow = capacity.level == 0 and capacity.headroom
-    ceiling = min(limits["max_heavy_slots"], HEAVY_HARD_CEILING) if grow else NORMAL_HEAVY_CEILING
+    grows = dict(fast=grow, heavy=grow and capacity.sessions <= limits["max_sessions_for_heavy_growth"])
+    ceiling = min(limits["max_heavy_slots"], HEAVY_HARD_CEILING) if grows["heavy"] else NORMAL_HEAVY_CEILING
     table = POOLS_BY_LEVEL[min(capacity.level, 4)]
     effective, rules = {}, {}
     for pool, wanted in configured.items():
-        target = target_slots(pool, wanted, grow, limits)
+        target = target_slots(pool, wanted, grows, limits)
         cap = table.get(pool, ceiling if pool == "heavy" else target)
         effective[pool] = min(target, cap, ceiling) if pool == "heavy" else min(target, cap)
-        rule = slot_rule(pool, wanted, effective[pool], capacity, ceiling)
+        rule = slot_rule(pool, (wanted, effective[pool]), capacity, ceiling)
         if rule:
             rules[pool] = rule
     return effective, rules
