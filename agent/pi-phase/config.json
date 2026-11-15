@@ -24,5 +24,6 @@
   "memory_admission": false,
   "host_pressure": { "mode": "off" },
   "cpu_budget": { "mode": "off" },
+  "memory_guard": { "mode": "observe" },
   "failure_categories": true
 }

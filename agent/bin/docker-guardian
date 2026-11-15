@@ -15,10 +15,15 @@
 set -u
 case "${1:-}" in -h|--help)
     cat <<'HELP'
-Usage: docker-guardian [-h|--help]
+Usage: docker-guardian [memory-guard [--once] [--dry-run] | gate | status] | [-h|--help]
 Keep local Docker Desktop usable: health check, restart when stuck, and hygiene pruning.
 Meant to run every 2 minutes from launchd. Without -h/--help it ACTS (may restart Docker
-Desktop and remove containers, networks, volumes, build cache and images). Other arguments are ignored.
+desktop and remove containers, networks, volumes, build cache and images). Other arguments are ignored.
+`memory-guard` runs one tick of the memory guard instead (pi-phase/memory_guard.py, woksin/pi-setup#222): samples
+memory, classifies a level, writes state/mem-guard.json and acts per memory_guard.mode in pi-phase config
+(off | observe | enforce). --dry-run prints the level and would-be actions and changes nothing.
+`memory-guard gate` is the lane spawn check (exit 3 = refused; LANE_CAP_OVERRIDE=<reason> allows once, audited);
+`memory-guard status` prints the memory: block.
 
 Environment:
   DOCKER_GUARDIAN_STATE     state directory (default: ~/.pi/agent/docker-guardian)
@@ -33,6 +38,11 @@ See also: docs/reference.md, dev-doctor --help, pi-cleanup --help
 HELP
     exit 0 ;;
 esac
+if [ "${1:-}" = memory-guard ]; then # own launchd job (30 s): never touches Docker, no ps -o lstart
+  shift
+  cmd=run; case "${1:-}" in gate|status) cmd=$1; shift ;; esac
+  exec /usr/bin/python3 "$(dirname "$0")/../pi-phase/memory_guard.py" "$cmd" "$@"
+fi
 # DOCKER_GUARDIAN_TEST_PATH/_STATE/_LOG exist only for the dry-run harness (docker-guardian/test/run-scenarios.sh).
 export PATH=${DOCKER_GUARDIAN_TEST_PATH:+$DOCKER_GUARDIAN_TEST_PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 S=${DOCKER_GUARDIAN_STATE:-$HOME/.pi/agent/docker-guardian}; mkdir -p "$S"
