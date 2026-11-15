@@ -3414,8 +3414,8 @@ def guarded_limits(settings):
     info = memory_guard.read_level(memory_guard.state_dir(), options["memory_guard"]["stale_s"])
     fast = options.get("fast_lane")
     configured = dict(heavy=settings[0], integration=settings[1], **({"fast": fast["slots"]} if fast else {}))
-    effective, rules = memory_guard.effective_slots(info["level"], configured, info.get("sessions") or 0,
-                                                    bool(info.get("headroom")), options["memory_guard"])
+    effective, rules = memory_guard.effective_slots(memory_guard.Capacity(info["level"], info.get("sessions") or 0,
+                                                    bool(info.get("headroom"))), configured, options["memory_guard"])
     result = PhaseConfig(effective["heavy"], effective["integration"],
                          dict(options, fast_lane=dict(fast, slots=effective["fast"])) if fast else options)
     result.guard_note = None

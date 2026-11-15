@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import memory_guard as mg
+import memory_guard_actions as mg_actions
 import pi_phase
 
 LIMITS = mg.guard_config(dict(mode="enforce"))
@@ -90,19 +91,19 @@ class SlotTests(unittest.TestCase):
     def test_effective_slots_by_level(self):
         expected = {0: (3, 4, 2), 1: (3, 4, 2), 2: (1, 1, 0), 3: (0, 1, 0), 4: (0, 0, 0)}
         for level, wanted in expected.items():
-            slots, _ = mg.effective_slots(level, self.CONFIGURED, 20, False, LIMITS)
+            slots, _ = mg.effective_slots(mg.Capacity(level, 20, False), self.CONFIGURED, LIMITS)
             self.assertEqual((slots["heavy"], slots["fast"], slots["integration"]), wanted, level)
 
     def test_heavy_four_only_at_level_zero_with_confirmed_headroom(self):
-        slots, rules = mg.effective_slots(0, self.CONFIGURED, 31, True, LIMITS)
+        slots, rules = mg.effective_slots(mg.Capacity(0, 31, True), self.CONFIGURED, LIMITS)
         self.assertEqual(slots["heavy"], 4)
-        slots, rules = mg.effective_slots(0, self.CONFIGURED, 31, False, LIMITS)
+        slots, rules = mg.effective_slots(mg.Capacity(0, 31, False), self.CONFIGURED, LIMITS)
         self.assertEqual(slots["heavy"], 3)
         self.assertIn("31 live pi", rules["heavy"])
-        self.assertEqual(mg.effective_slots(1, self.CONFIGURED, 5, True, LIMITS)[0]["heavy"], 3)
+        self.assertEqual(mg.effective_slots(mg.Capacity(1, 5, True), self.CONFIGURED, LIMITS)[0]["heavy"], 3)
 
     def test_headroom_raises_low_configured_slots_up_to_the_ceilings(self):
-        slots, rules = mg.effective_slots(0, dict(heavy=2, fast=1, integration=1), 10, True, LIMITS)
+        slots, rules = mg.effective_slots(mg.Capacity(0, 10, True), dict(heavy=2, fast=1, integration=1), LIMITS)
         self.assertEqual((slots["heavy"], slots["fast"], slots["integration"]), (4, 4, 1))
         self.assertIn("headroom", rules["heavy"])
 
@@ -127,7 +128,7 @@ class SlotTests(unittest.TestCase):
         self.assertEqual(state["cap"], 42)
 
     def test_lowered_pools_name_the_rule(self):
-        _, rules = mg.effective_slots(2, dict(heavy=2, fast=2, integration=1), 10)
+        _, rules = mg.effective_slots(mg.Capacity(2, 10), dict(heavy=2, fast=2, integration=1))
         self.assertEqual(sorted(rules), ["fast", "heavy", "integration"])
         self.assertIn("guard level 2", rules["heavy"])
 
@@ -274,8 +275,8 @@ class ReclaimTests(unittest.TestCase):
             settings = dict(mg.guard_config(dict(mode=mode)))
             actuator = mg.Actuator(settings, lambda line: None, lambda command, timeout=10: PS)
             with patch.object(mg.os, "kill", lambda pid, sig: killed.append((mode, pid))), \
-                    patch.object(mg.os, "getuid", return_value=501), patch.object(mg, "phase_running", return_value=False):
-                actuator.perform(1, [("reclaim", True, 40)], ["x"])
+                    patch.object(mg.os, "getuid", return_value=501), patch.object(mg_actions, "phase_running", return_value=False):
+                actuator.perform(1, [mg.Action("reclaim", True, 40)], ["x"])
         self.assertEqual([pid for mode, pid in killed if mode == "observe"], [])
         self.assertEqual([pid for mode, pid in killed if mode == "enforce"], [900, 901, 902])
 
@@ -295,7 +296,7 @@ class TickTests(unittest.TestCase):
         lines, runner = [], Recorder()
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PI_MEM_GUARD_AGENT_DIR": tmp}):
             actuator = mg.Actuator(dict(settings, lane_cap_script="/x/lane-cap.sh"), lines.append, runner, execute)
-            state, done = mg.tick(settings, tmp, current, previous or {}, 2000.0, actuator, execute)
+            state, done = mg.tick(mg.Guard(settings, tmp, actuator, execute), mg.TickInput(current, previous or {}, 2000.0))
             written = (Path(tmp) / mg.STATE_NAME).exists()
         return state, done, runner.calls, written
 
@@ -324,10 +325,10 @@ class TickTests(unittest.TestCase):
         self.assertTrue(all(item.startswith("would ") for item in done))
 
     def test_reclaim_runs_before_shedding_and_at_level_one(self):
-        names = [a[0] for a in mg.plan_actions(3, "enforce", LIMITS, 0, 0, 0)]
+        names = [a.name for a in mg.plan_actions(mg.Transition(3, 0, 0, 0), LIMITS)]
         self.assertLess(names.index("reclaim"), names.index("shed-lanes"))
-        self.assertIn("reclaim", [a[0] for a in mg.plan_actions(1, "enforce", LIMITS, 1, 0, 0)])
-        self.assertNotIn("reclaim", [a[0] for a in mg.plan_actions(0, "enforce", LIMITS, 0, 0, 0)])
+        self.assertIn("reclaim", [a.name for a in mg.plan_actions(mg.Transition(1, 1, 0, 0), LIMITS)])
+        self.assertNotIn("reclaim", [a.name for a in mg.plan_actions(mg.Transition(0, 0, 0, 0), LIMITS)])
 
     def test_fixtures_idle_and_latched(self):
         self.assertEqual(self.run_tick("enforce", sample())[0]["level"], 0)
