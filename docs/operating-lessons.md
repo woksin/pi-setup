@@ -198,3 +198,9 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Cause:** an `ops` subagent ran `pkill -f "bash -s" -P 1`. BSD pkill stops option parsing at the first operand, so the trailing `-P` and `1` became extra patterns ORed with the first; every user process with a "1" in its argv was SIGTERMed (pkill spares only its own ancestors). The subagent `extensions:` allowlists in `agent/agents/*.md` omitted `kill-guard`, so nothing blocked the command.
 - **Rule:** subagents load `kill-guard`; never `pkill`/`killall`, kill numeric PIDs you started only; on macOS put all options before the pattern.
 - **Enforced:** tool (`kill-guard` first in every agent `extensions:` allowlist; `agent/lib/agent-safety-extensions.test.ts` fails when an explicit allowlist omits it).
+
+### Admission looked at free memory while the host thrashed
+- **Symptom:** 2026-11-14 night and 2026-11-15, ~57 live pi sessions froze the Mac; the only watcher lived inside a swapped-out L0 session.
+- **Cause:** nothing capped live sessions, builds started at critical pressure (`max_pressure_level 4`), settings were read once at start, and free-% (~37 %) and swap-used (never shrinks) say nothing about thrashing.
+- **Rule:** decide from compressor %, swap-in rate, swap growth, pressure level and `ps` latency; a guard outside any session lowers capacity by level, reclaims orphaned MCP/build processes first and raises it again only after confirmed headroom.
+- **Enforced:** tool (`docker-guardian memory-guard`, `pi-phase` admission, lane spawn gate); starts in `observe` mode.

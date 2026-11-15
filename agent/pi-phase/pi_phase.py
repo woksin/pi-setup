@@ -29,6 +29,8 @@ import resource
 import time
 import uuid
 
+import memory_guard
+
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state"
 CONFIG = ROOT / "config.json"
@@ -583,6 +585,7 @@ class PhaseLedger:
         self.wait = None
         self.running_memory = None
         self.host_pressure = None
+        self.guard_level = None
         self.failure_categories = True
         self.snapshot_thread = None
         self.git_result = (None, None)
@@ -714,6 +717,8 @@ class PhaseLedger:
             pass
         if self.host_pressure is not None:
             self.record.setdefault("host", {}).update(self.host_pressure.cached_fields())  # cache only, never probes
+        if self.guard_level is not None:
+            self.record.setdefault("host", {})["guardLevel"] = self.guard_level
         self.record["waitS"] = max(0, self.started - self.queued)
         if self.state is not None:
             self.reaper_context()
@@ -1238,7 +1243,7 @@ def config(path, *, notes=None):
     defaults = dict(heavy_slots=2, integration_slots=1, msbuild_max_cpu=0,
                     container_test_detection="hint", cold_worktree_hint=True, memory_admission=False,
                     phase_nice=0, rss_cap_mb=12288, skip_passed_integration=False, max_high=3,
-                    host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"),
+                    host_pressure=dict(mode="off"), cpu_budget=dict(mode="off"), memory_guard=dict(memory_guard.DEFAULTS),
                     failure_categories=True, hang_timeout=dict(mode="off"), reap_build_servers=dict(mode="off"),
                     skip_cross_worktree=False, trial=None,
                     fast_lane=dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True),
@@ -1283,6 +1288,9 @@ def config(path, *, notes=None):
             continue
         elif key == "cpu_budget":
             values[key] = cpu_budget_config(value, warn)
+            continue
+        elif key == "memory_guard":
+            values[key] = memory_guard.guard_config(value, warn)
             continue
         elif key == "hang_timeout":
             values[key] = hang_timeout_config(value, warn)
@@ -1610,6 +1618,9 @@ def fast_budget(settings):
     return max(3 * settings["max_expected_s"], 120)
 
 
+MIN_FREE_PERCENT_WARN = 20
+
+
 def memory_admission_config(value, warn=None):
     warn = warn or note
     defaults = dict(min_free_percent=30, min_swap_free_mb=DEFAULT_MIN_SWAP_FREE_MB)
@@ -1623,6 +1634,9 @@ def memory_admission_config(value, warn=None):
         settings = {key: value.get(key, default) for key, default in defaults.items()}
         if (all(type(n) in (int, float) and 0 <= n <= sys.float_info.max for n in settings.values())
                 and settings["min_free_percent"] <= 100):
+            if settings["min_free_percent"] < MIN_FREE_PERCENT_WARN:
+                warn(f"memory_admission min_free_percent {settings['min_free_percent']:g} < {MIN_FREE_PERCENT_WARN}: "
+                     "builds can start into a thrashing host (2026-11-15 outage)")
             burst = integration_burst_config(value.get("integration_burst"), warn)
             if burst:
                 settings["integration_burst"] = burst
@@ -1780,7 +1794,9 @@ class IntegrationBurst:
 
 
 HOST_PRESSURE_DEFAULTS = dict(max_pressure_level=2, max_compressor_percent=30,
-                              max_swap_growth_mb_per_min=256, sample_ttl_s=5)
+                              max_swap_growth_mb_per_min=256, max_swap_in_pages_per_s=2000, sample_ttl_s=5)
+# 4 (critical) means the host is already failing; admitting builds there caused the 2026-11-15 freeze.
+MAX_ADMISSION_PRESSURE_LEVEL = 2
 HOST_SAMPLE_WINDOW_S = 600
 HOST_SAMPLE_MIN_SPAN_S = 60
 HOST_MODES = ("off", "observe", "enforce")
@@ -1816,11 +1832,22 @@ def reap_build_servers_config(value, warn=None):
 
 
 def host_pressure_config(value, warn=None):
+    warn = warn or note
+    allow_critical = isinstance(value, dict) and value.get("allow_critical") is True
+    if isinstance(value, dict):
+        value = {key: item for key, item in value.items() if key != "allow_critical"}
+
     def valid(settings):
         return (type(settings["max_pressure_level"]) is int and settings["max_pressure_level"] >= 1
                 and all(number(settings[key]) and settings[key] > 0 for key in HOST_PRESSURE_DEFAULTS)
                 and settings["max_compressor_percent"] <= 100 and settings["sample_ttl_s"] <= 3600)
-    return mode_config("host_pressure", value, warn or note, HOST_PRESSURE_DEFAULTS, valid)
+    settings = mode_config("host_pressure", value, warn, HOST_PRESSURE_DEFAULTS, valid)
+    if (settings["mode"] != "off" and settings["max_pressure_level"] > MAX_ADMISSION_PRESSURE_LEVEL
+            and not allow_critical):
+        warn(f"host_pressure max_pressure_level {settings['max_pressure_level']} clamped to "
+             f"{MAX_ADMISSION_PRESSURE_LEVEL}; set allow_critical: true to admit builds at critical pressure")
+        settings["max_pressure_level"] = MAX_ADMISSION_PRESSURE_LEVEL
+    return settings
 
 
 def parse_host_pressure(text):
@@ -1841,8 +1868,15 @@ def read_host_pressure(timeout):
         raise ValueError("host pressure is unsupported on this platform")
     names = ["vm.swapusage", "vm.compressor_bytes_used", "hw.memsize", "kern.memorystatus_vm_pressure_level",
              "kern.memorystatus_level"]
-    return parse_host_pressure(subprocess.run(["sysctl", "-n", *names], capture_output=True, text=True, check=True,
-                                              timeout=timeout).stdout)
+    reading = parse_host_pressure(subprocess.run(["sysctl", "-n", *names], capture_output=True, text=True, check=True,
+                                                 timeout=timeout).stdout)
+    try:  # swap-in rate input; the other signals still work without it
+        counters = memory_guard.parse_vm_stat(subprocess.run(["vm_stat"], capture_output=True, text=True, check=True,
+                                                             timeout=timeout).stdout)
+        reading["swapIns"] = counters["swapIns"]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return reading
 
 
 def swap_growth(history):
@@ -1851,6 +1885,16 @@ def swap_growth(history):
         return None
     (first, before), (last, after) = history[0], history[-1]
     return round((after - before) / ((last - first) / 60), 2) if last - first >= HOST_SAMPLE_MIN_SPAN_S else None
+
+
+def swap_in_rate(history):
+    """Pages/s between the oldest and newest [t, Swapins] samples, or None when under a minute apart."""
+    if len(history) < 2:
+        return None
+    (first, before), (last, after) = history[0], history[-1]
+    if last - first < HOST_SAMPLE_MIN_SPAN_S or after < before:
+        return None
+    return round((after - before) / (last - first), 1)
 
 
 class HostPressure:
@@ -1873,7 +1917,7 @@ class HostPressure:
 
     def cached_fields(self):
         data = self.cached() or {}
-        return {key: data[key] for key in ("pl", "cmpPct", "swapMb", "swapGrowth") if number(data.get(key))}
+        return {key: data[key] for key in ("pl", "cmpPct", "swapMb", "swapGrowth", "swapInRate") if number(data.get(key))}
 
     def sample(self, deadline):
         now = self.clock()
@@ -1893,7 +1937,12 @@ class HostPressure:
         history = [item for item in (cached or {}).get("hist", []) if isinstance(item, list) and len(item) == 2
                    and number(item[0]) and number(item[1]) and 0 <= now - item[0] <= HOST_SAMPLE_WINDOW_S]
         history.append([now, reading["swapMb"]])
-        data = dict(reading, t=now, hist=history, swapGrowth=swap_growth(history))
+        ins = [item for item in (cached or {}).get("ins", []) if isinstance(item, list) and len(item) == 2
+               and number(item[0]) and number(item[1]) and 0 <= now - item[0] <= HOST_SAMPLE_WINDOW_S]
+        if number(reading.get("swapIns")):
+            ins.append([now, reading["swapIns"]])
+        data = dict(reading, t=now, hist=history, swapGrowth=swap_growth(history), ins=ins,
+                    swapInRate=swap_in_rate(ins))
         try:
             save(self.path, data)
         except OSError:
@@ -1912,6 +1961,9 @@ class HostPressure:
         growth = data.get("swapGrowth")
         if growth is not None and growth >= limits["max_swap_growth_mb_per_min"]:
             return f"swap growth {growth:g} MB/min >= {limits['max_swap_growth_mb_per_min']:g}"
+        rate = data.get("swapInRate")
+        if rate is not None and rate >= limits["max_swap_in_pages_per_s"]:
+            return f"swap-in {rate:g} pages/s >= {limits['max_swap_in_pages_per_s']:g}"
         return None
 
     def waiting(self, reason):
@@ -3336,6 +3388,72 @@ def save(path, data):
         temp.unlink(missing_ok=True)
 
 
+def reload_config(path, previous, notes):
+    """config() for a running queue loop: an unreadable file keeps the previous settings (fail-safe, not defaults)."""
+    for candidate in (path, path.with_name("config.local.json")):
+        try:
+            if candidate.exists():
+                json.loads(candidate.read_text())
+        except (OSError, ValueError) as exc:
+            message = f"config reload failed ({exc}); keeping previous settings"
+            if message not in notes:
+                note(message)
+                notes.add(message)
+            return previous
+    return config(path, notes=notes)
+
+
+def guarded_limits(settings):
+    """Slot limits lowered by the memory guard level (only when memory_guard.mode is observe/enforce).
+
+    Carries `guard_note` (None when the guard changes nothing)."""
+    options = settings.options
+    settings.guard_note = None
+    if (options.get("memory_guard") or {}).get("mode", "off") == "off":
+        return settings
+    info = memory_guard.read_level(memory_guard.state_dir(), options["memory_guard"]["stale_s"])
+    fast = options.get("fast_lane")
+    configured = dict(heavy=settings[0], integration=settings[1], **({"fast": fast["slots"]} if fast else {}))
+    effective, rules = memory_guard.effective_slots(info["level"], configured, info.get("sessions") or 0,
+                                                    bool(info.get("headroom")), options["memory_guard"])
+    result = PhaseConfig(effective["heavy"], effective["integration"],
+                         dict(options, fast_lane=dict(fast, slots=effective["fast"])) if fast else options)
+    result.guard_note = None
+    if info["level"] >= 2 or rules:
+        result.guard_note = (f"memory guard level {info['level']}: {'; '.join(info.get('reasons') or ['ceilings'])}"
+                             f" (slots {', '.join(f'{pool} {configured[pool]}->{effective[pool]}' for pool in rules)})")
+    return result
+
+
+class AdmissionSet:
+    """Memory, burst, host-pressure and CPU admission objects, rebuilt only when their options change so the
+    sample caches survive a reload that did not touch them."""
+    def __init__(self, state, workers=None):
+        self.state, self.workers = state, workers
+        self.admission = self.burst = self.pressure = self.cpu = None
+        self.seen = {}
+
+    def changed(self, name, *values):
+        key = json.dumps(values, sort_keys=True, default=str)
+        if self.seen.get(name) == key:
+            return False
+        self.seen[name] = key
+        return True
+
+    def update(self, options):
+        if self.changed("memory", options["memory_admission"]):
+            self.admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
+            burst = options["memory_admission"].get("integration_burst") if self.admission else None
+            self.burst = IntegrationBurst(self.admission, burst) if burst else None
+        if self.changed("host", options["host_pressure"]):
+            self.pressure = (HostPressure(options["host_pressure"], self.state)
+                             if options["host_pressure"]["mode"] != "off" else None)
+        if self.changed("cpu", options["cpu_budget"], options["msbuild_max_cpu"]):
+            self.cpu = (CpuBudget(options["cpu_budget"], options["msbuild_max_cpu"], workers=self.workers)
+                        if options["cpu_budget"]["mode"] != "off" else None)
+        return self
+
+
 def slot_paths(state, kind, heavy, integration, ci_key):
     if kind == "ci":
         key = hashlib.sha256("\0".join(ci_key).encode()).hexdigest()
@@ -4012,6 +4130,7 @@ def status(state, configuration=CONFIG):
     cap = options["max_high"]
     fast_slots = options["fast_lane"]["slots"] if options["fast_lane"] else 0
     if not state.exists():
+        memory_status(settings)
         note("no active phases")
         note(f"fast=0/{fast_slots} queued=0")
         note(f"high=0/{cap}")
@@ -4088,7 +4207,28 @@ def status(state, configuration=CONFIG):
     critical_path_guidance(waiters)
     if waiters:
         note(f"slots heavy={used['heavy']}/{settings[0]} integration={used['integration']}/{settings[1]}")
+    memory_status(settings, used)
     return 0
+
+
+def guard_level(options):
+    """Cached guard level for the phase record, or None when the guard is off."""
+    guard = options.get("memory_guard") or {}
+    if guard.get("mode", "off") == "off":
+        return None
+    return memory_guard.read_level(memory_guard.state_dir(), guard["stale_s"])["level"]
+
+
+def memory_status(settings, used=None):
+    """The `memory:` block (guard level, signals, live pi vs cap, configured vs effective slots)."""
+    guard = settings.options.get("memory_guard") or {}
+    if guard.get("mode", "off") == "off":
+        return
+    info = memory_guard.read_level(memory_guard.state_dir(), guard["stale_s"])
+    fast = settings.options["fast_lane"]
+    configured = dict(heavy=settings[0], integration=settings[1], **({"fast": fast["slots"]} if fast else {}))
+    for line in memory_guard.describe(info, guard, configured=configured, used=used):
+        note(line)
 
 
 NICE_ENV = "PI_PHASE_NICE"
@@ -4550,15 +4690,12 @@ def run(args, state, configuration, output=None):
         if worktree_code is not None:
             return worktree_code
         admission_args.max_high = options["max_high"]
-        admission = MemoryAdmission(options["memory_admission"]) if options["memory_admission"] else None
-        burst_settings = options["memory_admission"].get("integration_burst") if admission else None
-        burst = IntegrationBurst(admission, burst_settings) if burst_settings else None
-        pressure = (HostPressure(options["host_pressure"], state)
-                    if options["host_pressure"]["mode"] != "off" else None)
-        cpu = (CpuBudget(options["cpu_budget"], options["msbuild_max_cpu"], workers=workers)
-               if options["cpu_budget"]["mode"] != "off" else None)
+        admissions = AdmissionSet(state, workers).update(options)
+        admission, burst, pressure, cpu = admissions.admission, admissions.burst, admissions.pressure, admissions.cpu
         if ledger:
             ledger.host_pressure = pressure
+            ledger.guard_level = guard_level(options)
+        guard_noted = None
         if (args.kind == "test" and options["container_test_detection"] == "promote"
                 and container_test_known(state, fingerprint, identity)):
             admission_args.kind = "integration"
@@ -4594,13 +4731,17 @@ def run(args, state, configuration, output=None):
                 if not registered:
                     time.sleep(min(TICK, max(0, deadline - time.monotonic())))
                     continue
-            heavy, integration = settings
+            limits = guarded_limits(settings)
+            if limits.guard_note != guard_noted:
+                guard_noted = limits.guard_note
+                note(guard_noted or "memory guard: no ceilings lowered")
+            heavy, integration = limits
             if burst and admission_args.kind == "integration":
                 integration = burst.effective(integration, deadline)
             scan = {}
             held = claim(state, phase_candidates(state, admission_args, (heavy, integration, ci_key, token)),
                          deadline, lambda: bool(cancelled[0]),
-                         token if waiter_fd is not None else None, PhaseConfig(heavy, integration, settings.options), admission,
+                         token if waiter_fd is not None else None, PhaseConfig(heavy, integration, limits.options), admission,
                          integration if burst and admission_args.kind == "integration" else None, scan=scan,
                          pressure=pressure, cpu=cpu)
             observe_waiter(admission_args, ledger, scan)
@@ -4637,7 +4778,15 @@ def run(args, state, configuration, output=None):
                 note(f"queued kind={args.kind} label={args.label} remaining={max(0, int(deadline-now))}s id={token[:12]}")
                 next_heartbeat = now + HEARTBEAT
             time.sleep(min(QUEUE_TICK + random.uniform(0, 0.5), max(0, deadline-now)))
-            settings = config(configuration, notes=config_notes)
+            settings = reload_config(configuration, settings, config_notes)
+            options = settings.options
+            admission_args.max_high = options["max_high"]
+            admissions.update(options)
+            admission, burst, pressure, cpu = (admissions.admission, admissions.burst, admissions.pressure,
+                                               admissions.cpu)
+            if ledger:
+                ledger.host_pressure = pressure
+                ledger.guard_level = guard_level(options)
         if cancelled[0]:
             note("cancelled after admission; command not started")
             if ledger:
