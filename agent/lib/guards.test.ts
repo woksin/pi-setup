@@ -564,6 +564,30 @@ test("MCP off never replaces an existing claimant", async () => {
 	assert.equal(app.notices.length, 0);
 });
 
+test("explicit /guards off cratis lets the Cratis corpus write hooks through; env opt-out does not", async () => {
+	const previous = process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES;
+	try {
+		delete process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES;
+		const app = fake();
+		guardsExtension(app.pi);
+		const command = app.commands.get("guards");
+		await app.fire("session_start");
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, undefined);
+		await command.handler("off cratis", app.ctx);
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, "1");
+		await command.handler("on cratis", app.ctx);
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, undefined);
+		delete (globalThis as any)[key];
+		process.env.PI_GUARDS_OFF = "cratis";
+		await app.fire("session_start");
+		assert.equal(isGuardOff("cratis"), true);
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, undefined, "PI_GUARDS_OFF never lifts protected writes");
+	} finally {
+		if (previous === undefined) delete process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES;
+		else process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES = previous;
+	}
+});
+
 test("/guards status, default all, named lists, persist parsing and footer set/clear", async () => {
 	const app = fake();
 	guardsExtension(app.pi);
