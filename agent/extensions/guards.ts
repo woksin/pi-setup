@@ -3,6 +3,7 @@
  * Without --persist changes last for this process (including in-process subagents).
  * session > persisted file > env > on. A corrupt file makes every guard on, and the env is ignored.
  * Explicit session overrides still apply; with no file, PI_GUARDS_OFF=cratis,mcp or all applies.
+ * An explicit /guards off cratis also sets CRATIS_HOOKS_ALLOW_PROTECTED_WRITES=1 for the Cratis corpus write hooks.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { GUARD_NAMES, guardStatus, guardsStatusText, isGuardOff, persistedNote, persistedOffGuards, setGuards } from "../lib/guards.ts";
@@ -41,10 +42,41 @@ export function tokenize(input: string): string[] {
 	return tokens;
 }
 
+/** The Cratis AI corpus hooks (cratis-guard-writes, cratis-guard-shell-writes) run as child processes of pi and
+ * honour only this variable. Mirror the user's explicit `/guards off cratis` (session or persisted, never PI_GUARDS_OFF)
+ * into pi's own environment so those hooks inherit it; restore the original value when the guard is back on. */
+const CRATIS_WRITES_ENV = "CRATIS_HOOKS_ALLOW_PROTECTED_WRITES";
+// Marks a value this extension synthesized, so a reloaded module or a child pi that inherits it
+// never mistakes it for the user's own harness setting.
+const CRATIS_WRITES_MARKER = "PI_GUARDS_SET_CRATIS_WRITES";
+const BASELINE_KEY = Symbol.for("pi.guards.cratisWritesBaseline");
+function cratisWritesBaseline(): string | undefined {
+	const shared = globalThis as typeof globalThis & { [BASELINE_KEY]?: { value: string | undefined } };
+	if (!shared[BASELINE_KEY]) {
+		const synthesized = process.env[CRATIS_WRITES_MARKER] === "1";
+		shared[BASELINE_KEY] = { value: synthesized ? undefined : process.env[CRATIS_WRITES_ENV] };
+	}
+	return shared[BASELINE_KEY].value;
+}
+export function syncCratisWritesEnv(): void {
+	const baseline = cratisWritesBaseline();
+	const cratis = guardStatus().find(entry => entry.name === "cratis");
+	const explicitOff = !!cratis && cratis.off && (cratis.source === "session" || cratis.source === "persisted");
+	if (explicitOff) {
+		process.env[CRATIS_WRITES_ENV] = "1";
+		process.env[CRATIS_WRITES_MARKER] = "1";
+		return;
+	}
+	delete process.env[CRATIS_WRITES_MARKER];
+	if (baseline === undefined) delete process.env[CRATIS_WRITES_ENV];
+	else process.env[CRATIS_WRITES_ENV] = baseline;
+}
+
 export default function (pi: ExtensionAPI) {
 	let currentContext: ExtensionContext | undefined;
 	const refresh = (ctx: ExtensionContext) => {
 		currentContext = ctx;
+		syncCratisWritesEnv();
 		if (!ctx.hasUI) return;
 		ctx.ui.setStatus("guards", guardsStatusText());
 	};

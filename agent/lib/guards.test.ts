@@ -14,6 +14,7 @@ import guardsExtension, { tokenize } from "../extensions/guards.ts";
 import waitExtension, { assess, PollTracker } from "../extensions/wait-guard.ts";
 
 const key = Symbol.for("pi.guards");
+const baselineKey = Symbol.for("pi.guards.cratisWritesBaseline");
 let directory: string;
 let file: string;
 let previousFile: string | undefined;
@@ -562,6 +563,53 @@ test("MCP off never replaces an existing claimant", async () => {
 	setGuards("mcp", true);
 	assert.equal(await approval(app.pi)!(), "deny");
 	assert.equal(app.notices.length, 0);
+});
+
+test("explicit /guards off cratis lets the Cratis corpus write hooks through; env opt-out does not", async () => {
+	const previous = process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES;
+	try {
+		delete process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES;
+		delete (globalThis as any)[baselineKey];
+		const app = fake();
+		guardsExtension(app.pi);
+		const command = app.commands.get("guards");
+		await app.fire("session_start");
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, undefined);
+		await command.handler("off cratis", app.ctx);
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, "1");
+		await command.handler("on cratis", app.ctx);
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, undefined);
+		delete (globalThis as any)[key];
+		process.env.PI_GUARDS_OFF = "cratis";
+		await app.fire("session_start");
+		assert.equal(isGuardOff("cratis"), true);
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, undefined, "PI_GUARDS_OFF never lifts protected writes");
+		delete process.env.PI_GUARDS_OFF;
+
+		// A child pi (fresh baseline) inheriting the synthesized bypass drops it while its own guard is on.
+		delete (globalThis as any)[key];
+		delete (globalThis as any)[baselineKey];
+		process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES = "1";
+		process.env.PI_GUARDS_SET_CRATIS_WRITES = "1";
+		await app.fire("session_start");
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, undefined);
+		assert.equal(process.env.PI_GUARDS_SET_CRATIS_WRITES, undefined);
+
+		// A harness-set value is the baseline: kept on, restored after off/on.
+		delete (globalThis as any)[baselineKey];
+		process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES = "0";
+		await app.fire("session_start");
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, "0");
+		await command.handler("off cratis", app.ctx);
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, "1");
+		await command.handler("on cratis", app.ctx);
+		assert.equal(process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES, "0");
+	} finally {
+		delete (globalThis as any)[baselineKey];
+		delete process.env.PI_GUARDS_SET_CRATIS_WRITES;
+		if (previous === undefined) delete process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES;
+		else process.env.CRATIS_HOOKS_ALLOW_PROTECTED_WRITES = previous;
+	}
 });
 
 test("/guards status, default all, named lists, persist parsing and footer set/clear", async () => {
