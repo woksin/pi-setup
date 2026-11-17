@@ -86,12 +86,12 @@ def counts_by_category(table):
 
 
 def read_ps(runner, monotonic):
-    """(mem, procs, latency) from one `ps`; a failing ps never fails the sample (latency = the timeout)."""
+    """(mem, procs, latency) from one `ps`; a failing ps leaves latency unknown, not a failed host sample."""
     began = monotonic()
     try:
         table = parse_ps_table(runner(["ps", "-axo", PS_COLUMNS], PS_TIMEOUT_S), os.getuid())
     except (OSError, subprocess.SubprocessError):
-        return {}, {}, float(PS_TIMEOUT_S)
+        return {}, {}, None
     return category_mb(table), counts_by_category(table), round(monotonic() - began, 2)
 
 

@@ -1,7 +1,7 @@
 """memory_guard tick: one decision from a sample and the previous state."""
 from dataclasses import dataclass
 
-from memory_guard_signals import Hysteresis, classify, enrich, has_headroom, session_cap
+from memory_guard_signals import Hysteresis, classify, enrich, has_headroom, memory_hold_corroborated, session_cap
 from memory_guard_actions import Transition, plan_actions
 from memory_guard_state import write_state
 
@@ -58,7 +58,7 @@ def tick(guard, inputs):
     enriched = enrich(inputs.sample, history) if inputs.sample is not None else None
     raw, reasons = classify(enriched, history, settings)
     hysteresis = Hysteresis(previous.get("level", 0), previous.get("clear", 0))
-    level = hysteresis.update(raw)
+    level = hysteresis.update(raw, memory_evidence=memory_hold_corroborated(enriched, settings))
     if level > raw and not reasons:
         reasons = [f"holding level {level} until {hysteresis.clear_ticks - hysteresis.clear} more clear tick(s)"]
     move = Transition(level, previous.get("level", 0), inputs.now, previous.get("lastNotify", 0))
