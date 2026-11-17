@@ -111,6 +111,8 @@ The `review` workflow gates only on **blocking** findings: critical or major iss
 <!-- pi-setup:codescene:start -->
 ## CodeScene Code Health
 
+This block mirrors Cratis AI `.cratis/ai/rules/code-health.md`; personal-only additions are the Cloud project 85913 uplift baseline, delegating wide analysis to a subagent, the `sync_skills` rule, and the reviewer blocking-finding rule.
+
 The `codescene` MCP server (`mcp__codescene`) and the CodeScene skills in `~/.agents/skills` (copied verbatim from upstream) apply wherever CodeScene is available. This policy overrides the skills where they differ:
 
 - **Judge the change, not the file.** Touched files must reach 9.5 (see Thresholds); findings in files the change does not touch are not a reason to refactor them. The safeguarding skill's "refactor when the review reports problems" applies to problems in touched files.

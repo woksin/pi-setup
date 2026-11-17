@@ -33,6 +33,8 @@
  * args: {
  *   target:   string   — what to review, e.g. "the changes in `git diff main...HEAD`" or "src/auth/"
  *   context?: string   — intent/spec of the change, to judge it against
+ *   deliveryReport?: string — delivery text for advisory Code Health table lint (no verdict effect).
+ *   diff?: string — diff text for that lint; no filesystem/git access and no extra agent call.
  *   author?:  "claude" | "gpt"  — who wrote the work; REQUIRED in quick mode, recommended in full mode.
  *                        `implementer` (Sol) output is "gpt"; Claude agents (general-purpose, careful-implementer,
  *                        opus-implementer, the main session) are "claude". In full mode with author "gpt", Opus's
@@ -189,6 +191,19 @@ const reviewExample = '{"target":"git diff <baseSha>..<headSha> in <abs repo pat
 const followUpExample = 'Round 2+: add "since":"<full SHA reviewed last>","prior":"<ONE string: blocking/unverified findings + dismissed findings with reasons>","round":2.'
 const shaHelp = 'Replace placeholders first: resolve SHAs with git rev-parse (40 hex for SHA-1, 64 for SHA-256), not short SHAs or moving refs; author is "claude" or "gpt".'
 if (problems.length) return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}\nCopy-paste example: ${reviewExample}\n${followUpExample}\n${shaHelp}`, problems }
+
+// Advisory only: inspect caller-supplied text, never fetch a diff or ask an agent.
+const codeHealthText = [input.deliveryReport, input.diff, input.target, input.context]
+  .filter(value => typeof value === 'string').join('\n')
+const touchesSource = /\b[\w./-]+\.(?:cs|[cm]?[jt]sx?|go|kts?|java|exs?|py|rb|rs|swift|c|cc|cpp|h|hpp|fsx?|scala|vue|svelte)\b/i.test(codeHealthText)
+const hasCodeHealthTable = codeHealthText.split(/\r?\n/).some(line => {
+  const columns = line.toLowerCase().split('|').map(column => column.trim())
+  return columns.includes('file') && columns.some(column => /^(?:score )?before$/.test(column)) &&
+    columns.some(column => /^(?:score )?after$/.test(column))
+})
+if (touchesSource && !hasCodeHealthTable) {
+  log('INFO: Source changes have no Code Health table (file, before, after); advisory only.')
+}
 
 const target = input.target
 const context = input.context ? `\n\nIntent / spec of the work:\n${input.context}` : ''
