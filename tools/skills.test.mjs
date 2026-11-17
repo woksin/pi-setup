@@ -1,6 +1,7 @@
 // Source checks for the shipped skills: real pi frontmatter parsing and discovery, reviewed description
 // snapshots, routing-fixture shape, and the review workflow's cache boundary that the sol-loop skill documents.
 // Nothing here calls a model or proves LLM routing quality. Run: node --test tools/skills.test.mjs
+import "../tests/codescene-policy.test.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -156,6 +157,7 @@ function provenance(model, label) {
 }
 async function runReview(args, { file = reviewFiles[0], override, agentError } = {}) {
   const calls = [];
+  const logs = [];
   const models = modelMap(file);
   const agent = async (prompt, opts) => {
     calls.push({ ...opts, prompt });
@@ -168,11 +170,49 @@ async function runReview(args, { file = reviewFiles[0], override, agentError } =
   const pipeline = async (items, ...stages) => Promise.all(items.map(async (item) => { let v = item; for (const s of stages) v = await s(v, item); return v; }));
   const parallel = async fns => Promise.all(fns.map(fn => fn().catch(() => null)));
   const fn = new AsyncFunction("args", "agent", "pipeline", "parallel", "phase", "log", "agentError", loadReview(file));
-  const result = await fn(args, agent, pipeline, parallel, () => {}, () => {}, agentError);
-  return { result, calls: calls.length, requests: calls };
+  const result = await fn(args, agent, pipeline, parallel, () => {}, message => logs.push(message), agentError);
+  return { result, calls: calls.length, requests: calls, codeHealthLogs: logs.filter(message => message.startsWith('INFO: Source changes')) };
 }
 
 const base = { target: "git diff A..B in /repo", context: "issue 60", author: "gpt", round: 1, baseSha: "a".repeat(40), headSha: "b".repeat(40) };
+
+for (const file of reviewFiles) {
+  test(`${file}: missing Code Health table is one info line, never a verdict or agent call`, async () => {
+    const unchanged = await runReview(base, { file });
+    const changed = await runReview({ ...base, deliveryReport: 'Changed src/example.ts', diff: '+++ b/src/other.cs' }, { file });
+    assert.deepEqual(changed.result, unchanged.result);
+    assert.deepEqual(changed.requests, unchanged.requests);
+    assert.deepEqual(changed.codeHealthLogs, ['INFO: Source changes have no Code Health table (file, before, after); advisory only.']);
+    assert.deepEqual(unchanged.codeHealthLogs, []);
+  });
+}
+
+test("Code Health lint accepts tables, ignores docs and tolerates non-text optional inputs", async () => {
+  const inputs = [
+    { deliveryReport: 'src/a.ts\n| File | Before | After |\n| --- | --- | --- |\n| src/a.ts | 10 | 10 |' },
+    { diff: '+++ b/src/a.cs', deliveryReport: '| file | score before | score after |' },
+    { diff: '+++ b/docs/readme.md', deliveryReport: 'Documentation only.' },
+    { deliveryReport: { unexpected: true }, diff: 42 },
+  ];
+  for (const input of inputs) assert.deepEqual((await runReview({ ...base, ...input })).codeHealthLogs, []);
+});
+
+test("Code Health lint sees diff-only source changes and does not mistake prose for a table", async () => {
+  for (const input of [
+    { diff: 'diff --git a/src/a.py b/src/a.py' },
+    { deliveryReport: 'src/a.ts: file, before, after' },
+    { target: 'Review src/a.go' },
+    { context: 'Changed src/a.rs' },
+  ]) assert.equal((await runReview({ ...base, ...input })).codeHealthLogs.length, 1);
+});
+
+test("Code Health lint stays advisory on cached reviews and ignores invalid optional fields", async () => {
+  const first = await runReview(base);
+  const cached = await runReview({ ...base, cachedReview: first.result, diff: '+++ b/src/a.ts' });
+  assert.equal(cached.result.passed, true);
+  assert.equal(cached.calls, 0);
+  assert.equal(cached.codeHealthLogs.length, 1);
+});
 
 const partialGpt = (opts, res) => ({ ...res, ...(opts.label === "review:gpt" ? { coverage: "partial" } : {}) });
 async function repairSeed(options = {}) {
