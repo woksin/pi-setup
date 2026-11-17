@@ -94,12 +94,17 @@ function request(args: string[]): PriorityRequest | undefined {
 	const options: Record<string, string> = {};
 	const flags = new Set(["--approved-long-timeout", "--vstest-confirmed"]);
 	for (let i = 1; i < args.length && args[i] !== "--"; i++) {
+		if (isHelp(args[i])) return undefined;
 		if (!args[i].startsWith("--")) break; // argparse.REMAINDER: producer starts here
 		if (flags.has(args[i])) continue;
 		const at = args[i].indexOf("=");
 		const key = at === -1 ? args[i] : args[i].slice(0, at);
 		options[key] = at === -1 ? (args[++i] ?? "") : args[i].slice(at + 1);
 	}
+	return highRequest(options);
+}
+
+function highRequest(options: Record<string, string>): PriorityRequest | undefined {
 	return options["--priority"] === "high" && options["--kind"] !== "ci" ? {
 		kind: options["--kind"] ?? "unknown", label: options["--label"] ?? "unlabelled",
 	} : undefined;
@@ -143,9 +148,14 @@ export function highPriorityRequests(command: string): PriorityRequest[] {
 	});
 }
 
-/** Explicit grant creation always needs approval, even when a grant already exists. */
+const isHelp = (arg: string) => arg === "--help" || arg === "-h";
+
+const isGrantCreation = (args: string[]) =>
+	args[0] === "grant-priority" && !args.some(isHelp) && !["status", "show"].includes(args[1]);
+
+/** Explicit grant creation needs approval; help and read-only queries do not create grants. */
 export function grantPriorityRequests(command: string): string[][] {
-	return phaseInvocations(command).filter(args => args[0] === "grant-priority").map(args => args.slice(1));
+	return phaseInvocations(command).filter(isGrantCreation).map(args => args.slice(1));
 }
 
 /** Raw grant-file access is never approved through agent tools, including mentions in bash data. */

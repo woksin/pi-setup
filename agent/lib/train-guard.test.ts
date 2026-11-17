@@ -317,6 +317,25 @@ test('hook install chains existing hook, rejects a real push, escape hatch permi
   assert.equal(await f.invoke('hook', 'uninstall'), 0); assert.equal(await readFile(hook, 'utf8'), original);
 });
 
+test('extension does not show an unparsed push notice', async t => {
+  const f = await fixture(t);
+  const values = { PI_TRAIN_DIR: f.env.PI_TRAIN_DIR, PI_GUARDS_FILE: join(f.root, 'guards.json'), PI_GUARDS_OFF: '' };
+  const old = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  t.after(() => { for (const [key, value] of Object.entries(old)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } });
+  const command = 'git push origin "$BRANCH"';
+  const decision = await trainPushDecision(command, f.repo, f.env, undefined, { noticed: new Set() });
+  assert.match(decision.notices[0], /unparsed push allowed/);
+  let handler: any; extension({ on: (name: string, fn: any) => { if (name === 'tool_call') handler = fn; } } as any);
+  const notices: string[] = [];
+  assert.equal(await handler({ toolName: 'bash', input: { command } }, {
+    cwd: f.repo, hasUI: true, ui: { notify: (message: string) => notices.push(message) },
+  }), undefined);
+  assert.deepEqual(notices, []);
+});
+
 test('extension allows unparseable pushes without accessing a missing headless UI', async t => {
   const f = await fixture(t);
   let handler: any; extension({ on: (name: string, fn: any) => { if (name === 'tool_call') handler = fn; } } as any);

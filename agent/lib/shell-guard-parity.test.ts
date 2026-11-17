@@ -7,6 +7,7 @@ import { cratisRepo, inCwd, loaded } from "./cratis-hooks-detect.test.ts";
 import resultGuard from "../extensions/subagent-result-guard.ts";
 import { createHandlers, DEFAULTS } from "./secret-mask.ts";
 import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { publicationInput } from "./publish-guard.ts";
 
@@ -61,6 +62,13 @@ function coveredEnvelopes(command: string) {
 test("loaded Cratis hooks retain execution-envelope coverage", async () => {
 	const repo = cratisRepo();
 	const previousRunner = cratisRunner;
+	// Isolate from the user shared guards file / env so the cratis guard is enabled.
+	const guardsDir = mkdtempSync(join(tmpdir(), "parity-guards-"));
+	const guardsFile = join(guardsDir, "guards.json");
+	writeFileSync(guardsFile, JSON.stringify({ off: { cratis: false } }));
+	const previousEnv = { file: process.env.PI_GUARDS_FILE, off: process.env.PI_GUARDS_OFF };
+	process.env.PI_GUARDS_FILE = guardsFile;
+	delete process.env.PI_GUARDS_OFF;
 	try {
 		await inCwd(repo.root, async () => {
 			let status = 2, probes = 0;
@@ -85,7 +93,12 @@ test("loaded Cratis hooks retain execution-envelope coverage", async () => {
 			}
 			assert.ok(probes > 0);
 		});
-	} finally { setCratisRunner(previousRunner); repo.cleanup(); }
+	} finally {
+		setCratisRunner(previousRunner); repo.cleanup();
+		if (previousEnv.file === undefined) delete process.env.PI_GUARDS_FILE; else process.env.PI_GUARDS_FILE = previousEnv.file;
+		if (previousEnv.off === undefined) delete process.env.PI_GUARDS_OFF; else process.env.PI_GUARDS_OFF = previousEnv.off;
+		rmSync(guardsDir, { recursive: true, force: true });
+	}
 });
 
 test("Cratis permission switch retains credential-read permission in every envelope", async () => {

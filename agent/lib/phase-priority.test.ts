@@ -93,6 +93,26 @@ test("detects explicit grants via runner paths and Python scripts with the same 
 	]) assert.deepEqual(grantPriorityRequests(command), [], command);
 });
 
+test("grant-priority help and read-only subcommands are not grant requests", () => {
+	for (const args of ["--help", "-h", "--uses 1 --help", "status", "show"]) {
+		for (const program of ["pi-phase", "python3 -B ./pi_phase.py"]) {
+			assert.deepEqual(grantPriorityRequests(`${program} grant-priority ${args}`), [], args);
+		}
+	}
+});
+
+test("run help does not request high priority and producer help does not exempt real requests", () => {
+	for (const flag of ["--help", "-h"]) {
+		assert.deepEqual(highPriorityRequests(`pi-phase run ${flag} --priority high`), []);
+		assert.deepEqual(highPriorityRequests(`pi-phase run --priority high ${flag}`), []);
+	}
+	assert.deepEqual(highPriorityRequests(run + " --help"), [request]);
+	assert.deepEqual(highPriorityRequests("pi-phase run --priority high --label '--help' -- echo"),
+		[{ kind: "unknown", label: "--help" }]);
+	assert.deepEqual(grantPriorityRequests("pi-phase grant-priority --help; pi-phase grant-priority --uses 1"), [["--uses", "1"]]);
+	assert.deepEqual(highPriorityRequests("pi-phase run --help --priority high; " + run), [request]);
+});
+
 test("raw grant-file references are blocked only for bash and write/edit paths", () => {
 	for (const command of ["echo '{}' > priority-grant.json", "rm ~/.pi/agent/pi-phase/state/priority-grant.json",
 		"python3 -c \"open('priority-grant.json', 'w').write('{}')\"", "echo 'priority-grant.json'",
@@ -190,6 +210,19 @@ test("denial, dismissal and headless requests block without creating grants", as
 		reason: "high priority needs approval from the orchestrator (L0) or the user; ask your parent session/orchestrator, which can grant it" });
 	assert.equal(headless.selections.length, 0);
 	assert.equal(calls.length, 0);
+});
+
+test("chained read-only commands and help bypass approval without weakening real grants", async () => {
+	const app = fake(false);
+	for (const command of ["df -g && pi-phase grant-priority --help", "pi-phase grant-priority -h",
+		"pi-phase grant-priority status", "pi-phase grant-priority show", "pi-phase run --help --priority high"]) {
+		assert.equal(await app.fire(command), undefined, command);
+	}
+	assert.equal(app.selections.length, 0);
+	assert.equal(calls.length, 0);
+	assert.equal((await app.fire("df -g && pi-phase grant-priority --uses 1"))?.block, true);
+	assert.equal((await app.fire(run + " --help"))?.block, true);
+	assert.equal((await app.fire("pi-phase grant-priority --help; " + run))?.block, true);
 });
 
 test("direct grant creation prompts even with an existing grant and only Allow proceeds", async () => {

@@ -127,21 +127,54 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-test("extension is orchestration-only and /guards off dotnet disables it", async () => {
-	let handler: any;
-	dotnetExtension({ on: (name: string, fn: any) => { assert.equal(name, "tool_call"); handler = fn; } } as any);
+function extensionHandlers() {
+	const handlers = new Map<string, any>();
+	dotnetExtension({ on: (name: string, fn: any) => handlers.set(name, fn) } as any);
 	const ctx = { cwd: dir, hasUI: false };
-	const event = { toolName: "bash", input: { command: "dotnet test" } };
-	assert.equal(await handler(event, ctx), undefined);
+	const event = { toolName: "bash", toolCallId: "build", input: { command: "dotnet build" } };
+	const content = [{ type: "text", text: "original result" }];
+	return { ctx, event, content,
+		call: (input = event) => handlers.get("tool_call")(input, ctx),
+		result: (toolCallId = event.toolCallId) => handlers.get("tool_result")({ ...event, toolCallId, content }, ctx),
+	};
+}
+
+test("extension is orchestration-only and appends a one-shot advisory without blocking", async () => {
+	const app = extensionHandlers();
+	assert.equal(await app.call(), undefined);
+	assert.equal(await app.result(), undefined);
 	process.env.PI_ORCH_ID = "lane-1";
-	assert.equal((await handler(event, ctx)).block, true);
-	assert.equal(await handler({ ...event, toolName: "read" }, ctx), undefined);
-	assert.equal((await handler({ toolName: "bash", input: {} }, ctx)).block, true);
+	assert.equal(await app.call(), undefined);
+	assert.equal(await app.result("unrelated"), undefined);
+	assert.deepEqual(await app.result(), { content: [...app.content,
+		{ type: "text", text: "\n[dotnet] " + dotnetBlockReason("dotnet build") }] });
+	assert.equal(await app.result(), undefined);
+	assert.deepEqual(app.content, [{ type: "text", text: "original result" }]);
+	assert.equal(await app.call({ ...app.event, toolName: "read" }), undefined);
+	assert.equal(await app.result(), undefined);
+});
+
+test("/guards off dotnet suppresses both pending and new advisories", async () => {
+	process.env.PI_ORCH_ID = "lane-1";
+	const app = extensionHandlers();
 	let command: any;
 	guardsExtension({ registerCommand: (_: string, spec: any) => { command = spec; },
 		on: () => {}, events: { on: () => {} } } as any);
-	await command.handler("off dotnet", ctx);
-	assert.equal(await handler(event, ctx), undefined);
-	await command.handler("on dotnet", ctx);
-	assert.equal((await handler(event, ctx)).block, true);
+	assert.equal(await app.call(), undefined);
+	await command.handler("off dotnet", app.ctx);
+	assert.equal(await app.result(), undefined);
+	assert.equal(await app.call(), undefined);
+	assert.equal(await app.result(), undefined);
+	await command.handler("on dotnet", app.ctx);
+	assert.equal(await app.result(), undefined);
+	assert.equal(await app.call(), undefined);
+	assert.match((await app.result()).content.at(-1).text, /^\n\[dotnet\] /);
+});
+
+test("extension keeps malformed execution blocking and wrapped commands silent", async () => {
+	process.env.PI_ORCH_ID = "lane-1";
+	const app = extensionHandlers();
+	assert.equal((await app.call({ ...app.event, input: {} } as any)).block, true);
+	assert.equal(await app.call({ ...app.event, input: { command: "pi-phase run --kind build -- dotnet build" } }), undefined);
+	assert.equal(await app.result(), undefined);
 });

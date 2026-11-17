@@ -292,7 +292,7 @@ function environment(t: any, values: Record<string, string>) {
   } });
 }
 
-test('extension: block, exception, orchestrated result warning chains after real output-cap, switch and solo', async t => {
+test('extension: blocks and exceptions remain, candidate and gate warnings stay silent after output-cap', async t => {
   const f = await fixture(t), repo = join(f.root, 'repo'); await mkdir(repo);
   const git = (...args: string[]) => {
     const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr);
@@ -303,7 +303,9 @@ test('extension: block, exception, orchestrated result warning chains after real
     PI_EFFICIENCY_FILE: join(f.root, 'efficiency.json') });
   await writeFile(process.env.PI_EFFICIENCY_FILE!, JSON.stringify({ outputCap: { enabled: true, maxChars: 4000, scope: 'all' } }));
   const train = capture(extension), cap = capture(outputCap), handler = train.handlers.get('tool_call')![0];
-  const ctx = { cwd: repo, hasUI: false, sessionManager: { getSessionId: () => 'candidate-test' } };
+  const notices: string[] = [];
+  const ctx = { cwd: repo, hasUI: true, ui: { notify: (message: string) => notices.push(message) },
+    sessionManager: { getSessionId: () => 'candidate-test' } };
   const event = { toolName: 'bash', toolCallId: 'one', input: { command: 'gh pr create' } };
   assert.equal((await handler(event, ctx)).block, true);
   const typed = { toolName: 'publish', toolCallId: 'typed', input: { kind: 'pr-create', repo: 'acme/widget', title: 'Title', body: 'Safe' } };
@@ -316,7 +318,11 @@ test('extension: block, exception, orchestrated result warning chains after real
   const before = await readFile(process.env.PI_GUARD_DECISIONS_LOG!, 'utf8');
   assert.equal(await handler({ ...event, input: { command: 'pi-phase status' } }, ctx), undefined);
   assert.equal(await readFile(process.env.PI_GUARD_DECISIONS_LOG!, 'utf8'), before);
-  assert.equal(await handler(event, ctx), undefined);
+  for (const warningEvent of [event, typed, { ...event, input: { command: 'pi-phase run --kind test -- echo ok' } }]) {
+    assert.equal(await handler(warningEvent, ctx), undefined);
+  }
+  assert.deepEqual(notices, []);
+  assert.equal(await readFile(process.env.PI_GUARD_DECISIONS_LOG!, 'utf8'), before);
   // Use pi's actual runner, with both extensions loaded, rather than emulating chaining.
   let entry: string;
   try { entry = new URL(import.meta.resolve('@earendil-works/pi-coding-agent')).pathname; }
@@ -327,9 +333,8 @@ test('extension: block, exception, orchestrated result warning chains after real
   const resultEvent = { ...event, content: [{ type: 'text', text: 'line\n'.repeat(5000) }], isError: false };
   const result = await runner.emitToolResult(resultEvent);
   assert.match(result.content[0].text, /full output:/);
-  assert.match(result.content.at(-1).text, /\[candidate\].*Candidate notice:.*created anyway \(warn-only\)/);
-  assert.doesNotMatch(result.content.at(-1).text, /PR refused/);
-  assert.equal(await train.handlers.get('tool_result')![0](resultEvent), undefined);
+  assert.doesNotMatch(JSON.stringify(result.content), /\[candidate\]|Candidate notice:|PR refused/);
+  assert.equal(await train.handlers.get('tool_result')?.[0](resultEvent), undefined);
   await writeFile(process.env.PI_GUARDS_FILE!, JSON.stringify({ off: { trains: true } }));
   assert.equal(await handler(event, ctx), undefined);
   assert.equal(await handler(typed, ctx), undefined);
@@ -340,7 +345,7 @@ test('extension: block, exception, orchestrated result warning chains after real
   git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
   git('commit', '--allow-empty', '-m', 'base'); git('update-ref', 'refs/remotes/origin/main', 'HEAD');
   assert.equal(await handler(event, ctx), undefined);
-  assert.equal(await train.handlers.get('tool_result')![0](resultEvent), undefined);
+  assert.equal(await train.handlers.get('tool_result')?.[0](resultEvent), undefined);
 });
 
 test('GHE repositories are host-qualified: a github.com candidate never refuses or warns a same-named GHE PR', async t => {
