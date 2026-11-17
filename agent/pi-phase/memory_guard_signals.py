@@ -68,12 +68,20 @@ def pressure_held(sample, history, limit):
 
 
 def memory_corroborated(sample, limits):
-    """Memory evidence for latency escalation/holds; None when the host sample is unknown."""
+    """Memory evidence for latency escalation; None when the host sample is unknown."""
     if sample is None:
         return None
     return (sample["pl"] >= limits["warn_pressure_level"]
             or sample["cmpPct"] >= limits["warn_compressor_percent"]
             or at_least(sample.get("swapGrowth"), limits["stop_swap_growth_mb_per_min"]))
+
+
+def memory_hold_corroborated(sample, limits):
+    """Hysteresis also holds while swap-ins remain at or above the stop threshold."""
+    if sample is None:
+        return None
+    return (memory_corroborated(sample, limits)
+            or at_least(sample.get("swapInRate"), limits["stop_swap_in_pages_per_s"]))
 
 
 def corroborated_latency_reason(sample, limit, limits):

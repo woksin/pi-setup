@@ -240,6 +240,12 @@ class LevelTests(unittest.TestCase):
             with self.subTest(evidence=evidence):
                 self.assertEqual(mg.classify(sample(psLatency=21, **evidence), [], LIMITS)[0], 4)
 
+    def test_swap_ins_alone_do_not_corroborate_latency_escalation(self):
+        for latency in (9, 21):
+            with self.subTest(latency=latency):
+                current = sample(psLatency=latency, swapInRate=LIMITS["stop_swap_in_pages_per_s"])
+                self.assertEqual(mg.classify(current, [], LIMITS)[0], 1)
+
     def test_latency_corroboration_uses_configured_thresholds(self):
         limits = dict(LIMITS, warn_pressure_level=3, warn_compressor_percent=34,
                       stop_swap_growth_mb_per_min=512)
@@ -443,6 +449,19 @@ class TickTests(unittest.TestCase):
                 previous = dict(level=4, clear=0, hist=[sample(t=900)])
                 state, _, _, _ = self.run_tick("observe", sample(**evidence), previous)
                 self.assertEqual((state["level"], state["clear"]), (4, 1))
+
+    def test_hysteresis_holds_after_swap_ins_drop_but_remain_above_stop_threshold(self):
+        previous = dict(hist=[sample(t=900, cmpPct=25)])
+        for t, swap_ins, expected_raw in ((930, 211000, 0), (960, 421000, 3)):
+            previous, _, _, _ = self.run_tick("observe", sample(t=t, cmpPct=25, swapIns=swap_ins), previous)
+            self.assertEqual(previous["raw"], expected_raw)
+        self.assertEqual(previous["level"], 3)
+        for rate in (5000, LIMITS["stop_swap_in_pages_per_s"]):
+            with self.subTest(rate=rate):
+                current = sample(t=990, cmpPct=25, swapIns=421000 + rate * 30)
+                state, _, _, _ = self.run_tick("observe", current, previous)
+                self.assertEqual(state["swapInRate"], rate)
+                self.assertEqual((state["raw"], state["level"], state["clear"]), (2, 3, 1))
 
     def test_unknown_host_sample_does_not_release_hysteresis(self):
         state, _, _, _ = self.run_tick("observe", None, dict(level=4))
