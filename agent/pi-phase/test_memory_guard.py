@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import memory_guard as mg
 import memory_guard_actions as mg_actions
+import memory_guard_sampling as mg_sampling
 import pi_phase
 
 LIMITS = mg.guard_config(dict(mode="enforce"))
@@ -209,14 +210,42 @@ class LevelTests(unittest.TestCase):
         self.assertEqual(self.level(psLatency=4), 1)
         self.assertEqual(self.level(cmpPct=36), 2)
         self.assertEqual(self.level(sessions=43), 2)
-        self.assertEqual(self.level(psLatency=9), 2)
+        self.assertEqual(self.level(psLatency=9), 1)
         self.assertEqual(self.level(cmpPct=41), 3)
         self.assertEqual(self.level(cmpPct=46), 4)
         self.assertEqual(self.level(pl=4), 4)
-        self.assertEqual(self.level(psLatency=21), 4)
+        self.assertEqual(self.level(psLatency=21), 1)
 
-    def test_ps_timeout_trigger_is_emergency(self):
-        self.assertEqual(self.level(psLatency=float(mg.PS_TIMEOUT_S)), 4)
+    def test_latency_alone_never_reduces_pools(self):
+        for latency in (4, 9, 21, float(mg.PS_TIMEOUT_S), 100):
+            with self.subTest(latency=latency):
+                level = self.level(psLatency=latency)
+                self.assertEqual(level, 1)
+                configured = dict(heavy=3, fast=4, integration=2)
+                self.assertEqual(mg.effective_slots(mg.Capacity(level), configured, LIMITS)[0], configured)
+
+    def test_unknown_latency_contributes_nothing(self):
+        self.assertEqual(self.level(psLatency=None), 0)
+        self.assertEqual(self.level(psLatency=None, pl=2), 1)
+        self.assertEqual(self.level(psLatency=None, cmpPct=46), 4)
+
+    def test_latency_with_pressure_can_escalate(self):
+        for latency, expected in ((4, 1), (9, 2), (21, 4)):
+            with self.subTest(latency=latency):
+                self.assertEqual(self.level(psLatency=latency, pl=LIMITS["warn_pressure_level"]), expected)
+
+    def test_latency_with_compressor_or_swap_growth_can_escalate(self):
+        for evidence in (dict(cmpPct=LIMITS["warn_compressor_percent"]),
+                         dict(swapGrowth=LIMITS["stop_swap_growth_mb_per_min"])):
+            with self.subTest(evidence=evidence):
+                self.assertEqual(mg.classify(sample(psLatency=21, **evidence), [], LIMITS)[0], 4)
+
+    def test_latency_corroboration_uses_configured_thresholds(self):
+        limits = dict(LIMITS, warn_pressure_level=3, warn_compressor_percent=34,
+                      stop_swap_growth_mb_per_min=512)
+        for evidence in (dict(pl=2), dict(cmpPct=33), dict(swapGrowth=511)):
+            with self.subTest(evidence=evidence):
+                self.assertEqual(mg.classify(sample(psLatency=21, **evidence), [], limits)[0], 1)
 
     def test_two_failed_samples_in_a_row_are_an_emergency(self):
         self.assertEqual(mg.classify(None, [], LIMITS)[0], 1)
@@ -256,6 +285,32 @@ PS = """\
 202 1 501 500 zsh
 203 202 501 300000 csc
 """
+
+
+class SamplingTests(unittest.TestCase):
+    def test_failed_ps_leaves_latency_unknown_without_failing_the_host_sample(self):
+        errors = (OSError("no ps"), subprocess.CalledProcessError(1, "ps"),
+                  subprocess.TimeoutExpired("ps", mg.PS_TIMEOUT_S))
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                def runner(command, timeout):
+                    if command[0] == "ps":
+                        raise error
+                    return {"sysctl": "used = 12800M\n100\n1000\n1\n",
+                            "vm_stat": "page size of 16384 bytes\nSwapins: 1000.\nSwapouts: 0.\n",
+                            "pgrep": "123\n"}[command[0]]
+                current = mg.read_sample(runner=runner, clock=lambda: 1000, monotonic=lambda: 0)
+                self.assertIsNone(current["psLatency"])
+                self.assertEqual((current["mem"], current["procs"]), ({}, {}))
+                self.assertEqual(mg.classify(mg.enrich(current, []), [], LIMITS)[0], 0)
+
+    def test_successful_ps_keeps_measured_latency(self):
+        times = iter((100, 121))
+        with patch.object(mg_sampling.os, "getuid", return_value=501):
+            mem, procs, latency = mg_sampling.read_ps(lambda command, timeout: PS, lambda: next(times))
+        self.assertEqual(latency, 21)
+        self.assertIn("pi", mem)
+        self.assertEqual(procs["pi"], 1)
 
 
 class ReclaimTests(unittest.TestCase):
@@ -368,6 +423,30 @@ class TickTests(unittest.TestCase):
             state, done = mg.tick(mg.Guard(settings, tmp, actuator, execute), mg.TickInput(current, previous or {}, 2000.0))
             written = (Path(tmp) / mg.STATE_NAME).exists()
         return state, done, runner.calls, written
+
+    def test_hysteresis_releases_shedding_when_memory_evidence_is_gone(self):
+        for level in (3, 4):
+            for latency, expected in ((0.2, 0), (21, 1), (None, 0)):
+                with self.subTest(level=level, latency=latency):
+                    previous = dict(level=level, clear=0, hist=[sample(t=900, swapMb=14000)])
+                    current = sample(cmpPct=14, psLatency=latency)
+                    state, done, _, _ = self.run_tick("observe", current, previous)
+                    self.assertLess(state["swapGrowth"], 0)
+                    self.assertEqual((state["level"], state["raw"], state["clear"]), (expected, expected, 0))
+                    self.assertNotIn("would shed-lanes", done)
+                    self.assertNotIn("would docker-stop-unpinned", done)
+
+    def test_hysteresis_still_holds_with_memory_corroboration(self):
+        for evidence in (dict(pl=LIMITS["warn_pressure_level"]),
+                         dict(cmpPct=LIMITS["warn_compressor_percent"]), dict(swapMb=14000)):
+            with self.subTest(evidence=evidence):
+                previous = dict(level=4, clear=0, hist=[sample(t=900)])
+                state, _, _, _ = self.run_tick("observe", sample(**evidence), previous)
+                self.assertEqual((state["level"], state["clear"]), (4, 1))
+
+    def test_unknown_host_sample_does_not_release_hysteresis(self):
+        state, _, _, _ = self.run_tick("observe", None, dict(level=4))
+        self.assertEqual((state["level"], state["clear"]), (4, 1))
 
     def test_observe_mode_only_logs_destructive_actions(self):
         state, done, calls, _ = self.run_tick("observe", sample(cmpPct=41))

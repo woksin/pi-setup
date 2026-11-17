@@ -67,11 +67,24 @@ def pressure_held(sample, history, limit):
     return sample["pl"] >= limit and bool(previous) and previous.get("pl", 0) >= limit
 
 
+def memory_corroborated(sample, limits):
+    """Memory evidence for latency escalation/holds; None when the host sample is unknown."""
+    if sample is None:
+        return None
+    return (sample["pl"] >= limits["warn_pressure_level"]
+            or sample["cmpPct"] >= limits["warn_compressor_percent"]
+            or at_least(sample.get("swapGrowth"), limits["stop_swap_growth_mb_per_min"]))
+
+
+def corroborated_latency_reason(sample, limit, limits):
+    return latency_reason(sample, limit) if memory_corroborated(sample, limits) else []
+
+
 def emergency_reasons(sample, history, limits):
     pressure = sample["pl"] >= limits["emergency_pressure_level"]
     return ([f"memory pressure level {sample['pl']} (critical)"] if pressure else []) \
         + compressor_reason(sample, limits["emergency_compressor_percent"]) \
-        + latency_reason(sample, limits["emergency_ps_latency_s"])
+        + corroborated_latency_reason(sample, limits["emergency_ps_latency_s"], limits)
 
 
 def shed_reasons(sample, history, limits):
@@ -87,7 +100,7 @@ def stop_reasons(sample, history, limits):
         + ([f"swap growth {sample['swapGrowth']:g} MB/min"] if growth else []) \
         + swap_in_reason(sample, history, limits["stop_swap_in_pages_per_s"]) \
         + ([f"{sample['sessions']} live pi > hard cap {limits['hard_live_sessions']:g}"] if over_hard else []) \
-        + latency_reason(sample, limits["stop_ps_latency_s"])
+        + corroborated_latency_reason(sample, limits["stop_ps_latency_s"], limits)
 
 
 def warn_reasons(sample, history, limits):
@@ -115,11 +128,13 @@ def classify(sample, history, limits):
 
 
 class Hysteresis:
-    """Rises immediately; falls one level only after `clear_ticks` consecutive ticks below the current level."""
+    """Rises immediately; debounces falls unless shedding/emergency has lost memory corroboration."""
     def __init__(self, level=0, clear=0, clear_ticks=3):
         self.level, self.clear, self.clear_ticks = level, clear, clear_ticks
 
-    def update(self, raw):
+    def update(self, raw, memory_evidence=None):
+        if self.level >= 3 and memory_evidence is False:
+            self.level, self.clear = raw, 0
         if raw >= self.level:
             self.level, self.clear = raw, 0
             return self.level
