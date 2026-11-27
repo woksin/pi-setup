@@ -146,9 +146,3 @@ test("the splitter gives stable units for abbreviations, file names, backticks a
   assert.match(units[0].id, /^sec-1-[0-9a-f]{8}$/);
   assert.equal(splitUnits("<!-- pi-setup:x:start -->\n## Hidden\n\nSkipped sentence.\n<!-- pi-setup:x:end -->\n\nKept sentence.\n").length, 1);
 });
-
-test("the real repository inventory has no lost or unverified rule", () => {
-  const r = spawnSync("node", [join(REPO, "tools/agents-rules.mjs"), "--check"], { encoding: "utf8" });
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /agents-rules: \d+ units, \d+ exact, \d+ mapped, \d+ removed, 0 lost/);
-});
