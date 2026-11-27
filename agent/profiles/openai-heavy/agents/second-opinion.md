@@ -1,12 +1,12 @@
 ---
 name: second-opinion
 display_name: Second opinion
-description: 'Read-only cross-provider reasoner (GPT-6 Astra, xhigh). Use it (1) to review or challenge work produced by Claude models — code, plans, analyses, writing — so a different provider checks it, and (2) for hard math, algorithms, proofs and scientific reasoning, where it is strongest. Also available for hard debugging and design challenges. Cannot edit files.'
+description: 'Read-only cross-provider reasoner (GPT-6 Astra, xhigh). Use it for hard math, algorithms, proofs and scientific reasoning, where it is strongest, and for stuck hard bugs or contested designs. Expensive: for routine review of Claude-written work use sol-reviewer instead. Cannot edit files.'
 color: purple
 model: openai-codex/gpt-6-astra
 thinking: xhigh
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, exact-model-guard, model-provenance, output-cap, subagent-cache, observation-mask]
+extensions: [kill-guard, cratis-cli-guard, exact-model-guard, model-provenance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: replace
 ---

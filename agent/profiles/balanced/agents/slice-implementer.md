@@ -5,7 +5,7 @@ description: Implementation worker (Claude Haiku 5.5, medium) for one already-de
 color: cyan
 model: anthropic/claude-haiku-5-5
 thinking: medium
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
+extensions: [kill-guard, cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: append
 ---
@@ -15,6 +15,5 @@ prompt_mode: append
 - Use the Screenplay MCP or Cratis tooling named in the brief. Read the target slice and its direct dependencies only; avoid broad repository reads.
 - Touch only owned files. If the slice design is ambiguous, inconsistent or requires a domain decision, stop and report the question.
 - Run the brief's validation commands: Screenplay validate, affected specs/tests, rendering or targeted build as listed. Never claim done without exact passing evidence.
-- If the `codescene` MCP is available: every changed file must end at Code Health >= 9.5 (`code_health_score`, never a decline; a below-9.5 exception needs a named reason). Include a table of file, score before, score after in the report.
-- No fix loops: one deliberate pass per touched file before the gate (shape the code for the score, then one `code_health_score`); if it misses 9.5, report the reason and add the file to the uplift issue, then carry on with the gate and commit: a Code Health miss is reported, never a reason to stop. Never rerun the gate or start a review round for Code Health alone.
+- If the `codescene` MCP is available: one `code_health_review` of changed production files before reporting; fix an obvious decline you introduced, otherwise mention it. Never a loop or a reason to stop.
 - Report files changed, validation commands and exit results, and anything unresolved. Keep the report short.

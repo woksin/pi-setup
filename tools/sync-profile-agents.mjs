@@ -3,6 +3,7 @@
 // profile carries the current agent bodies, extension lists (kill-guard) and subagent rules. Only what makes a
 // profile a profile survives: its frontmatter `model:` and `thinking:` lines and, when the description names the
 // model in a parenthetical such as "(Claude Opus 5.5, medium)", that parenthetical. Agents absent in the base are skipped.
+// Every base agent/workflows/*.js is also copied verbatim into each profile that has a workflows/ directory.
 //   node tools/sync-profile-agents.mjs          rewrite the profile copies
 //   node tools/sync-profile-agents.mjs --check  fail if any copy is stale
 import fs from 'node:fs'
@@ -11,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const baseDir = path.join(root, 'agent/agents')
+const baseWorkflows = path.join(root, 'agent/workflows')
 const profilesDir = path.join(root, 'agent/profiles')
 const check = process.argv.includes('--check')
 
@@ -60,6 +62,20 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       if (!check) fs.writeFileSync(target, next)
     }
   }
+  const copied = []
+  for (const profile of fs.readdirSync(profilesDir)) {
+    const dir = path.join(profilesDir, profile, 'workflows')
+    if (!fs.existsSync(dir)) continue
+    for (const file of fs.readdirSync(baseWorkflows).filter(f => f.endsWith('.js'))) {
+      const target = path.join(dir, file)
+      const text = fs.readFileSync(path.join(baseWorkflows, file))
+      if (fs.existsSync(target) && fs.readFileSync(target).equals(text)) continue
+      stale.push(path.relative(root, target))
+      copied.push(`${profile}/${file}`)
+      if (!check) fs.writeFileSync(target, text)
+    }
+  }
+  if (copied.length) console.log(`workflows copied: ${copied.join(', ')}`)
   if (check && stale.length) {
     console.error(`stale profile agents (run node tools/sync-profile-agents.mjs):\n  ${stale.join('\n  ')}`)
     process.exit(1)

@@ -1,8 +1,8 @@
 ---
 name: planner
-description: "Planner (GPT-6 Astra, high) for turning a decided issue/request into a detailed, implementer-ready plan file: researches the code, chooses the approach, names files, steps, gate command, done checklist, risks and stop conditions. Use before implementer/careful-implementer for any non-trivial change; skip for mechanical edits."
+description: "Planner (GPT-6 Astra, high) for turning a decided issue/request into a detailed, implementer-ready plan file: researches the code, chooses the approach, names files, steps, gate command, done checklist, risks and stop conditions. Use for more than three implementation files, cross-repository dependencies or a named unresolved design/behaviour question; reuse valid plans and do not pair with Plan. Stronger user/repository planning requirements still apply."
 tools: read, bash, grep, find, ls, write
-extensions: [cratis-cli-guard, provider-fallback, issue-work, output-cap, subagent-cache, observation-mask]
+extensions: [kill-guard, cratis-cli-guard, provider-fallback, issue-work, pi-context-budget, output-cap, subagent-cache, observation-mask]
 model: openai-codex/gpt-6-astra
 thinking: high
 max_turns: 120
@@ -30,4 +30,4 @@ Part 2:
 - `## Risks and open questions`: questions that need the user first, each marked BLOCKING; then other risks.
 
 ## Final reply (at most 1k characters)
-The plan path; the approach in 2 lines; BLOCKING questions (or "none"); the recommended implementer type: `implementer` for clear testable work, `careful-implementer` for behaviour-preserving, UI or text work, `grunt` for mechanical work, `opus-implementer` only with a named open design question. Then a `Status summary:` line (≤ 300 characters: approach and key decision) for the issue status block.
+The plan path; the approach in 2 lines; BLOCKING questions (or "none"); the recommended implementer type: `implementer` for clear testable work, `careful-implementer` for behaviour-preserving, UI or text work, `grunt` for mechanical work, `opus-implementer` only with a named open design question. Then a `Status summary:` line (≤ 300 characters: approach and key decision) for the local register (`issue_work`), not a body status block; the parent may append a self-contained event comment for a meaningful event.

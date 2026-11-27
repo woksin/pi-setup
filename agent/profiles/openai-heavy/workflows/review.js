@@ -4,14 +4,14 @@
  * and reuses caller-carried full passing verdicts for identical committed scope.
  *
  * profile:begin summary
- * Full mode (default, openai-heavy profile): Claude Opus 5.5 (`reviewer`) and GPT-6 Astra (`second-opinion`, xhigh)
+ * Full mode (default): Claude Fable 5.2 (`reviewer`) and GPT-6.2 Sol (`sol-reviewer`, high)
  * review independently; each one's findings are then checked by the OTHER provider,
  * which tries to refute them. Only findings that survive are reported as confirmed.
- * The Opus review runs at high effort (the reviewer agent defaults to medium);
+ * The Fable review runs at the reviewer agent's medium effort (Fable 5.2, medium);
  * verification runs at each agent's default effort.
  *
- * Deep mode (`deep: true`): the GPT side uses GPT-6 Astra (`second-opinion`, high) instead of
- * Sol, for both its review and its verification of Opus's findings. Reserve it for
+ * Deep mode (`deep: true`): the GPT side uses GPT-6.2 Astra (`second-opinion`, high) instead of
+ * Sol, for both its review and its verification of Fable's findings. Reserve it for
  * security-sensitive, concurrency/algorithmic or large cross-cutting changes — it costs
  * considerably more OpenAI budget.
  * profile:end summary
@@ -28,7 +28,7 @@
  * for exploitable ones), never drop them. Added 2026-10-29 after GHSA-qr53-922q-xh7r slipped through review.
  *
  * Quick mode: one review by the provider that did NOT write the work, no verification:
- * GPT-6.1 Sol (`sol-reviewer`, high) for Claude-written work, Opus 5.5 (`reviewer`, medium)
+ * GPT-6.2 Sol (`sol-reviewer`, high) for Claude-written work, Fable 5.2 (`reviewer`, medium)
  * for GPT-written work.
  *
  * args: {
@@ -38,12 +38,18 @@
  *   diff?: string — diff text for that lint; no filesystem/git access and no extra agent call.
  *   author?:  "claude" | "gpt"  — who wrote the work; REQUIRED in quick mode, recommended in full mode.
  *                        `implementer` (Sol) output is "gpt"; Claude agents (general-purpose, careful-implementer,
- *                        opus-implementer, the main session) are "claude". In full mode with author "gpt", Opus's
- *                        findings are verified by GPT-6 Astra rather than by Sol, so Sol never adjudicates
+ *                        opus-implementer, the main session) are "claude". In full mode with author "gpt", Fable's
+ *                        findings are verified by GPT-6.2 Astra rather than by Sol, so Sol never adjudicates
  *                        findings against its own model's work.
- *   quick?:   boolean  — single cross-provider review, no verification (default false). Low-risk changes only;
+ *   tier?:    'A' | 'B' | 'C' — B with a known author and no required review runs quick automatically (unless quick:false);
+ *             an explicit quick:true on tier A or C runs full mode. C skips (passed:false) only when reviewRequired is
+ *             omitted/false and nothing else (deep, quick, force, round>1, cachedReview, repair, since, prior) requires a review.
+ *   trustBoundary?: boolean — set false only for a known non-boundary change; absent/unknown with tier uses A.
+ *   reviewRequired?: boolean — independent review policy requires a review, regardless of tier.
+ *   criticalDependency?: boolean — anything but an explicit false (true, null, omitted) overrides a supplied B/C classification.
+ *   quick?:   boolean  — single cross-provider review, no verification (default false; tier B may enable it). Low-risk changes only;
  *                        use full mode for security-sensitive or mixed-authorship changes.
- *   deep?:    boolean  — full mode with GPT-6 Astra instead of GPT-6.1 Sol on the GPT side (default false).
+ *   deep?:    boolean  — full mode with GPT-6.2 Astra instead of GPT-6.2 Sol on the GPT side (default false).
  *                        Security-sensitive, algorithmic or large cross-cutting changes only.
  *   since?:   string   — follow-up round (requires prior and round): commit SHA the previous review saw.
  *                        Only after a whole-change review (same mode, or full after a deep round). Reviewers look only at
@@ -95,10 +101,10 @@
 export const meta = {
   name: 'review',
   // profile:begin meta
-  description: 'Cross-provider code/work review (Opus 5.5 + GPT-6 Astra), blocking findings verified by the other provider',
+  description: 'Cross-provider code/work review (Fable 5.2 + GPT-6.2 Sol; GPT-6.2 Astra with deep: true); only blocking findings gate, verified by the other provider',
   whenToUse: 'Reviewing a diff, change set, document or plan before it is merged or published; pass author, round and full SHAs.',
   phases: [
-    { title: 'Review', detail: 'Opus 5.5 and GPT-6 Astra review independently, plus a cross-provider security lens' },
+    { title: 'Review', detail: 'Fable 5.2 and GPT-6.2 Sol (Astra in deep mode) review independently, plus a cross-provider security lens' },
     { title: 'Verify', detail: 'each finding is challenged by the other provider' },
   ],
   // profile:end meta
@@ -107,27 +113,27 @@ export const meta = {
 // profile:begin routing
 // Pinned models, not provider labels. Keep synchronized with agent frontmatter.
 const AGENT_MODELS = {
-  reviewer: 'anthropic/claude-opus-5-5',
-  'sol-reviewer': 'openai-codex/gpt-6.1-sol',
-  'second-opinion': 'openai-codex/gpt-6-astra',
+  reviewer: 'anthropic/claude-fable-5-2',
+  'sol-reviewer': 'openai-codex/gpt-6.2-sol',
+  'second-opinion': 'openai-codex/gpt-6.2-astra',
 }
 // Review sides in lane order; the first side is the default author side. Lane, security and verify labels derive from the keys.
 const ROUTING = {
-  claude: { agentType: 'reviewer', name: 'Opus 5.5', reviewEffort: 'high' },
-  gpt: { agentType: 'second-opinion', name: 'GPT-6 Astra', reviewEffort: 'xhigh' },
+  claude: { agentType: 'reviewer', name: 'Fable 5.2' },
+  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.2 Sol' },
 }
 // Sides that run on a different agent in deep mode.
 const DEEP_ROUTING = {
-  gpt: { agentType: 'second-opinion', name: 'GPT-6 Astra', reviewEffort: 'xhigh' },
+  gpt: { agentType: 'second-opinion', name: 'GPT-6.2 Astra' },
 }
 const QUICK_ROUTING = {
-  claude: { agentType: 'reviewer', name: 'Opus 5.5' },
-  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
+  claude: { agentType: 'reviewer', name: 'Fable 5.2' },
+  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.2 Sol' },
 }
 // Accepted args.author values -> the side that wrote the work.
 const AUTHOR_SIDES = { claude: 'claude', gpt: 'gpt' }
 // Who checks `side`'s findings when the work was written by `author` (outside deep mode); null = always the other side.
-const SAME_AUTHOR_VERIFIER = { side: 'claude', author: 'gpt', agentType: 'second-opinion', name: 'GPT-6 Astra' }
+const SAME_AUTHOR_VERIFIER = { side: 'claude', author: 'gpt', agentType: 'second-opinion', name: 'GPT-6.2 Astra' }
 // profile:end routing
 
 // Validate everything before phase()/agent(), including stringified tool arguments.
@@ -150,12 +156,19 @@ const SIDES = Object.keys(ROUTING)
 const authorNames = Object.keys(AUTHOR_SIDES).map(name => `"${name}"`).join(', ')
 const knownAuthor = typeof input.author === 'string' && Object.hasOwn(AUTHOR_SIDES, input.author)
 if (input.author !== undefined && !knownAuthor) problems.push(`author must be one of ${authorNames}.`)
-const quick = input.quick === true
+const requestedQuick = input.quick === true
 const deep = input.deep === true
+const tier = input.trustBoundary === false && input.criticalDependency === false
+  && ['B', 'C'].includes(input.tier) ? input.tier : 'A'
+const reviewRequired = ![undefined, false].includes(input.reviewRequired) || deep || requestedQuick ||
+  input.force === true || input.round > 1 || ['cachedReview', 'repair', 'since', 'prior'].some(key => input[key] !== undefined)
+const legacy = input.tier === undefined && input.trustBoundary === undefined && input.criticalDependency === undefined
+const quick = (requestedQuick && (legacy || tier === 'B')) ||
+  (tier === 'B' && !reviewRequired && input.quick !== false && knownAuthor)
 // The side that wrote the work (default: the first side).
 const author = knownAuthor ? AUTHOR_SIDES[input.author] : SIDES[0]
-if (quick && !knownAuthor) problems.push(`Quick mode needs args.author: one of ${authorNames} (who wrote the work).`)
-if (quick && deep) problems.push('quick and deep cannot be combined — deep is a full review with GPT-6 Astra.')
+if (requestedQuick && !knownAuthor) problems.push(`Quick mode needs args.author: one of ${authorNames} (who wrote the work).`)
+if (requestedQuick && deep) problems.push('quick and deep cannot be combined — deep is a full review with GPT-6.2 Astra.')
 if (deep && !['security', 'algorithmic', 'concurrency', 'cross-cutting'].includes(input.deepReason)) {
   problems.push('deep: true needs deepReason: security, algorithmic, concurrency, or cross-cutting.')
 }
@@ -186,12 +199,14 @@ if (repairing) {
   if (!plainObject(input.repair)) problems.push('repair must be a previous review result object, passed unchanged.')
   if (input.cachedReview !== undefined) problems.push('repair and cachedReview cannot be combined.')
   if (!input.headSha || !input.baseSha) problems.push('repair requires headSha and baseSha for the original range.')
-  if (quick || input.since !== undefined || input.prior !== undefined) problems.push('repair cannot be combined with quick, since or prior; retry the original range.')
+  if (requestedQuick || input.since !== undefined || input.prior !== undefined) problems.push('repair cannot be combined with quick, since or prior; retry the original range.')
 }
 const reviewExample = '{"target":"git diff <baseSha>..<headSha> in <abs repo path>","context":"<intent, issue #>","author":"gpt","round":1,"headSha":"<full HEAD SHA>","baseSha":"<full base SHA>"}'
 const followUpExample = 'Round 2+: add "since":"<full SHA reviewed last>","prior":"<ONE string: blocking/unverified findings + dismissed findings with reasons>","round":2.'
 const shaHelp = 'Replace placeholders first: resolve SHAs with git rev-parse (40 hex for SHA-1, 64 for SHA-256), not short SHAs or moving refs; author is "claude" or "gpt".'
 if (problems.length) return { passed: false, error: `Invalid review arguments:\n- ${problems.join('\n- ')}\nCopy-paste example: ${reviewExample}\n${followUpExample}\n${shaHelp}`, problems }
+
+if (tier === 'C' && !reviewRequired) return { passed: false, skipped: true, reason: 'tier C: no review required' }
 
 // Advisory only: inspect caller-supplied text, never fetch a diff or ask an agent.
 const codeHealthText = [input.deliveryReport, input.diff, input.target, input.context]
@@ -456,7 +471,7 @@ const receiptProblems = receipt => {
   return problems
 }
 const cached = input.cachedReview
-if (!quick && !since && !prior && input.headSha && input.baseSha && cached?.reviewCacheKey === cacheKey &&
+if (!quick && !requestedQuick && !since && !prior && input.headSha && input.baseSha && cached?.reviewCacheKey === cacheKey &&
     cached.passed === true && cached.complete === true && cached.mode === (deep ? 'deep' : 'full') &&
     cached.blockingCount === 0 && cached.unverifiedCount === 0 &&
     Array.isArray(cached.incomplete) && cached.incomplete.length === 0 &&

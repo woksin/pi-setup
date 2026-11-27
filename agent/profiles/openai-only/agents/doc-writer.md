@@ -1,12 +1,12 @@
 ---
 name: doc-writer
 display_name: Doc writer
-description: 'Technical writer (GPT-6 Astra, medium) for substantial documentation, READMEs, tutorials, API and architecture guides, ADRs and narrative release notes. Prefer general-purpose (GPT-6.1 Sol) for narrow documentation updates with known facts and an established structure. Writes from the actual code and verifies every example, command and path it documents. Follows repository docs rules and Cratis documentation skills when installed.'
+description: 'Technical writer (GPT-6 Astra, medium) for substantial documentation, READMEs, tutorials, API and architecture guides, ADRs and narrative release notes. Prefer general-purpose (Sonnet medium) for narrow documentation updates with known facts and an established structure. Writes from the actual code and verifies every example, command and path it documents. Follows repository docs rules and Cratis documentation skills when installed.'
 color: teal
 model: openai-codex/gpt-6-astra
 thinking: medium
 tools: read, write, edit, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, subagent-cache, observation-mask]
+extensions: [kill-guard, cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: true
 prompt_mode: append
 ---
