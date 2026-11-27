@@ -102,7 +102,7 @@ const parityFields: Record<string, { required: string; forbidden: string }> = {
 	"gist-create": { required: "files", forbidden: "addAssignees addLabels addReviewers assignees auto base body bodyFile createIfNone deleteBranch draft editLast endpoint event fields gistId head host labels matchHeadCommit method number prerelease reason removeAssignees removeFiles removeLabels removeReviewers repo reviewers strategy subject tag target title" },
 	"gist-edit": { required: "gistId", forbidden: "addAssignees addLabels addReviewers assignees auto base body bodyFile createIfNone deleteBranch draft editLast endpoint event fields head host labels matchHeadCommit method number prerelease public reason removeAssignees removeLabels removeReviewers repo reviewers strategy subject tag target title" },
 	api: { required: "endpoint method", forbidden: "addAssignees addLabels addReviewers assignees auto base createIfNone deleteBranch description draft editLast event files gistId head labels matchHeadCommit number prerelease public reason removeAssignees removeFiles removeLabels removeReviewers repo reviewers strategy subject tag target title" },
-	check: { required: "files", forbidden: "addAssignees addLabels addReviewers assignees auto base body bodyFile createIfNone deleteBranch description draft editLast endpoint event fields gistId head host labels matchHeadCommit method number prerelease public reason removeAssignees removeFiles removeLabels removeReviewers repo reviewers strategy subject tag target title" },
+	check: { required: "files", forbidden: "addAssignees addLabels addReviewers assignees auto base body createIfNone deleteBranch description draft editLast endpoint event fields gistId head host labels matchHeadCommit method number prerelease public reason removeAssignees removeFiles removeLabels removeReviewers repo reviewers strategy subject tag target title" },
 };
 // Each value is valid for its field, including conditional createIfNone: false.
 const parityValues: Record<string, unknown> = {
@@ -283,6 +283,7 @@ test("schema exposes one flat strict object; runtime owns per-kind contracts", (
 	assert.equal((publishRequestSchema as any).oneOf, undefined);
 	assert.equal(publishRequestSchema.properties.kind.enum.length, 18);
 	for (const kind of publishRequestSchema.properties.kind.enum) {
+		if (kind === "check") continue; // Check requires exactly one of two fields, not a fixed required list.
 		const contract = kindContract(kind as PublishRequest["kind"]);
 		const required = contract.split(" requires: ")[1].split(";")[0].split(", ");
 		const optional = contract.split("; optional: ")[1].split(", ").filter(Boolean);
@@ -303,9 +304,14 @@ test("schema exposes one flat strict object; runtime owns per-kind contracts", (
 });
 
 test("check has capture sources but no gh command or authority argv", () => {
-	const plan = toGhPlan({ kind: "check", files: ["a", "b"] });
-	assert.deepEqual(plan.argv, []); assert.deepEqual(plan.authority.ghArgs, []);
-	assert.equal(plan.payloads.length, 2); assert.deepEqual(plan.outbound, []);
+	for (const [field, expected] of [[{ files: ["a", "b"] }, 2], [{ bodyFile: "a" }, 1]] as const) {
+		const plan = toGhPlan(validateRequest({ kind: "check", ...field }));
+		assert.deepEqual(plan.argv, []); assert.deepEqual(plan.authority.ghArgs, []);
+		assert.equal(plan.payloads.length, expected); assert.deepEqual(plan.outbound, []);
+	}
+	for (const field of [{}, { files: [] }, { bodyFile: "a", files: ["b"] }, { body: "text" }]) {
+		assert.throws(() => validateRequest({ kind: "check", ...field }), InvalidRequest);
+	}
 });
 
 test("detached request is validated again if a caller accessor changes identifier values", () => {
@@ -375,7 +381,7 @@ test("validation details name only known fields and static contracts, never rece
 	] as const;
 	for (const [value, expected] of cases) assert.throws(() => validateRequest(value), error => {
 		assert.ok(error instanceof InvalidRequest); assert.match(error.detail ?? "", expected);
-		assert.match(error.detail ?? "", new RegExp(`${value.kind} requires: .*optional:`));
+		assert.match(error.detail ?? "", new RegExp(`${value.kind} requires:`));
 		assert.ok(!JSON.stringify(error).includes("SENTINEL")); return true;
 	});
 	assert.throws(() => validateRequest({ kind: "KIND-SENTINEL" }), error => {

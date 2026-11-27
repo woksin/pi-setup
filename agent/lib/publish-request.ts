@@ -29,7 +29,7 @@ export type PublishRequest =
 	| { kind: "gist-create"; files: string[]; description?: string; public?: boolean }
 	| { kind: "gist-edit"; gistId: string; files?: string[]; description?: string; removeFiles?: string[] }
 	| (OptionalBody & Hosted & { kind: "api"; endpoint: string; method: "POST" | "PATCH" | "PUT" | "DELETE"; fields?: ApiField[] })
-	| { kind: "check"; files: string[] };
+	| ({ kind: "check" } & ({ files: string[]; bodyFile?: never } | { bodyFile: string; files?: never }));
 
 export class InvalidRequest extends Error {
 	readonly code = "invalid-request";
@@ -132,7 +132,7 @@ const contracts: Record<PublishRequest["kind"], Contract> = {
 	"release-create": contract("repo tag", `${body} title target draft prerelease`),
 	"release-notes": contract("repo tag", `${body} title`),
 	"gist-create": contract("files", "description public"), "gist-edit": contract("gistId", "files description removeFiles"),
-	api: contract("endpoint method", `${body} fields`), check: contract("files"),
+	api: contract("endpoint method", `${body} fields`), check: contract("", "files bodyFile"),
 };
 // `host` qualifies a repository (or an api call); gist-* and check have no repository and reject it.
 for (const [kind, shape] of Object.entries(contracts)) if (shape.required.includes("repo") || kind === "api") shape.optional.push("host");
@@ -149,7 +149,7 @@ export const publishRequestSchema = { type: "object", additionalProperties: fals
 export function kindSummary(): string {
 	const groups = new Map<string, string[]>();
 	for (const [kind, shape] of Object.entries(contracts)) {
-		const required = shape.required.join(",");
+		const required = kind === "check" ? "files or bodyFile" : shape.required.join(",");
 		const kinds = groups.get(required) ?? [];
 		kinds.push(kind); groups.set(required, kinds);
 	}
@@ -158,6 +158,7 @@ export function kindSummary(): string {
 /** Static contract text: never includes caller-supplied values or unknown field names. */
 export function kindContract(kind: PublishRequest["kind"]): string {
 	if (!own(contracts, kind)) return invalid();
+	if (kind === "check") return "check requires: non-empty files or bodyFile (only one)";
 	const shape = contracts[kind];
 	const body = REQUIRED_BODY_KINDS.includes(kind) ? "; body or bodyFile" : "";
 	const edit = EDIT_KINDS.includes(kind) ? "; at least one of title/body/bodyFile for edits" : "";
@@ -218,10 +219,14 @@ function validateGist(input: RecordValue): void {
 	if ((input.files as string[] | undefined)?.some(file => !publicFilename(basename(file)))) invalid();
 	if (input.kind === "gist-edit" && !gistChanges(input)) invalid();
 }
+function validateCheck(input: RecordValue): void {
+	if (input.kind !== "check") return;
+	const files = input.files as unknown[] | undefined;
+	if (own(input, "bodyFile") ? files !== undefined : !files?.length) invalid(kindContract("check"));
+}
 function validateChanges(input: RecordValue): void {
-	validateEdit(input); validateGist(input);
-	if (!["gist-create", "check"].includes(input.kind as string)) return;
-	if ((input.files as unknown[]).length === 0) invalid();
+	validateEdit(input); validateGist(input); validateCheck(input);
+	if (input.kind === "gist-create" && (input.files as unknown[]).length === 0) invalid();
 }
 function freeze<T>(value: T): T {
 	if (value && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value); }
@@ -330,7 +335,6 @@ function addFiles(request: RecordValue, plan: GhPlan): void {
 	(request.files as string[] | undefined)?.forEach((file, index) => {
 		const name = basename(file), label = `files[${index}]`;
 		const source = { label, source: { file }, basename: name };
-		if (request.kind === "check") { plan.payloads.push(source); return; }
 		plan.outbound.push({ label, text: name });
 		payload(plan, source, request.kind === "gist-edit" ? "--add=" : "");
 	});
@@ -354,6 +358,16 @@ function command(request: RecordValue): string[] {
 	for (const key of ["event", "strategy"]) if (own(request, key)) argv.push(`--${request[key]}`);
 	return argv;
 }
+const PR_EDIT_METADATA = [...ISSUE_METADATA, "addReviewers", "removeReviewers"];
+/** REST can apply description/title/base together without gh pr edit's classic Projects query. */
+function useRestForPrBodyEdit(request: RecordValue, plan: GhPlan): void {
+	if (request.kind !== "pr-edit" || PR_EDIT_METADATA.some(key => (request[key] as string[] | undefined)?.length)) return;
+	const body = plan.argv.find(arg => typeof arg !== "string");
+	if (!body) return;
+	plan.argv = ["api", `repos/${request.repo}/pulls/${request.number}`, "--method=PATCH", `--hostname=${plan.host ?? DEFAULT_HOST}`,
+		"--silent", { ...body, prefix: "--field=body=@" }];
+	for (const key of ["title", "base"]) if (own(request, key)) plan.argv.push(`--raw-field=${key}=${request[key]}`);
+}
 function addHost(request: RecordValue, plan: GhPlan): void {
 	const host = request.host as string;
 	plan.host = host; plan.authority.host = host;
@@ -362,16 +376,24 @@ function addHost(request: RecordValue, plan: GhPlan): void {
 }
 /** Payload slots are deliberately not source paths. Only the capture core can materialize them. */
 export function toGhPlan(value: PublishRequest): GhPlan {
-	const request = validateRequest(value) as unknown as RecordValue;
+	const validated = validateRequest(value), request = validated as unknown as RecordValue;
 	const plan: GhPlan = { argv: command(request), payloads: [], outbound: [], requestBytes: Buffer.byteLength(JSON.stringify(request), "utf8"), authority: {
 		kind: request.kind as PublishRequest["kind"], ghArgs: [],
 		...Object.fromEntries(["repo", "number", "base", "head"].filter(key => own(request, key)).map(key => [key, request[key]])),
 	} };
+	if (validated.kind === "check") {
+		plan.payloads = validated.bodyFile !== undefined
+			? [{ label: "body", source: { file: validated.bodyFile } }]
+			: validated.files.map((file, index) => ({ label: `files[${index}]`, source: { file } }));
+		return plan;
+	}
 	if (own(request, "host")) addHost(request, plan);
 	if (request.kind === "api") plan.outbound.push({ label: "endpoint", text: request.endpoint as string });
 	for (const key of ["tag", "gistId"]) if (own(request, key)) plan.outbound.push({ label: key, text: request[key] as string });
 	addOptions(request, plan); addBody(request, plan); addFiles(request, plan); addFields(request, plan);
+	// Keep admission on the typed PR edit and its original target, not the transport command.
 	plan.authority.ghArgs = plan.argv.map(arg => typeof arg === "string" ? arg : `${arg.prefix}publication-payload`);
+	useRestForPrBodyEdit(request, plan);
 	return plan;
 }
 
