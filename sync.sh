@@ -93,7 +93,7 @@ fail() { echo "sync.sh: $*" >&2; exit 1; }
 sync_dir() { # sync_dir <src> <dst> [rsync flags...]: copy, or in dry-run mode record the files that would change
   local src=$1 dst=$2; shift 2
   if ((DRY)); then
-    local line path flags
+    local line path flags sx dx
     "${RS[@]}" -n -c --out-format='%i|%n' -i "$@" "$src" "$dst" > "$INVENTORY" || fail "rsync dry-run failed for $dst"
     while IFS= read -r line; do
       case $line in
@@ -103,7 +103,14 @@ sync_dir() { # sync_dir <src> <dst> [rsync flags...]: copy, or in dry-run mode r
         ?d*) ;;
         *"|"*) flags=${line%%|*}; path=${line#*|}
                flags=${flags:2}; flags=${flags//[togu]/}   # time and owner differences are not changes (content, size, mode are)
-               [ -z "${flags//[. ]/}" ] || CHANGED+=("$dst$path") ;;
+               [ -z "${flags//[. ]/}" ] && continue
+               # a permission-only difference counts only when the executable bit differs (git tracks nothing else)
+               if [ "${flags//[. ]/}" = p ] && [ -f "$src$path" ] && [ -f "$dst$path" ]; then
+                 [ -x "$src$path" ] && sx=1 || sx=0
+                 [ -x "$dst$path" ] && dx=1 || dx=0
+                 [ "$sx" = "$dx" ] && continue
+               fi
+               CHANGED+=("$dst$path") ;;
         "") ;;
         *) fail "cannot parse rsync inventory line: $line" ;;
       esac
