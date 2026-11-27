@@ -76,6 +76,9 @@ Decide technical questions yourself. Ask the user (`user_questions`, then end th
 
 Hand off with `context_handoff` when asked; keep verified facts, verbatim user constraints, the next action and every running job/watch. On resume, check only the outstanding jobs and the mutable facts the next action needs.
 
+<!-- pi-profile:routing:start (installer profiles only; empty when no profile is applied) -->
+<!-- pi-profile:routing:end -->
+
 <!-- pi-setup:codescene:start -->
 CodeScene: see "CodeScene" above (advisory, pre-commit only).
 <!-- pi-setup:codescene:end -->

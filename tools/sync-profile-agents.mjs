@@ -3,7 +3,7 @@
 // profile carries the current agent bodies, extension lists (kill-guard) and subagent rules. Only what makes a
 // profile a profile survives: its frontmatter `model:` and `thinking:` entries and, when the description names the
 // model in a parenthetical such as "(Claude Opus 5.5, medium)", that parenthetical. Agents absent in the base are skipped.
-// Every base agent/workflows/*.js is also copied verbatim into each profile that has a workflows/ directory.
+// Every base agent/workflows/*.js without `profile:begin` blocks (those come from sync-review-workflow.mjs) is also copied verbatim into each profile that has a workflows/ directory.
 //   node tools/sync-profile-agents.mjs          rewrite the profile copies
 //   node tools/sync-profile-agents.mjs --check  fail if any copy is stale
 // Options: --repo <dir> (default: this repository), --base <dir> (holds agents/ and workflows/; default <repo>/agent,
@@ -99,7 +99,8 @@ function main(argv) {
     })
   }
   const agents = baseFiles('agents', '.md')
-  const workflows = baseFiles('workflows', '.js')
+  // Workflows with `profile:begin` blocks are rendered per profile by tools/sync-review-workflow.mjs; copying them would overwrite that.
+  const workflows = baseFiles('workflows', '.js').filter(f => !/profile:begin /.test(fs.readFileSync(path.join(baseRoot, 'workflows', f), 'utf8')))
 
   const profilesDir = path.join(repo, 'agent/profiles')
   const plan = []

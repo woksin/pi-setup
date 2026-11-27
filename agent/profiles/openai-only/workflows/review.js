@@ -4,16 +4,15 @@
  * and reuses caller-carried full passing verdicts for identical committed scope.
  *
  * profile:begin summary
- * Full mode (default): Claude Fable 5.2 (`reviewer`) and GPT-6.2 Sol (`sol-reviewer`, high)
- * review independently; each one's findings are then checked by the OTHER provider,
- * which tries to refute them. Only findings that survive are reported as confirmed.
- * The Fable review runs at the reviewer agent's medium effort (Fable 5.2, medium);
- * verification runs at each agent's default effort.
+ * Full mode (default, openai-only profile): GPT-6.1 Sol (`sol-reviewer`, high) and GPT-6 Astra (`reviewer`, high)
+ * review independently; each one's findings are then checked by the OTHER model,
+ * which tries to refute them. Cross-model, NOT cross-provider: all agents are pinned to openai-codex.
+ * author: sol or astra; legacy gpt/claude authors count as Sol-written, so Astra reviews them.
+ * Verification runs at each agent's default effort.
  *
- * Deep mode (`deep: true`): the GPT side uses GPT-6.2 Astra (`second-opinion`, high) instead of
- * Sol, for both its review and its verification of Fable's findings. Reserve it for
- * security-sensitive, concurrency/algorithmic or large cross-cutting changes — it costs
- * considerably more OpenAI budget.
+ * Deep mode (`deep: true`): the Astra side uses `second-opinion` (xhigh) for both its review and
+ * its verification of Sol's findings. Reserve it for security-sensitive, concurrency/algorithmic
+ * or large cross-cutting changes.
  * profile:end summary
  *
  * GENERATED PER PROFILE: this file is the source. Every agent/profiles/<name>/workflows/review.js is
@@ -101,11 +100,11 @@
 export const meta = {
   name: 'review',
   // profile:begin meta
-  description: 'Cross-provider code/work review (Fable 5.2 + GPT-6.2 Sol; GPT-6.2 Astra with deep: true); only blocking findings gate, verified by the other provider',
-  whenToUse: 'Reviewing a diff, change set, document or plan before it is merged or published; pass author, round and full SHAs.',
+  description: 'OpenAI-only independent Sol/Astra review with adversarial cross-model verification',
+  whenToUse: 'Review a whole change before merge; quick mode for iteration, deep mode for hard reasoning',
   phases: [
-    { title: 'Review', detail: 'Fable 5.2 and GPT-6.2 Sol (Astra in deep mode) review independently, plus a cross-provider security lens' },
-    { title: 'Verify', detail: 'each finding is challenged by the other provider' },
+    { title: 'Review', detail: 'Sol and Astra review independently, plus a cross-model security lens' },
+    { title: 'Verify', detail: 'the other OpenAI model challenges blocking findings' },
   ],
   // profile:end meta
 }
@@ -113,27 +112,27 @@ export const meta = {
 // profile:begin routing
 // Pinned models, not provider labels. Keep synchronized with agent frontmatter.
 const AGENT_MODELS = {
-  reviewer: 'anthropic/claude-fable-5-2',
-  'sol-reviewer': 'openai-codex/gpt-6.2-sol',
-  'second-opinion': 'openai-codex/gpt-6.2-astra',
+  reviewer: 'openai-codex/gpt-6-astra',
+  'sol-reviewer': 'openai-codex/gpt-6.1-sol',
+  'second-opinion': 'openai-codex/gpt-6-astra',
 }
 // Review sides in lane order; the first side is the default author side. Lane, security and verify labels derive from the keys.
 const ROUTING = {
-  claude: { agentType: 'reviewer', name: 'Fable 5.2' },
-  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.2 Sol' },
+  sol: { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol', reviewEffort: 'high' },
+  astra: { agentType: 'reviewer', name: 'GPT-6 Astra', reviewEffort: 'high' },
 }
 // Sides that run on a different agent in deep mode.
 const DEEP_ROUTING = {
-  gpt: { agentType: 'second-opinion', name: 'GPT-6.2 Astra' },
+  astra: { agentType: 'second-opinion', name: 'GPT-6 Astra', reviewEffort: 'xhigh' },
 }
 const QUICK_ROUTING = {
-  claude: { agentType: 'reviewer', name: 'Fable 5.2' },
-  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.2 Sol' },
+  sol: { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol', reviewEffort: 'high' },
+  astra: { agentType: 'reviewer', name: 'GPT-6 Astra', reviewEffort: 'high' },
 }
 // Accepted args.author values -> the side that wrote the work.
-const AUTHOR_SIDES = { claude: 'claude', gpt: 'gpt' }
+const AUTHOR_SIDES = { sol: 'sol', astra: 'astra', gpt: 'sol', claude: 'sol' }
 // Who checks `side`'s findings when the work was written by `author` (outside deep mode); null = always the other side.
-const SAME_AUTHOR_VERIFIER = { side: 'claude', author: 'gpt', agentType: 'second-opinion', name: 'GPT-6.2 Astra' }
+const SAME_AUTHOR_VERIFIER = null
 // profile:end routing
 
 // Validate everything before phase()/agent(), including stringified tool arguments.
