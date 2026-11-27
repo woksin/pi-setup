@@ -71,6 +71,7 @@ class CleanupDiagnosticsTests(unittest.TestCase):
 
     def supervise(self, *, live=True, observation="waitid"):
         root = Path(__file__).resolve().parents[2] / ".ai-work"
+        root.mkdir(exist_ok=True)  # absent in a fresh checkout (CI)
         owned = self.stack.enter_context(tempfile.TemporaryDirectory(prefix="cleanup-synthetic-", dir=root))
         state = Path(owned) / "state"
         configuration = Path(owned) / "config.json"
