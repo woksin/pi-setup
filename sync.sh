@@ -5,10 +5,12 @@
 # (tools/publish-check.py + gitleaks) before anything is written to the checkout.
 set -euo pipefail
 ALLOW_STALE=()
+DRY_RUN=0
 while (($#)); do
   case $1 in
     --allow-stale) [ $# -ge 2 ] || { echo "usage: sync.sh [--allow-stale <repo path>]..." >&2; exit 2; }; ALLOW_STALE+=("$2"); shift 2 ;;
-    *) echo "usage: sync.sh [--allow-stale <repo path>]..." >&2; exit 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    *) echo "usage: sync.sh [--dry-run] [--allow-stale <repo path>]..." >&2; exit 2 ;;
   esac
 done
 cd "$(dirname "$0")"
@@ -70,32 +72,48 @@ chmod +x tools/bin/ai-work-lifecycle
 # normalize works on repo-relative paths, so it runs inside the stage.
 python3 "$REPO/setup-user.py" normalize "$PI/user.json" woksin /Volumes/sourcecode/repos
 
+# Profiles get the base agent bodies and workflows. Generated here, in the stage, so the checks below cover the output;
+# inputs are the staged base (live), the profile files they replace must be tracked in the repo.
+mkdir -p "$STAGE/agent/profiles"
+node "$REPO/tools/sync-profile-agents.mjs" --repo "$REPO" --base "$STAGE/agent" --out "$STAGE/agent/profiles"
+
 # ---- 2. check the stage; any finding stops here, before the checkout is touched ----
 python3 "$REPO/tools/publish-check.py" "$STAGE" "$PI/lib/secret-mask.ts"
 gitleaks dir "$STAGE" --no-banner --redact
 
-# ---- 3. refuse to overwrite repo work newer than the live copy, then write the stage into the checkout ----
-# Every file the sync would change or delete is compared (content, not mtime) and, when the repo's last commit
-# touching it is newer than the live file's mtime, the sync stops. Allow a known case with --allow-stale <repo path>.
+# ---- 3. refuse to overwrite repo work newer than the live input, then write the stage into the checkout ----
+# Every repo file the sync would modify or delete (content or mode) must have a live input at least as new as the
+# repo's last commit touching it. A missing live input or a newer repo commit stops the sync, unless the repo path is
+# passed with --allow-stale. Directory mtimes never authorize a file.
 cd "$REPO"
 CHANGED=()
 DRY=0
+INVENTORY="$STAGE/.inventory"
+fail() { echo "sync.sh: $*" >&2; exit 1; }
 sync_dir() { # sync_dir <src> <dst> [rsync flags...]: copy, or in dry-run mode record the files that would change
   local src=$1 dst=$2; shift 2
   if ((DRY)); then
     local line path
+    "${RS[@]}" -n -c --out-format='%i|%n' -i "$@" "$src" "$dst" > "$INVENTORY" || fail "rsync dry-run failed for $dst"
     while IFS= read -r line; do
       case $line in
-        "*deleting "*) path=${line#"*deleting "}; path=${path# }; CHANGED+=("${dst}${path}") ;;
-        [\>\<c]f*) path=${line#* }; CHANGED+=("${dst}${path}") ;;
+        "*deleting "*) path=${line#"*deleting "}
+                       [ -e "$dst$path" ] || [ -L "$dst$path" ] || fail "cannot parse rsync deletion line: $line"
+                       [ -d "$dst$path" ] && [ ! -L "$dst$path" ] || CHANGED+=("$dst$path") ;;
+        ?d*) ;;
+        *"|"*) path=${line#*|}; CHANGED+=("$dst$path") ;;
+        "") ;;
+        *) fail "cannot parse rsync inventory line: $line" ;;
       esac
-    done < <("${RS[@]}" -n -c -i "$@" "$src" "$dst")
+    done < "$INVENTORY"
   else
     "${RS[@]}" "$@" "$src" "$dst"
   fi
 }
 sync_file() { # sync_file <src> <dst>
-  if ((DRY)); then cmp -s "$1" "$2" || CHANGED+=("$2"); else cp "$1" "$2"; fi
+  if ((DRY)); then
+    if { [ -e "$2" ] || [ -L "$2" ]; } && ! cmp -s "$1" "$2"; then CHANGED+=("$2"); fi
+  else cp "$1" "$2"; fi
 }
 write_stage() {
   mkdir -p agent skills tools/bin agent/lane-policy agent/launchd
@@ -117,35 +135,40 @@ write_stage() {
   done
   sync_dir "$STAGE/tools/ai-work-lifecycle/" tools/ai-work-lifecycle/
   sync_file "$STAGE/tools/bin/ai-work-lifecycle" tools/bin/ai-work-lifecycle
+  # generated profile files (repo-owned, never deleted): only the files the generator changed are in the stage
+  if ((!DRY)); then rsync -a "$STAGE/agent/profiles/" agent/profiles/; fi
 }
-live_path() { # repo path -> the live file it is published from (empty when it is derived or per-machine)
+live_path() { # repo path -> the live file it is published from
   case $1 in
-    agent/launchd/*|tools/bin/*) ;;
+    agent/launchd/com.example.*.plist) local n=${1#agent/launchd/com.example.}; echo "$HOME/Library/LaunchAgents/com.$(id -un).${n%.plist}.plist" ;;
+    agent/npm-package.json) echo "$PI/npm/package.json" ;;
     agent/*) echo "$PI/${1#agent/}" ;;
     skills/*) echo "$HOME/.agents/skills/${1#skills/}" ;;
     tools/ai-work-lifecycle/*) echo "$HOME/.local/share/ai-work-lifecycle/${1#tools/ai-work-lifecycle/}" ;;
+    tools/bin/ai-work-lifecycle) echo "$HOME/.local/bin/ai-work-lifecycle" ;;
+    *) fail "no live input known for $1" ;;
   esac
 }
-mtime() { stat -f %m "$1"; }
 
 DRY=1; write_stage; DRY=0
 STALE=()
 for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
-  commit=$(git log -1 --format=%ct -- "$f" 2>/dev/null || true)
-  [ -n "$commit" ] || continue            # untracked in the repo: nothing to lose
-  live=$(live_path "$f"); [ -n "$live" ] || continue
-  if [ -e "$live" ]; then stamp=$(mtime "$live")
-  else d=$(dirname "$live"); while [ ! -e "$d" ] && [ "$d" != / ]; do d=$(dirname "$d"); done; stamp=$(mtime "$d"); fi
+  [ -e "$f" ] || [ -L "$f" ] || continue          # an addition: nothing in the repo to lose
+  commit=$(git log -1 --format=%ct -- "$f") || fail "git log failed for $f"
+  : "${commit:=0}"
+  live=$(live_path "$f") || exit 1
+  if [ -e "$live" ]; then stamp=$(stat -L -f %m "$live") || fail "stat failed for $live"; else stamp=-1; fi
   if ((commit > stamp)); then
     for a in ${ALLOW_STALE[@]+"${ALLOW_STALE[@]}"}; do [ "$a" = "$f" ] && continue 2; done
     STALE+=("$f")
   fi
 done
 if ((${#STALE[@]})); then
-  echo "sync.sh: refusing to overwrite repo changes newer than the live copy (catch the live install up, or pass --allow-stale <path>):" >&2
+  echo "sync.sh: refusing to modify or delete repo files whose live input is missing or older than their last repo commit (catch the live install up, or pass --allow-stale <path>):" >&2
   printf '  %s\n' "${STALE[@]}" >&2
   exit 1
 fi
+if ((DRY_RUN)); then echo "sync.sh: dry run, ${#CHANGED[@]} file(s) would change; nothing written"; exit 0; fi
 write_stage
 
 git status --short
