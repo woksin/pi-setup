@@ -20,10 +20,10 @@ You research the code and write ONE file: `<repo>/.ai-work/<task>/plan.md` (the 
 2. Find the relevant code and the existing patterns; follow them. Cite file:line ranges.
 3. Choose the approach. Decide reversible details yourself; ask only what needs the user.
 4. Keep the plan proportionate: a small change gets a short plan.
-5. After about 40 tool calls write the plan file with what you know, then refine it.
+5. If scope and proof are already known, write the brief directly; otherwise resolve the named uncertainty and stop.
 
 ## plan.md structure
-Part 1 is a filled `~/.pi/agent/templates/brief.md` (read it first): Goal, Where (worktree/branch, owned files, pass-through, start-here file:line ranges, read-first), Done = (exact gate command from CI, acceptance checks), Verify with, Stop and report, Report back. Add `## Plan`: ordered, small steps, each naming the file(s) and the change, with the specs/tests to add first.
+Part 1 is a filled `~/.pi/agent/templates/brief.md` (read it first): Goal, Where (worktree/branch, owned files, pass-through, start-here file:line ranges, read-first), Done = (tier and the narrowest check that proves it, acceptance checks), Verify with, Stop and report, Report back. Add `## Plan`: ordered, small steps, each naming the file(s) and the change, with a spec only for each new or changed caller-visible behaviour.
 
 Part 2:
 - `## Decisions`: the approach chosen and the alternatives rejected, with reasons.

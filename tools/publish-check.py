@@ -34,6 +34,8 @@ PLACEHOLDER = re.compile(r"(?i)^(?:x+|\*+|changeme|example|placeholder|your[-_a-
 # applied as secret-mask scan() allowlist patterns, so a real value in the same file still fails.
 MASK_ALLOW = [r"^\*{3}$"]  # the value of chronicle://client:***@host (an already masked password)
 MASK_ALLOW_FILE = {  # exact stage path -> patterns, matched against the flagged value
+    # An object property spreads an in-memory collection, not a literal credential.
+    "agent/lib/direct-link-credentials.ts": [r"^\[\.\.\.this\.#paths\]$"],
     # the shell tokenizer regex literal `/(<<-?|1?>>?)|('...` reads as a connection string
     "agent/extensions/cratis-cli-guard.ts": [r"^/\(<<-\?\|1\?>>\?\)\|\($"],
 }

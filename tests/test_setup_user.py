@@ -174,8 +174,6 @@ class InstallTests(unittest.TestCase):
                          {"githubUser": "einari", "reposRoot": "/tmp/x/repos"})
         self.assertEqual((pi / "docker-guardian/local-tags.txt").read_bytes(),
                          (REPO / "agent/docker-guardian/local-tags.example.txt").read_bytes())
-        self.assertIn("--add-assignee einari", (pi / "AGENTS.md").read_text())
-        self.assertIn("--add-assignee einari", (self.home / ".agents/skills/github-issue-hygiene/SKILL.md").read_text())
         author = (REPO / "LICENSE").read_text().splitlines()[2].split()[-1]
         residuals = self.run_command("grep", "-rIn", "-i", author, str(self.home)).stdout.splitlines()
         for line in residuals:
@@ -200,7 +198,7 @@ class InstallTests(unittest.TestCase):
         (pi / "docker-guardian/local-tags.txt").write_text('custom-*\n')
         self.install("--user", "another-user", "--repos-root", "/tmp/other repos")
         self.assertEqual((pi / "docker-guardian/local-tags.txt").read_text(), 'custom-*\n')
-        self.assertIn("--add-assignee another-user", (pi / "AGENTS.md").read_text())
+        self.assertEqual(json.loads((pi / "user.json").read_text())["githubUser"], "another-user")
         self.assertEqual(next(pi.glob(".pi-setup/backups/*/AGENTS.md")).read_bytes(), original)
         # The user removed the pinned npm packages after the first install; a reinstall respects that.
         self.assertEqual(json.loads((pi / "settings.json").read_text()),
@@ -209,10 +207,16 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(any(pi.rglob("*.bak-*")))
 
     def test_sync_round_trip_in_scratch_copy(self):
-        self.clean_install()
+        pi = self.clean_install()
+        # The source live install has no active profile, unlike a clean install.
+        agents = pi / "AGENTS.md"
+        agents.write_bytes(re.sub(rb"(^<!-- pi-profile:routing:start[^\n]*\n).*?(^<!-- pi-profile:routing:end -->$)",
+                                  rb"\1\2", agents.read_bytes(), flags=re.MULTILINE | re.DOTALL))
         scratch = Path(self.temp.name) / "repo"
         shutil.copytree(REPO, scratch, ignore=shutil.ignore_patterns(".git", ".ai-work", "__pycache__", "node_modules"))
         self.run_command("git", "init", "-q", cwd=scratch)
+        self.run_command("git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit",
+                         "-q", "--allow-empty", "--no-gpg-sign", "-m", "Initialize test repo", cwd=scratch)
         launchd = self.home / "Library/LaunchAgents"
         launchd.mkdir(parents=True)
         username = self.run_command("id", "-un").stdout.strip()

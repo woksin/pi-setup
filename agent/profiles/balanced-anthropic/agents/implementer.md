@@ -1,7 +1,7 @@
 ---
 name: implementer
 display_name: Implementer
-description: Implementation worker (Claude Sonnet 5.5, medium) for well-specified coding tasks where tests and a review step exist — feature work, refactors, fixes with a clear spec. Also the preferred worker for security-related code, which Opus 5.5 may refuse in pi. Tends to rewrite nearby code (e.g. user-facing messages) more than asked, so its output must be reviewed and tested. Give it the spec, the files it owns, and the test command.
+description: Implementation worker (Claude Sonnet 5.5, medium) for well-specified coding tasks where tests and a review step exist — feature work, refactors, fixes with a clear spec. Also the preferred worker for security-related code, which Opus 5.5 may refuse in pi. Tends to rewrite nearby code (e.g. user-facing messages) more than asked, so its diff must be checked for scope; review follows the global tier policy. Give it the spec, the files it owns, and the test command.
 color: blue
 model: anthropic/claude-sonnet-5-5
 thinking: medium

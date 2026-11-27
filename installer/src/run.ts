@@ -312,6 +312,7 @@ async function execute(ctx: Ctx, options: Options, prompter: Prompter | undefine
     wantGithubDetails: Boolean(prompter),
     needScan: Boolean(prompter) || !knownRoot,
     probePi: !readOnly,
+    probeDotnetVersion: !readOnly,
     login: options.user || savedString(saved, "githubUser") || undefined,
   });
   spin?.stop("Looked around");

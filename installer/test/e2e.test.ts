@@ -188,8 +188,9 @@ describe("install (e2e)", () => {
   });
 
   for (const mode of ["--dry-run", "--plan"]) {
-    test(`${mode} with an existing ~/.pi/agent makes zero pi calls and changes nothing`, () => {
+    test(`${mode} with an existing ~/.pi/agent neither probes pi nor lets dotnet write HOME`, () => {
       const box = fresh();
+      writeFileSync(join(box.stubs, "dotnet"), '#!/bin/sh\nmkdir "$HOME/.dotnet"\necho 11.0.100\n', { mode: 0o755 });
       mkdirSync(piPath(box), { recursive: true });
       writeFileSync(piPath(box, "user.json"), '{"githubUser":"einari","reposRoot":"/tmp/r"}');
       const snapshot = () => {

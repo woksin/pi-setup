@@ -17,6 +17,8 @@ export interface DetectRequest {
   needScan: boolean;
   /** Probe pi auth and the catalog (false when probing would create ~/.pi/agent). */
   probePi: boolean; // false in --dry-run/--plan: pi probes can write state
+  /** Dotnet's version probe can create first-run state in HOME. */
+  probeDotnetVersion?: boolean;
   login?: string;
 }
 
@@ -53,9 +55,10 @@ export function parseModelTable(stdout: string): Set<string> | null {
   return ids.size ? ids : null;
 }
 
-async function probeTool(ctx: Ctx, name: string): Promise<ToolState> {
+async function probeTool(ctx: Ctx, name: string, probeVersion = true): Promise<ToolState> {
   const path = ctx.which(name);
   if (!path) return { name };
+  if (!probeVersion) return { name, path };
   const result = await ctx.run(name, ["--version"], { timeoutMs: name === "pi" ? PI_MS : SHORT_MS });
   const first = result.stdout.trim().split("\n")[0] || result.stderr.trim().split("\n")[0];
   return { name, path, version: result.timedOut || !first ? undefined : first };
@@ -102,8 +105,9 @@ export async function detect(ctx: Ctx, request: DetectRequest): Promise<Detectio
   const piPresent = Boolean(ctx.which("pi"));
   const providers: Record<string, ProviderState> = {};
   const probePi = request.probePi && piPresent;
+  const versionProbes: Partial<Record<string, boolean>> = { pi: request.probePi, dotnet: request.probeDotnetVersion };
   const [tools, github, states, catalog] = await Promise.all([
-    Promise.all(TOOLS.map((t) => (t === "pi" && !request.probePi ? Promise.resolve<ToolState>({ name: t, path: ctx.which(t) }) : probeTool(ctx, t)))),
+    Promise.all(TOOLS.map((t) => probeTool(ctx, t, versionProbes[t]))),
     probeGithub(ctx, request),
     Promise.all(PROVIDER_IDS.map((id) => (probePi ? probeProvider(ctx, id) : Promise.resolve<ProviderState>({ status: "unknown" })))),
     probePi ? probeCatalog(ctx) : Promise.resolve(null),

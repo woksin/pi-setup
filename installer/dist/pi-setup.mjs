@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 1e01a2051ddbbce6cca6a75b1d06f2b37a3c77b6d3bfae04a1f00a2b845807ef
+// pi-setup-source-sha256: 41de610e513fbec5384d64672f24ceee1ba181333e207df936a07cc7361b002f
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -8242,9 +8242,10 @@ function parseModelTable(stdout2) {
   }
   return ids.size ? ids : null;
 }
-async function probeTool(ctx, name) {
+async function probeTool(ctx, name, probeVersion = true) {
   const path2 = ctx.which(name);
   if (!path2) return { name };
+  if (!probeVersion) return { name, path: path2 };
   const result3 = await ctx.run(name, ["--version"], { timeoutMs: name === "pi" ? PI_MS : SHORT_MS });
   const first = result3.stdout.trim().split("\n")[0] || result3.stderr.trim().split("\n")[0];
   return { name, path: path2, version: result3.timedOut || !first ? void 0 : first };
@@ -8285,8 +8286,9 @@ async function detect(ctx, request2) {
   const piPresent = Boolean(ctx.which("pi"));
   const providers2 = {};
   const probePi = request2.probePi && piPresent;
+  const versionProbes = { pi: request2.probePi, dotnet: request2.probeDotnetVersion };
   const [tools, github, states, catalog] = await Promise.all([
-    Promise.all(TOOLS2.map((t2) => t2 === "pi" && !request2.probePi ? Promise.resolve({ name: t2, path: ctx.which(t2) }) : probeTool(ctx, t2))),
+    Promise.all(TOOLS2.map((t2) => probeTool(ctx, t2, versionProbes[t2]))),
     probeGithub(ctx, request2),
     Promise.all(PROVIDER_IDS.map((id) => probePi ? probeProvider(ctx, id) : Promise.resolve({ status: "unknown" }))),
     probePi ? probeCatalog(ctx) : Promise.resolve(null)
@@ -12135,6 +12137,7 @@ async function execute(ctx, options, prompter, baseCtx) {
     wantGithubDetails: Boolean(prompter),
     needScan: Boolean(prompter) || !knownRoot,
     probePi: !readOnly,
+    probeDotnetVersion: !readOnly,
     login: options.user || savedString2(saved2, "githubUser") || void 0
   });
   spin?.stop("Looked around");

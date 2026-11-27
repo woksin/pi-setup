@@ -118,6 +118,9 @@ class SyncPublishTests(unittest.TestCase):
         self.scratch = Path(self.directory.name) / "repo"
         shutil.copytree(REPO, self.scratch, ignore=shutil.ignore_patterns(".git", ".ai-work", "__pycache__", "node_modules", "node-compile-cache*"))
         self.run_command("git", "init", "-q", cwd=self.scratch)
+        # Give git log a HEAD without recording newer timestamps for the test fixtures.
+        self.run_command("git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit",
+                         "-q", "--allow-empty", "--no-gpg-sign", "-m", "Initialize test repo", cwd=self.scratch)
         launchd = self.home / "Library/LaunchAgents"
         launchd.mkdir(parents=True)
         username = self.run_command("id", "-un").stdout.strip()
@@ -137,6 +140,7 @@ class SyncPublishTests(unittest.TestCase):
         self.assertIn(expected_path, output)
         self.assertEqual(snapshot(self.scratch), before, "checkout changed although the sync failed")
         self.assertEqual(list(Path(self.directory.name).glob("pi-sync.*")), [], "stage left behind")
+        return output
 
     def test_clean_sync_reports_no_leaks_and_matches_the_live_tree(self):
         local = self.pi / "pi-phase/config.local.json"
@@ -161,10 +165,23 @@ class SyncPublishTests(unittest.TestCase):
         (self.pi / "agents/leaky.md").write_text("notes\n" + PLANT_PASSWORD)
         self.assert_sync_refused("agent/agents/leaky.md")
 
-    def test_planted_connection_string_fails(self):
-        (self.pi / "templates").mkdir(exist_ok=True)
-        (self.pi / "templates/db.md").write_text("mongodb://admin:Sup3rS3cret@db.internal:27017/app\n")
-        self.assert_sync_refused("agent/templates/db.md")
+    def test_planted_connection_string_fails_in_published_files(self):
+        connection = "mongodb://admin:" + FAKE_KEY + "@db.example.invalid:27017/app"
+        for path in ("templates/db.md", "lib/direct-link-credentials.ts"):
+            with self.subTest(path=path):
+                live = self.pi / path
+                live.parent.mkdir(exist_ok=True)
+                original = live.read_text() if live.exists() else ""
+                number = len(original.splitlines()) + 1
+                live.write_text(original + f'const databaseConnectionString = "{connection}";\n')
+                output = self.assert_sync_refused(f"agent/{path}:{number}: connection-string")
+                self.assertIn(f"agent/{path}: secret-mask (connection-string)", output)
+                self.assertNotIn(connection, output)
+                self.assertNotIn(FAKE_KEY, output)
+                if original:
+                    live.write_text(original)
+                else:
+                    live.unlink()
 
     def test_planted_api_key_field_in_models_json_fails(self):
         path = self.pi / "models.json"
