@@ -124,6 +124,13 @@ class InboxWatchSpecs(unittest.TestCase):
         self.assertEqual(matches(["L24-to-L0-x.md"], "L24"), set())
         self.assertEqual(matches(["R-AI-to-L0-x.md"], "--alias", "R-AI", "L24"), set())
 
+    def test_lane_and_alias_case_variants_deliver_only_inbound_addresses(self):
+        inbound = {"L0-to-S01ABC12-direct.md", "L0-to-s01Abc12-direct-lower.md",
+                   "s01ABC12-from-L0-reversed.md", "L0-to-L5-cc-r-aI-alias.md"}
+        ignored = {"L0-to-L5-s01abc12-topic.md", "s01ABC12-to-ALL-own.md",
+                   "ALL-from-s01Abc12-own.md", "ALL-from-r-ai-own.md"}
+        self.assertEqual(matches(inbound | ignored, "--alias", "R-AI", "S01abc12"), inbound)
+
     def test_timestamp_prefixed_names(self):
         names = ["20261023-074001-L0-to-L15-x.md", "20261023T074001-L0-to-L15-y.md",
                  "20261023-074001-ALL-from-L0-z.md", "20261023-074001-L15-to-L0-own.md",

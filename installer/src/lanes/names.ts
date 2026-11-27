@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 const ID = "(?:[A-Z][A-Z0-9]*[a-z]?|[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)+)";
 export const validNewId = (s: string): boolean => s.length <= 32 && /^(?:[A-Z][A-Z0-9]*[a-z]?|R-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)$/.test(s);
 export const validId = (s: string): boolean => s.length <= 32 && new RegExp(`^${ID}$`).test(s);
+export const validRecipientId = (s: string): boolean => s.length <= 32 && /^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*$/i.test(s);
 export const validTopic = (s: string): boolean => /^[a-z0-9][a-z0-9-]{0,47}$/.test(s);
 export const slug = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32).replace(/-$/, "") || "task";
 export function messageName(from: string, to: string, topic: string, at: Date, collision = 1): string {

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { expand, type Config } from "./config.ts";
 import type { LanesCtx } from "./ctx.ts";
-import { messageName, parseMessageName, validId, validTopic } from "./names.ts";
+import { messageName, parseMessageName, validId, validRecipientId, validTopic } from "./names.ts";
 
 export interface MessageRef { name: string; from: string; to: string[]; topic: string; at: Date }
 export interface LaneBackend {
@@ -28,7 +28,7 @@ export class FileBackend implements LaneBackend {
     this.dir = dir; this.now = now; this.broadcast = broadcast;
   }
   async send(m: { from: string; to: string; topic: string; body: string }): Promise<MessageRef & { path: string }> {
-    if (!validId(m.from) || !validId(m.to) || !validTopic(m.topic)) throw new Error("invalid message name");
+    if (!validId(m.from) || !validRecipientId(m.to) || !validTopic(m.topic)) throw new Error("invalid message name");
     mkdirSync(this.dir, { recursive: true });
     const at = this.now();
     for (let i = 1; ; i++) {

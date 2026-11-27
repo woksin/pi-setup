@@ -3,30 +3,30 @@ import { resolve } from "node:path";
 import { backendFor } from "../backend.ts";
 import { effectiveParent, UsageError, type Config, type Lane } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
-import { validId, validTopic } from "../names.ts";
+import { validId, validRecipientId, validTopic } from "../names.ts";
 import { age, foldRegistry, holding, issueKey, ownershipOf, parseIssue, readIssueRegister, type RegisterData } from "../issue-register.ts";
 import { buildRoster, readRoster, sessionsForRow, type RosterRow } from "../roster.ts";
 export async function send(
   args: string[], opts: Record<string, string>, c: Config, root: string, ctx: LanesCtx,
 ): Promise<number> {
-  let [to, topic, file] = args;
-  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to, topic, file }, opts);
-  const known = [c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.flatMap((l) => [l.id, l.group])];
-  if (!known.includes(to)) await warnUnknown(to, { c, root, ctx });
-  const refusal = await guardIssue(to, opts, { c, root, ctx });
+  const [recipient, topic, file] = args;
+  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to: recipient, topic, file }, opts);
+  const deps = { c, root, ctx };
+  const to = await resolveRecipient(recipient, deps);
+  const refusal = await guardIssue(to, opts, deps);
   if (refusal) return refusal;
   let body = await messageBody(file, opts, ctx);
   if (!body.trim()) throw new UsageError("empty message body");
   if (opts.force !== undefined) body = `Ownership override (--force): ${opts.force}\n\n${body}`;
-  to = route({ to, from, direct: opts.direct }, c, ctx);
-  ctx.out((await backendFor(c, ctx, root).send({ from, to, topic, body })).path);
+  const target = route({ to, from, direct: opts.direct }, c, ctx);
+  ctx.out((await backendFor(c, ctx, root).send({ from, to: target, topic, body })).path);
   return 0;
 }
 
 function validateMessage(input: { from?: string; to: string; topic: string; file?: string }, opts: Record<string, string>): string {
   if (!input.from) throw new UsageError("set --from or PI_ORCH_ID");
   if (!validId(input.from)) throw new UsageError("invalid from");
-  if (!validId(input.to)) throw new UsageError("invalid to");
+  if (!validRecipientId(input.to)) throw new UsageError("invalid to");
   if (!validTopic(input.topic)) throw new UsageError("invalid topic");
   if (opts.m !== undefined && input.file !== undefined) throw new UsageError("choose a file or -m, not both");
   return input.from;
@@ -69,12 +69,25 @@ function closestLive(to: string, rows: RosterRow[]): string {
   ranked.sort((a, b) => b.prefix - a.prefix || a.distance - b.distance || Number(b.row.state === "idle") - Number(a.row.state === "idle") || a.row.lane.localeCompare(b.row.lane));
   return ranked.slice(0, 3).map(({ row }) => `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${row.state}`).join(", ");
 }
-async function warnUnknown(to: string, deps: SendContext): Promise<void> {
+function matchingRecipient(to: string, ids: Iterable<string>): string | undefined {
+  const key = to.toLowerCase();
+  const matches = [...new Set(ids)].filter(id => id.toLowerCase() === key);
+  if (matches.length > 1) throw new UsageError(`ambiguous recipient ${to}: ${matches.sort().join(", ")}`);
+  return matches[0];
+}
+async function resolveRecipient(to: string, deps: SendContext): Promise<string> {
+  const { c, ctx } = deps;
+  if (["ALL", c.messages.broadcast, ...c.lanes.map(l => l.group)].includes(to)) return to;
   const live = await liveRoster(deps);
-  if (live.registered.has(to)) return;
-  deps.ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  const liveIds = live.rows.filter(row => row.identity !== "unregistered").map(row => row.lane);
+  const canonical = matchingRecipient(to, [...live.registered, ...liveIds])
+    ?? matchingRecipient(to, [c.coordinator.id, ...c.lanes.map(l => l.id)]);
+  if (canonical) return canonical;
+  if (!validId(to)) throw new UsageError("invalid to");
+  ctx.err(`warning: unknown recipient ${to}; sending anyway`);
   const candidates = closestLive(to, live.rows);
-  if (candidates) deps.ctx.err(`closest live: ${candidates}`);
+  if (candidates) ctx.err(`closest live: ${candidates}`);
+  return to;
 }
 function assignmentRepo(to: string, c: Config): string | undefined {
   const lanes = c.lanes.filter(l => l.id === to && !l.retired && !l.closed);

@@ -12,6 +12,13 @@ interface Lease {
 export interface AdmissionRequest {
   root: string; cwd: string; id: string; pool: Lease["pool"];
 }
+class StartUnavailable extends Error {
+  readonly pid: number;
+  constructor(pid: number) {
+    super(`admission inventory: start time unavailable for pid ${pid}`);
+    this.pid = pid;
+  }
+}
 const pause = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 async function bounded<T>(work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -22,10 +29,12 @@ async function bounded<T>(work: Promise<T>): Promise<T> {
 export async function inventory(ctx: LanesCtx): Promise<AdmissionProcess[]> {
   const rows = await bounded(ctx.admissionInventory ? ctx.admissionInventory() : nativeInventory(ctx));
   if (!Array.isArray(rows) || rows.length > 20000 || rows.some(r => !Number.isSafeInteger(r.pid) || r.pid < 1
-    || !Number.isSafeInteger(r.ppid) || r.ppid < 0 || typeof r.start !== "string" || !r.start.trim()
-    || typeof r.pi !== "boolean" || (r.pi && !r.cwd)) || new Set(rows.map(r => r.pid)).size !== rows.length) {
+    || !Number.isSafeInteger(r.ppid) || r.ppid < 0 || typeof r.pi !== "boolean" || (r.pi && !r.cwd))
+    || new Set(rows.map(r => r.pid)).size !== rows.length) {
     throw new Error("admission inventory malformed or identity unavailable");
   }
+  const unreadable = rows.find(r => typeof r.start !== "string" || !r.start.trim());
+  if (unreadable) throw new StartUnavailable(unreadable.pid);
   return rows;
 }
 async function nativeInventory(ctx: LanesCtx): Promise<AdmissionProcess[]> {
@@ -34,7 +43,7 @@ async function nativeInventory(ctx: LanesCtx): Promise<AdmissionProcess[]> {
   const rows: AdmissionProcess[] = [];
   for (const line of result.stdout.trim().split("\n")) {
     const m = /^(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.+)$/.exec(line.trim());
-    if (!m) throw new Error("admission inventory malformed");
+    if (!m) throw unreadableProcess(line);
     const row: AdmissionProcess = { pid: Number(m[1]), ppid: Number(m[2]), start: m[3].replace(/\s+/g, " "), pi: basename(m[4]) === "pi" };
     if (row.pi) {
       if (ctx.readCwd) row.cwd = await ctx.readCwd(row.pid);
@@ -50,6 +59,10 @@ async function nativeInventory(ctx: LanesCtx): Promise<AdmissionProcess[]> {
     rows.push(row);
   }
   return rows;
+}
+function unreadableProcess(line: string): Error {
+  const pid = /^\s*(\d+)\s+\d+(?:\s|$)/.exec(line);
+  return pid ? new StartUnavailable(Number(pid[1])) : new Error("admission inventory malformed");
 }
 function privateDir(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
@@ -67,12 +80,14 @@ async function locked<T>(dir: string, work: () => Promise<T>): Promise<T> {
   }
   try { return await work(); } finally { rmdirSync(lock); }
 }
-function identity(value: any): value is Identity { return value && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.start === "string" && value.start.length > 0; }
+function identity(value: any): value is Identity { return value && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.start === "string" && value.start.trim().length > 0; }
 function readLease(file: string): Lease {
   if (!lstatSync(file).isFile()) throw new Error("admission lease is not a regular file");
   const v = JSON.parse(readFileSync(file, "utf8"));
-  if (v?.version !== 1 || !identity(v.owner) || (v.child !== undefined && !identity(v.child))
-    || (v.priorPi !== undefined && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)))
+  if (v?.version === 1 && (!identity(v.owner) || (v.child !== undefined && !identity(v.child)))) {
+    throw uncertainLease(file, "recorded owner or child identity unreadable");
+  }
+  if (v?.version !== 1 || (v.priorPi !== undefined && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)))
     || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some(s => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
   return v;
 }
@@ -81,9 +96,7 @@ function store(file: string, lease: Lease): void {
   writeFileSync(temp, JSON.stringify(lease), { mode: 0o600, flag: "wx" }); renameSync(temp, file);
 }
 function alive(id: Identity, rows: AdmissionProcess[]): boolean {
-  const row = rows.find(r => r.pid === id.pid);
-  if (row && row.start !== id.start) throw new Error(`admission identity uncertain: pid ${id.pid} reused`);
-  return Boolean(row);
+  return rows.some(row => row.pid === id.pid && row.start === id.start);
 }
 function below(row: AdmissionProcess, owner: Identity, rows: AdmissionProcess[]): boolean {
   const seen = new Set<number>(); let at: AdmissionProcess | undefined = row;
@@ -103,16 +116,30 @@ function uncertainPi(lease: Lease, all: Lease[], rows: AdmissionProcess[]): bool
       && [other.owner, other.child].some(id => id && alive(id, rows) && below(pi, id, rows)));
   });
 }
-function registry(dir: string): { file: string; lease: Lease }[] {
+interface LeaseEntry { file: string; lease: Lease }
+function registry(dir: string): LeaseEntry[] {
   return readdirSync(dir).filter(n => n.endsWith(".json")).map(n => {
     const file = join(dir, n); return { file, lease: readLease(file) };
   });
 }
-function leases(dir: string, rows: AdmissionProcess[]): Lease[] {
-  const entries = registry(dir); const all = entries.map(e => e.lease);
+function uncertainLease(file: string, detail: string): Error {
+  return new Error(`admission lease uncertain: ${file}: ${detail}; confirm neither the recorded owner nor any child is still running, then move this lease out of the admission directory`);
+}
+async function leaseInventory(ctx: LanesCtx, entries: LeaseEntry[]): Promise<AdmissionProcess[]> {
+  try { return await inventory(ctx); }
+  catch (error) {
+    if (error instanceof StartUnavailable) {
+      const entry = entries.find(({ lease }) => lease.owner.pid === error.pid || lease.child?.pid === error.pid);
+      if (entry) throw uncertainLease(entry.file, `start time unavailable for pid ${error.pid}`);
+    }
+    throw error;
+  }
+}
+function leases(entries: LeaseEntry[], rows: AdmissionProcess[]): Lease[] {
+  const all = entries.map(e => e.lease);
   return entries.flatMap(({ file, lease }) => {
-    if (alive(lease.owner, rows)) { if (lease.child) alive(lease.child, rows); return [lease]; }
-    if (!lease.child) throw new Error("admission lease uncertain: dead owner with unrecorded child");
+    if (alive(lease.owner, rows)) return [lease];
+    if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
     if (alive(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
     unlinkSync(file); return [];
   });
@@ -120,9 +147,10 @@ function leases(dir: string, rows: AdmissionProcess[]): Lease[] {
 export async function admit(ctx: LanesCtx, request: AdmissionRequest, beforeLaunch?: () => Promise<void>) {
   const dir = join(ctx.piAgentDir, "lanes-admission");
   const lease = await locked(dir, async () => {
-    const rows = await inventory(ctx); const owner = rows.find(r => r.pid === process.pid);
+    const entries = registry(dir); const rows = await leaseInventory(ctx, entries);
+    const owner = rows.find(r => r.pid === process.pid);
     if (!owner) throw new Error("admission controller identity unavailable");
-    const active = leases(dir, rows); const pis = rows.filter(r => r.pi);
+    const active = leases(entries, rows); const pis = rows.filter(r => r.pi);
     if (active.some(l => l.cwd === request.cwd) || pis.some(p => p.cwd === request.cwd)) throw new Error(`already running in ${request.cwd}`);
     const value: Lease = { version: 1, token: randomUUID(), owner: { pid: owner.pid, start: owner.start }, root: request.root, cwd: request.cwd, id: request.id, pool: request.pool,
       priorPi: pis.map(p => ({ pid: p.pid, start: p.start })) };
@@ -143,8 +171,8 @@ export async function admit(ctx: LanesCtx, request: AdmissionRequest, beforeLaun
       await locked(dir, async () => {
         const current = readLease(file);
         if (current.token !== lease.token || current.owner.pid !== process.pid || current.owner.start !== lease.owner.start) throw new Error("admission lease ownership changed");
-        const rows = await inventory(ctx);
-        if ((lease.child && alive(lease.child, rows)) || uncertainPi(lease, registry(dir).map(e => e.lease), rows)) throw new Error("admission child cleanup uncertain; lease retained");
+        const entries = registry(dir); const rows = await leaseInventory(ctx, entries);
+        if ((lease.child && alive(lease.child, rows)) || uncertainPi(lease, entries.map(e => e.lease), rows)) throw new Error("admission child cleanup uncertain; lease retained");
         unlinkSync(file);
       });
     },
