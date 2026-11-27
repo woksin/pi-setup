@@ -6,8 +6,7 @@ from memory_guard_config import DEFAULTS, HEAVY_HARD_CEILING, number
 GROWTH_WINDOW_S = 300
 MIN_SPAN_S = 60
 NORMAL_HEAVY_CEILING = 3
-POOLS_BY_LEVEL = {0: {}, 1: {}, 2: dict(heavy=1, fast=1, integration=0), 3: dict(heavy=0, fast=1, integration=0),
-                  4: dict(heavy=0, fast=0, integration=0)}
+POOLS_BY_LEVEL = {0: {}, 1: {}, **{level: dict(heavy=0, fast=0, integration=0) for level in (2, 3, 4)}}
 
 
 def has_swap_ins(sample):
@@ -104,7 +103,8 @@ def shed_reasons(sample, history, limits):
 def stop_reasons(sample, history, limits):
     growth = at_least(sample.get("swapGrowth"), limits["stop_swap_growth_mb_per_min"])
     over_hard = sample.get("sessions", 0) > limits["hard_live_sessions"]
-    return compressor_reason(sample, limits["stop_compressor_percent"]) \
+    held = [f"memory pressure level {sample['pl']} held"] if pressure_held(sample, history, limits["warn_pressure_level"]) else []
+    return held + compressor_reason(sample, limits["stop_compressor_percent"]) \
         + ([f"swap growth {sample['swapGrowth']:g} MB/min"] if growth else []) \
         + swap_in_reason(sample, history, limits["stop_swap_in_pages_per_s"]) \
         + ([f"{sample['sessions']} live pi > hard cap {limits['hard_live_sessions']:g}"] if over_hard else []) \

@@ -1,4 +1,6 @@
 """cpu_budget (#81 step 6): per-pool unit costs, load guard, observe vs enforce, config."""
+from contextlib import redirect_stdout
+import io
 import os
 import time
 import unittest
@@ -62,16 +64,33 @@ class CpuBudgetTests(Harness):
         prior = {path: pi_phase.metadata(path.with_suffix(".json")) for path in self.state.glob("*.lock")}
         self.assertEqual(budget.running_units(self.state, {}, prior, set()), 3 + 1 + 2)
 
-    def test_enforce_holds_when_units_would_exceed_the_budget_only_while_others_run(self):
-        budget = self.budget(max_units=4)
-        self.assertTrue(self.claim(budget), "idle host: the first phase always starts")
-        for path in self.state.glob("*"):
-            path.unlink()
-        self.hold("heavy-0.lock")  # 3 units running; a heavy candidate needs 3 more > 4
-        scan = {}
-        self.assertIsNone(self.claim(budget, scan=scan))
-        self.assertEqual(scan["reason"], "cpu")
-        self.assertTrue(self.claim(self.budget(max_units=6)), "3 + 3 fits a budget of 6")
+    def test_heavy_plus_fast_block_integration_until_fast_releases(self):
+        budget = self.budget(max_units=8)
+        self.hold("heavy-0.lock")  # 3 units
+        fast = pi_phase.lock_file(self.state / "fast-0.lock")  # 1 unit
+        try:
+            scan = {}
+            self.assertIsNone(self.claim(budget, kind="integration", scan=scan))  # needs another 3 + 2
+            self.assertEqual(scan["reason"], "cpu")
+            self.assertIn("4+5/8", scan["hold"])
+        finally:
+            pi_phase.unlock(fast)
+        self.assertTrue(self.claim(budget, kind="integration"))
+
+    def test_idle_over_ceiling_is_rejected_without_starting_or_requeueing(self):
+        self.configure(cpu_budget=dict(mode="enforce", max_units=2, costs=dict(heavy=3)),
+                       memory_guard=dict(mode="off"), container_test_detection="off")
+        output = io.StringIO()
+        with patch.object(pi_phase.os, "getloadavg", return_value=(0, 0, 0)), redirect_stdout(output):
+            code = pi_phase.main(["run", "--kind", "build", "--policy", "queued", "--timeout", "1",
+                                  "--label", "over-ceiling", "--queue-timeout", "60", "--", "should-not-execute"],
+                                 state=str(self.state), configuration=str(self.config))
+        self.assertEqual(code, 75)
+        self.assertIn("needs 3 units", output.getvalue())
+        self.assertIn("max 2", output.getvalue())
+        record = self.ledger_records()[-1]
+        self.assertIsNone(record["startedAt"])
+        self.assertEqual(record["outcome"], "rejected")
 
     def test_direct_takes_part_in_enforce_mode_only(self):
         self.hold("heavy-0.lock")
@@ -99,7 +118,7 @@ class CpuBudgetTests(Harness):
     def test_ci_is_never_held(self):
         self.hold("heavy-0.lock")
         budget = self.budget(max_units=1, load=99.0)
-        self.assertEqual(budget.reason(3, [self.state / "ci-abc.lock"], 99.0), None)
+        self.assertTrue(self.claim(budget, kind="ci"))
 
     def test_observe_never_holds(self):
         self.hold("heavy-0.lock")

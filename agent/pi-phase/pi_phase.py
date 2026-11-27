@@ -1490,6 +1490,49 @@ def direct_refusal(state, kind, fingerprint, identity=None):
     return None
 
 
+LIGHT_SLOT = "direct-00000000000000000000000000000000.lock"
+LIGHT_RUN_S = 30
+LIGHT_QUEUE_S = 5
+
+
+def proven_light(args, command, history, fingerprint):
+    if (args.kind != "test" or args.policy != "direct" or args.source != "flag"
+            or len(command) != 3 or command[:2] != ["node", "--test"]):
+        return False
+    # One explicit local file, never a glob, directory, discovery or an option.
+    name = command[2]
+    path = Path(name)
+    if (not re.fullmatch(r"[a-zA-Z0-9_./-]+\.(?:js|mjs|cjs|ts|mts|cts)", name)
+            or name.startswith("-") or path.is_absolute() or ".." in path.parts):
+        return False
+    try:
+        if not path.resolve(strict=True).is_relative_to(Path.cwd()) or not path.is_file():
+            return False
+    except (OSError, RuntimeError):
+        return False
+    runs = history.exact_runs(fingerprint)
+    return (any(r["outcome"] == "passed" for r in runs)
+            and all(number(r.get("runS")) and 0 <= r["runS"] <= LIGHT_RUN_S
+                    and r.get("fastBudgetExceeded") is not True for r in runs))
+
+
+class LightQueue:
+    """The same short budget covers worktree wait, registration and slot admission."""
+    def __init__(self, queued, timeout, proven):
+        self.queued, self.timeout, self.proven = queued, timeout, proven
+        self.bounded = False
+
+    def deadline(self, guard):
+        self.bounded |= self.proven and guard.get("level", 0) >= 2
+        return self.queued + (min(self.timeout, LIGHT_QUEUE_S) if self.bounded else self.timeout)
+
+    def timeout_note(self, reason):
+        if self.bounded:
+            note(f"light direct not started: {reason or 'admission deadline'}; use CI if available")
+        else:
+            queue_timeout_note(self.timeout)
+
+
 def fast_lane_config(value, warn):
     defaults = dict(slots=2, max_expected_s=90, kinds=["build", "test"], shape=True)
     if value is False:
@@ -1715,7 +1758,7 @@ class MemoryAdmission:
         self.noted = False
         self.failure_noted = False
 
-    def reading(self, deadline):
+    def reading(self, deadline, *, light=False):
         now = time.monotonic()
         if self.checked is None or now - self.checked >= 5:
             self.checked = now
@@ -1724,14 +1767,15 @@ class MemoryAdmission:
             except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
                 self.sample = None
                 if not self.failure_noted:
-                    note(f"memory measurement failed ({exc}); admitting (fail-open)")
+                    fallback = "light admission cannot verify the floor" if light else "admitting (fail-open)"
+                    note(f"memory measurement failed ({exc}); {fallback}")
                     self.failure_noted = True
         return self.sample
 
-    def reason(self, deadline):
-        self.reading(deadline)
+    def reason(self, deadline, *, light=False):
+        self.reading(deadline, light=True) if light else self.reading(deadline)
         if self.sample is None:
-            return None
+            return "memory floor measurement unavailable" if light else None
         free, swap_free = self.sample
         minimum = self.thresholds["min_free_percent"]
         if free < minimum:
@@ -1866,13 +1910,17 @@ def parse_host_pressure(text):
 def read_host_pressure(timeout):
     if sys.platform != "darwin":
         raise ValueError("host pressure is unsupported on this platform")
+    deadline = time.monotonic() + timeout
     names = ["vm.swapusage", "vm.compressor_bytes_used", "hw.memsize", "kern.memorystatus_vm_pressure_level",
              "kern.memorystatus_level"]
     reading = parse_host_pressure(subprocess.run(["sysctl", "-n", *names], capture_output=True, text=True, check=True,
                                                  timeout=timeout).stdout)
     try:  # swap-in rate input; the other signals still work without it
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return reading
         counters = memory_guard.parse_vm_stat(subprocess.run(["vm_stat"], capture_output=True, text=True, check=True,
-                                                             timeout=timeout).stdout)
+                                                             timeout=remaining).stdout)
         reading["swapIns"] = counters["swapIns"]
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
@@ -1909,7 +1957,8 @@ class HostPressure:
     def cached(self):
         try:
             data = json.loads(self.path.read_text())
-            if isinstance(data, dict) and number(data.get("t")) and isinstance(data.get("hist"), list):
+            if (isinstance(data, dict) and all(number(data.get(key)) for key in ("t", "pl", "cmpPct"))
+                    and isinstance(data.get("hist"), list)):
                 return data
         except (OSError, ValueError):
             pass
@@ -1919,7 +1968,7 @@ class HostPressure:
         data = self.cached() or {}
         return {key: data[key] for key in ("pl", "cmpPct", "swapMb", "swapGrowth", "swapInRate") if number(data.get(key))}
 
-    def sample(self, deadline):
+    def sample(self, deadline, *, light=False):
         now = self.clock()
         cached = self.cached()
         if cached and 0 <= now - cached["t"] < self.settings["sample_ttl_s"]:
@@ -1931,7 +1980,8 @@ class HostPressure:
             reading = self.probe(min(1, remaining))
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
             if not self.failure_noted:
-                note(f"host pressure measurement failed ({exc}); admitting (fail-open)")
+                fallback = "light admission cannot verify pressure" if light else "admitting (fail-open)"
+                note(f"host pressure measurement failed ({exc}); {fallback}")
                 self.failure_noted = True
             return None
         history = [item for item in (cached or {}).get("hist", []) if isinstance(item, list) and len(item) == 2
@@ -1949,12 +1999,15 @@ class HostPressure:
             pass  # An unwritable cache only costs the next waiter a probe.
         return data
 
-    def reason(self, deadline):
-        data = self.sample(deadline)
+    def reason(self, deadline, *, light=False):
+        data = self.sample(deadline, light=True) if light else self.sample(deadline)
         if data is None:
-            return None
+            return "host pressure unavailable" if light else None
         limits = self.settings
-        if data["pl"] >= limits["max_pressure_level"]:
+        if light and data["pl"] >= 4:
+            return f"critical memory pressure level {data['pl']}"
+        warning = light and data["pl"] == limits["max_pressure_level"] == 2
+        if data["pl"] >= limits["max_pressure_level"] and not warning:
             return f"memory pressure level {data['pl']} >= {limits['max_pressure_level']}"
         if data["cmpPct"] >= limits["max_compressor_percent"]:
             return f"compressor {data['cmpPct']:g}% >= {limits['max_compressor_percent']:g}%"
@@ -2025,12 +2078,15 @@ class CpuBudget:
 
     def running_units(self, state, available, prior, live):
         """Caller holds the coordinator."""
-        return sum(self.cost(path, prior.get(path) or {}) for path in state.glob("*.lock")
+        return sum(self.cost(path, metadata(path.with_suffix(".json"))) for path in state.glob("*.lock")
                    if path.name.startswith(tuple(pool + "-" for pool in CPU_POOLS)) and path not in available
                    and lease_running(path, prior, live))
 
+    def need(self, candidate):
+        return sum(self.cost(path) for path in candidate)
+
     def reason(self, units, candidate, load):
-        need = sum(self.cost(path) for path in candidate)
+        need = self.need(candidate)
         if need <= 0:
             return None  # ci (and unpriced pools) are never held
         if units + need > self.max_units:
@@ -2984,12 +3040,15 @@ HOLDER_SLOTS_ENV = "PI_PHASE_HOLDER_SLOTS"
 HOLDER_STATE_ENV = "PI_PHASE_HOLDER_STATE"
 
 
-def worktree_root(cwd):
+def worktree_root(cwd, deadline=None):
     for _ in range(2):
+        timeout = 3 if deadline is None else min(3, deadline() - time.monotonic())
+        if timeout <= 0:
+            break
         try:
             result = subprocess.run(["git", "--no-optional-locks", "rev-parse", "--show-toplevel"],
                                     cwd=cwd, env=scrubbed_environment(GIT_OPTIONAL_LOCKS="0"),
-                                    capture_output=True, text=True, timeout=3)
+                                    capture_output=True, text=True, timeout=timeout)
             return os.path.realpath(result.stdout.strip() if result.returncode == 0 else cwd)
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -3008,9 +3067,17 @@ def worktree_group_paths(path):
     return path.with_suffix(".groups").glob("*.json")
 
 
-def worktree_groups_alive(path, info):
+def worktree_groups_alive(path, info, deadline=None):
     groups = [info, *(metadata(group) for group in worktree_group_paths(path))]
-    return any(group_alive(group) is not False for group in groups)
+    if deadline is None:
+        return any(group_alive(group) is not False for group in groups)
+    if any(group.get("unreadable") for group in groups):
+        return True
+    pgids = set().union(*(lease_groups(group) for group in groups))
+    if not pgids:
+        return False
+    live = live_groups(min(0.5, deadline() - time.monotonic()))
+    return live is None or bool(pgids & live)
 
 
 class WorktreeLease:
@@ -3045,17 +3112,20 @@ class WorktreeLease:
                 os.close(self.fd)
 
 
-def process_snapshot():
+def process_snapshot(timeout=2):
     listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="],
-                             capture_output=True, text=True, timeout=2, check=True).stdout
+                             capture_output=True, text=True, timeout=timeout, check=True).stdout
     return {int(p[0]): (int(p[1]), int(p[2]), p[3])
             for line in listing.splitlines() if len(p := line.split()) == 4}
 
 
-def holder_ancestry(info):
+def holder_ancestry(info, deadline=None):
     """A token alone is not authority: require a live holder and producer ancestry."""
     try:
-        rows = process_snapshot()
+        timeout = 2 if deadline is None else min(2, deadline() - time.monotonic())
+        if timeout <= 0:
+            return False
+        rows = process_snapshot(timeout) if deadline else process_snapshot()
         producer, holder = info["pid"], info["holderPid"]
         if any(pid not in rows or rows[pid][2].startswith("Z") for pid in (producer, holder)):
             return False
@@ -3074,7 +3144,7 @@ def holder_ancestry(info):
     return False
 
 
-def nested_holder(state, root):
+def nested_holder(state, root, deadline=None):
     """Validate live slot ownership under the coordinator; never inherit lock FDs."""
     token = os.environ.get(HOLDER_ENV, "")
     if (not re.fullmatch(r"[a-f0-9]{32}", token)
@@ -3087,14 +3157,30 @@ def nested_holder(state, root):
                 or any(not isinstance(name, str) or not re.fullmatch(
                     r"(?:heavy|integration|fast)-[0-9]+\.lock|direct-[a-f0-9]{32}\.lock", name) for name in slots)):
             return None
-        with open(state / "coordinator.lock", "a+b") as coordinator:
-            fcntl.flock(coordinator, fcntl.LOCK_EX)
+        if LIGHT_SLOT in slots:
+            return None  # The short exception cannot authorize nested work.
+        if deadline:
+            coordinator = None
+            while coordinator is None and (remaining := deadline() - time.monotonic()) > 0:
+                coordinator = lock_file(state / "coordinator.lock")
+                if coordinator is None:
+                    time.sleep(min(TICK, remaining))
+            if coordinator is None:
+                return None
+        else:
+            coordinator = os.open(state / "coordinator.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if not deadline:
+                fcntl.flock(coordinator, fcntl.LOCK_EX)
             records = [metadata((state / name).with_suffix(".json")) for name in slots]
             info = records[0]
             if (any(record != info for record in records) or info.get("token") != token
                     or info.get("root") != root or not all(readonly_busy(state / name) for name in slots)):
                 return None
-        if holder_ancestry(info):
+        finally:
+            os.close(coordinator)
+        related = holder_ancestry(info, deadline) if deadline else holder_ancestry(info)
+        if related:
             return dict(info, slots=slots)
     except (OSError, ValueError, TypeError):
         pass
@@ -3105,7 +3191,7 @@ def holder_environment(state, root, held, token, environment, holder=None):
     environment = scrubbed_environment(environment)
     for name in (HOLDER_ENV, HOLDER_ROOT_ENV, HOLDER_SLOTS_ENV, HOLDER_STATE_ENV, "PI_PHASE_WORKTREE_HELD"):
         environment.pop(name, None)
-    if holder or held:
+    if holder or (held and all(path.name != LIGHT_SLOT for path, _ in held)):
         environment.update({HOLDER_ENV: holder["token"] if holder else token,
                             HOLDER_ROOT_ENV: root, HOLDER_STATE_ENV: os.path.realpath(state),
                             HOLDER_SLOTS_ENV: json.dumps(holder["slots"] if holder else [p.name for p, _ in held])})
@@ -3168,6 +3254,8 @@ class WorktreeAdmission:
         self.lease = None
         self.holder = None
         self.result = "error"
+        self.light_deadline = None
+        self.light_queue = None
 
     def register(self):
         directory = self.state / "worktrees" / "waiting"
@@ -3195,7 +3283,7 @@ class WorktreeAdmission:
             return None
         try:
             info = metadata(self.info_path)
-            if worktree_groups_alive(self.path, info):
+            if worktree_groups_alive(self.path, info, self.light_deadline):
                 return None
             self.publish_holder(fd, info)
             fd = None
@@ -3224,6 +3312,7 @@ class WorktreeAdmission:
                 if cancelled():
                     return "cancelled", None
                 info = metadata(self.info_path)
+                deadline = self.light_deadline() if self.light_deadline else deadline
                 if time.monotonic() >= deadline:
                     return "timeout", info
                 if self.claim():
@@ -3242,9 +3331,7 @@ class WorktreeAdmission:
 
     def acquire(self, deadline, cancelled, ledger):
         if os.environ.get(WORKTREE_ENV) == "0":
-            self.root = worktree_root(os.getcwd())
-            if self.args.kind != "ci":
-                self.holder = nested_holder(self.state, self.root)
+            self.prepare_root()
             self.result = "disabled"
             return None
         started = time.monotonic()
@@ -3258,11 +3345,19 @@ class WorktreeAdmission:
                 # waitS and its telemetry continue to describe global admission only.
                 ledger.queued = time.monotonic()
 
+    def prepare_root(self):
+        if self.light_deadline:
+            self.root = worktree_root(os.getcwd(), self.light_deadline)
+            self.holder = nested_holder(self.state, self.root, self.light_deadline)
+        else:
+            self.root = worktree_root(os.getcwd())
+            if self.args.kind != "ci":
+                self.holder = nested_holder(self.state, self.root)
+
     def admit(self, deadline, cancelled):
         if self.args.kind == "ci":
             return "skipped", None
-        self.root = worktree_root(os.getcwd())
-        self.holder = nested_holder(self.state, self.root)
+        self.prepare_root()
         if self.opt_out:
             return "skipped", None
         self.path, self.info_path, self.key = worktree_paths(self.state, self.root)
@@ -3280,7 +3375,10 @@ class WorktreeAdmission:
         if ledger:
             ledger.outcome("queue-timeout" if self.result == "timeout" else "cancelled")
         if self.result == "timeout":
-            queue_timeout_note(self.args.queue_timeout)
+            if self.light_queue and self.light_queue.bounded:
+                self.light_queue.timeout_note("worktree lock unavailable")
+            else:
+                queue_timeout_note(self.args.queue_timeout)
             note(f"worktree lock still held by {value.get('label', '?')} pid {value.get('pid', '?')}")
             return 75
         note("cancelled while waiting for worktree lock")
@@ -3411,7 +3509,7 @@ def guarded_limits(settings):
     settings.guard_note = None
     if (options.get("memory_guard") or {}).get("mode", "off") == "off":
         return settings
-    info = memory_guard.read_level(memory_guard.state_dir(), options["memory_guard"]["stale_s"])
+    info = guard_snapshot(options)
     fast = options.get("fast_lane")
     configured = dict(heavy=settings[0], integration=settings[1], **({"fast": fast["slots"]} if fast else {}))
     effective, rules = memory_guard.effective_slots(memory_guard.Capacity(info["level"], info.get("sessions") or 0,
@@ -3419,6 +3517,7 @@ def guarded_limits(settings):
     result = PhaseConfig(effective["heavy"], effective["integration"],
                          dict(options, fast_lane=dict(fast, slots=effective["fast"])) if fast else options)
     result.guard_note = None
+    result.guard = info
     result.burst_blocked = info["level"] >= 2  # the guard forbids integration at level 2+; a burst must not undo it
     if info["level"] >= 2 or rules:
         result.guard_note = (f"memory guard level {info['level']}: {'; '.join(info.get('reasons') or ['ceilings'])}"
@@ -3534,13 +3633,17 @@ def high_slot_paths(state):
     return list(state.glob("heavy-*.lock")) + list(state.glob("fast-*.lock")) + list(state.glob("direct-*.lock"))
 
 
-def observe_high(state):
+def observe_high(state, deadline=None):
     """Probe orphan-guarded HIGH leases; call outside the coordinator and pass to high_count."""
     observed = {}
     for path in high_slot_paths(state):
         data = metadata(path.with_suffix(".json"))
         if data.get("priority") == "high" and lease_groups(data) and not readonly_busy(path):
-            observed[path] = (data, group_alive(data))
+            observed[path] = (data, group_alive(data) if deadline is None else None)
+    if deadline is not None and observed:
+        live = live_groups(min(0.5, deadline - time.monotonic()))
+        if live is not None:
+            return {path: (data, bool(lease_groups(data) & live)) for path, (data, _) in observed.items()}
     return observed
 
 
@@ -3551,7 +3654,7 @@ def high_count(state, observed=None):
     observation is used only if the metadata is unchanged; anything else counts as occupied.
     Without an observation (direct callers) probes run inline.
     """
-    tokens = {w["token"] for w in all_waiters(state) if w["priority"] == "high"}
+    tokens = {w["token"] for w in all_waiters(state) + direct_waiters(state) if w["priority"] == "high"}
     for path in high_slot_paths(state):
         data = metadata(path.with_suffix(".json"))
         if data.get("priority") != "high":
@@ -3566,10 +3669,6 @@ def high_count(state, observed=None):
         if busy:
             tokens.add(data.get("token", path.name))
     return len(tokens)
-
-
-def slotless_policy(args):
-    return args.kind == "ci" or getattr(args, "policy", None) == "direct"
 
 
 def caller_identity():
@@ -3590,34 +3689,41 @@ def approved_priority(state, priority, cap, observed=None):
     return "high", None
 
 
-def register_waiter(state, args, token):
+def register_waiter(state, args, token, *, display_direct=False):
     """Nonblocking registration, including atomic grant consumption and FIFO sequence."""
-    observed = observe_high(state) if args.priority == "high" else None
+    deadline = getattr(args, "light_registration_deadline", None)
+    observed = observe_high(state, deadline) if args.priority == "high" else None
     coordinator = lock_file(state / "coordinator.lock")
     if coordinator is None:
         return False, None
-    path = state / ("fast-waiters" if getattr(args, "fast", False) else "waiters") / f"{token}.json"
+    direct = args.kind != "ci" and getattr(args, "policy", None) == "direct"
+    directory = "waiting-direct" if direct else "fast-waiters" if getattr(args, "fast", False) else "waiters"
+    path = state / directory / f"{token}.json"
     fd = None
     downgrade_note = None
     try:
         args.priority, downgrade_note = approved_priority(state, args.priority, getattr(args, "max_high", 3), observed)
-        if slotless_policy(args):
+        if args.kind == "ci" or (direct and not display_direct):
             return True, None
         path.parent.mkdir(mode=0o700, exist_ok=True)
-        counter = state / "waiter-seq.json"
-        seq = metadata(counter).get("seq", 0) + 1
-        save(counter, {"seq": seq})
+        seq = 0
+        if direct:
+            direct_waiters(state)  # Drop display entries from dead supervisors.
+        else:
+            counter = state / "waiter-seq.json"
+            seq = metadata(counter).get("seq", 0) + 1
+            save(counter, {"seq": seq})
         fd = lock_file(path)
         if fd is None:
             raise ValueError("cannot lock new waiter")
         session, lane = caller_identity()
         data = dict(token=token, pid=os.getpid(), priority=args.priority, kind=args.kind,
-                    session=session, lane=lane, withdraw=1,
+                    session=session, lane=lane, withdraw=0 if direct else 1,
                     label=args.label, cwd=os.getcwd(), enqueued=time.time(), seq=seq,
                     policy=getattr(args, "policy", "queued"), source=getattr(args, "source", "default"))
         if getattr(args, "fast", False):
             data["fast"] = True
-        if getattr(args, "expected", None) is not None:
+        if not direct and getattr(args, "expected", None) is not None:
             # Rank fields are written once, here, so every scan computes one total order.
             data.update(expected=float(args.expected), basis=getattr(args, "basis", "default"),
                         ageAt=data["enqueued"] + (getattr(args, "age_after", None) or 0))
@@ -3638,12 +3744,22 @@ def register_waiter(state, args, token):
                 note(downgrade_note)
             except BaseException:
                 if fd is not None:
-                    deregister_waiter(state, token, fd)
+                    deregister_waiter(state, token, fd, bounded=deadline is not None)
                 raise
 
 
-def deregister_waiter(state, token, fd):
-    """Keep unlink and lock release atomic with respect to queue scans."""
+def deregister_waiter(state, token, fd, *, bounded=False):
+    """Keep unlink and lock release atomic. A bounded waiter leaves scavenging to the next scan if busy."""
+    if bounded:
+        coordinator = lock_file(state / "coordinator.lock")
+        try:
+            if coordinator is not None:
+                waiter_path(state, token).unlink(missing_ok=True)
+        finally:
+            unlock(fd)
+            if coordinator is not None:
+                unlock(coordinator)
+        return
     with open(state / "coordinator.lock", "a+b") as coordinator:
         fcntl.flock(coordinator, fcntl.LOCK_EX)
         try:
@@ -3653,8 +3769,26 @@ def deregister_waiter(state, token, fd):
 
 
 def waiter_path(state, token):
-    fast = state / "fast-waiters" / f"{token}.json"
-    return fast if fast.exists() else state / "waiters" / f"{token}.json"
+    for directory in ("fast-waiters", "waiting-direct"):
+        path = state / directory / f"{token}.json"
+        if path.exists():
+            return path
+    return state / "waiters" / f"{token}.json"
+
+
+def write_waiter(path, info):
+    # Replacing the path would lose the waiter's locked inode. All readers hold the coordinator.
+    with open(path, "r+") as stream:
+        stream.write(json.dumps(info))
+        stream.truncate()
+
+
+def record_hold(path, scan):
+    if path is not None and scan.get("reason"):
+        info = metadata(path)
+        hold = " ".join(scan.get("hold", scan["reason"]).split())[:240]
+        if info and not info.get("unreadable") and info.get("hold") != hold:
+            write_waiter(path, dict(info, hold=hold))
 
 
 def withdrawal_path(state, token):
@@ -3723,6 +3857,10 @@ def all_waiters(state, cancelled=lambda: False, *, readonly=False, now=None):
     return ranked_waiters(waiters, now)
 
 
+def direct_waiters(state):
+    return live_waiters(state, directory="waiting-direct")
+
+
 def live_waiters(state, cancelled=lambda: False, *, readonly=False, directory="waiters", now=None):
     """Kernel locks, not PIDs, define liveness. Caller holds the coordinator."""
     waiters = []
@@ -3755,6 +3893,8 @@ def live_waiters(state, cancelled=lambda: False, *, readonly=False, directory="w
                     path.unlink(missing_ok=True)
         finally:
             os.close(fd)
+    if directory == "waiting-direct":
+        return sorted(waiters, key=lambda w: w["enqueued"])
     now = time.time() if now is None else now
     return ranked_waiters(waiters, now)
 
@@ -3826,20 +3966,54 @@ def cpu_verdict(cpu, state, available, prior, live, candidate, load):
     return cpu.reason(cpu.running_units(state, available, prior, live), candidate, load)
 
 
+def admission_reason(check, deadline, light):
+    return check.reason(deadline, light=True) if light else check.reason(deadline)
+
+
+def light_pressure(guard, pressure, host):
+    """Guard critical pressure and missing readings veto light even outside host enforce mode."""
+    level = guard.get("pl")
+    if number(level) and level >= 4:
+        host = f"critical memory pressure level {level}"
+    elif not pressure and not number(level):
+        host = "host pressure unavailable"
+    veto = host if host and host.startswith(("critical memory pressure", "host pressure unavailable")) else None
+    return host, veto
+
+
 def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admission=None,
-          integration_ceiling=None, *, scan=None, pressure=None, cpu=None):
+          integration_ceiling=None, *, scan=None, pressure=None, cpu=None, guard=None,
+          display=None, workers=None):
     """One bounded admission scan; kernel locks and metadata identity are checked atomically.
 
     Every probe (memory, host pressure, load average) runs here, before the coordinator lock is taken."""
+    scan = {} if scan is None else scan
+    queued_path = waiter_path(state, waiter or display) if waiter or display else None
     paths = claim_paths(state, candidates, waiter, limits)
+    light = state / LIGHT_SLOT in paths
+    guard = guard or {}
+    level = guard.get("level", 0)
+    if level >= 2 and not (light and level in (2, 3) and not guard.get("stale")):
+        why = '; '.join(guard.get("reasons") or ["admission stopped"])
+        scan.update(reason="guard", hold=f"guard level {level}: {why}")
+        coordinator = lock_file(state / "coordinator.lock")
+        if coordinator is not None:
+            try:
+                record_hold(queued_path, scan)
+            finally:
+                unlock(coordinator)
+        return None
     gated = any(path.name.startswith(("heavy-", "fast-", "direct-")) for path in paths)
-    reason = admission.reason(deadline) if admission and gated else None
-    host = pressure.reason(deadline) if pressure and gated else None
+    reason = admission_reason(admission, deadline, light) if admission and gated else None
+    host = admission_reason(pressure, deadline, light) if pressure and gated else None
+    if light:
+        host, veto = light_pressure(guard, pressure, host)
+        reason = veto or reason
     host_seen = host  # raw verdict, kept for observation whatever the enforce juggling below does
     holder = admission
-    if host and pressure.mode == "enforce" and not reason:
+    if host and pressure and pressure.mode == "enforce" and not reason:
         reason, holder = host, pressure
-    elif host and pressure.mode == "enforce":
+    elif host and pressure and pressure.mode == "enforce":
         host = None
     load = cpu.load_per_core() if cpu else None
     snapshot_paths = paths.copy()
@@ -3856,6 +4030,8 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
     needs_probe = any(lease_groups(entry) for entry in prior.values())
     live = live_groups(min(0.5, deadline - time.monotonic())) if needs_probe else set()
     if live is None or cancelled() or time.monotonic() >= deadline:
+        if light:
+            scan.update(reason="slots", hold=reason or "light slot or safety headroom not verified")
         return None
     coordinator = lock_file(state / "coordinator.lock")
     if coordinator is None:
@@ -3877,17 +4053,21 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
                 continue
             available[path] = fd
         record_admission(scan, paths, available, admission)
-        if (reason or host) and phases_running(state, available, prior, live):
+        if cpu and cpu.mode == "enforce":
+            need = minimum_units(cpu, candidates, limits, metadata(queued_path) if waiter else {})
+            if need is not None and need > cpu.max_units:
+                why = f"cpu budget needs {need} units; max {cpu.max_units}"
+                scan.update(reason="cpu", hold=why, rejected=why)
+                return None
+        if (reason or host) and (light or phases_running(state, available, prior, live)):
             observe_verdict(scan, "host", host_seen)
             if reason:
-                memory_held = True
-                if scan is not None:
-                    scan["reason"] = "memory"
-                    if cpu and candidates:
-                        observe_verdict(scan, "cpu", cpu_verdict(cpu, state, available, prior, live, candidates[0], load))
+                memory_held = holder is not None
+                scan.update(reason="memory", hold=reason)
+                if cpu and candidates:
+                    observe_verdict(scan, "cpu", cpu_verdict(cpu, state, available, prior, live, candidates[0], load))
                 return None
-            if scan is not None:
-                scan["wouldHold"] = f"host:{host}"  # observe mode: report, never hold
+            scan["wouldHold"] = f"host:{host}"  # observe mode: report, never hold
         eligible = (burst_available(state, available, prior, live, integration_ceiling)
                     if integration_ceiling is not None else available)
         if waiter is not None:
@@ -3895,17 +4075,11 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
                                           lambda: cancelled() or time.monotonic() >= deadline, scan)
         else:
             candidate = next((c for c in candidates if all(p in eligible for p in c)), [])
-            if scan is not None and not candidate:
-                scan["reason"] = "slots"
-        if (candidate or candidates) and cpu and phases_running(state, available, prior, live):
-            budget = cpu_verdict(cpu, state, available, prior, live, candidate or candidates[0], load)
-            observe_verdict(scan, "cpu", budget)  # independent of the host verdict and of what the scan decides
-            if candidate and budget and cpu.mode == "enforce":
-                if scan is not None:
-                    scan["reason"] = "cpu"
-                candidate = []
-            elif candidate and budget and scan is not None and "wouldHold" not in scan:
-                scan["wouldHold"] = budget
+            if not candidate:
+                scan.update(reason="slots", hold="light direct cap (1)" if light else "slots")
+        if cpu and (candidate or candidates):
+            candidate = budget_candidate(cpu, state, candidate, candidates[0] if candidates else candidate,
+                                         available, prior, live, load, light, scan)
         if candidate and not cancelled() and time.monotonic() < deadline:
             for path in candidate:
                 # Reserve the slot generation: a late nested registration against the previous
@@ -3913,21 +4087,56 @@ def claim(state, candidates, deadline, cancelled, waiter=None, limits=None, admi
                 previous = metadata(path.with_suffix(".json"))
                 if previous.get("token") and not previous.get("retired"):
                     save(path.with_suffix(".json"), dict(previous, retired=True))
-            if waiter is not None:
-                queued_path = waiter_path(state, waiter)
+            if queued_path is not None:
                 info = metadata(queued_path)
-                if info.get("priority") == "high":
-                    # Reserve the HIGH count before unlinking; launcher publication happens later.
-                    publish([(path, available[path]) for path in candidate], info)
+                # Publish the worker price and reserve the HIGH count before unlocking the coordinator.
+                if workers is not None:
+                    info["workers"] = workers
+                if workers is not None or info.get("priority") == "high":
+                    for path in candidate:
+                        save(path.with_suffix(".json"), info)
                 queued_path.unlink(missing_ok=True)
             return [(path, available.pop(path)) for path in candidate]
     finally:
-        for fd in available.values():
-            unlock(fd)
-        unlock(coordinator)
+        try:
+            record_hold(queued_path, scan)
+        finally:
+            for fd in available.values():
+                unlock(fd)
+            unlock(coordinator)
         if memory_held:
             holder.waiting(reason)
     return None
+
+
+def minimum_units(cpu, candidates, limits, waiter):
+    prices = [cpu.need(candidate) for candidate in candidates]
+    fast = getattr(limits, "options", {}).get("fast_lane")
+    if waiter.get("fast") and fast and fast["slots"]:
+        prices.append(cpu.need([Path("fast-0.lock")]))  # Fast can also fall back to heavy.
+    return min(prices, default=None)
+
+
+def budget_candidate(cpu, state, candidate, probe, available, prior, live, load, light, scan):
+    """An enforced unit ceiling never grants first-work progress. The ordinary load check still does."""
+    running = light or phases_running(state, available, prior, live)
+    enforced = cpu.mode == "enforce"
+    need = cpu.need(candidate or probe)
+    if not running and not (enforced and need > cpu.max_units):
+        return candidate
+    used = cpu.running_units(state, available, prior, live)
+    verdict = cpu.reason(used, candidate or probe, load if running else None)
+    if light and need and load is None and verdict is None:
+        verdict = "cpu:load unavailable"
+    observe_verdict(scan, "cpu", verdict)
+    if verdict and candidate:
+        if enforced:
+            hold = (f"cpu budget {used}+{need}/{cpu.max_units} units" if used + need > cpu.max_units
+                    else verdict)
+            scan.update(reason="cpu", hold=hold)
+            return []
+        scan.setdefault("wouldHold", verdict)
+    return candidate
 
 
 def publish(held, info):
@@ -3935,10 +4144,13 @@ def publish(held, info):
         save(path.with_suffix(".json"), info)
 
 
-def release(state, held, token, safe):
-    with open(state / "coordinator.lock", "a+b") as coordinator:
-        fcntl.flock(coordinator, fcntl.LOCK_EX)
-        if safe:
+def release(state, held, token, safe, *, bounded=False):
+    path = state / "coordinator.lock"
+    coordinator = lock_file(path) if bounded else os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if not bounded:
+            fcntl.flock(coordinator, fcntl.LOCK_EX)
+        if coordinator is not None and safe:
             for path, _ in held:
                 entry = metadata(path.with_suffix(".json"))
                 if entry.get("token") == token:
@@ -3948,14 +4160,17 @@ def release(state, held, token, safe):
                         save(path.with_suffix(".json"), entry)
                     else:
                         remove_lease(path)
+    finally:
         for _, fd in held:
             # Supervisor-only references: orphan group metadata guards crashes.
             os.close(fd)
+        if coordinator is not None:
+            os.close(coordinator)
 
 
 def remove_lease(path):
     path.with_suffix(".json").unlink(missing_ok=True)
-    if path.name.startswith("direct-"):
+    if path.name.startswith("direct-") and path.name != LIGHT_SLOT:
         path.unlink(missing_ok=True)
 
 
@@ -4075,9 +4290,7 @@ def reprioritize(state, configuration, args):
         waiter["reprioritization"] = dict(previous=previous, priority=priority, at=time.time(), uid=os.getuid())
         # The waiter holds this inode's flock for its lifetime. Replacing the path
         # would make it look dead. All queue readers hold the coordinator too.
-        with open(waiter_path(state, waiter["token"]), "r+") as stream:
-            stream.write(json.dumps(waiter))
-            stream.truncate()
+        write_waiter(waiter_path(state, waiter["token"]), waiter)
     if message:
         note(message)
     note(f"reprioritized pid={waiter.get('pid', '?')} label={waiter.get('label', '?')} priority={priority}")
@@ -4130,15 +4343,23 @@ def admission_status(state, fast_running, fast_slots, waiters):
     note(f"fast={fast_running}/{fast_slots} queued={sum(bool(w.get('fast')) for w in waiters)}")
 
 
+def host_budget_status(cpu, units, light):
+    ceiling = cpu.max_units if cpu.mode != "off" else "-"
+    note(f"host budget: {cpu.mode} {units}/{ceiling} units; light={light}/1")
+
+
 def status(state, configuration=CONFIG):
     settings = config(configuration)
     options = settings.options
     cap = options["max_high"]
     fast_slots = options["fast_lane"]["slots"] if options["fast_lane"] else 0
+    cpu = CpuBudget(CPU_BUDGET_DEFAULTS | options["cpu_budget"], options["msbuild_max_cpu"])
+    show_budget = cpu.mode != "off" or options["memory_guard"]["mode"] != "off"
     if not state.exists():
         memory_status(settings)
         note("no active phases")
         note(f"fast=0/{fast_slots} queued=0")
+        host_budget_status(cpu, 0, 0)
         note(f"high=0/{cap}")
         return 0
     observed = observe_high(state)
@@ -4155,6 +4376,7 @@ def status(state, configuration=CONFIG):
                 unlock(fd)
             owners.append((path, data, busy))
         waiters = all_waiters(state, now=time.time())
+        direct = direct_waiters(state)
         grant = priority_grant(state)
         high = high_count(state, observed)
     # No slow ps probe or terminal write while holding the shared coordinator.
@@ -4164,12 +4386,15 @@ def status(state, configuration=CONFIG):
     except (OSError, ValueError, subprocess.SubprocessError):
         processes = None
     seen = set()
-    fast_running = 0
+    fast_running = units = light_running = 0
     used = dict(heavy=0, integration=0)
     for path, data, busy in owners:
-        orphan = (data.get("unreadable") or live is None or bool(lease_groups(data) & live)) if not busy else False
+        groups = lease_groups(data)
+        orphan = not busy and (data.get("unreadable") or bool(groups and (live is None or groups & live)))
         if not busy and not orphan:
             continue
+        units += cpu.cost(path, data)
+        light_running += path.name == LIGHT_SLOT
         for pool in used:
             used[pool] += path.name.startswith(pool + "-")
         token = data.get("token", path.name)
@@ -4190,6 +4415,7 @@ def status(state, configuration=CONFIG):
              f"pid={data.get('pid', '?')} cwd={data.get('cwd', '?')} "
              f"elapsed={age}s {phase_state}"
              f"{' fast' if data.get('fast') or path.name.startswith('fast-') else ''}"
+             f"{' light' if path.name == LIGHT_SLOT else ''}"
              f" policy={data.get('policy', 'queued')} source={data.get('source', 'default')}")
     if not seen:
         note("no active phases")
@@ -4203,7 +4429,16 @@ def status(state, configuration=CONFIG):
              f"{' fast' if waiter.get('fast') else ''}"
              f" policy={waiter.get('policy', 'queued')} source={waiter.get('source', 'default')}"
              f" id={waiter.get('token', '?')[:12]}")
+        note(f"queued hold: label={waiter.get('label', '?')} hold={waiter.get('hold', 'pending')} "
+             f"id={waiter.get('token', '?')[:12]}")
+    for waiter in direct:
+        age = max(0, int(now - waiter["enqueued"]))
+        note(f"waiting direct priority={waiter['priority']} kind={waiter['kind']} "
+             f"label={waiter.get('label', '?')} hold={waiter.get('hold', 'pending')} waited={age}s "
+             f"id={waiter['token'][:12]}")
     admission_status(state, fast_running, fast_slots, waiters)
+    if show_budget or light_running:
+        host_budget_status(cpu, units, light_running)
     note(f"high={high}/{cap}")
     if grant:
         remaining = "unlimited uses" if grant["uses"] is None else f"{grant['uses']} use(s) remaining"
@@ -4217,12 +4452,16 @@ def status(state, configuration=CONFIG):
     return 0
 
 
-def guard_level(options):
-    """Cached guard level for the phase record, or None when the guard is off."""
+def guard_snapshot(options):
     guard = options.get("memory_guard") or {}
     if guard.get("mode", "off") == "off":
-        return None
-    return memory_guard.read_level(memory_guard.state_dir(), guard["stale_s"])["level"]
+        return {}
+    return memory_guard.read_level(memory_guard.state_dir(), guard["stale_s"])
+
+
+def guard_level(options):
+    """Cached guard level for the phase record, or None when the guard is off."""
+    return guard_snapshot(options).get("level")
 
 
 def memory_status(settings, used=None):
@@ -4533,13 +4772,18 @@ def prepare_policy(state, args, options, fingerprint, history=None, identity=Non
 def phase_candidates(state, args, context):
     heavy, integration, identity, token = context
     if args.policy == "direct" and args.kind != "ci":
-        # A per-run lease tracks ownership, not capacity. CI keeps its singleton watcher lock.
-        return [[state / f"direct-{token}.lock"]]
+        # A per-run lease tracks ownership. Only the light reservation has a capacity.
+        name = LIGHT_SLOT if getattr(args, "light", False) else f"direct-{token}.lock"
+        return [[state / name]]
     return slot_paths(state, args.kind, heavy, integration, identity)
 
 
 def apply_fast_budget(args, settings, held, policy_args=None):
     limit = getattr(policy_args, "config_direct_limit", None)
+    if any(path.name == LIGHT_SLOT for path, _ in held):
+        args.timeout = min(args.timeout, LIGHT_RUN_S)
+        note(f"light direct (budget {args.timeout:g}s)")
+        return None
     if limit is not None and any(path.name.startswith("direct-") for path, _ in held):
         budget = fast_budget(dict(max_expected_s=limit))
         args.config_direct_budget = True
@@ -4660,7 +4904,9 @@ def run(args, state, configuration, output=None):
         warm = obj_warmth(os.getcwd()) if args.kind in ("build", "test") else None
         if ledger and warm is not None:
             ledger.record["warm"] = warm
-        prepare_policy(state, admission_args, options, fingerprint, load_history(state), identity, warm=warm)
+        history = load_history(state)
+        prepare_policy(state, admission_args, options, fingerprint, history, identity, warm=warm)
+        light_proven = proven_light(admission_args, original_command, history, fingerprint)
         if ledger:
             ledger.failure_categories = options["failure_categories"]
             ledger.prepare_snapshot()
@@ -4691,7 +4937,12 @@ def run(args, state, configuration, output=None):
                     ledger.outcome("skipped")
                     return 0
         queued = time.monotonic()
-        deadline = queued + args.queue_timeout
+        light_queue = LightQueue(queued, args.queue_timeout, light_proven)
+        worktree.light_queue = light_queue
+        if light_proven:
+            worktree.light_deadline = lambda: light_queue.deadline(guard_snapshot(options))
+        deadline = light_queue.deadline(guard_snapshot(options) if light_proven else {})
+        hold = "registration or safety headroom unavailable" if light_proven else None
         worktree_code = worktree.acquire(deadline, lambda: cancelled[0], ledger)
         if worktree_code is not None:
             return worktree_code
@@ -4724,20 +4975,28 @@ def run(args, state, configuration, output=None):
             if not long_queue_hint and time.monotonic() - queued > 600:
                 note(f"long queue ({int(time.monotonic() - queued)}s): run dev-doctor to look for contention")
                 long_queue_hint = True
+            limits = guarded_limits(settings)
+            guard = getattr(limits, "guard", {}) if args.kind != "ci" else {}
+            deadline = light_queue.deadline(guard)
+            admission_args.light = (light_proven and guard.get("level") in (2, 3)
+                                    and not guard.get("stale")
+                                    and not container_test_known(state, fingerprint, identity))
             if time.monotonic() >= deadline:
-                queue_timeout_note(args.queue_timeout)
+                light_queue.timeout_note(hold)
                 if ledger:
                     ledger.outcome("queue-timeout")
                 return 75
             if not registered:
-                registered, waiter_fd = register_waiter(state, admission_args, token)
+                admission_args.light_registration_deadline = deadline if light_queue.bounded else None
+                registered, waiter_fd = (register_waiter(state, admission_args, token, display_direct=True)
+                                         if admission_args.policy == "direct" and args.kind != "ci"
+                                         else register_waiter(state, admission_args, token))
                 if registered and ledger:
                     ledger.record["priority"] = admission_args.priority
                     ledger.enqueue()
                 if not registered:
                     time.sleep(min(TICK, max(0, deadline - time.monotonic())))
                     continue
-            limits = guarded_limits(settings)
             if limits.guard_note != guard_noted:
                 guard_noted = limits.guard_note
                 note(guard_noted or "memory guard: no ceilings lowered")
@@ -4746,24 +5005,38 @@ def run(args, state, configuration, output=None):
             if bursting:
                 integration = burst.effective(integration, deadline)
             scan = {}
+            direct = admission_args.policy == "direct" and waiter_fd is not None
             held = claim(state, phase_candidates(state, admission_args, (heavy, integration, ci_key, token)),
                          deadline, lambda: bool(cancelled[0]),
-                         token if waiter_fd is not None else None, PhaseConfig(heavy, integration, limits.options), admission,
-                         integration if bursting else None, scan=scan,
-                         pressure=pressure, cpu=cpu)
+                         token if waiter_fd is not None and not direct else None,
+                         PhaseConfig(heavy, integration, limits.options), admission,
+                         integration if bursting else None, scan=scan, pressure=pressure, cpu=cpu, guard=guard,
+                         display=token if direct else None, workers=workers)
+            hold = scan.get("hold", scan.get("reason", hold))
             observe_waiter(admission_args, ledger, scan)
             if cancelled[0]:
                 note("cancelled during admission; command not started")
                 if ledger:
                     ledger.outcome("cancelled")
                 return 128 + cancelled[0]
+            if scan.get("rejected"):
+                if light_queue.bounded:
+                    light_queue.timeout_note(scan["rejected"])
+                else:
+                    note(scan["rejected"])
+                if ledger:
+                    ledger.outcome("rejected")
+                return 75
             if held:
                 if ledger:
                     ledger.admitted_with_would_hold(scan)
                 if time.monotonic() >= deadline:
-                    release(state, held, token, True)
+                    if light_queue.bounded:
+                        release(state, held, token, True, bounded=True)
+                    else:
+                        release(state, held, token, True)
                     held = None
-                    queue_timeout_note(args.queue_timeout)
+                    light_queue.timeout_note(hold)
                     if ledger:
                         ledger.outcome("queue-timeout")
                     return 75
@@ -4777,14 +5050,15 @@ def run(args, state, configuration, output=None):
                 return 75
             now = time.monotonic()
             if now >= deadline:
-                queue_timeout_note(args.queue_timeout)
+                light_queue.timeout_note(hold)
                 if ledger:
                     ledger.outcome("queue-timeout")
                 return 75
             if now >= next_heartbeat:
                 note(f"queued kind={args.kind} label={args.label} remaining={max(0, int(deadline-now))}s id={token[:12]}")
                 next_heartbeat = now + HEARTBEAT
-            time.sleep(min(QUEUE_TICK + random.uniform(0, 0.5), max(0, deadline-now)))
+            poll = .2 if light_queue.bounded else QUEUE_TICK + random.uniform(0, 0.5)
+            time.sleep(min(poll, max(0, deadline-now)))
             settings = reload_config(configuration, settings, config_notes)
             options = settings.options
             admission_args.max_high = options["max_high"]
@@ -4949,7 +5223,7 @@ def run(args, state, configuration, output=None):
         detector_stopped.set()
         if waiter_fd is not None:
             cleanup_step(errors, "deregister_waiter", proc,
-                         lambda: deregister_waiter(state, token, waiter_fd))
+                         lambda: deregister_waiter(state, token, waiter_fd, bounded=light_queue.bounded))
             try:
                 withdrawal_path(state, token).unlink(missing_ok=True)
             except OSError:
