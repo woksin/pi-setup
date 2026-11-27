@@ -84,8 +84,9 @@ class LeanProfile(unittest.TestCase):
             if path.is_file():
                 with self.subTest(file=path.name):
                     self.assertNotIn("kimi-coding", path.read_text())
-        self.assertEqual((profiles / "lean/workflows/review.js").read_bytes(),
-                         (ROOT / "agent/workflows/review.js").read_bytes())
+        generated = re.compile(r"^[ \t]*(?://|\*) profile:begin (\w+)\n.*?^[ \t]*(?://|\*) profile:end \1\n", re.DOTALL | re.MULTILINE)
+        self.assertEqual(generated.sub("", (profiles / "lean/workflows/review.js").read_text()),
+                         generated.sub("", (ROOT / "agent/workflows/review.js").read_text()))
 
     def test_roles_and_independent_review_are_pinned(self):
         expected = {

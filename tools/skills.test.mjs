@@ -491,7 +491,9 @@ test("review routing, runtime wrapper and schemas stay synchronized across all p
     assert.ok(!source.includes("review-v1:"), `${file}: no legacy cache prefix`);
     if (source.includes("const cacheKey")) assert.match(source, /const cacheKey = 'review-v4-coverage:'/);
   }
-  for (const profile of ["balanced", "balanced-openai", "lean"]) assert.equal(loadReview(`agent/profiles/${profile}/workflows/review.js`), reviewSource);
+  // Only the generated profile blocks (models, names, summaries) may differ from the base source.
+  const outsideBlocks = text => text.replace(/^[ \t]*(?:\/\/|\*) profile:begin (\w+)\n[\s\S]*?^[ \t]*(?:\/\/|\*) profile:end \1\n/gm, "");
+  for (const profile of ["balanced", "balanced-openai", "lean"]) assert.equal(outsideBlocks(loadReview(`agent/profiles/${profile}/workflows/review.js`)), outsideBlocks(reviewSource));
 });
 
 const blockingClaim = index => ({ severity: "major", blocking: true, location: `src/a.ts:${index + 1}`,

@@ -4,14 +4,14 @@
  * and reuses caller-carried full passing verdicts for identical committed scope.
  *
  * profile:begin summary
- * Full mode (default): Claude Opus 5.5 (`reviewer`) and GPT-6.1 Sol (`sol-reviewer`, high)
+ * Full mode (default): Claude Fable 5.2 (`reviewer`) and GPT-6.2 Sol (`sol-reviewer`, high)
  * review independently; each one's findings are then checked by the OTHER provider,
  * which tries to refute them. Only findings that survive are reported as confirmed.
- * The Opus review runs at the reviewer agent's medium effort (Opus 5.5 medium >= xhigh, Oct 2026);
+ * The Fable review runs at the reviewer agent's medium effort (Fable 5.2, medium);
  * verification runs at each agent's default effort.
  *
- * Deep mode (`deep: true`): the GPT side uses GPT-6 Astra (`second-opinion`, high) instead of
- * Sol, for both its review and its verification of Opus's findings. Reserve it for
+ * Deep mode (`deep: true`): the GPT side uses GPT-6.2 Astra (`second-opinion`, high) instead of
+ * Sol, for both its review and its verification of Fable's findings. Reserve it for
  * security-sensitive, concurrency/algorithmic or large cross-cutting changes — it costs
  * considerably more OpenAI budget.
  * profile:end summary
@@ -101,10 +101,10 @@
 export const meta = {
   name: 'review',
   // profile:begin meta
-  description: 'Cross-provider code/work review (Opus 5.5 + GPT-6.1 Sol; GPT-6 Astra with deep: true); only blocking findings gate, verified by the other provider',
+  description: 'Cross-provider code/work review (Fable 5.2 + GPT-6.2 Sol; GPT-6.2 Astra with deep: true); only blocking findings gate, verified by the other provider',
   whenToUse: 'Reviewing a diff, change set, document or plan before it is merged or published; pass author, round and full SHAs.',
   phases: [
-    { title: 'Review', detail: 'Opus 5.5 and GPT-6.1 Sol (Astra in deep mode) review independently, plus a cross-provider security lens' },
+    { title: 'Review', detail: 'Fable 5.2 and GPT-6.2 Sol (Astra in deep mode) review independently, plus a cross-provider security lens' },
     { title: 'Verify', detail: 'each finding is challenged by the other provider' },
   ],
   // profile:end meta
@@ -113,27 +113,27 @@ export const meta = {
 // profile:begin routing
 // Pinned models, not provider labels. Keep synchronized with agent frontmatter.
 const AGENT_MODELS = {
-  reviewer: 'anthropic/claude-opus-5-5',
-  'sol-reviewer': 'openai-codex/gpt-6.1-sol',
-  'second-opinion': 'openai-codex/gpt-6-astra',
+  reviewer: 'anthropic/claude-fable-5-2',
+  'sol-reviewer': 'openai-codex/gpt-6.2-sol',
+  'second-opinion': 'openai-codex/gpt-6.2-astra',
 }
 // Review sides in lane order; the first side is the default author side. Lane, security and verify labels derive from the keys.
 const ROUTING = {
-  claude: { agentType: 'reviewer', name: 'Opus 5.5' },
-  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
+  claude: { agentType: 'reviewer', name: 'Fable 5.2' },
+  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.2 Sol' },
 }
 // Sides that run on a different agent in deep mode.
 const DEEP_ROUTING = {
-  gpt: { agentType: 'second-opinion', name: 'GPT-6 Astra' },
+  gpt: { agentType: 'second-opinion', name: 'GPT-6.2 Astra' },
 }
 const QUICK_ROUTING = {
-  claude: { agentType: 'reviewer', name: 'Opus 5.5' },
-  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.1 Sol' },
+  claude: { agentType: 'reviewer', name: 'Fable 5.2' },
+  gpt: { agentType: 'sol-reviewer', name: 'GPT-6.2 Sol' },
 }
 // Accepted args.author values -> the side that wrote the work.
 const AUTHOR_SIDES = { claude: 'claude', gpt: 'gpt' }
 // Who checks `side`'s findings when the work was written by `author` (outside deep mode); null = always the other side.
-const SAME_AUTHOR_VERIFIER = { side: 'claude', author: 'gpt', agentType: 'second-opinion', name: 'GPT-6 Astra' }
+const SAME_AUTHOR_VERIFIER = { side: 'claude', author: 'gpt', agentType: 'second-opinion', name: 'GPT-6.2 Astra' }
 // profile:end routing
 
 // Validate everything before phase()/agent(), including stringified tool arguments.
