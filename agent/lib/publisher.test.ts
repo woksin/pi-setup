@@ -113,6 +113,46 @@ test("pr-edit sends scanned body bytes as a REST PATCH while retaining title, ba
 	assert.equal(calls.length, 3);
 }));
 
+test("metadata-only PR edits use REST without replacing other metadata", async () => {
+	const calls: string[][] = [];
+	const mocks = adapters((_executable, argv) => {
+		calls.push(argv);
+		const child = new Child(); queueMicrotask(() => child.finish()); return child;
+	});
+	code(await publish({ ...base, kind: "pr-edit", addLabels: ["ai-corpus: tracked", "documentation"], removeLabels: ["old/review #1"],
+		addAssignees: ["incoming"], removeAssignees: ["outgoing"], addReviewers: ["writer", "Owner/new-team"],
+		removeReviewers: ["reader", "owner/old-team"] }, safeContext, mocks), "published");
+	const issue = "repos/owner/repo/issues/39", reviews = "repos/owner/repo/pulls/39/requested_reviewers";
+	assert.ok(calls.every(args => args[0] === "api" && args.includes("--hostname=github.com")));
+	assert.deepEqual(calls.map(args => [args[1], args[2], ...args.filter(arg => arg.startsWith("--raw-field="))]), [
+		["repos/owner/repo/pulls/39", "--method=GET"],
+		[`${issue}/labels/old%2Freview%20%231`, "--method=DELETE"],
+		[`${issue}/labels`, "--method=POST", "--raw-field=labels[]=ai-corpus: tracked", "--raw-field=labels[]=documentation"],
+		[`${issue}/assignees`, "--method=DELETE", "--raw-field=assignees[]=outgoing"],
+		[reviews, "--method=DELETE", "--raw-field=reviewers[]=reader", "--raw-field=team_reviewers[]=old-team"],
+		[`${issue}/assignees`, "--method=POST", "--raw-field=assignees[]=incoming"],
+		[reviews, "--method=POST", "--raw-field=reviewers[]=writer", "--raw-field=team_reviewers[]=new-team"],
+	]);
+});
+
+test("PR metadata edits cannot change an ordinary issue with the requested number", async () => {
+	const calls: string[][] = [];
+	const mocks = adapters((_executable, argv) => {
+		calls.push(argv);
+		const child = new Child(); queueMicrotask(() => child.finish(1)); return child;
+	});
+	code(await publish({ ...base, kind: "pr-edit", addLabels: ["triaged"] }, safeContext, mocks), "gh-failed");
+	assert.deepEqual(calls.map(args => args.slice(0, 3)), [["api", "repos/owner/repo/pulls/39", "--method=GET"]]);
+});
+
+test("unsafe metadata in a later REST operation prevents every mutation", async () => {
+	let spawned = 0;
+	const mocks = adapters(() => { spawned++; throw new Error("must not reach gh"); });
+	code(await publish({ ...base, kind: "pr-edit", addLabels: ["triaged"],
+		addAssignees: [`${safeContext.home}/private-value`] }, safeContext, mocks), "scan-refused");
+	assert.equal(spawned, 0);
+});
+
 test("pr-edit with non-REST metadata still uses native gh options", async () => {
 	let args: string[] = [];
 	const mocks = adapters((_executable, argv) => {
@@ -124,6 +164,60 @@ test("pr-edit with non-REST metadata still uses native gh options", async () => 
 	assert.ok(args.includes("--add-reviewer=reviewer"));
 	assert.ok(args.some(arg => arg.startsWith("--body-file=")));
 });
+
+for (const [reason, stateReason, initialState] of [["not-planned", "not_planned", "open"], ["completed", "completed", undefined],
+	["not-planned", "not_planned", "closed"]] as const) {
+	test(`issue close applies and confirms ${reason} (${initialState ?? "no comment"})`, () => fixture(async root => {
+		const endpoint = "repos/owner/repo/issues/39";
+		const source = join(root, "close.md"), body = Buffer.from("\ufeffClosing note\r\n@next line");
+		writeFileSync(source, body);
+		const calls: string[][] = [], comments: Buffer[] = [];
+		const mocks = adapters((_executable, argv) => {
+			calls.push(argv);
+			const child = new Child();
+			queueMicrotask(() => {
+				if (argv[2] === "--method=GET") child.stdout.write(`${initialState}\n`);
+				else if (argv[1] === `${endpoint}/comments`) {
+					const field = argv.find(arg => arg.startsWith("--field=body=@"));
+					if (field) comments.push(readFileSync(field.slice("--field=body=@".length)));
+				} else child.stdout.write("true\n");
+				child.finish();
+			});
+			return child;
+		});
+		code(await publish({ ...base, kind: "issue-close", reason, ...(initialState ? { bodyFile: source } : {}) }, safeContext, mocks), "published");
+		assert.deepEqual(calls.map(args => args.slice(0, 3)), [
+			...(initialState ? [["api", endpoint, "--method=GET"]] : []),
+			...(initialState === "open" ? [["api", `${endpoint}/comments`, "--method=POST"]] : []),
+			["api", endpoint, "--method=PATCH"],
+		]);
+		assert.deepEqual(comments, initialState === "open" ? [body] : []);
+		assert.ok(calls.at(-1)!.includes("--raw-field=state=closed"));
+		assert.ok(calls.at(-1)!.includes(`--raw-field=state_reason=${stateReason}`));
+		assert.ok(calls.at(-1)!.includes(`--jq=.state == "closed" and .state_reason == "${stateReason}"`));
+	}));
+}
+
+for (const failure of ["comment-failed", "unconfirmed-close", "unsafe-comment"]) {
+	test(`issue close reports ${failure} without retrying the comment`, async () => {
+		const calls: string[] = [];
+		const mocks = adapters((_executable, argv) => {
+			calls.push(argv[2]);
+			const child = new Child();
+			queueMicrotask(() => {
+				if (argv[2] === "--method=GET") child.stdout.write("open\n");
+				if (argv[2] === "--method=PATCH") child.stdout.write("false\n");
+				child.finish(failure === "comment-failed" && argv[2] === "--method=POST" ? 1 : 0);
+			});
+			return child;
+		});
+		const body = failure === "unsafe-comment" ? `${safeContext.home}/private-value` : "Closing note";
+		const result = await publish({ ...base, kind: "issue-close", reason: "not-planned", body }, safeContext, mocks);
+		code(result, failure === "unsafe-comment" ? "scan-refused" : "gh-failed");
+		assert.deepEqual(calls, failure === "unsafe-comment" ? []
+			: ["--method=GET", "--method=POST", ...(failure === "unconfirmed-close" ? ["--method=PATCH"] : [])]);
+	});
+}
 
 test("real descriptor capture, permissions, exact BOM/newlines, forced host and sanitized success", () => fixture(async root => {
 	const source = join(root, "source.md"), bytes = Buffer.from("\ufeffRelease notes\r\nNo final newline");

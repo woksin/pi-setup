@@ -325,8 +325,8 @@ function childFailure(state: { code: number | null; failure?: PublishCode; stder
 	const detail = state.code === null || !state.reflect ? "" : ghDetail(state.stderr, state.reflect, state.run);
 	return new Failure("gh-failed", undefined, `exit=${exit} category=${category}${detail ? `; ${detail}` : ""}; ${GH_ADVICE[category]}`);
 }
-function stderrCapture() {
-	let text = "", remaining = STDERR_LIMIT;
+function textCapture(limit: number) {
+	let text = "", remaining = limit;
 	const decoder = new TextDecoder();
 	return {
 		append(chunk: Buffer | string) {
@@ -337,10 +337,18 @@ function stderrCapture() {
 		take() { const captured = text + decoder.decode(); text = ""; return captured; },
 	};
 }
-function monitor(child: PublisherChild, run: Runtime, reflect?: string[]): Promise<void> {
+interface ChildOptions { reflect?: string[]; expect?: readonly string[] }
+function confirmedOutput(expected: readonly string[], text: string): string {
+	const output = text.trim();
+	if (expected.includes(output)) return output;
+	throw new Failure("gh-failed", undefined, "GitHub did not confirm the expected issue state or close reason; check the issue before retrying");
+}
+function monitor(child: PublisherChild, run: Runtime, options: ChildOptions): Promise<string | undefined> {
 	return new Promise((resolve, reject) => {
 		let failure: PublishCode | undefined;
-		const stderr = stderrCapture();
+		const stderr = textCapture(STDERR_LIMIT);
+		const expected = options.expect;
+		const stdout = textCapture(OUTPUT_LIMIT);
 		const stop = (code: PublishCode) => {
 			if (failure) return;
 			failure = code;
@@ -351,25 +359,32 @@ function monitor(child: PublisherChild, run: Runtime, reflect?: string[]): Promi
 		child.on("error", () => stop("gh-failed"));
 		child.once("close", (code: number | null) => {
 			cancelTimer(); run.context.signal?.removeEventListener("abort", abort);
-			const error = childFailure({ code, failure, stderr: stderr.take(), reflect, run });
-			if (error) reject(error); else resolve();
+			const error = childFailure({ code, failure, stderr: stderr.take(), reflect: options.reflect, run });
+			if (error) return reject(error);
+			try { resolve(expected && confirmedOutput(expected, stdout.take())); } catch (unexpected) { reject(unexpected); }
 		});
-		watchStream(child.stdout, stop); watchStream(child.stderr, stop, stderr.append);
+		watchStream(child.stdout, stop, expected ? stdout.append : undefined); watchStream(child.stderr, stop, stderr.append);
 		run.context.signal?.addEventListener("abort", abort, { once: true });
 		if (run.context.signal?.aborted) abort();
 	});
 }
-async function runGh(argv: () => string[], env: NodeJS.ProcessEnv, run: Runtime, reflect?: string[]): Promise<void> {
+async function runGh(argv: () => string[], env: NodeJS.ProcessEnv, run: Runtime, options: ChildOptions = {}): Promise<string | undefined> {
 	const executable = await ghExecutable(run);
 	cancelled(run.context.signal);
 	const args = argv();
 	try {
 		const child = run.spawn(executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"], env, cwd: run.context.cwd });
-		await monitor(child, run, reflect);
+		return await monitor(child, run, options);
 	} catch (error) { if (error instanceof Failure) throw error; throw new Failure("gh-failed"); }
 }
 async function send(plan: GhPlan, state: { bytes: Buffer[]; paths: string[] }, run: Runtime): Promise<void> {
-	await runGh(() => plan.argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), environment(run.env, plan.host), run, reflectionTexts(plan, state.bytes));
+	const env = environment(run.env, plan.host), reflect = reflectionTexts(plan, state.bytes);
+	let previousOutput: string | undefined;
+	for (const { argv, expect, onPreviousOutput, skipIfEmpty } of [plan, ...(plan.followups ?? [])]) {
+		if (onPreviousOutput !== undefined && onPreviousOutput !== previousOutput) continue;
+		if (skipIfEmpty !== undefined && !state.bytes[skipIfEmpty].length) continue;
+		previousOutput = await runGh(() => argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), env, run, { reflect, expect });
+	}
 }
 /** A non-default host must already hold a stored gh credential; output is discarded, failure is a fixed code. */
 async function hostPreflight(host: string, run: Runtime): Promise<void> {

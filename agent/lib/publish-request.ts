@@ -11,14 +11,13 @@ type Target = Hosted & { repo: string; number: number };
 type Create = Body & Hosted & { repo: string; title: string; labels?: string[]; assignees?: string[] };
 type Comment = Body & Target & { editLast?: boolean; createIfNone?: boolean };
 type IssueEdit = OptionalBody & Target & { title?: string; addLabels?: string[]; removeLabels?: string[]; addAssignees?: string[]; removeAssignees?: string[] };
-type Edit = BodyOrTitle & IssueEdit;
 export type ApiField = { name: string; value: string | number | boolean | null; file?: never } | { name: string; file: string; value?: never };
 export type PublishRequest =
 	| (Create & { kind: "issue-create" })
 	| (Create & { kind: "pr-create"; base?: string; head?: string; draft?: boolean; reviewers?: string[] })
 	| (Comment & { kind: "issue-comment" | "pr-comment" })
 	| (IssueEdit & { kind: "issue-edit" })
-	| (Edit & { kind: "pr-edit"; base?: string; addReviewers?: string[]; removeReviewers?: string[] })
+	| (IssueEdit & { kind: "pr-edit"; base?: string; addReviewers?: string[]; removeReviewers?: string[] })
 	| (OptionalBody & Target & { kind: "issue-close"; reason?: "completed" | "not-planned" })
 	| (OptionalBody & Target & { kind: "pr-close"; deleteBranch?: boolean })
 	| (OptionalBody & Target & { kind: "issue-reopen" | "pr-reopen" })
@@ -137,9 +136,9 @@ const contracts: Record<PublishRequest["kind"], Contract> = {
 // `host` qualifies a repository (or an api call); gist-* and check have no repository and reject it.
 for (const [kind, shape] of Object.entries(contracts)) if (shape.required.includes("repo") || kind === "api") shape.optional.push("host");
 const REQUIRED_BODY_KINDS = ["issue-create", "pr-create", "issue-comment", "pr-comment", "release-create"];
-const EDIT_KINDS = ["pr-edit", "release-notes"];
 export const APPEND_ONLY_REASON = "Issues and comments are append-only: do not edit issue bodies/titles or existing comments; append a new event comment instead. PR descriptions remain editable.";
 const ISSUE_METADATA = ["addLabels", "removeLabels", "addAssignees", "removeAssignees"];
+const PR_EDIT_METADATA = [...ISSUE_METADATA, "addReviewers", "removeReviewers"];
 /** `gh gist edit` takes single-valued --add/--remove/--desc, so one edit means exactly one operation with one value. */
 const GIST_EDIT_OPERATIONS = ["description", "files", "removeFiles"];
 export const publishRequestSchema = { type: "object", additionalProperties: false, properties: {
@@ -161,7 +160,8 @@ export function kindContract(kind: PublishRequest["kind"]): string {
 	if (kind === "check") return "check requires: non-empty files or bodyFile (only one)";
 	const shape = contracts[kind];
 	const body = REQUIRED_BODY_KINDS.includes(kind) ? "; body or bodyFile" : "";
-	const edit = EDIT_KINDS.includes(kind) ? "; at least one of title/body/bodyFile for edits" : "";
+	const edit = kind === "pr-edit" ? "; at least one of title/body/bodyFile or a non-empty metadata change"
+		: kind === "release-notes" ? "; at least one of title/body/bodyFile for edits" : "";
 	return `${kind} requires: ${shape.required.join(", ")}${body}${edit}; optional: ${shape.optional.join(", ")}`;
 }
 function unknownFieldsDetail(keys: string[], kind: PublishRequest["kind"]): string {
@@ -204,10 +204,16 @@ function validateBody(input: RecordValue): void {
 	if (needsBody(input) && !hasBody) invalid(`${kind} needs body or bodyFile; ${contract}`);
 	if (input.createIfNone === true && input.editLast !== true) invalid();
 }
+function hasMetadata(input: RecordValue, keys: string[]): boolean {
+	return keys.some(key => (input[key] as string[] | undefined)?.length);
+}
+function hasTextEdit(input: RecordValue): boolean {
+	return ["title", "body", "bodyFile"].some(key => own(input, key));
+}
 function validateEdit(input: RecordValue): void {
-	if (input.kind === "issue-edit" && !ISSUE_METADATA.some(key => (input[key] as unknown[] | undefined)?.length)) invalid();
-	if (!EDIT_KINDS.includes(input.kind as string)) return;
-	if (!["title", "body", "bodyFile"].some(key => own(input, key))) invalid();
+	if (input.kind === "issue-edit" && !hasMetadata(input, ISSUE_METADATA)) invalid();
+	if (input.kind === "pr-edit" && !(hasTextEdit(input) || hasMetadata(input, PR_EDIT_METADATA))) invalid();
+	if (input.kind === "release-notes" && !hasTextEdit(input)) invalid();
 }
 function gistChanges(input: RecordValue): boolean {
 	const present = GIST_EDIT_OPERATIONS.filter(key => own(input, key));
@@ -288,8 +294,15 @@ export function validateRequest(value: unknown): PublishRequest {
 export interface PayloadSource { label: string; source: { text: string } | { file: string }; basename?: string }
 export interface PayloadSlot { payload: number; use: "file" | "text"; prefix: string }
 export interface OutboundText { label: string; text: string }
-export interface GhPlan {
-	argv: (string | PayloadSlot)[]; payloads: PayloadSource[]; outbound: OutboundText[];
+export interface GhCommand {
+	argv: (string | PayloadSlot)[];
+	expect?: readonly string[];
+	onPreviousOutput?: string;
+	skipIfEmpty?: number;
+}
+export interface GhPlan extends GhCommand {
+	followups?: GhCommand[];
+	payloads: PayloadSource[]; outbound: OutboundText[];
 	authority: { kind: PublishRequest["kind"]; ghArgs: string[]; repo?: string; host?: string; number?: number; base?: string; head?: string };
 	requestBytes: number;
 	/** Non-default GitHub host; absent means github.com. */
@@ -358,15 +371,87 @@ function command(request: RecordValue): string[] {
 	for (const key of ["event", "strategy"]) if (own(request, key)) argv.push(`--${request[key]}`);
 	return argv;
 }
-const PR_EDIT_METADATA = [...ISSUE_METADATA, "addReviewers", "removeReviewers"];
+function rest(plan: GhPlan, endpoint: string, method: "GET" | "POST" | "PATCH" | "DELETE"): string[] {
+	plan.outbound.push({ label: "endpoint", text: endpoint });
+	return ["api", endpoint, `--method=${method}`, `--hostname=${plan.host ?? DEFAULT_HOST}`];
+}
+function setCommands(plan: GhPlan, commands: GhCommand[]): void {
+	const [first, ...followups] = commands;
+	if (!first) return;
+	Object.assign(plan, first);
+	if (followups.length) plan.followups = followups;
+}
+function useRestForIssueClose(request: Extract<PublishRequest, { kind: "issue-close" }>, plan: GhPlan): void {
+	if (!request.reason) return;
+	const endpoint = `repos/${request.repo}/issues/${request.number}`;
+	const reason = request.reason === "not-planned" ? "not_planned" : request.reason;
+	const commands: GhCommand[] = [], body = plan.argv.find(arg => typeof arg !== "string");
+	if (body) {
+		// Like native issue close, do not append another comment to an already closed issue.
+		commands.push({ argv: [...rest(plan, endpoint, "GET"), "--jq=.state"], expect: ["open", "closed"] });
+		commands.push({ argv: [...rest(plan, `${endpoint}/comments`, "POST"), "--silent",
+			{ ...body, use: "file", prefix: "--field=body=@" }], onPreviousOutput: "open", skipIfEmpty: body.payload });
+	}
+	plan.outbound.push({ label: "state_reason", text: reason });
+	commands.push({ argv: [...rest(plan, endpoint, "PATCH"), "--raw-field=state=closed", `--raw-field=state_reason=${reason}`,
+		`--jq=.state == "closed" and .state_reason == "${reason}"`], expect: ["true"] });
+	setCommands(plan, commands);
+}
 /** REST can apply description/title/base together without gh pr edit's classic Projects query. */
 function useRestForPrBodyEdit(request: RecordValue, plan: GhPlan): void {
-	if (request.kind !== "pr-edit" || PR_EDIT_METADATA.some(key => (request[key] as string[] | undefined)?.length)) return;
 	const body = plan.argv.find(arg => typeof arg !== "string");
 	if (!body) return;
-	plan.argv = ["api", `repos/${request.repo}/pulls/${request.number}`, "--method=PATCH", `--hostname=${plan.host ?? DEFAULT_HOST}`,
+	plan.argv = [...rest(plan, `repos/${request.repo}/pulls/${request.number}`, "PATCH"),
 		"--silent", { ...body, prefix: "--field=body=@" }];
 	for (const key of ["title", "base"]) if (own(request, key)) plan.argv.push(`--raw-field=${key}=${request[key]}`);
+}
+function metadata(request: RecordValue, key: string): string[] {
+	return request[key] as string[] | undefined ?? [];
+}
+function nativePrMetadata(request: RecordValue): boolean {
+	// Keep gh's account aliases and qualified teams it must resolve, not literal REST logins/slugs.
+	if ([...metadata(request, "addAssignees"), ...metadata(request, "removeAssignees")].some(value => value.startsWith("@"))) return true;
+	const owner = (request.repo as string).split("/")[0].toLowerCase();
+	if ([...metadata(request, "addReviewers"), ...metadata(request, "removeReviewers")].some(value => {
+		const parts = value.split("/");
+		return parts.length > 1 && (parts.length !== 2 || parts[0].toLowerCase() !== owner || !parts[1]);
+	})) return true;
+	// An endpoint path segment must not be interpreted as navigation.
+	return metadata(request, "removeLabels").some(value => value.split(/[/\\]/).some(segment => segment === "." || segment === ".."));
+}
+function reviewerFields(values: string[], plan: GhPlan): string[] {
+	return values.map(value => {
+		const index = value.indexOf("/");
+		if (index < 0) return `--raw-field=reviewers[]=${value}`;
+		const slug = value.slice(index + 1);
+		plan.outbound.push({ label: "team_reviewers", text: slug });
+		return `--raw-field=team_reviewers[]=${slug}`;
+	});
+}
+function useRestForPrMetadata(request: RecordValue, plan: GhPlan): void {
+	if (nativePrMetadata(request)) return;
+	const repo = `repos/${request.repo}`, issue = `${repo}/issues/${request.number}`, pr = `${repo}/pulls/${request.number}`;
+	const commands: GhCommand[] = [];
+	// The issue endpoints also accept ordinary issues; confirm this target is a PR before using them.
+	if (hasMetadata(request, ISSUE_METADATA)) commands.push({ argv: [...rest(plan, pr, "GET"), "--silent"] });
+	const add = (path: string, method: "POST" | "DELETE", fields: string[]) => {
+		commands.push({ argv: [...rest(plan, path, method), "--silent", ...fields] });
+	};
+	for (const label of metadata(request, "removeLabels")) add(`${issue}/labels/${encodeURIComponent(label)}`, "DELETE", []);
+	const labels = metadata(request, "addLabels");
+	if (labels.length) add(`${issue}/labels`, "POST", labels.map(value => `--raw-field=labels[]=${value}`));
+	for (const [action, method] of [["remove", "DELETE"], ["add", "POST"]] as const) {
+		const assignees = metadata(request, `${action}Assignees`), reviewers = metadata(request, `${action}Reviewers`);
+		if (assignees.length) add(`${issue}/assignees`, method, assignees.map(value => `--raw-field=assignees[]=${value}`));
+		if (reviewers.length) add(`${pr}/requested_reviewers`, method, reviewerFields(reviewers, plan));
+	}
+	setCommands(plan, commands);
+}
+function applyTransport(request: PublishRequest, plan: GhPlan): void {
+	if (request.kind === "issue-close") useRestForIssueClose(request, plan);
+	if (request.kind !== "pr-edit") return;
+	if (!hasTextEdit(request) && !request.base) useRestForPrMetadata(request, plan);
+	else if (!hasMetadata(request, PR_EDIT_METADATA)) useRestForPrBodyEdit(request, plan);
 }
 function addHost(request: RecordValue, plan: GhPlan): void {
 	const host = request.host as string;
@@ -391,9 +476,9 @@ export function toGhPlan(value: PublishRequest): GhPlan {
 	if (request.kind === "api") plan.outbound.push({ label: "endpoint", text: request.endpoint as string });
 	for (const key of ["tag", "gistId"]) if (own(request, key)) plan.outbound.push({ label: key, text: request[key] as string });
 	addOptions(request, plan); addBody(request, plan); addFiles(request, plan); addFields(request, plan);
-	// Keep admission on the typed PR edit and its original target, not the transport command.
+	// Admission stays on the original typed operation, not the transport commands.
 	plan.authority.ghArgs = plan.argv.map(arg => typeof arg === "string" ? arg : `${arg.prefix}publication-payload`);
-	useRestForPrBodyEdit(request, plan);
+	applyTransport(validated, plan);
 	return plan;
 }
 

@@ -400,11 +400,12 @@ test("CLI preserves safe validator detail but hides parser exception values", ()
 	});
 });
 
-test("issue-close maps the typed not-planned reason to gh's spelling", () => {
-	const plan = toGhPlan(validateRequest({ kind: "issue-close", ...target, reason: "not-planned" }));
-	assert.ok(plan.argv.includes("--reason=not planned"));
-	assert.ok(!plan.argv.includes("--reason=not-planned"));
-	assert.ok(toGhPlan(validateRequest({ kind: "issue-close", ...target, reason: "completed" })).argv.includes("--reason=completed"));
+test("metadata-only PR edits require at least one non-empty change", () => {
+	const request = { kind: "pr-edit", ...target };
+	assert.throws(() => validateRequest(request), InvalidRequest);
+	assert.throws(() => validateRequest({ ...request, addLabels: [], removeReviewers: [] }), InvalidRequest);
+	assert.deepEqual(parseCli(["pr-edit", "--repo", target.repo, "--number", String(target.number), "--add-label", "ai-corpus: tracked"]),
+		{ ...request, addLabels: ["ai-corpus: tracked"] });
 });
 
 const hosted = { kind: "issue-comment", ...target, body: "Body" } as const;
