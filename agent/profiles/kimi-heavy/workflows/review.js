@@ -81,13 +81,13 @@
  * Transitional (pi-setup#87): a reviewer with no record at all (session started before model-provenance
  * was installed) is reported as `unavailable (pre-update session)`, does not block and never makes
  * the result reusable from cache; remove once no pre-update sessions remain.
- * Two result shapes, both built to fit the parent's notification, which cuts the pretty-printed JSON at
- * 4000 chars (every field is clipped and sanitised, every list capped; the test bound is 3900):
+ * The parent's notification cuts pretty-printed JSON at 4000 chars, so human-facing text is concise:
  *   - passed: verdict, reviewCacheKey (when reusable) and a slim receipt per run {label, agentType, expected,
  *     effective, ok}, then capped advisory/coverage lines. The key and receipt come first and are never trimmed.
- *   - not passed: verdict, blocking findings (capped, then an explicit `…N more` entry; blockingCount is the real
- *     count), unverified, incomplete, one-line reviewers; never carries a cache key. Coverage-only failures
- *     may carry repair evidence; a repaired result carries repaired/repairAttempt and is never cacheable.
+ *   - not passed: verdict and a brief location and problem for each blocker, then incomplete and reviewer lines.
+ *     The full workflow result ends with untruncated `blocking` and `unverified` arrays. Never carries a cache key.
+ *     Coverage-only failures may carry repair evidence; a repaired result carries repaired/repairAttempt and is never cacheable.
+ *   - advisory lines are capped and report how many additional findings were omitted.
  * Repair keys, like reviewCacheKey, are non-cryptographic digests: identity and tamper-evidence against accidental
  * edits, not authentication. The workflow realm has no secret or crypto; a caller who reimplements the digest
  * can forge evidence, exactly as with cachedReview. The parent/orchestrator must pass the earlier result unchanged.
@@ -328,27 +328,42 @@ for (const side of SIDES) {
 cacheAgentTypes[`review:security-${secSide}`] = REVIEWERS[secSide].agentType
 cacheAgentTypes[`verify:security-${secSide}-by-${other(secSide)}`] = verifierFor(secSide).agentType
 
-// ---- result shape: bounded by construction, never measured-then-shrunk ----
+// ---- result shape: concise preview, lossless blocking details ----
 const isBlocking = f => f.blocking === true && (f.severity === 'critical' || f.severity === 'major')
 const clip = (t, n) => (typeof t === 'string' && t.length > n ? t.slice(0, n) + '…' : t)
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g
-// Result text is clipped, then reduced to characters JSON.stringify never escapes, so the caps below are exact.
+// Preview text is clipped, then reduced to characters JSON.stringify never escapes.
 const shown = (t, n) => clip(typeof t === 'string' ? t : '', n)
   .replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/"/g, "'").replace(/\\/g, '/').replace(LONE_SURROGATE, '?')
 const oneLine = (f, n = 110) => shown(`(${f.severity}) ${f.location}: ${f.problem}`, n)
 // Security holes found in touched code that predate the change: surfaced separately so they are never lost
 // in the advisory list. The caller tracks them (private advisory for exploitable ones).
 const preExisting = list => list.filter(f => typeof f.problem === 'string' && f.problem.startsWith('PRE-EXISTING:')).map(f => oneLine(f))
-const full = f => ({
-  severity: shown(f.severity, 10), location: shown(f.location, 70), problem: shown(f.problem, 160), fix: shown(f.fix, 80),
-  ...(f.foundBy ? { foundBy: shown(f.foundBy, 40) } : {}), ...(f.note ? { note: shown(f.note, 80) } : {}),
+const findingDetails = ({ severity, location, problem, fix, foundBy, note }) => ({
+  severity, location, problem, fix, ...(foundBy ? { foundBy } : {}), note: typeof note === 'string' ? note : '',
 })
+const blockerLine = f => `${shown(f.location, 56)}: ${shown(f.problem, 80)}`
 const capped = (items, cap, show, more) => {
   const out = items.slice(0, cap).map(show)
   if (items.length > cap) out.push(more(items.length - cap))
   return out
 }
 const lines = (items, cap, n) => capped(items.filter(item => typeof item === 'string'), cap, item => shown(item, n), k => `…${k} more`)
+const advisoryLines = (items, cap, width, capWithOmission = cap) => {
+  const findings = []
+  let omitted = 0
+  for (const item of items) {
+    // A cached result or a repair receipt may already account for findings it did not retain.
+    const count = /^…([1-9]\d{0,11}) more$/.exec(item)
+    if (count) omitted += Number(count[1])
+    else findings.push(item)
+  }
+  const visible = omitted || findings.length > cap ? capWithOmission : cap
+  const out = findings.slice(0, visible).map(item => shown(item, width))
+  omitted += findings.length - out.length
+  if (omitted) out.push(`…${omitted} more`)
+  return out
+}
 const nextStep = passed =>
   passed
     ? 'Passed. Fix cheap advisory items in the same change if you like; do not start another review round for them.'
@@ -363,9 +378,10 @@ const slimRun = run => ({
 })
 const runLine = run => `${shown(run?.label, 40) || 'invalid record'}: ${run?.ok === true ? 'ok' : 'INCOMPLETE'}`
 const RUNS_MAX = 6
-// Passed: verdict, cache key and receipt first. Not passed: verdict, blocking, unverified, incomplete first.
+// Put the brief verdict before anything that might be clipped by the host notification.
 const buildResult = r => {
-  const out = { mode: r.mode, round, passed: r.passed, complete: r.complete, blockingCount: r.blockingCount, unverifiedCount: r.unverifiedCount, next: r.next }
+  const out = { mode: r.mode, round, passed: r.passed, complete: r.complete, blockingCount: r.blockingCount, unverifiedCount: r.unverifiedCount,
+    next: r.next, rejectedCount: r.rejectedCount ?? 0 }
   if (r.repaired) { out.repaired = true; out.repairAttempt = r.repairAttempt }
   if (r.repair) out.repair = r.repair
   if (r.cached !== undefined) out.cached = r.cached
@@ -379,18 +395,19 @@ const buildResult = r => {
     out.unverified = []
     out.incomplete = []
     out.coverageNotes = lines(r.coverageNotes, 3, 150)
-    out.advisory = lines(r.advisory, 4, 110)
+    out.advisory = advisoryLines(r.advisory, 4, 110)
     out.preExistingSecurity = lines(r.preExisting, 3, 110)
     out.summaries = r.summaries.slice(0, 3).map(s => ({ by: shown(s.by, 30), summary: shown(s.summary, 70) }))
   } else {
-    out.blocking = capped(r.blocking, 3, full, k => `…${k} more blocking findings omitted (blockingCount=${r.blockingCount})`)
-    out.unverified = capped(r.unverified, 2, f => oneLine(f, 140), k => `…${k} more unverified findings omitted (unverifiedCount=${r.unverifiedCount})`)
+    if (r.error) out.error = r.error
+    if (r.blockingCount || r.unverifiedCount) out.summary = [...r.blocking, ...r.unverified].map(blockerLine).join('\n')
     out.incomplete = lines(r.incomplete, 4, 170)
     out.reviewers = capped(r.reviewers, RUNS_MAX, runLine, k => `…${k} more runs`)
-    out.advisory = lines(r.advisory, 2, 100)
+    out.advisory = advisoryLines(r.advisory, 2, 100)
     out.preExistingSecurity = lines(r.preExisting, 1, 100)
+    out.blocking = r.blocking.map(findingDetails)
+    out.unverified = r.unverified.map(findingDetails)
   }
-  out.rejectedCount = r.rejectedCount ?? 0
   return out
 }
 
@@ -449,7 +466,7 @@ const buildRepair = (lanes, completedKeys, preserved, notes) => {
   if (missing.length === 0 || missing.length === lanes.length || attempt > 2) return undefined
   const evidence = { v: 1, attempt, round,
     missing: missing.sort(), completed: completed.sort((a, b) => a.label.localeCompare(b.label)),
-    advisory: lines(notes.advisory, 3, 90).slice(0, 3), coverageNotes: lines(notes.coverageNotes, 3, 120).slice(0, 3),
+    advisory: advisoryLines(notes.advisory, 3, 90, 2), coverageNotes: lines(notes.coverageNotes, 3, 120).slice(0, 3),
     preExisting: lines(notes.preExisting, 3, 100).slice(0, 3) }
   return { v: evidence.v, key: repairDigest(evidence), ...evidence }
 }
@@ -638,22 +655,25 @@ if (quick) {
     () => reviewAgent(reviewPrompt, { agentType: r.agentType, schema: FINDINGS, label: `review:${side}`, phase: 'Review' }, r.name),
     () => reviewAgent(securityPrompt, { agentType: r.agentType, schema: FINDINGS, label: `review:security-${side}`, phase: 'Review' }, `${r.name} (security)`),
   ])
-  if (!res) return { mode: 'quick', round, passed: false, error: failedText(r.name, `review:${side}`) }
-  if (!sec) return { mode: 'quick', round, passed: false, error: failedText(`${r.name} security`, `review:security-${side}`) }
+  const error = !res ? failedText(r.name, `review:${side}`) : !sec ? failedText(`${r.name} security`, `review:security-${side}`) : undefined
   // Quick mode has no verifier: security blockers gate unverified (fail closed).
-  const all = res.findings.concat(sec.findings.map(f => ({ ...f, foundBy: `${r.name} (security)` })))
+  const all = (res?.findings ?? []).concat((sec?.findings ?? []).map(f => ({ ...f, foundBy: `${r.name} (security)` })))
+  if (error && all.length === 0) return { mode: 'quick', round, passed: false, error }
   const blocking = all.filter(isBlocking)
   const incomplete = [...runtimeProblems]
+  const coverageNotes = []
   for (const [slotName, slot] of [[r.name, res], [`${r.name} (security)`, sec]]) {
+    if (!slot) continue
     const cp = coverageProblem(slotName, slot)
     if (cp) incomplete.push(cp)
+    coverageNotes.push(...coverageNotesFor(slotName, slot))
   }
-  const passedQ = blocking.length === 0 && incomplete.length === 0
+  const complete = !error && incomplete.length === 0
+  const passedQ = blocking.length === 0 && complete
   return buildResult({
-    mode: 'quick', passed: passedQ, complete: incomplete.length === 0, incomplete,
-    coverageNotes: [...coverageNotesFor(r.name, res), ...coverageNotesFor(`${r.name} (security)`, sec)],
+    mode: 'quick', passed: passedQ, complete, incomplete, error, coverageNotes,
     reviewers: runtimeReviewers(), reviewedBy: r.name, blockingCount: blocking.length, unverifiedCount: 0,
-    summaries: [{ by: r.name, summary: res.summary }], blocking, unverified: [], preExisting: preExisting(all),
+    summaries: [{ by: r.name, summary: res?.summary }], blocking, unverified: [], preExisting: preExisting(all),
     advisory: all.filter(f => !isBlocking(f)).map(f => oneLine(f)),
     next: runtimeProblems.length ? runtimeNext : nextStep(passedQ),
   })

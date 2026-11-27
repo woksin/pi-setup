@@ -384,9 +384,11 @@ test("repair receipts and combined results fit the notification bound", async ()
     return res;
   } });
   assert.ok(seed.result.repair);
+  assert.equal(seed.result.advisory.at(-1), "…8 more");
   assert.ok(JSON.stringify(seed.result, null, 2).length <= 3900, JSON.stringify(seed.result, null, 2).length);
   const fixed = await runReview({ ...base, repair: seed.result }, { override: withClaims });
   assert.equal(fixed.result.passed, true);
+  assert.equal(fixed.result.advisory.at(-1), "…8 more");
   assert.ok(JSON.stringify(fixed.result, null, 2).length <= 3900, JSON.stringify(fixed.result, null, 2).length);
   const again = await runReview({ ...base, repair: seed.result }, { override: (opts, res) => {
     withClaims(opts, res);
@@ -396,6 +398,7 @@ test("repair receipts and combined results fit the notification bound", async ()
     return res;
   } });
   assert.ok(again.result.repair);
+  assert.equal(again.result.advisory.at(-1), "…13 more");
   assert.ok(JSON.stringify(again.result, null, 2).length <= 3900, JSON.stringify(again.result, null, 2).length);
 });
 
@@ -806,7 +809,7 @@ test("failed review partitions say why when the host exposes agentError, and deg
   assert.match(nonString.result.error, /^[^:]+ review failed$/);
 });
 
-test("fit preserves gate and coverage with nine blockers and six reviewer records", async () => {
+test("nine blockers preserve the gate, coverage and all six reviewer records", async () => {
   const run = await runReview(base, { override: (opts, res) => {
     if (opts.label.startsWith("review:")) {
       res.summary = "summary ".repeat(100);
@@ -817,8 +820,8 @@ test("fit preserves gate and coverage with nine blockers and six reviewer record
   assert.equal(run.result.passed, false);
   assert.equal(run.result.complete, true);
   assert.equal(run.result.blockingCount, 9);
+  assert.equal(run.result.blocking.length, 9);
   assert.equal(run.result.reviewers.length, 6);
-  assert.ok(JSON.stringify(run.result, null, 2).length <= 3900);
 });
 
 test("a standalone Sol result is not a full-review cache entry", async () => {
@@ -872,6 +875,12 @@ for (const file of reviewFiles) {
     assert.equal(quick.requests.filter(opts => opts.label.startsWith("verify:")).length, 0, "quick mode has no verifier");
     const failed = await runReview({ ...base, quick: true }, { file, override: (opts, res) => securityLabel(opts) ? null : res });
     assert.equal(failed.result.passed, false);
+    const onlySecurity = await runReview({ ...base, quick: true }, { file, override: (opts, res) => securityLabel(opts) ? { ...res, findings: [securityFinding] } : null });
+    assert.equal(onlySecurity.result.passed, false);
+    assert.equal(onlySecurity.result.complete, false);
+    assert.ok(onlySecurity.result.error);
+    assert.equal(onlySecurity.result.blockingCount, 1);
+    assert.equal(onlySecurity.result.blocking[0].problem, securityFinding.problem);
     const failedFull = await runReview(base, { file, override: (opts, res) => securityLabel(opts) ? null : res });
     assert.equal(failedFull.result.passed, false);
     assert.equal(failedFull.result.complete, false);
@@ -898,44 +907,70 @@ test("profile review workflows equal the generator output (node tools/sync-revie
   assert.equal(run.status, 0, run.stderr);
 });
 
-// ---- #161: results are bounded as delivered (parent notification cuts pretty-printed JSON at 4000) ----
+// ---- #243: the notification preview stays concise; the structured result keeps the full blockers ----
 const prettyLength = result => JSON.stringify(result, null, 2).length;
 const nasty = "\"\\\n\t\u0001\u2028\ud800 ".repeat(40);
 const hostile = text => `${text} ${nasty}`;
 const hostileFinding = index => ({ severity: "major", blocking: true, location: hostile(`src/${index}.ts:1`), problem: hostile(`regression ${index}`),
   fix: hostile("restore"), coverage: "complete" });
-const adversarial = (opts, res) => {
+const tenBlockers = Array.from({ length: 10 }, (_, i) => hostileFinding(i));
+const verificationNote = hostile("confirmed");
+const advisoryFindings = Array.from({ length: 6 }, (_, i) => ({ ...hostileFinding(i), blocking: false, severity: "minor", problem: hostile(`PRE-EXISTING: p${i}`) }));
+const adversarial = status => (opts, res) => {
   res.summary = hostile("summary");
   res.coverageNote = hostile("UNRUN: browser: unavailable");
-  if (opts.label.startsWith("review:")) res.findings = [0, 1, 2, 3, 4, 5, 6, 7].map(i => (i < 6 ? hostileFinding(i) : { ...hostileFinding(i), blocking: false, severity: "minor" }));
-  else res.verdicts = [0, 1, 2, 3, 4, 5].map(index => ({ index, status: "blocks", reason: hostile("confirmed") }));
+  if (securityLabel(opts)) res.findings = [...tenBlockers, ...advisoryFindings];
+  if (opts.label.startsWith("verify:")) res.verdicts = tenBlockers.map((_, index) => ({ index, status, reason: verificationNote }));
   return res;
 };
+const blockerFields = ({ location, problem, fix, note }) => ({ location, problem, fix, note });
+
+test("unverified blockers also retain full details and keep the review from passing", async () => {
+  const { result } = await runReview(base, { override: adversarial("uncertain") });
+  assert.equal(result.passed, false);
+  assert.equal(result.unverifiedCount, tenBlockers.length);
+  assert.deepEqual(result.unverified.map(blockerFields), tenBlockers.map(f => blockerFields({ ...f, note: verificationNote })));
+  assert.equal(result.summary.split("\n").length, tenBlockers.length);
+});
 
 for (const file of reviewFiles) {
-  test(`${file}: pretty-printed results stay <= 3900 chars with hostile text and six runs, and keep the verdict`, async () => {
+  test(`${file}: a short preview lists all ten blockers and their details are lossless`, async () => {
     for (const mode of [{}, { deep: true, deepReason: "security", deepJustification: "auth change" }, { quick: true }]) {
-      const blocked = await runReview({ ...base, ...mode }, { file, override: adversarial });
-      assert.ok(prettyLength(blocked.result) <= 3900, `${JSON.stringify(mode)} blocked: ${prettyLength(blocked.result)}`);
-      assert.equal(blocked.result.passed, false);
-      assert.ok(blocked.result.blockingCount >= 6, "blockingCount is the real count");
-      assert.ok(blocked.result.blocking.length <= 4 && blocked.result.blocking.some(f => typeof f === "string" && f.includes("more blocking")));
-      assert.equal(blocked.result.reviewCacheKey, undefined);
-      const clean = await runReview({ ...base, ...mode }, { file, override: (opts, res) => ({ ...res, summary: hostile("s"), findings: opts.label.startsWith("review:")
-        ? [0, 1, 2, 3, 4, 5].map(i => ({ ...hostileFinding(i), blocking: false, severity: "minor", problem: hostile(`PRE-EXISTING: p${i}`) })) : [],
-        coverageNote: hostile("UNRUN: x: y") }) });
-      assert.equal(clean.result.passed, true);
-      assert.ok(prettyLength(clean.result) <= 3900, `${JSON.stringify(mode)} passed: ${prettyLength(clean.result)}`);
-      if (!mode.quick) {
-        assert.match(clean.result.reviewCacheKey, /^review-v4-coverage:/);
-        const hit = await runReview({ ...base, ...mode, cachedReview: clean.result }, { file });
-        assert.equal(hit.calls, 0);
-        assert.equal(hit.result.cached, true);
-        assert.equal(hit.result.reviewCacheKey, clean.result.reviewCacheKey);
-        assert.ok(prettyLength(hit.result) <= 3900);
-        assert.ok(hit.result.reviewers.every(run => run.session === undefined && run.modelCounts === undefined), "cache hits keep slim records");
+      const blocked = await runReview({ ...base, ...mode }, { file, override: adversarial("blocks") });
+      const { blocking, unverified, ...preview } = blocked.result;
+      assert.ok(prettyLength(preview) <= 3900, `${JSON.stringify(mode)} preview: ${prettyLength(preview)}`);
+      assert.equal(preview.passed, false);
+      assert.equal(preview.blockingCount, 10);
+      assert.equal(preview.reviewCacheKey, undefined);
+      assert.deepEqual(unverified, []);
+      assert.deepEqual(blocking.map(blockerFields), tenBlockers.map(f => blockerFields({ ...f, note: mode.quick ? "" : verificationNote })));
+      const lines = preview.summary.split("\n");
+      assert.equal(lines.length, tenBlockers.length);
+      for (const [i, line] of lines.entries()) {
+        assert.ok(line.includes(`src/${i}.ts:1`));
+        assert.ok(line.includes(`regression ${i}`));
       }
+      assert.ok(JSON.stringify(blocked.result, null, 2).slice(0, 3900).includes("regression 9"));
+      assert.equal(preview.advisory.at(-1), "…4 more");
     }
+  });
+
+  test(`${file}: bounded passing results report advisory omissions even on cache hits`, async () => {
+    const clean = await runReview(base, { file, override: (opts, res) => ({ ...res, summary: hostile("s"),
+      findings: opts.label.startsWith("review:") ? advisoryFindings : [], coverageNote: hostile("UNRUN: x: y") }) });
+    assert.equal(clean.result.passed, true);
+    assert.ok(prettyLength(clean.result) <= 3900, `passed: ${prettyLength(clean.result)}`);
+    const total = clean.requests.filter(opts => opts.label.startsWith("review:")).length * advisoryFindings.length;
+    const retained = clean.result.advisory.length - 1;
+    assert.equal(clean.result.advisory.at(-1), `…${total - retained} more`);
+    assert.match(clean.result.reviewCacheKey, /^review-v4-coverage:/);
+    const hit = await runReview({ ...base, cachedReview: clean.result }, { file });
+    assert.equal(hit.calls, 0);
+    assert.equal(hit.result.cached, true);
+    assert.equal(hit.result.reviewCacheKey, clean.result.reviewCacheKey);
+    assert.deepEqual(hit.result.advisory, clean.result.advisory);
+    assert.ok(prettyLength(hit.result) <= 3900);
+    assert.ok(hit.result.reviewers.every(run => run.session === undefined && run.modelCounts === undefined), "cache hits keep slim records");
   });
 
   test(`${file}: a cache hit enforces unique labels, allowed roles, required lanes, an exact count and bounded output`, async () => {
