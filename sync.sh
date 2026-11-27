@@ -4,6 +4,13 @@
 # The whole published tree is built in a temporary stage and checked
 # (tools/publish-check.py + gitleaks) before anything is written to the checkout.
 set -euo pipefail
+ALLOW_STALE=()
+while (($#)); do
+  case $1 in
+    --allow-stale) [ $# -ge 2 ] || { echo "usage: sync.sh [--allow-stale <repo path>]..." >&2; exit 2; }; ALLOW_STALE+=("$2"); shift 2 ;;
+    *) echo "usage: sync.sh [--allow-stale <repo path>]..." >&2; exit 2 ;;
+  esac
+done
 cd "$(dirname "$0")"
 REPO=$PWD
 PI="$HOME/.pi/agent"
@@ -27,7 +34,7 @@ done
 # publishing sanitisers: per-user label in docker-guardian, author-specific inbox path and notes path
 sed -i '' -e "s#com\\.$(id -un)\\.#com.example.#g" agent/bin/docker-guardian agent/bin/pi-cleanup
 sed -i '' -e 's#\${INBOX_DIR:-[^}]*}#${INBOX_DIR:-$HOME/.pi/agent/inbox}#' agent/bin/inbox-watch
-"${RS[@]}" --exclude=ACTIVE "$PI/profiles/" agent/profiles/
+# agent/profiles/ is repo-owned: never copied from the live install (see tools/sync-profile-agents.mjs)
 # lane-policy: only the README is shared (policy.json is per-machine state)
 mkdir -p agent/lane-policy
 cp "$PI/lane-policy/README.md" agent/lane-policy/README.md
@@ -67,26 +74,76 @@ python3 "$REPO/setup-user.py" normalize "$PI/user.json" woksin /Volumes/sourceco
 python3 "$REPO/tools/publish-check.py" "$STAGE" "$PI/lib/secret-mask.ts"
 gitleaks dir "$STAGE" --no-banner --redact
 
-# ---- 3. write the stage into the checkout ----
+# ---- 3. refuse to overwrite repo work newer than the live copy, then write the stage into the checkout ----
+# Every file the sync would change or delete is compared (content, not mtime) and, when the repo's last commit
+# touching it is newer than the live file's mtime, the sync stops. Allow a known case with --allow-stale <repo path>.
 cd "$REPO"
-mkdir -p agent skills tools/bin
-for d in agents extensions early-extensions lib workflows templates loose-threads; do
-  "${RS[@]}" "$STAGE/agent/$d/" "agent/$d/"
+CHANGED=()
+DRY=0
+sync_dir() { # sync_dir <src> <dst> [rsync flags...]: copy, or in dry-run mode record the files that would change
+  local src=$1 dst=$2; shift 2
+  if ((DRY)); then
+    local line path
+    while IFS= read -r line; do
+      case $line in
+        "*deleting "*) path=${line#"*deleting "}; path=${path# }; CHANGED+=("${dst}${path}") ;;
+        [\>\<c]f*) path=${line#* }; CHANGED+=("${dst}${path}") ;;
+      esac
+    done < <("${RS[@]}" -n -c -i "$@" "$src" "$dst")
+  else
+    "${RS[@]}" "$@" "$src" "$dst"
+  fi
+}
+sync_file() { # sync_file <src> <dst>
+  if ((DRY)); then cmp -s "$1" "$2" || CHANGED+=("$2"); else cp "$1" "$2"; fi
+}
+write_stage() {
+  mkdir -p agent skills tools/bin agent/lane-policy agent/launchd
+  for d in agents extensions early-extensions lib workflows templates loose-threads; do
+    sync_dir "$STAGE/agent/$d/" "agent/$d/"
+  done
+  sync_dir "$STAGE/agent/bin/" agent/bin/ --exclude=fd --exclude=rg
+  sync_dir "$STAGE/agent/pi-phase/" agent/pi-phase/ --exclude=state --exclude=config.local.json --exclude='backup-*'
+  sync_dir "$STAGE/agent/local-packages/pi-questions/" agent/local-packages/pi-questions/ "${PQ_EX[@]}"
+  sync_file "$STAGE/agent/lane-policy/README.md" agent/lane-policy/README.md
+  for f in "$STAGE"/agent/launchd/*; do sync_file "$f" "agent/launchd/${f##*/}"; done
+  for f in AGENTS.md AGENTS.subagent.md models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json settings.json npm-package.json; do
+    sync_file "$STAGE/agent/$f" "agent/$f"
+  done
+  for s in ai-work-lifecycle github-issue-hygiene dev-machine-performance report-setup-issue sol-loop ci-and-pushing shipping-trains; do
+    sync_dir "$STAGE/skills/$s/" "skills/$s/"
+  done
+  sync_dir "$STAGE/tools/ai-work-lifecycle/" tools/ai-work-lifecycle/
+  sync_file "$STAGE/tools/bin/ai-work-lifecycle" tools/bin/ai-work-lifecycle
+}
+live_path() { # repo path -> the live file it is published from (empty when it is derived or per-machine)
+  case $1 in
+    agent/launchd/*|tools/bin/*) ;;
+    agent/*) echo "$PI/${1#agent/}" ;;
+    skills/*) echo "$HOME/.agents/skills/${1#skills/}" ;;
+    tools/ai-work-lifecycle/*) echo "$HOME/.local/share/ai-work-lifecycle/${1#tools/ai-work-lifecycle/}" ;;
+  esac
+}
+mtime() { stat -f %m "$1"; }
+
+DRY=1; write_stage; DRY=0
+STALE=()
+for f in ${CHANGED[@]+"${CHANGED[@]}"}; do
+  commit=$(git log -1 --format=%ct -- "$f" 2>/dev/null || true)
+  [ -n "$commit" ] || continue            # untracked in the repo: nothing to lose
+  live=$(live_path "$f"); [ -n "$live" ] || continue
+  if [ -e "$live" ]; then stamp=$(mtime "$live")
+  else d=$(dirname "$live"); while [ ! -e "$d" ] && [ "$d" != / ]; do d=$(dirname "$d"); done; stamp=$(mtime "$d"); fi
+  if ((commit > stamp)); then
+    for a in ${ALLOW_STALE[@]+"${ALLOW_STALE[@]}"}; do [ "$a" = "$f" ] && continue 2; done
+    STALE+=("$f")
+  fi
 done
-"${RS[@]}" --exclude=fd --exclude=rg "$STAGE/agent/bin/" agent/bin/
-"${RS[@]}" --exclude=state --exclude=config.local.json --exclude='backup-*' "$STAGE/agent/pi-phase/" agent/pi-phase/
-"${RS[@]}" "${PQ_EX[@]}" "$STAGE/agent/local-packages/pi-questions/" agent/local-packages/pi-questions/
-"${RS[@]}" --exclude=ACTIVE "$STAGE/agent/profiles/" agent/profiles/
-mkdir -p agent/lane-policy agent/launchd
-cp "$STAGE/agent/lane-policy/README.md" agent/lane-policy/README.md
-cp "$STAGE"/agent/launchd/* agent/launchd/
-for f in AGENTS.md AGENTS.subagent.md models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json context-budget.json settings.json npm-package.json; do
-  cp "$STAGE/agent/$f" "agent/$f"
-done
-for s in ai-work-lifecycle github-issue-hygiene dev-machine-performance report-setup-issue sol-loop ci-and-pushing shipping-trains; do
-  "${RS[@]}" "$STAGE/skills/$s/" "skills/$s/"
-done
-"${RS[@]}" "$STAGE/tools/ai-work-lifecycle/" tools/ai-work-lifecycle/
-cp "$STAGE/tools/bin/ai-work-lifecycle" tools/bin/ai-work-lifecycle
+if ((${#STALE[@]})); then
+  echo "sync.sh: refusing to overwrite repo changes newer than the live copy (catch the live install up, or pass --allow-stale <path>):" >&2
+  printf '  %s\n' "${STALE[@]}" >&2
+  exit 1
+fi
+write_stage
 
 git status --short

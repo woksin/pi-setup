@@ -50,6 +50,13 @@ def active():
     return ACTIVE.read_text().strip() if ACTIVE.exists() else None
 
 
+def has_routing_markers():
+    """False for an AGENTS.md without a routing block: use/save then leave it alone."""
+    text = AGENTS_MD.read_text() if AGENTS_MD.exists() else ""
+    s, e = text.find(START), text.find(END)
+    return 0 <= s <= e
+
+
 def split_agents_md():
     text = AGENTS_MD.read_text()
     s = text.find(START)
@@ -81,7 +88,7 @@ def drift(name):
         if not dst.exists() or not filecmp.cmp(src, dst, shallow=False):
             out.append(str(dst.relative_to(ROOT)))
     routing = PROFILES / name / "routing.md"
-    if routing.exists() and split_agents_md()[1] != routing.read_text():
+    if routing.exists() and has_routing_markers() and split_agents_md()[1] != routing.read_text():
         out.append("AGENTS.md (routing section)")
     return out
 
@@ -109,7 +116,7 @@ def cmd_use(name, force):
     for src, dst in managed_files(name):
         shutil.copy2(src, dst)
     routing = PROFILES / name / "routing.md"
-    if routing.exists():
+    if routing.exists() and has_routing_markers():
         head, _, tail = split_agents_md()
         AGENTS_MD.write_text(head + routing.read_text() + tail)
     ACTIVE.write_text(name + "\n")
@@ -124,7 +131,7 @@ def cmd_save():
         if dst.exists():
             shutil.copy2(dst, src)
     routing = PROFILES / name / "routing.md"
-    if routing.exists():
+    if routing.exists() and has_routing_markers():
         routing.write_text(split_agents_md()[1])
     print(f"saved live files into '{name}'")
 
