@@ -9,7 +9,7 @@ import type { Readable } from "node:stream";
 import { scanPublication } from "./publish-scan.ts";
 import type { PublicationContext, PublicationScan } from "./publish-scan.ts";
 import { InvalidRequest, MAX_REQUEST_BYTES, MAX_STRING_BYTES, toGhPlan, validateAppendOnly, validateRequest } from "./publish-request.ts";
-import type { GhPlan, PayloadSource, PayloadSlot } from "./publish-request.ts";
+import type { GhCommand, GhPlan, PayloadSource, PayloadSlot } from "./publish-request.ts";
 
 export type PublishCode = "published" | "scan-clean" | "invalid-request" | "unsupported-platform" | "payload-unreadable" | "payload-too-large" | "payload-not-utf8" | "scan-refused" | "gh-unavailable" | "gh-failed" | "gh-timeout" | "cancelled" | "gh-output-limit" | "cleanup-failed" | "payload-not-found" | "payload-symlink" | "payload-not-file" | "payload-permission" | "host-unauthenticated";
 export interface PublishResult { code: PublishCode; text: string; isError: boolean; detail?: string; diagnostics?: { source: string; count: number; findings: PublicationScan["findings"] } }
@@ -377,14 +377,28 @@ async function runGh(argv: () => string[], env: NodeJS.ProcessEnv, run: Runtime,
 		return await monitor(child, run, options);
 	} catch (error) { if (error instanceof Failure) throw error; throw new Failure("gh-failed"); }
 }
-async function send(plan: GhPlan, state: { bytes: Buffer[]; paths: string[] }, run: Runtime): Promise<void> {
+interface SendState { bytes: Buffer[]; paths: string[]; closeComment?: "uncertain" | "posted" }
+function skipCommand({ onLastOutput, skipIfBlank }: GhCommand, lastOutput: string | undefined, bytes: Buffer[]): boolean {
+	if (onLastOutput !== undefined && onLastOutput !== lastOutput) return true;
+	return skipIfBlank !== undefined && !decoded(bytes[skipIfBlank]).trim();
+}
+async function send(plan: GhPlan, state: SendState, run: Runtime): Promise<void> {
 	const env = environment(run.env, plan.host), reflect = reflectionTexts(plan, state.bytes);
-	let previousOutput: string | undefined;
-	for (const { argv, expect, onPreviousOutput, skipIfEmpty } of [plan, ...(plan.followups ?? [])]) {
-		if (onPreviousOutput !== undefined && onPreviousOutput !== previousOutput) continue;
-		if (skipIfEmpty !== undefined && !state.bytes[skipIfEmpty].length) continue;
-		previousOutput = await runGh(() => argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), env, run, { reflect, expect });
+	let lastOutput: string | undefined;
+	for (const command of [plan, ...(plan.followups ?? [])]) {
+		if (skipCommand(command, lastOutput, state.bytes)) continue;
+		const { argv, expect, postsCloseComment } = command;
+		if (postsCloseComment) state.closeComment = "uncertain";
+		const output = await runGh(() => argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), env, run, { reflect, expect });
+		if (postsCloseComment) state.closeComment = "posted";
+		if (output === "pr") throw new Failure("gh-failed", undefined, "target is a pull request; use pr-close instead");
+		lastOutput = output ?? lastOutput;
 	}
+}
+function closeCommentAdvice(outcome: PublishResult, comment: SendState["closeComment"]): PublishResult {
+	if (!outcome.isError || !comment) return outcome;
+	const detail = comment === "posted" ? "comment already posted; retry issue-close without body" : "check the issue before retrying";
+	return { ...outcome, detail };
 }
 /** A non-default host must already hold a stored gh credential; output is discarded, failure is a fixed code. */
 async function hostPreflight(host: string, run: Runtime): Promise<void> {
@@ -406,6 +420,7 @@ async function cleanup(state: { directory?: string; outcome: PublishResult }, io
 export async function publish(value: unknown, context: PublisherContext = {}, adapters: PublisherAdapters = {}): Promise<PublishResult> {
 	const run = runtime(context, adapters);
 	let directory: string | undefined;
+	let state: SendState | undefined;
 	let outcome: PublishResult;
 	try {
 		cancelled(context.signal);
@@ -420,8 +435,9 @@ export async function publish(value: unknown, context: PublisherContext = {}, ad
 		directory = await run.io.mkdtemp(join(run.temporaryRoot(), "pi-publish-"));
 		await run.io.chmod(directory, 0o700);
 		const paths = await snapshots({ dir: directory, plan, bytes }, run);
-		await send(plan, { bytes, paths }, run);
+		state = { bytes, paths };
+		await send(plan, state, run);
 		outcome = result("published");
 	} catch (error) { outcome = failed(error); }
-	return cleanup({ directory, outcome }, run.io);
+	return closeCommentAdvice(await cleanup({ directory, outcome }, run.io), state?.closeComment);
 }

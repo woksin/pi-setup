@@ -331,8 +331,8 @@ test("body and file fields are slots, not original paths or gh @ interpretations
 	assert.ok(plan.payloads.some(source => "file" in source.source && source.source.file === "input.json"));
 });
 
-test("reopen and close comments are scanned text slots; merge/release use files", () => {
-	for (const kind of ["issue-close", "issue-reopen", "pr-close", "pr-reopen"] as const) {
+test("native reopen/close comments are scanned text slots; merge/release use files", () => {
+	for (const kind of ["issue-reopen", "pr-close", "pr-reopen"] as const) {
 		const plan = toGhPlan({ kind, ...target, bodyFile: "private-name" });
 		assert.deepEqual(plan.argv.at(-1), { payload: 0, use: "text", prefix: "--comment=" });
 		assert.ok(!JSON.stringify(plan.authority).includes("private-name"));

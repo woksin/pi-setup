@@ -165,11 +165,14 @@ test("pr-edit with non-REST metadata still uses native gh options", async () => 
 	assert.ok(args.some(arg => arg.startsWith("--body-file=")));
 });
 
-for (const [reason, stateReason, initialState] of [["not-planned", "not_planned", "open"], ["completed", "completed", undefined],
-	["not-planned", "not_planned", "closed"]] as const) {
-	test(`issue close applies and confirms ${reason} (${initialState ?? "no comment"})`, () => fixture(async root => {
+for (const [reason, stateReason, initialState, comment] of [
+	["not-planned", "not_planned", "open", "text"], ["completed", "completed", "open", "none"],
+	["not-planned", "not_planned", "closed", "text"], [undefined, undefined, "open", "text"],
+	[undefined, undefined, "closed", "none"], [undefined, undefined, "open", "blank"],
+] as const) {
+	test(`issue close (${reason ?? "default reason"}, ${initialState}, ${comment} body)`, () => fixture(async root => {
 		const endpoint = "repos/owner/repo/issues/39";
-		const source = join(root, "close.md"), body = Buffer.from("\ufeffClosing note\r\n@next line");
+		const source = join(root, "close.md"), body = Buffer.from(comment === "blank" ? " \t\r\n" : "\ufeffClosing note\r\n@next line");
 		writeFileSync(source, body);
 		const calls: string[][] = [], comments: Buffer[] = [];
 		const mocks = adapters((_executable, argv) => {
@@ -185,37 +188,68 @@ for (const [reason, stateReason, initialState] of [["not-planned", "not_planned"
 			});
 			return child;
 		});
-		code(await publish({ ...base, kind: "issue-close", reason, ...(initialState ? { bodyFile: source } : {}) }, safeContext, mocks), "published");
+		code(await publish({ ...base, kind: "issue-close", ...(reason ? { reason } : {}),
+			...(comment === "none" ? {} : { bodyFile: source }) }, safeContext, mocks), "published");
+		const shouldComment = initialState === "open" && comment === "text", shouldClose = initialState === "open" || reason;
 		assert.deepEqual(calls.map(args => args.slice(0, 3)), [
-			...(initialState ? [["api", endpoint, "--method=GET"]] : []),
-			...(initialState === "open" ? [["api", `${endpoint}/comments`, "--method=POST"]] : []),
-			["api", endpoint, "--method=PATCH"],
+			["api", endpoint, "--method=GET"],
+			...(shouldComment ? [["api", `${endpoint}/comments`, "--method=POST"]] : []),
+			...(shouldClose ? [["api", endpoint, "--method=PATCH"]] : []),
 		]);
-		assert.deepEqual(comments, initialState === "open" ? [body] : []);
-		assert.ok(calls.at(-1)!.includes("--raw-field=state=closed"));
-		assert.ok(calls.at(-1)!.includes(`--raw-field=state_reason=${stateReason}`));
-		assert.ok(calls.at(-1)!.includes(`--jq=.state == "closed" and .state_reason == "${stateReason}"`));
+		assert.deepEqual(comments, shouldComment ? [body] : []);
+		if (shouldClose) {
+			const patch = calls.at(-1)!;
+			assert.ok(patch.includes("--raw-field=state=closed"));
+			assert.deepEqual(patch.filter(arg => arg.startsWith("--raw-field=state_reason=")), stateReason ? [`--raw-field=state_reason=${stateReason}`] : []);
+			assert.ok(patch.includes(`--jq=.state == "closed"${stateReason ? ` and .state_reason == "${stateReason}"` : ""}`));
+		}
 	}));
 }
 
-for (const failure of ["comment-failed", "unconfirmed-close", "unsafe-comment"]) {
-	test(`issue close reports ${failure} without retrying the comment`, async () => {
-		const calls: string[] = [];
+for (const [request, label] of [[{ reason: "not-planned" }, "without a comment"], [{ body: "Closing note" }, "with a comment"]] as const) {
+	test(`issue-close refuses a pull request before mutation (${label})`, async () => {
+		const calls: string[][] = [];
 		const mocks = adapters((_executable, argv) => {
-			calls.push(argv[2]);
+			calls.push(argv);
+			const child = new Child();
+			queueMicrotask(() => { child.stdout.write("pr\n"); child.finish(); });
+			return child;
+		});
+		code(await publish({ ...base, kind: "issue-close", ...request }, safeContext, mocks), "gh-failed", "target is a pull request; use pr-close instead");
+		assert.deepEqual(calls.map(args => args.slice(0, 3)), [["api", "repos/owner/repo/issues/39", "--method=GET"]]);
+		assert.ok(calls[0].includes('--jq=if has("pull_request") then "pr" else .state end'));
+	});
+}
+
+for (const [failure, failureCode, advice, step] of [
+	["unsafe comment", "scan-refused", undefined, undefined],
+	["comment exits nonzero", "gh-failed", "check the issue before retrying", "POST"],
+	["comment times out", "gh-timeout", "check the issue before retrying", "POST"],
+	["close exits nonzero", "gh-failed", "comment already posted; retry issue-close without body", "PATCH"],
+	["close is unconfirmed", "gh-failed", "comment already posted; retry issue-close without body", "PATCH"],
+] as const) {
+	test(`issue close handles ${failure} without retrying the comment`, async () => {
+		const calls: string[] = [];
+		let timeout: () => void;
+		const mocks = adapters((_executable, argv) => {
+			const method = argv[2].slice("--method=".length);
+			calls.push(method);
 			const child = new Child();
 			queueMicrotask(() => {
-				if (argv[2] === "--method=GET") child.stdout.write("open\n");
-				if (argv[2] === "--method=PATCH") child.stdout.write("false\n");
-				child.finish(failure === "comment-failed" && argv[2] === "--method=POST" ? 1 : 0);
+				if (method === "GET") child.stdout.write("open\n");
+				if (method !== step) return child.finish();
+				if (failure === "comment times out") { timeout(); return child.finish(null); }
+				if (failure === "close is unconfirmed") { child.stdout.write("false\n"); return child.finish(); }
+				child.stderr.write("gh: Server error (HTTP 503)\n");
+				child.finish(1);
 			});
 			return child;
 		});
-		const body = failure === "unsafe-comment" ? `${safeContext.home}/private-value` : "Closing note";
+		mocks.clock = { after: (_ms, callback) => { timeout = callback; return () => {}; } };
+		const body = step ? "Closing note" : `${safeContext.home}/private-value`;
 		const result = await publish({ ...base, kind: "issue-close", reason: "not-planned", body }, safeContext, mocks);
-		code(result, failure === "unsafe-comment" ? "scan-refused" : "gh-failed");
-		assert.deepEqual(calls, failure === "unsafe-comment" ? []
-			: ["--method=GET", "--method=POST", ...(failure === "unconfirmed-close" ? ["--method=PATCH"] : [])]);
+		code(result, failureCode, advice);
+		assert.deepEqual(calls, step ? ["GET", "POST", ...(step === "PATCH" ? ["PATCH"] : [])] : []);
 	});
 }
 

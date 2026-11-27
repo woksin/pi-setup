@@ -297,8 +297,9 @@ export interface OutboundText { label: string; text: string }
 export interface GhCommand {
 	argv: (string | PayloadSlot)[];
 	expect?: readonly string[];
-	onPreviousOutput?: string;
-	skipIfEmpty?: number;
+	onLastOutput?: string;
+	skipIfBlank?: number;
+	postsCloseComment?: true;
 }
 export interface GhPlan extends GhCommand {
 	followups?: GhCommand[];
@@ -382,19 +383,26 @@ function setCommands(plan: GhPlan, commands: GhCommand[]): void {
 	if (followups.length) plan.followups = followups;
 }
 function useRestForIssueClose(request: Extract<PublishRequest, { kind: "issue-close" }>, plan: GhPlan): void {
-	if (!request.reason) return;
 	const endpoint = `repos/${request.repo}/issues/${request.number}`;
 	const reason = request.reason === "not-planned" ? "not_planned" : request.reason;
-	const commands: GhCommand[] = [], body = plan.argv.find(arg => typeof arg !== "string");
+	const commands: GhCommand[] = [{
+		argv: [...rest(plan, endpoint, "GET"), '--jq=if has("pull_request") then "pr" else .state end'],
+		expect: ["open", "closed", "pr"],
+	}];
+	const body = plan.argv.find(arg => typeof arg !== "string");
 	if (body) {
-		// Like native issue close, do not append another comment to an already closed issue.
-		commands.push({ argv: [...rest(plan, endpoint, "GET"), "--jq=.state"], expect: ["open", "closed"] });
+		// Do not append another comment to an already closed issue.
 		commands.push({ argv: [...rest(plan, `${endpoint}/comments`, "POST"), "--silent",
-			{ ...body, use: "file", prefix: "--field=body=@" }], onPreviousOutput: "open", skipIfEmpty: body.payload });
+			{ ...body, use: "file", prefix: "--field=body=@" }], onLastOutput: "open", skipIfBlank: body.payload, postsCloseComment: true });
 	}
-	plan.outbound.push({ label: "state_reason", text: reason });
-	commands.push({ argv: [...rest(plan, endpoint, "PATCH"), "--raw-field=state=closed", `--raw-field=state_reason=${reason}`,
-		`--jq=.state == "closed" and .state_reason == "${reason}"`], expect: ["true"] });
+	const patch = [...rest(plan, endpoint, "PATCH"), "--raw-field=state=closed"];
+	let confirmation = '--jq=.state == "closed"';
+	if (reason) {
+		plan.outbound.push({ label: "state_reason", text: reason });
+		patch.push(`--raw-field=state_reason=${reason}`);
+		confirmation += ` and .state_reason == "${reason}"`;
+	}
+	commands.push({ argv: [...patch, confirmation], expect: ["true"], onLastOutput: reason ? undefined : "open" });
 	setCommands(plan, commands);
 }
 /** REST can apply description/title/base together without gh pr edit's classic Projects query. */
