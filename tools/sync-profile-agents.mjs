@@ -74,6 +74,10 @@ export function render(baseText, profileText, where = 'profile') {
 }
 
 function main(argv) {
+  if (argv.includes('-h') || argv.includes('--help')) {
+    console.log('Usage: node tools/sync-profile-agents.mjs [--check] [--repo <dir>] [--base <dir>] [--out <dir>]')
+    return
+  }
   const opt = name => { const i = argv.indexOf(name); return i < 0 ? undefined : argv[i + 1] }
   const check = argv.includes('--check')
   const repo = path.resolve(opt('--repo') ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..'))
