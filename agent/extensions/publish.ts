@@ -59,7 +59,7 @@ export default function publishExtension(pi: ExtensionAPI, services: PublishServ
 }
 export const PUBLISH_HELP = [
 	"Usage: pi-publish KIND --repo OWNER/REPO [--host HOST] --number N --body-file FILE ...",
-	"       pi-publish check --file FILE",
+	"       pi-publish check (--file FILE ... | --body-file FILE)",
 	"Publish GitHub issue and PR text through the same typed validator and captured-byte scanner as the pi publish tool. Issues/comments are append-only: no issue body/title edits or editLast. Issue metadata and PR descriptions remain editable.",
 	"Shell lane/candidate admission is separate. Use the publish tool from pi where possible.",
 	"Payload errors name the resolved path; gh errors give exit code, category, HTTP status and a redacted API message.",
