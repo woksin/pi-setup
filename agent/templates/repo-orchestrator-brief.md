@@ -22,7 +22,7 @@ Rules:
 - Check the register (`issue_work owner <issues>`) for every issue before assigning it to a lane; never assign one it shows OWNED by another session without the owner's or <L0 id>'s confirmation.
 
 ## Gate schedule
-- Tier 1 gate: `<exact command>`. Tier 2 gate: `<exact command>`. Both mirror CI (see `.github/workflows/`).
+- Candidate check: `<exact command>`: build and test the union of the deliveries' affected projects with CI's configuration (see `.github/workflows/`). Whole-solution and integration runs are CI's job; run one locally only when shared build configuration changed.
 - Run one gate per candidate code state. A lane's own green gate is evidence for its branch only. Rerun on the merged candidate.
 - Heavy phases (build, integration, Docker) run through `pi-phase` and never in parallel for the same code state. Schedule them here: `<time/slot or "on candidate">`.
 - Attribute every failure to the delivery that caused it, send it back to that lane with the log excerpt, and keep the other deliveries in the candidate when they are independent.

@@ -51,7 +51,9 @@
   "cacheWarming": "off",
   "showCacheMissNotices": true,
   "extensions": [
-    "-builtin:mcp"
+    "-builtin:mcp",
+    "-extensions/code-change-notice.ts",
+    "-extensions/model-drift.ts"
   ],
   "extensionChangelogVersions": {
     "{\"source\":\"npm:@gotgenes/pi-anthropic-auth\",\"scope\":\"user\"}": "3.6.0",

@@ -50,6 +50,8 @@ done
 for f in AGENTS.md AGENTS.subagent.md models.json subagents.json provider-fallback.json mcp-adapter.json efficiency.json ; do
   cp "$PI/$f" "agent/$f"
 done
+# portable MCP command: the install resolves cs-mcp on PATH, not a Homebrew prefix
+sed -i '' -e 's#"/opt/homebrew/bin/cs-mcp"#"cs-mcp"#' agent/mcp-adapter.json
 # per-session resume checks point at local scripts: not shared
 jq 'del(.resumeChecks)' "$PI/context-budget.json" > agent/context-budget.json
 # local packages -> their public npm packages; deduplicated, order kept

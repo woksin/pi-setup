@@ -1,12 +1,15 @@
 # Global instructions
 
-Goal: the shortest useful feedback loop. Spend time only on what changes the outcome. CI is the gate; local work is edit → targeted check → PR.
+Goal: the shortest useful feedback loop. Spend time only on what changes the outcome. Local machine and CI runners are both saturated: run the first check that can catch a plausible failure, wherever it is cheapest, and never run a redundant one. CI is the merge gate, not the debugger.
 
 ## Default loop
 
 - Fetch and update main (or merge it into the branch) before implementing. Report dirty or diverged state; never discard it.
-- Make the change, run the narrowest check that proves it (the affected test project, one spec, a build of the touched project). Build/test phases go through `pi-phase run`. No whole-solution local gates; CI runs those.
-- Push, open the PR, wait on CI with `job_start`/`job_watch` on an immutable run ID or SHA, merge when green. Never poll.
+- Make the change, run the narrowest check that proves it (one spec, the affected test project). Build/test phases go through `pi-phase run`. Iteration checks count as pre-push verification: before pushing, run only coverage still missing; a test run that builds the project replaces a separate build.
+- pi-phase skips an exact verified pass automatically; use `--rerun` only for an input it cannot see (local package feed, external state).
+- A targeted local integration test is fine when it answers the question cheaply. Whole-solution, matrix and multi-OS runs belong to CI.
+- Push the first coherent revision, open the PR, wait on CI with `job_start`/`job_watch` on an immutable run ID or SHA, merge when the expected checks succeeded on that exact head (no checks is not green: a repo without CI merges on the named local check, stated in the PR). Never poll. Diagnose a CI failure before pushing a fix or re-running; cancel your own superseded branch runs.
+- Under sustained queue pressure (local or CI), defer redundant checks, not the first discriminating one; reduce concurrent sessions rather than raising priority.
 - Diagnose before retrying. Stop and report when a check fails repeatedly without new evidence.
 
 ## Criticality tiers (used by agent briefs and the `review` workflow)
@@ -21,16 +24,16 @@ Unknown: pick the higher tier. Security-relevant changes are never below B.
 
 The Cratis AI corpus installer (`cratis ai`) picks the rules and skills per repository profile; follow what it installed in the repo.
 
-- **Applications built on the Cratis platform** (Ada, Direct, Studio, …): the risk lives in the event model / Screenplay — event types, commands, read models and how they flow. Spend review effort there, before code. Implementation is recipe-driven (how to use Chronicle, Arc, Arc React, Components); write one Given/When/Then spec per command outcome and view, no extra review.
+- **Applications built on the Cratis platform** (Ada, Direct, Studio, …): the risk lives in the event model / Screenplay — event types, commands, read models and how they flow. Spend review effort there, before code. Implementation is recipe-driven (how to use Chronicle, Arc, Arc React, Components); add a Given/When/Then spec only for a new or changed command outcome or view that existing specs do not cover, no extra review. Where a corpus rule demands more specs, this policy is the intent; report the conflict.
 - **Platform repositories** (Chronicle, Arc, Fundamentals, Components, Arc.TypeScript, Arc.Go, …): public API and runtime behaviour are contracts for every consumer. Specs cover caller-visible behaviour; breaking changes are majors.
 
 ## Tests
 
-Test promises that outlive the code: security/authorization, secret redaction, data and migrations, event schemas (upcasting, replay, projection idempotency), published contracts, runner cost guards. Otherwise test caller-visible behaviour only; never assert prose, file layout or third-party markup; no custom verification tooling for one-off work.
+Test promises that outlive the code: security/authorization, secret redaction, data and migrations, event schemas (upcasting, replay, projection idempotency), published contracts, runner cost guards. Otherwise test caller-visible behaviour only, reuse existing proof, parameterize equivalent cases, no spec-per-method or file quota; never assert prose, file layout or third-party markup; no custom verification tooling for one-off work.
 
 ## Review
 
-One independent cross-provider review, only for tier A or a B change that touches a trust boundary, workflow permissions, untrusted-PR triggers or destructive/bulk actions. Use the `review` workflow (pass `author` and `tier`). Block on correctness/security, not nits; at most one follow-up round for a named blocker. Everything else ships on green CI without review.
+One independent review by the other provider (`reviewer` for GPT-written work, `sol-reviewer` for Claude-written work), after the targeted check passed, only for tier A or a B change that touches a trust boundary, workflow permissions, untrusted-PR triggers or destructive/bulk actions. The two-provider `review` workflow is only for auth, credentials, secrets or production deployment. Block on correctness/security, not nits; at most one follow-up round, on the delta, for a named blocker. Everything else ships on green CI without review.
 
 ## CodeScene
 

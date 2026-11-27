@@ -14,7 +14,7 @@ Investigation budget: for any question needing more than ~5 reads/searches or ~2
 <What must be true when you are done, in 1–3 sentences. Link the issue.>
 
 ## Where
-- Worktree / branch: <absolute path> (`<branch>`). Work only there.
+- Worktree / branch: <absolute path> (`<branch>`). Work only there. The parent restores dependencies (e.g. `dotnet restore`, `yarn install`) before spawning; if they are missing, report instead of stalling.
 - First step: `git fetch origin && git merge origin/main` (or rebase if the repo does that); stop and report on conflicts you cannot resolve mechanically.
 - Issue register: <issue → FREE/OWNED per `issue_work owner`, checked by the parent>; claimed by the delegating session <session id prefix>. Work under that claim is authorized; stop and report only if the register shows the issue owned by a different session.
 - Files / areas you own: <paths>. Do not edit anything else.
@@ -23,11 +23,10 @@ Investigation budget: for any question needing more than ~5 reads/searches or ~2
 - Read first (only these): <rules/docs paths>. If the task touches CI, runners, secrets, permissions or production, name the governing rule file here (e.g. `.cratis/ai/rules/github-actions.md`) and check the request against it before sending.
 
 ## Done =
-- [ ] The Tier 1 gate `<exact command, e.g. .ai-work/ci-local.sh>` exits 0 (whole-solution build with CI's configuration and warnings, lint, all non-integration tests). Affected-project commands are for iterating only, never completion evidence. If a Tier 1 part genuinely cannot run here, name it and say what ran instead.
-- [ ] Candidate delivery instead (repo has an open `pi-train` candidate): targeted checks `<command>` exit 0 and the branch is delivered with `pi-train fold <branch>`; the candidate owner runs Tier 1 once.
-- [ ] <acceptance check: failing-first spec now passes / behaviour X observable via Y>.
-- [ ] Every changed file at Code Health >= 9.5 (`code_health_score`), with a before/after table in the report; any exception named with a reason.
-- [ ] No Code Health fix loop: one deliberate pass per file before the gate; a file still below 9.5 gets a reported reason and an uplift entry, not another round.
+- [ ] Tier <A/B/C>. The check `<exact command>` exits 0 on the final code state: tier A builds and tests the affected projects with CI's configuration (Release, warnings as errors); tier B runs the named smoke check; tier C needs none. Checks already run during iteration on the same state count. Whole-solution, matrix and integration suites are CI's job unless the brief names one.
+- [ ] Candidate delivery instead (repo has an open `pi-train` candidate): the same check, then `pi-train fold <branch>`.
+- [ ] <acceptance check: behaviour X observable via Y; one spec per caller-visible outcome, only when the behaviour is new or changed>.
+- [ ] CodeScene (if available): one `code_health_review` of changed production files; fix an obvious decline you introduced, otherwise mention it. No scores table, no second pass.
 - [ ] Diff limited to the owned files; no unrelated reformatting or renames. Work only in this repository and issue; report anything else instead of doing it.
 - [ ] Every claim of "done" is backed by a check you ran on the final code state; a report without a run check is "unverified", not done.
 - [ ] The deliverable is the change in the repository, not notes about it. Decide reversible implementation details yourself and record the choice in the report; ask only for decisions the brief reserves.
@@ -39,7 +38,7 @@ Investigation budget: for any question needing more than ~5 reads/searches or ~2
 - Budget: about 40 tool calls for this unit. If you will exceed it, write `handoff.md` and report; the parent resumes you rather than respawning.
 
 ## Plan (optional; filled by `planner`)
-Ordered, small steps, each naming the file(s) and the change, and the specs/tests to add first.
+Ordered, small steps, each naming the file(s) and the change, and the spec for each new or changed caller-visible behaviour (none for refactors, docs or prose).
 
 ## Execution policy (binding — do not re-decide)
 - pi-phase policy: auto / direct / fast / queued (pass `--policy` for an explicit choice); pack/restore use `--kind build`, including `pi-phase run --kind build ... -- bash …/cratis-local-packages.sh pack-nuget …` (inner dotnet shim applies; version/stamp tokens are normalized for history).
@@ -48,9 +47,8 @@ Ordered, small steps, each naming the file(s) and the change, and the specs/test
 
 ## Verify with
 - Configuration to verify: <e.g. Release, warnings as errors; must match CI>.
-- Iterate with: `<narrow affected-project command>`. For a .NET `dotnet build`/`dotnet test` argv, run it as `pi-phase run --profile iterate ...` (analyzers and code style off). Iterate runs are never delivery or gate evidence. For .NET, run `~/.pi/agent/bin/pi-affected` first and iterate on its `target:`.
-- Before delivery: one full-profile build of the touched projects in the configuration above (analyzers on), then the Done gate.
-- Finish with the Done gate once. Use `pi-phase run ... --log <repo>/.ai-work/<task>/<phase>.log` instead of redirects, pipes or `; echo $?`. A `pi-phase run` goes alone in its tool turn, never batched with edits or quick checks (a parallel batch records results only when all calls finish).
+- Iterate with: `<narrow affected-project command>` (the parent fills this in; `pi-affected` can suggest it). Optional `pi-phase run --profile iterate` turns analyzers off for speed; such runs do not count for the Done check.
+- Finish with the Done check once. Use `pi-phase run ... --log <repo>/.ai-work/<task>/<phase>.log` instead of redirects, pipes or `; echo $?`. A `pi-phase run` goes alone in its tool turn, never batched with edits or quick checks (a parallel batch records results only when all calls finish).
 
 ## Stop and report (do not work around) when
 - The gate fails for a reason outside your files, or a pre-existing test fails.

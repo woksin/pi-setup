@@ -11,7 +11,7 @@
     "scope": "subagents"
   },
   "delegationNudge": {
-    "enabled": true,
+    "enabled": false,
     "scope": "main",
     "thresholdBytes": 40000,
     "thresholdCalls": 12
