@@ -43,7 +43,8 @@ const single = (entry, where) => {
   if (entry.lines.length > 1 && entry.lines.slice(1).some(l => l.trim() !== '')) throw new Error(`${where}: multi-line ${entry.key} is not supported`)
   return entry
 }
-const PAREN = /\([^)]*\)/
+// A parenthetical that can name a model: no quotes or backslashes, so it is safe inside any YAML scalar style.
+const PAREN = /\([^)"'\\]*\)/
 
 export function render(baseText, profileText, where = 'profile') {
   const base = parse(baseText, `base ${where}`)
@@ -66,7 +67,6 @@ export function render(baseText, profileText, where = 'profile') {
     const bp = PAREN.exec(entries[bd].lines[0])
     const pp = PAREN.exec(profile.entries[pd].lines[0])
     if (bp && pp) {
-      if (/["'\\]/.test(pp[0])) throw new Error(`${where}: description parenthetical contains a quote or backslash`)
       entries[bd].lines[0] = entries[bd].lines[0].replace(PAREN, () => pp[0])
     } else if (bp && !pp) entries[bd] = { key: 'description', lines: [...profile.entries[pd].lines] }
   }
