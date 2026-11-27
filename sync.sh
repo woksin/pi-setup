@@ -93,7 +93,7 @@ fail() { echo "sync.sh: $*" >&2; exit 1; }
 sync_dir() { # sync_dir <src> <dst> [rsync flags...]: copy, or in dry-run mode record the files that would change
   local src=$1 dst=$2; shift 2
   if ((DRY)); then
-    local line path
+    local line path flags
     "${RS[@]}" -n -c --out-format='%i|%n' -i "$@" "$src" "$dst" > "$INVENTORY" || fail "rsync dry-run failed for $dst"
     while IFS= read -r line; do
       case $line in
@@ -101,7 +101,9 @@ sync_dir() { # sync_dir <src> <dst> [rsync flags...]: copy, or in dry-run mode r
                        [ -e "$dst$path" ] || [ -L "$dst$path" ] || fail "cannot parse rsync deletion line: $line"
                        [ -d "$dst$path" ] && [ ! -L "$dst$path" ] || CHANGED+=("$dst$path") ;;
         ?d*) ;;
-        *"|"*) path=${line#*|}; CHANGED+=("$dst$path") ;;
+        *"|"*) flags=${line%%|*}; path=${line#*|}
+               flags=${flags:2}; flags=${flags//t/}     # a time-only difference is not a change
+               [ -z "${flags//[. ]/}" ] || CHANGED+=("$dst$path") ;;
         "") ;;
         *) fail "cannot parse rsync inventory line: $line" ;;
       esac
