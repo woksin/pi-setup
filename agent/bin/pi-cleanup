@@ -2278,7 +2278,7 @@ def plan_artifacts(ctx: Ctx, checkouts):
     item["roots"] = artifact_roots(checkouts)
     for root in ctx.items(item["roots"]):
         for dp, dns, fns in os.walk(root, followlinks=False):
-            dns.sort()
+            dns[:] = sorted(d for d in dns if d != "keep")  # .ai-work/**/keep/ is preserved, never descended
             for fn in sorted(fns):
                 low = fn.lower()
                 cutoff = short if low.endswith(ARTIFACT_SHORT_SUFFIXES) else \
@@ -2349,6 +2349,14 @@ def reclaim_blocker(ctx, it, path):
         return "not directly under ~/.net/<app>"
     if parent != os.path.dirname(path):
         return "path goes through a symlink"
+    if it["reclaim"] == "artifacts":
+        # fail closed: nothing at or below a `keep` component (of the path or its root-relative part) is removed
+        for r in roots:
+            if parent == r or parent.startswith(r + os.sep):
+                rel = os.path.relpath(path, r).split(os.sep)
+                if "keep" in rel:
+                    return "under a keep/ directory"
+                break
     if reclaim_identity(path) != it["identities"].get(path):
         return "changed since planning"
     reason = retained_reason(path)

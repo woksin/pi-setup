@@ -119,8 +119,8 @@ class AiWorkArtifactTests(ReclaimFixture):
     def plan(self, ctx=None):
         return cleanup.plan_artifacts(ctx or self.ctx(), self.checkouts)
 
-    def test_suffix_ages_and_keep_dir_are_included(self):
-        old = [self.make('a.trx', 3), self.make('keep/b.dll', 3), self.make('out/c.pdb', 3),
+    def test_suffix_ages_are_included(self):
+        old = [self.make('a.trx', 3), self.make('out/c.pdb', 3),
                self.make('d.nettrace', 3), self.make('e.etlx', 3), self.make('f.dmp', 3), self.make('.coverage', 3),
                self.make('g.nupkg', 8), self.make('h.snupkg', 8), self.make('i.jar', 8)]
         young = [self.make('young.trx', 1), self.make('young.nupkg', 3)]
@@ -128,6 +128,26 @@ class AiWorkArtifactTests(ReclaimFixture):
         self.assertEqual(item['action'], 'run')
         self.assertEqual(sorted(item['paths']), sorted(str(p) for p in old))
         self.assertFalse(set(map(str, young)) & set(item['paths']))
+
+    def keep_tree(self):
+        return [self.make(n, 30) for n in ('keep/b.dll', 'keep/x/bin/a.dll', 'keep/deep/obj/z.pdb',
+                                           'proj/keep/y.trx', 'proj/keep/n/o/p.nupkg')]
+
+    def test_nothing_under_a_keep_directory_is_planned(self):
+        kept, sibling = self.keep_tree(), self.make('proj/bin/a.dll', 3)
+        self.assertEqual(self.plan()['paths'], [str(sibling)])
+        self.assertTrue(all(p.exists() for p in kept))
+
+    def test_apply_never_removes_under_keep_even_if_planned(self):
+        kept, sibling = self.keep_tree(), self.make('proj/bin/a.dll', 3)
+        item = self.plan()
+        for p in kept:  # a tampered/stale plan naming keep files
+            item['paths'].append(str(p))
+            item['identities'][str(p)] = cleanup.reclaim_identity(str(p))
+        cleanup.apply_reclaim(self.ctx(), item)
+        self.assertTrue(all(p.exists() for p in kept))
+        self.assertFalse(sibling.exists())
+        self.assertEqual(item['result']['skipped'], len(kept))
 
     def test_notes_logs_and_bundles_are_never_matched(self):
         for name in ('notes.md', 'build.log', 'repo.bundle', 'data.json', 'plan.txt'):
