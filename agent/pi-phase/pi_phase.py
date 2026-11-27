@@ -3788,7 +3788,10 @@ def record_hold(path, scan):
         info = metadata(path)
         hold = " ".join(scan.get("hold", scan["reason"]).split())[:240]
         if info and not info.get("unreadable") and info.get("hold") != hold:
-            write_waiter(path, dict(info, hold=hold))
+            try:  # status hint only: a failed write must never abort a queued run
+                write_waiter(path, dict(info, hold=hold))
+            except OSError:
+                pass
 
 
 def withdrawal_path(state, token):
@@ -4415,7 +4418,6 @@ def status(state, configuration=CONFIG):
              f"pid={data.get('pid', '?')} cwd={data.get('cwd', '?')} "
              f"elapsed={age}s {phase_state}"
              f"{' fast' if data.get('fast') or path.name.startswith('fast-') else ''}"
-             f"{' light' if path.name == LIGHT_SLOT else ''}"
              f" policy={data.get('policy', 'queued')} source={data.get('source', 'default')}")
     if not seen:
         note("no active phases")
