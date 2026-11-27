@@ -90,7 +90,7 @@ class SlotTests(unittest.TestCase):
     CONFIGURED = dict(heavy=6, fast=4, integration=2)
 
     def test_effective_slots_by_level(self):
-        expected = {0: (3, 4, 2), 1: (3, 4, 2), 2: (1, 1, 0), 3: (0, 1, 0), 4: (0, 0, 0)}
+        expected = {0: (3, 4, 2), 1: (3, 4, 2), 2: (0, 0, 0), 3: (0, 0, 0), 4: (0, 0, 0)}
         for level, wanted in expected.items():
             slots, _ = mg.effective_slots(mg.Capacity(level, 20, False), self.CONFIGURED, LIMITS)
             self.assertEqual((slots["heavy"], slots["fast"], slots["integration"]), wanted, level)
@@ -151,8 +151,8 @@ class SlotTests(unittest.TestCase):
             self.assertEqual(tuple(off), (3, 1))
             path.write_text(json.dumps(dict(heavy_slots=3, integration_slots=1, memory_guard=dict(mode="observe"))))
             on = pi_phase.guarded_limits(pi_phase.config(path))
-            self.assertEqual(tuple(on), (1, 0))
-            self.assertEqual(on.options["fast_lane"]["slots"], 1)
+            self.assertEqual(tuple(on), (0, 0))
+            self.assertEqual(on.options["fast_lane"]["slots"], 0)
             self.assertIn("level 2", on.guard_note)
             self.assertTrue(on.burst_blocked)
 
@@ -497,6 +497,17 @@ class TickTests(unittest.TestCase):
         self.assertIn("reclaim", [a.name for a in mg.plan_actions(mg.Transition(1, 1, 0, 0), LIMITS)])
         self.assertNotIn("reclaim", [a.name for a in mg.plan_actions(mg.Transition(0, 0, 0, 0), LIMITS)])
 
+    def test_warning_pressure_stops_after_two_samples_and_recovers_after_three_clear_ticks(self):
+        state = {}
+        for tick, (pressure, raw, effective) in enumerate(((2, 1, 1), (1, 0, 1), (2, 1, 1),
+                                                           (2, 2, 2), (1, 0, 2), (1, 0, 2), (1, 0, 1))):
+            with self.subTest(tick=tick):
+                state, _, _, _ = self.run_tick("observe", sample(t=1000 + tick * 30, pl=pressure), state)
+                self.assertEqual((state["raw"], state["level"]), (raw, effective))
+                slots, _ = mg.effective_slots(mg.Capacity(state["level"], 20), dict(heavy=3, fast=2, integration=1))
+                self.assertEqual(slots, dict(heavy=0, fast=0, integration=0) if effective == 2
+                                 else dict(heavy=3, fast=2, integration=1))
+
     def test_fixtures_idle_and_latched(self):
         self.assertEqual(self.run_tick("enforce", sample())[0]["level"], 0)
         self.assertEqual(self.run_tick("enforce", sample(cmpPct=20.0))[0]["level"], 0)
@@ -506,7 +517,7 @@ class TickTests(unittest.TestCase):
                      swapInRate=10.0, sessions=43, stale=False)
         text = "\n".join(mg.describe(state, LIMITS, configured=dict(heavy=3, fast=2, integration=1)))
         for needle in ("guard level 2", "compressor 36%", "growth 0 MB/min", "swap-in 10", "live pi 43",
-                       "heavy 3->1 (guard level 2)", "integration 1->0"):
+                       "heavy 3->0 (guard level 2)", "integration 1->0"):
             self.assertIn(needle, text)
 
 
