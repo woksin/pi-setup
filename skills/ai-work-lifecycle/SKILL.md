@@ -187,3 +187,15 @@ When free space is low, look in this order. Measure first, delete second.
   requires ignored-file review plus a live process/container check.
 - Full reference and setup: `~/.local/share/ai-work-lifecycle/README.md` and
   `REFERENCE.md` in the same directory.
+
+## Worktree and verification-chain cleanup
+
+Reuse one warm worktree per lane and one worktree per issue/PR; do not create review-round copies or share build outputs. Put worktrees under <parent>/.worktrees/, never inside .ai-work/. Tiny notes need no task registration. Keep recovery evidence in keep/; ignored is not disposable.
+
+Before a worktree or heavy phase, check df -h ~: below 40 GiB run pi-cleanup dry-run and report; below 25 GiB start neither. These floors apply to every criticality tier. Use pi-retain for active verification roots and release only when their owner finishes. Never delete candidate/train or delivered-but-not-yet-gated build outputs without owner agreement.
+
+Use pi-holders per process, not lsof +D: shared hard-link inode matches can be ambiguous. Inspection failure (exit 3) blocks deletion. Verify tracked/ignored/untracked content and delivery before worktree removal; preserve useful data and unreferenced commits. Build-output targets must contain no tracked files. Never remove a live session's cwd, force-remove worktrees, or run git clean -fdx.
+
+When genuinely complete, finish TASK --apply after preview; otherwise mark paused. Remove safe merged temporary worktrees using git worktree remove without --force, then prune. If retaining a worktree, remove only verified disposable outputs not held by processes. Scheduled cleanup is a backstop, not proof of completion or authority to delete.
+
+Default to no hang dump: VSTest --blame-hang-dump-type none; omit MTP --hangdump. Mini dumps require active hang diagnosis declared with pi-phase --diagnose-hang. Extract the evidence and remove task-owned dumps promptly. Do not create full dumps as a routine gate artifact.

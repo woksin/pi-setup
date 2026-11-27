@@ -3,8 +3,8 @@ name: doc-writer
 display_name: Doc writer
 description: 'Technical writer (Claude Sonnet 5.5, medium) for substantial documentation, READMEs, tutorials, API and architecture guides, ADRs and narrative release notes. Prefer general-purpose (Sonnet medium) for narrow documentation updates with known facts and an established structure. Writes from the actual code and verifies every example, command and path it documents. Follows repository docs rules and Cratis documentation skills when installed.'
 color: teal
-model: anthropic/claude-sonnet-5-5
-thinking: medium
+model: openai-codex/gpt-6.2-astra
+thinking: high
 tools: read, write, edit, bash, grep, find, ls
 extensions: [kill-guard, cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: true

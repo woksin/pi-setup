@@ -8,7 +8,7 @@ import type { SpawnOptions } from "node:child_process";
 import type { Readable } from "node:stream";
 import { scanPublication } from "./publish-scan.ts";
 import type { PublicationContext, PublicationScan } from "./publish-scan.ts";
-import { InvalidRequest, MAX_REQUEST_BYTES, MAX_STRING_BYTES, toGhPlan, validateRequest } from "./publish-request.ts";
+import { InvalidRequest, MAX_REQUEST_BYTES, MAX_STRING_BYTES, toGhPlan, validateAppendOnly, validateRequest } from "./publish-request.ts";
 import type { GhPlan, PayloadSource, PayloadSlot } from "./publish-request.ts";
 
 export type PublishCode = "published" | "scan-clean" | "invalid-request" | "unsupported-platform" | "payload-unreadable" | "payload-too-large" | "payload-not-utf8" | "scan-refused" | "gh-unavailable" | "gh-failed" | "gh-timeout" | "cancelled" | "gh-output-limit" | "cleanup-failed" | "payload-not-found" | "payload-symlink" | "payload-not-file" | "payload-permission" | "host-unauthenticated";
@@ -383,6 +383,7 @@ export async function publish(value: unknown, context: PublisherContext = {}, ad
 		const request = validateRequest(value), plan = toGhPlan(request);
 		captureFlags(run.platform);
 		const bytes = await capture(plan, run);
+		if (request.kind === "api") bytes.forEach((payload, index) => validateAppendOnly(request, decoded(payload), plan.payloads[index].label));
 		cancelled(context.signal);
 		if (request.kind === "check") return result("scan-clean");
 		if (plan.host) await hostPreflight(plan.host, run);

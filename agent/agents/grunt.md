@@ -3,8 +3,8 @@ name: grunt
 display_name: Grunt
 description: Worker (Claude Sonnet 5.5, low) for mechanical, well-specified work — renames, boilerplate, formatting, simple edits, bulk changes to named files, log triage, summarising given text. Give it exact files and exact instructions. Do NOT use it for design decisions, debugging, anything security-sensitive, or factual questions — it is tuned for speed, not judgment.
 color: gray
-model: anthropic/claude-sonnet-5-5
-thinking: low
+model: openai-codex/gpt-6.1-terra
+thinking: medium
 extensions: [kill-guard, cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: append

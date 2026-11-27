@@ -1,10 +1,10 @@
 ---
 name: cratis-cli
 display_name: Cratis CLI
-description: 'Cratis CLI expert (GPT-6.1 Sol, medium) for debugging running and deployed Cratis applications with the `cratis` CLI — Chronicle event stores, observers, failed partitions, projections, read models, jobs, events, Arc command/query endpoints, contexts. Read-only diagnosis: state-changing commands (replay, retry, clear quarantine, remove, job control, context changes) are blocked by a guard and must be proposed, not run. Correlates server state with source code.'
+description: 'Cratis CLI expert (GPT-6.2 Sol, medium) for debugging running and deployed Cratis applications with the `cratis` CLI — Chronicle event stores, observers, failed partitions, projections, read models, jobs, events, Arc command/query endpoints, contexts. Read-only diagnosis: state-changing commands (replay, retry, clear quarantine, remove, job control, context changes) are blocked by a guard and must be proposed, not run. Correlates server state with source code.'
 color: yellow
-model: openai-codex/gpt-6.1-sol
-thinking: medium
+model: openai-codex/gpt-6.2-sol
+thinking: high
 tools: read, bash, grep, find, ls, ext:pi-mcp-adapter
 extensions: [kill-guard, cratis-cli-guard, pi-mcp-adapter, provider-fallback, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: true

@@ -3,8 +3,8 @@ name: prose-editor
 display_name: Prose editor
 description: 'Focused copy editor (Claude Sonnet 5.5, low) for shortening, polishing or reformatting supplied text with established facts. Not for research, new conceptual documentation or voice-sensitive public content; use doc-writer or content-writer for those.'
 color: teal
-model: anthropic/claude-sonnet-5-5
-thinking: low
+model: openai-codex/gpt-6.1-terra
+thinking: medium
 tools: read, write, edit, grep, find, ls
 extensions: [kill-guard, cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: true

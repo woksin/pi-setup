@@ -1,9 +1,41 @@
 {
   "mode": "enforce",
+  "maxHandoffsPerSession": 200,
   "main": {
     "soft": 150000,
     "handoff": 220000,
     "hard": 400000,
-    "minProgress": 50000
+    "minProgress": 120000
+  },
+  "models": {
+    "anthropic/claude-fable-5-2": {
+      "main": {
+        "soft": 200000,
+        "handoff": 300000,
+        "hard": 500000,
+        "minProgress": 120000
+      }
+    },
+    "anthropic/claude-opus-5-5": {
+      "main": {
+        "soft": 200000,
+        "handoff": 300000,
+        "hard": 500000,
+        "minProgress": 120000
+      }
+    }
+  },
+  "memory": {
+    "journal": true,
+    "requests": true,
+    "answers": "final",
+    "answerPolicy": "carry",
+    "intent": true,
+    "resume": true,
+    "recall": true,
+    "retentionDays": 30,
+    "scope": {
+      "mode": "all"
+    }
   }
 }

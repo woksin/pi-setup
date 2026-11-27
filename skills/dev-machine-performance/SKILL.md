@@ -77,3 +77,9 @@ Variant suffixes never compete; short aliases stay when longer versions exist.
 Pins also match RepoDigests; install activates image hygiene by seeding pinned.txt.
 An empty `~/.pi/agent/docker-guardian/no-image-prune` file disables only image cleanup.
 Images are checked before exited-container removal; later passes may reclaim them.
+
+## Tier-aware tuning
+
+The criticality tiers select checks; this skill schedules and diagnoses them, not expands them. C has no mandatory full local gate; B uses focused operational proof; A runs CI-matched gates only for changed inputs/dependency closure and reuses valid results. Do not add coverage, integration stacks, or repeated frameworks merely for reassurance.
+
+For long queues or high load, run dev-doctor once and present the evidence and proposed fixes. For large package copies, use --only package-cache-volume, measure before/after, and verify a build before deleting a retained cache. Respect the skill's approval boundaries; never alter shared hard-linked package files in place. Reuse warm worktrees without sharing outputs. Missing diagnostic sources mean unknown, not healthy.

@@ -5,10 +5,11 @@
   "defaultThinkingLevel": "medium",
   "enabledModels": [
     "anthropic/claude-opus-5-5",
+    "anthropic/claude-fable-5-2",
     "anthropic/claude-sonnet-5-5",
     "anthropic/claude-haiku-5-5",
-    "openai-codex/gpt-6.1-sol",
-    "openai-codex/gpt-6-astra",
+    "openai-codex/gpt-6.2-sol",
+    "openai-codex/gpt-6.2-astra",
     "openai-codex/gpt-6-luna",
     "openai-codex/gpt-6.1-terra"
   ],
@@ -28,21 +29,22 @@
     "npm:pi-web-access",
     "npm:@tintinweb/pi-subagents",
     "npm:pi-mcp-adapter",
-    "npm:@woksin/pi-jobs@0.5.0",
-    "npm:@woksin/pi-recover@0.1.1",
+    "npm:@woksin/pi-jobs",
+    "npm:@woksin/pi-recover",
     "npm:pi-browser-use",
     "npm:donsetch",
-    "npm:@woksin/pi-context-budget@0.5.0",
-    "npm:@woksin/pi-orch@0.3.1",
+    "npm:@woksin/pi-context-budget",
+    "npm:@woksin/pi-orch",
     "./local-packages/pi-questions"
   ],
   "hideThinkingBlock": true,
   "modelThinkingLevels": {
     "anthropic/claude-opus-5-5": "medium",
-    "openai-codex/gpt-6-astra": "high",
+    "anthropic/claude-fable-5-2": "medium",
+    "openai-codex/gpt-6.2-astra": "high",
     "openai-codex/gpt-6-luna": "low",
     "anthropic/claude-sonnet-5-5": "medium",
-    "openai-codex/gpt-6.1-sol": "high",
+    "openai-codex/gpt-6.2-sol": "high",
     "openai-codex/gpt-6.1-terra": "medium"
   },
   "collapseChangelog": true,
@@ -50,5 +52,16 @@
   "showCacheMissNotices": true,
   "extensions": [
     "-builtin:mcp"
-  ]
+  ],
+  "extensionChangelogVersions": {
+    "{\"source\":\"npm:@gotgenes/pi-anthropic-auth\",\"scope\":\"user\"}": "3.6.0",
+    "{\"source\":\"npm:pi-web-access\",\"scope\":\"user\"}": "0.48.0",
+    "{\"source\":\"npm:@tintinweb/pi-subagents\",\"scope\":\"user\"}": "0.26.2",
+    "{\"source\":\"npm:pi-mcp-adapter\",\"scope\":\"user\"}": "7.0.1",
+    "{\"source\":\"./local-packages/pi-jobs\",\"scope\":\"user\"}": "0.6.0",
+    "{\"source\":\"./local-packages/pi-recover\",\"scope\":\"user\"}": "0.1.1",
+    "{\"source\":\"./local-packages/pi-questions\",\"scope\":\"user\"}": "0.2.1",
+    "{\"source\":\"npm:pi-mcp-adapter@2.32.1\",\"scope\":\"project\"}": "2.32.1",
+    "{\"source\":\"./local-packages/pi-orch\",\"scope\":\"user\"}": "0.3.1"
+  }
 }
