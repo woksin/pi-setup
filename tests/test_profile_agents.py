@@ -25,6 +25,38 @@ class ProfileAgentBodies(unittest.TestCase):
                 self.assertEqual(body(path), body(shared), f"{profile}/{path.name}: body differs from agent/agents/{path.name}")
 
 
+class CodexFallbacks(unittest.TestCase):
+    def test_every_routed_codex_model_has_a_claude_equivalent(self):
+        agent = ROOT / "agent"
+        files = sorted(AGENTS.glob("*.md")) + sorted((agent / "profiles").glob("*/agents/*.md"))
+        routed = set()
+        for path in files:
+            header = FRONTMATTER.match(path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(header, path)
+            routed.update(re.findall(r"^model:[ \t]*['\"]?(openai-codex/[\w.-]+)", header[0], re.MULTILINE))
+
+        settings = json.loads((agent / "settings.json").read_text(encoding="utf-8"))
+        routed.update(settings["enabledModels"])
+        routed.update(settings.get("modelThinkingLevels", {}))
+        routed.add(f"{settings['defaultProvider']}/{settings['defaultModel']}")
+
+        registry = json.loads((agent / "models.json").read_text(encoding="utf-8"))["providers"]["openai-codex"]
+        routed.update(f"openai-codex/{model['id']}" for model in registry.get("models", []))
+        routed.update(f"openai-codex/{model}" for model in registry.get("modelOverrides", {}))
+
+        review = json.loads((ROOT / "tools/review-profiles.json").read_text(encoding="utf-8"))
+        for routing in [review["defaults"], *review["profiles"].values()]:
+            routed.update(routing.get("models", {}).values())
+
+        config = json.loads((agent / "provider-fallback.json").read_text(encoding="utf-8"))
+        codex = {model for model in routed if model.startswith("openai-codex/")}
+        self.assertTrue(codex, "no routed Codex models found")
+        for model in sorted(codex):
+            with self.subTest(model=model):
+                equivalent = next((b if a == model else a for a, b in config["pairs"] if model in (a, b)), "")
+                self.assertTrue(equivalent.startswith("anthropic/"), f"{model} has no Claude equivalent")
+
+
 class CodeHealthNeverStops(unittest.TestCase):
     """A Code Health miss is reported; it never stops an agent before the gate and commit (#190)."""
 
