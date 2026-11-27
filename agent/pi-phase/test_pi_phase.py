@@ -1684,10 +1684,15 @@ class PhaseTests(unittest.TestCase):
             self.wait_for(lambda: bool(list((self.state / "waiters").glob("*.json"))))
             waiter = json.loads(next((self.state / "waiters").glob("*.json")).read_text())
             self.assertEqual(waiter["kind"], "integration")
-            for index in range(2):
+            def heavy_free(index):
                 fd = pi_phase.lock_file(self.state / f"heavy-{index}.lock")
-                self.assertIsNotNone(fd)  # No heavy lease held while integration is blocked.
+                if fd is None:
+                    return False
                 pi_phase.unlock(fd)
+                return True
+            # No heavy lease held while integration is blocked. A scan briefly locks candidate slots and releases
+            # them, so a single probe can race it; a held lease never frees and still fails this wait.
+            self.wait_for(lambda: heavy_free(0) and heavy_free(1))
         finally:
             pi_phase.unlock(blocker)
         self.wait_for(lambda: (self.state / "integration-0.json").exists())

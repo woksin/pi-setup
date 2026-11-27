@@ -1,0 +1,82 @@
+name: suites
+
+# Unit suites for the agent tree. Path-filtered so unrelated pull requests do not pay for them.
+on:
+  pull_request:
+    paths:
+      - agent/lib/**
+      - agent/extensions/**
+      - agent/early-extensions/**
+      - agent/agents/**
+      - agent/bin/pi-setup-tests
+      - agent/bin/pi-publish
+      - agent/bin/inbox-watch
+      - agent/npm-package.json
+      - agent/pi-phase/**
+      - .github/workflows/suites.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: suites-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      lib: ${{ steps.filter.outputs.lib }}
+      phase: ${{ steps.filter.outputs.phase }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eu
+          if [ "$EVENT" != pull_request ]; then
+            echo lib=true >> "$GITHUB_OUTPUT"; echo phase=true >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "$BASE"...HEAD)
+          lib=false; phase=false
+          if printf '%s\n' "$files" | grep -Eq '^(agent/(lib|extensions|early-extensions|agents)/|agent/bin/(pi-setup-tests|pi-publish|inbox-watch)$|agent/npm-package\.json$|\.github/workflows/suites\.yml$)'; then lib=true; fi
+          if printf '%s\n' "$files" | grep -Eq '^(agent/pi-phase/|\.github/workflows/suites\.yml$)'; then phase=true; fi
+          echo "lib=$lib" >> "$GITHUB_OUTPUT"; echo "phase=$phase" >> "$GITHUB_OUTPUT"
+
+  lib:
+    needs: changes
+    if: needs.changes.outputs.lib == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Install the pinned pi-coding-agent
+        run: |
+          set -eu
+          spec=$(jq -r '.dependencies["@earendil-works/pi-coding-agent"]' agent/npm-package.json)
+          mkdir -p agent/npm
+          cd agent/npm
+          echo '{"private":true}' > package.json
+          npm install --no-audit --no-fund --ignore-scripts "@earendil-works/pi-coding-agent@$spec"
+      - run: agent/bin/pi-setup-tests agent
+
+  pi-phase:
+    needs: changes
+    if: needs.changes.outputs.phase == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: agent/pi-phase
+    steps:
+      - uses: actions/checkout@v5
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s . -p 'test_*.py'
