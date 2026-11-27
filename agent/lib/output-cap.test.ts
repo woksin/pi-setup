@@ -230,9 +230,13 @@ test("logError appends a JSON line and never throws", () => {
 
 test("extension logs a thrown error and fails open", () => {
 	const f = join(dir, "err.jsonl");
+	const config = join(dir, "efficiency.json");
+	const prevConfig = process.env.PI_EFFICIENCY_FILE;
 	const prev = process.env.PI_EFFICIENCY_ERRORS_FILE;
+	process.env.PI_EFFICIENCY_FILE = config;
 	process.env.PI_EFFICIENCY_ERRORS_FILE = f;
 	try {
+		writeFileSync(config, JSON.stringify({ outputCap: { enabled: true, scope: "all" } }));
 		const handlers: Record<string, Function> = {};
 		extension({ on: (n: string, h: Function) => { handlers[n] = h; } } as any);
 		const bad = { cwd: dir, sessionManager: { getSessionId: () => { throw new Error("nosession"); } } };
@@ -243,6 +247,7 @@ test("extension logs a thrown error and fails open", () => {
 		assert.equal(row.message, "nosession");
 		assert.equal(errorLogPath(), f);
 	} finally {
+		if (prevConfig === undefined) delete process.env.PI_EFFICIENCY_FILE; else process.env.PI_EFFICIENCY_FILE = prevConfig;
 		if (prev === undefined) delete process.env.PI_EFFICIENCY_ERRORS_FILE; else process.env.PI_EFFICIENCY_ERRORS_FILE = prev;
 	}
 });

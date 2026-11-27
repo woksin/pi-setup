@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { constants, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
@@ -28,12 +28,12 @@ async function fixture(run: (root: string) => Promise<void>) {
 	const root = mkdtempSync(join(tmpdir(), "publisher-spec-"));
 	try { await run(root); } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
-function code(result: PublishResult, expected: string) {
+function code(result: PublishResult, expected: string, detail?: string) {
 	assert.equal(result.code, expected);
 	assert.equal(result.text, expected === "published" ? "published" : expected === "scan-clean" ? "scan clean" : `publish: ${expected}`);
 	assert.equal(result.isError, !["published", "scan-clean"].includes(expected));
 	assert.doesNotMatch(JSON.stringify(result), /private-value|trusted\/gh|stderr/);
-	if (!["invalid-request", "gh-failed", "payload-not-found", "payload-symlink", "payload-not-file", "payload-permission", "payload-too-large"].includes(expected)) assert.equal(result.detail, undefined);
+	if (detail !== undefined || !["invalid-request", "gh-failed", "payload-not-found", "payload-symlink", "payload-not-file", "payload-permission", "payload-too-large"].includes(expected)) assert.equal(result.detail, detail);
 }
 
 test("API file payloads cannot edit issue text or existing comments, including GraphQL", () => fixture(async root => {
@@ -392,16 +392,17 @@ test("output exactly at each stream limit is discarded without rejecting success
 	code(await publish({ ...base, body: "Safe" }, safeContext, mocks), "published");
 });
 
-for (const [errno, expected] of [
+for (const [errno, expected, detail] of [
 	["ENOENT", "payload-not-found"], ["ENOTDIR", "payload-not-found"], ["ELOOP", "payload-symlink"],
 	["EISDIR", "payload-not-file"], ["EACCES", "payload-permission"], ["EPERM", "payload-permission"],
-	["EIO", "payload-unreadable"], ["toString", "payload-unreadable"], [undefined, "payload-unreadable"],
-] as const) test(`open errno ${errno} uses only whitelisted code and caller path`, async () => {
+	["EIO", "payload-unreadable", "code=EIO"], ["EPRIVATE_VALUE", "payload-unreadable"],
+	["ENOENT\n", "payload-unreadable"], ["toString", "payload-unreadable"], [undefined, "payload-unreadable"],
+] as const) test(`open errno ${JSON.stringify(errno)} uses only whitelisted code and caller path`, async () => {
 	const mocks = adapters(); let opened = "";
 	mocks.io!.open = async path => { opened = path; throw Object.assign(new Error("private-value"), { code: errno, path: "private-value" }); };
 	const result = await publish({ ...base, bodyFile: "draft.md" }, { ...safeContext, cwd: "/workspace/project" }, mocks);
-	code(result, expected); assert.equal(opened, "/workspace/project/draft.md");
-	assert.equal(result.detail, expected === "payload-unreadable" ? undefined : "/workspace/project/draft.md");
+	assert.equal(opened, "/workspace/project/draft.md");
+	code(result, expected, expected === "payload-unreadable" ? detail : "/workspace/project/draft.md");
 });
 
 test("capture details abbreviate only the home component, sanitize and bound caller paths", async () => {
@@ -414,15 +415,16 @@ test("capture details abbreviate only the home component, sanitize and bound cal
 	assert.equal(result.detail?.length, 300);
 });
 
-test("oversize descriptors name the resolved caller path; read and close errno remain generic", async () => {
+test("oversize descriptors name the resolved caller path; read and close show only safe errno codes", async () => {
 	const mocks = adapters(); mocks.io!.open = async () => fakeHandle({ size: MAX_STRING_BYTES + 1 }).handle;
-	const result = await publish({ ...base, bodyFile: "draft.md" }, safeContext, mocks);
-	assert.equal(result.detail, resolve("draft.md"));
-	for (const operation of ["read", "close"] as const) {
-		const file = fakeHandle(); file.handle[operation] = async () => { throw Object.assign(new Error("private-value"), { code: "ENOENT" }); };
+	const context = { ...safeContext, cwd: "/workspace/project" };
+	const result = await publish({ ...base, bodyFile: "draft.md" }, context, mocks);
+	code(result, "payload-too-large", "/workspace/project/draft.md");
+	for (const operation of ["read", "close"] as const) for (const [errno, detail] of [["ENOENT", "code=ENOENT"], ["EPRIVATE_VALUE", undefined]] as const) {
+		const file = fakeHandle(); file.handle[operation] = async () => { throw Object.assign(new Error("private-value"), { code: errno, path: "private-value" }); };
 		mocks.io!.open = async () => file.handle;
-		const failed = await publish({ ...base, bodyFile: "draft.md" }, safeContext, mocks);
-		code(failed, "payload-unreadable"); assert.equal(failed.detail, undefined);
+		const failed = await publish({ ...base, bodyFile: "draft.md" }, context, mocks);
+		code(failed, "payload-unreadable", detail);
 	}
 });
 
