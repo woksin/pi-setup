@@ -102,7 +102,7 @@ sync_dir() { # sync_dir <src> <dst> [rsync flags...]: copy, or in dry-run mode r
                        [ -d "$dst$path" ] && [ ! -L "$dst$path" ] || CHANGED+=("$dst$path") ;;
         ?d*) ;;
         *"|"*) flags=${line%%|*}; path=${line#*|}
-               flags=${flags:2}; flags=${flags//t/}     # a time-only difference is not a change
+               flags=${flags:2}; flags=${flags//[togu]/}   # time and owner differences are not changes (content, size, mode are)
                [ -z "${flags//[. ]/}" ] || CHANGED+=("$dst$path") ;;
         "") ;;
         *) fail "cannot parse rsync inventory line: $line" ;;
