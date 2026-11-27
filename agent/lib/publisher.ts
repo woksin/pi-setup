@@ -1,7 +1,7 @@
 /** Inactive shared capture/scan/send core. Admission belongs to the tool/CLI integrations. */
 import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { spawn as nodeSpawn } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
@@ -132,7 +132,7 @@ function unreadableDetail(error: unknown): string | undefined {
 	if (!error || typeof error !== "object" || !("code" in error)) return undefined;
 	const errno = error.code;
 	if (typeof errno !== "string") return undefined;
-	if (/^E[A-Z0-9_]{2,19}$/.exec(errno)?.[0] !== errno) return undefined;
+	if (!Object.hasOwn(osConstants.errno, errno)) return undefined;
 	return `code=${errno}`;
 }
 async function openCapture(path: string, flags: number, run: Runtime): Promise<CaptureHandle> {
