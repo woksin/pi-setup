@@ -71,6 +71,60 @@ test("captured metadata-only issue updates and PR descriptions remain publishabl
 	}
 }));
 
+test("release, issue and PR publication resolve absolute and home-relative body files alike", () => fixture(async root => {
+	const source = join(root, "notes.md"), bytes = Buffer.from("Release notes\r\n");
+	writeFileSync(source, bytes);
+	const sent: Buffer[] = [];
+	const mocks = adapters((_executable, argv) => {
+		const slot = argv.find(arg => /^--(?:notes|body)-file=/.test(arg))!;
+		sent.push(readFileSync(slot.slice(slot.indexOf("=") + 1)));
+		const child = new Child(); queueMicrotask(() => child.finish()); return child;
+	});
+	for (const bodyFile of [source, "~/notes.md"]) for (const request of [
+		{ kind: "release-create", repo: base.repo, tag: "v1" }, base, { ...base, kind: "pr-comment" },
+	]) code(await publish({ ...request, bodyFile }, { home: root, cwd: dirname(root) }, mocks), "published");
+	assert.deepEqual(sent, Array(6).fill(bytes));
+}));
+
+test("pr-edit sends scanned body bytes as a REST PATCH while retaining title, base and host", () => fixture(async root => {
+	const source = join(root, "notes.md"), bytes = Buffer.from("\ufeffFirst line\r\n@second line");
+	writeFileSync(source, bytes);
+	const calls: string[][] = [], sent: Buffer[] = [];
+	const mocks = adapters((_executable, argv) => {
+		calls.push(argv);
+		const slot = argv.find(arg => arg.startsWith("--field=body=@"));
+		if (slot) sent.push(readFileSync(slot.slice("--field=body=@".length)));
+		const child = new Child(); queueMicrotask(() => child.finish()); return child;
+	});
+	const request = { ...base, kind: "pr-edit", title: "@literal", base: "main" };
+	code(await publish({ ...request, bodyFile: "~/notes.md", host: "ghe.example.com" }, { home: root }, mocks), "published");
+	code(await publish({ ...request, body: "" }, safeContext, mocks), "published");
+	assert.deepEqual(calls[0], ["auth", "status", "--hostname=ghe.example.com"]);
+	for (const [index, host] of [[1, "ghe.example.com"], [2, "github.com"]] as const) {
+		const argv = calls[index];
+		assert.deepEqual(argv.slice(0, 4), ["api", "repos/owner/repo/pulls/39", "--method=PATCH", `--hostname=${host}`]);
+		assert.ok(argv.includes("--raw-field=title=@literal"));
+		assert.ok(argv.includes("--raw-field=base=main"));
+		assert.ok(!argv.some(arg => arg.includes(source)));
+	}
+	assert.deepEqual(sent, [bytes, Buffer.alloc(0)]);
+	writeFileSync(source, "/home/scanner-fixture/private-value");
+	code(await publish({ ...request, bodyFile: source }, safeContext, mocks), "scan-refused");
+	assert.equal(calls.length, 3);
+}));
+
+test("pr-edit with non-REST metadata still uses native gh options", async () => {
+	let args: string[] = [];
+	const mocks = adapters((_executable, argv) => {
+		args = argv;
+		const child = new Child(); queueMicrotask(() => child.finish()); return child;
+	});
+	code(await publish({ ...base, kind: "pr-edit", body: "New description", addReviewers: ["reviewer"] }, safeContext, mocks), "published");
+	assert.deepEqual(args.slice(0, 3), ["pr", "edit", "39"]);
+	assert.ok(args.includes("--add-reviewer=reviewer"));
+	assert.ok(args.some(arg => arg.startsWith("--body-file=")));
+});
+
 test("real descriptor capture, permissions, exact BOM/newlines, forced host and sanitized success", () => fixture(async root => {
 	const source = join(root, "source.md"), bytes = Buffer.from("\ufeffRelease notes\r\nNo final newline");
 	writeFileSync(source, bytes);
@@ -386,7 +440,7 @@ for (const [message, category, advice] of [
 	["dial tcp: no such host", "network", "retry once, then stop"],
 	["TLS handshake timed out", "network", "retry once, then stop"],
 	["unexpected failure", "unclassified", "do not retry blindly"],
-] as const) test(`gh stderr classifies ${category} without retaining any received text`, async () => {
+] as const) test(`gh stderr classifies ${category} without echoing reflected content`, async () => {
 	const mocks = adapters(() => {
 		const child = new Child(); queueMicrotask(() => {
 			child.stdout.write("HTTP 401: Bad credentials");
@@ -395,8 +449,10 @@ for (const [message, category, advice] of [
 		}); return child;
 	});
 	const result = await publish({ ...base, body: "PAYLOAD-SENTINEL" }, safeContext, mocks);
-	code(result, "gh-failed"); assert.equal(result.detail, `exit=1 category=${category}; ${advice}`);
-	assert.ok(!JSON.stringify(result).includes("PAYLOAD-SENTINEL"));
+	code(result, "gh-failed");
+	const status = message.match(/HTTP (\d{3})/)?.[1];
+	assert.equal(result.detail, `exit=1 category=${category}${status ? `; status=${status}` : ""}; ${advice}`);
+	assert.doesNotMatch(JSON.stringify(result), /PAYLOAD-SENTINEL|private-value/);
 });
 
 for (const termination of ["signal", "spawn", "child-error", "stream-error"] as const) test(`gh ${termination} has a value-free unclassified detail`, async () => {
@@ -423,7 +479,38 @@ test("streaming UTF-8 stderr decoding handles split characters and a split categ
 		}); return child;
 	});
 	const result = await publish({ ...base, body: "Safe" }, safeContext, mocks);
-	code(result, "gh-failed"); assert.equal(result.detail, "exit=3 category=validation; do not retry; fix the request (repo, number, fields)");
+	code(result, "gh-failed"); assert.equal(result.detail, "exit=3 category=validation; status=422; do not retry; fix the request (repo, number, fields)");
+	assert.ok(!JSON.stringify(result).includes("private-value"));
+});
+
+test("gh diagnostics expose bounded API messages for native and gh api error formats", async () => {
+	for (const [stderr, message, status] of [
+		["GraphQL: Projects (classic) is being deprecated (repository.pullRequest.projectCards)", "Projects (classic) is being deprecated", undefined],
+		["HTTP 422: Base branch is invalid (https://api.github.com/repos/o/r/pulls/39)", "Base branch is invalid", "422"],
+		["gh: Base branch is invalid (HTTP 422)", "Base branch is invalid", "422"],
+	] as const) {
+		const mocks = adapters(() => {
+			const child = new Child(); queueMicrotask(() => { child.stderr.write(stderr); child.finish(1); }); return child;
+		});
+		const result = await publish({ ...base, kind: "pr-edit", body: "New description" }, safeContext, mocks);
+		code(result, "gh-failed");
+		assert.ok(result.detail?.includes("exit=1"));
+		assert.ok(result.detail?.includes("message="));
+		assert.ok(result.detail?.includes(message));
+		assert.equal(result.detail?.match(/status=(\d+)/)?.[1], status);
+		assert.ok(!result.detail?.includes("https://api.github.com"));
+	}
+});
+
+test("native gh diagnostics omit private paths, reflected body lines and unrelated stderr", async () => {
+	for (const message of ["GraphQL: /home/scanner-fixture/private-value", "HTTP 422: error in Reflected body", "private-value"]) {
+		const mocks = adapters(() => {
+			const child = new Child(); queueMicrotask(() => { child.stderr.write(message + "\nunrelated diagnostic"); child.finish(1); }); return child;
+		});
+		const result = await publish({ ...base, kind: "pr-edit", body: "Reflected body" }, safeContext, mocks);
+		code(result, "gh-failed");
+		assert.doesNotMatch(result.detail!, /message=|private-value|Reflected body|unrelated diagnostic/);
+	}
 });
 
 test("successful gh exit never exposes or classifies stderr", async () => {

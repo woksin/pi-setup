@@ -112,9 +112,13 @@ const OPEN_ERRORS: Record<string, PublishCode> = {
 	ENOENT: "payload-not-found", ENOTDIR: "payload-not-found", ELOOP: "payload-symlink",
 	EISDIR: "payload-not-file", EACCES: "payload-permission", EPERM: "payload-permission",
 };
+function resolveSource(path: string, cwd: string, home?: string): string {
+	const expanded = home && (path === "~" || path.startsWith("~/")) ? join(home, path.slice(1)) : path;
+	return resolve(cwd, expanded);
+}
 function displayPath(path: string, run: Runtime): string {
-	const absolute = resolve(run.context.cwd ?? process.cwd(), path), home = run.scanContext.home.replace(/\/+$/, "");
-	const displayed = home && (absolute === home || absolute.startsWith(home + "/")) ? "~" + absolute.slice(home.length) : absolute;
+	const home = run.scanContext.home.replace(/\/+$/, "");
+	const displayed = home && (path === home || path.startsWith(home + "/")) ? "~" + path.slice(home.length) : path;
 	return displayed.replace(/[\p{Cc}\p{Cf}]/gu, "?").slice(0, 300);
 }
 function openErrorCode(error: unknown): PublishCode {
@@ -132,7 +136,7 @@ function unreadableDetail(error: unknown): string | undefined {
 	return `code=${errno}`;
 }
 async function openCapture(path: string, flags: number, run: Runtime): Promise<CaptureHandle> {
-	try { return await run.io.open(resolve(run.context.cwd ?? process.cwd(), path), flags); }
+	try { return await run.io.open(path, flags); }
 	catch (error) {
 		const code = openErrorCode(error);
 		throw new Failure(code, undefined, code === "payload-unreadable" ? unreadableDetail(error) : displayPath(path, run));
@@ -181,7 +185,7 @@ async function capture(plan: GhPlan, run: Runtime): Promise<Buffer[]> {
 }
 async function captureSource(payload: PayloadSource, cache: Map<string, Buffer>, run: Runtime): Promise<Buffer> {
 	if ("text" in payload.source) return Buffer.from(payload.source.text, "utf8");
-	const path = resolve(run.context.cwd ?? process.cwd(), payload.source.file);
+	const path = resolveSource(payload.source.file, run.context.cwd ?? process.cwd(), payload.label === "body" ? run.scanContext.home : undefined);
 	if (!cache.has(path)) cache.set(path, await captureFile(path, run));
 	return cache.get(path)!;
 }
@@ -286,14 +290,24 @@ function reflectionTexts(plan: GhPlan, bytes: Buffer[]): string[] {
 	}
 	return [...new Set(texts.flatMap(text => text.split(/\r?\n/)).map(messageText).filter(text => text.length > 0))];
 }
-function ghMessage(stderr: string, reflect: string[], run: Runtime): string {
-	const lines = stderr.split(/\r?\n/), first = lines.findIndex(line => /^gh: .+/.test(line));
-	if (first < 0) return "";
-	const candidates = [lines[first].replace(/^gh: /, "").replace(/ \(HTTP \d{3}\)$/, "")];
+function ghMessageCandidates(stderr: string): string[] {
+	const lines = stderr.split(/\r?\n/);
+	const first = lines.findIndex(line => /^(?:gh: |GraphQL: |HTTP \d{3}: ).+/.test(line));
+	if (first < 0) return [];
+	const primary = lines[first];
+	if (!primary.startsWith("gh: ")) {
+		// Native gh commands print Go API errors directly. Do not expose ancillary native stderr.
+		return [primary.replace(/^(?:GraphQL|HTTP \d{3}): /, "").replace(/ \(https?:\/\/[^\s)]+\)$/, "")];
+	}
+	const candidates = [primary.slice(4).replace(/ \(HTTP \d{3}\)$/, "")];
 	for (const line of lines.slice(first + 1, first + 4)) {
 		if (!line.trim()) break;
 		candidates.push(line);
 	}
+	return candidates;
+}
+function ghMessage(stderr: string, reflect: string[], run: Runtime): string {
+	const candidates = ghMessageCandidates(stderr);
 	return candidates.map(messageText).filter(line => {
 		if (!line || reflect.some(text => line.includes(text))) return false;
 		return scanPublication(line, run.scanContext).count === 0;

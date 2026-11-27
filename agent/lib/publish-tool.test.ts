@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import publishExtension, { cliMain, PUBLISH_HELP } from "../extensions/publish.ts";
 import type { PublishServices } from "../extensions/publish.ts";
@@ -139,6 +142,28 @@ test("tool and CLI help describe JSON bodyFile for nested arrays and safe gh dia
 	assert.match(tool(allowed).description, /fields are flat gh -f\/-F values/);
 	assert.match(PUBLISH_HELP, /arrays\/objects of objects need a JSON bodyFile \(no fields\)/);
 	assert.match(PUBLISH_HELP, /gh errors give exit code, category, HTTP status and a redacted API message/);
+});
+
+test("check bodyFile reaches scan-only through the typed tool and CLI", async () => {
+	const root = await mkdtemp(join(tmpdir(), "publish-check-"));
+	try {
+		const bodyFile = join(root, "notes.md");
+		const forbidden: string[] = [];
+		const send: typeof publish = (value, ctx) => publish(value, ctx, {
+			spawn: () => { forbidden.push("spawn"); throw new Error(); },
+			io: { mkdtemp: async () => { forbidden.push("snapshot"); throw new Error(); } },
+		});
+		const registered = tool({ send });
+		for (const [body, expected, exit] of [["Release notes", "scan-clean", 0], ["/home/fixture/private-value", "scan-refused", 3]] as const) {
+			await writeFile(bodyFile, body);
+			const result = await registered.execute("id", { kind: "check", bodyFile }, undefined, undefined, { ...context, cwd: root });
+			assert.equal(result.details.code, expected);
+			const cli = await cliMain(["check", "--body-file", bodyFile], { send, cwd: () => root });
+			assert.equal(cli.exitCode, exit);
+			assert.ok(!cli.text.includes("private-value"));
+		}
+		assert.deepEqual(forbidden, []);
+	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("bin help smoke does not publish or show raw paths", () => {
