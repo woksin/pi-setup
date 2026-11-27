@@ -134,9 +134,13 @@ test("extension: off without config, gated by scope, stable set per session", as
 test("extension logs a thrown error and fails open", () => {
 	const d = mkdtempSync(join(tmpdir(), "pi-mask-err-"));
 	const f = join(d, "err.jsonl");
+	const config = join(d, "efficiency.json");
+	const prevConfig = process.env.PI_EFFICIENCY_FILE;
 	const prev = process.env.PI_EFFICIENCY_ERRORS_FILE;
+	process.env.PI_EFFICIENCY_FILE = config;
 	process.env.PI_EFFICIENCY_ERRORS_FILE = f;
 	try {
+		writeFileSync(config, JSON.stringify({ observationMask: { enabled: true, scope: "all" } }));
 		const h: Record<string, Function> = {};
 		extension({ on: (n: string, fn: Function) => { h[n] = fn; } } as any);
 		const bad = { cwd: d, sessionManager: { getSessionId: () => { throw new Error("nosession"); } } };
@@ -145,6 +149,7 @@ test("extension logs a thrown error and fails open", () => {
 		assert.deepEqual([row.ext, row.event, row.message], ["observation-mask", "context", "nosession"]);
 		assert.ok(row.ts);
 	} finally {
+		if (prevConfig === undefined) delete process.env.PI_EFFICIENCY_FILE; else process.env.PI_EFFICIENCY_FILE = prevConfig;
 		if (prev === undefined) delete process.env.PI_EFFICIENCY_ERRORS_FILE; else process.env.PI_EFFICIENCY_ERRORS_FILE = prev;
 		rmSync(d, { recursive: true, force: true });
 	}
