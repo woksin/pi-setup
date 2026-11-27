@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, wr
 import { join } from "node:path";
 import { tempDir } from "./helpers/home.ts";
 import { validId, validTopic, messageName, parseMessageName, sessionDirFor } from "../src/lanes/names.ts";
-import { defaults, expand, findRoot, loadConfig, preapprovalDefault, saveConfig, validate } from "../src/lanes/config.ts";
+import { defaults, expand, findRoot, loadConfig, preapprovalDefault, saveConfig, UsageError, validate } from "../src/lanes/config.ts";
 
 test("messages.ackMinutes accepts positive integers without adding a default", () => {
   const c = defaults(tempDir("lanes-ack-config"), tempDir("lanes-ack-home"));
@@ -70,6 +70,18 @@ test("config expansion, validation, root lookup and atomic saves preserve unknow
   for (const [key, value] of [["version", 2], ["baseBranch", 3], ["terminal", { backend: "bad" }], ["coordinator", { ...c.coordinator, id: "ALL" }]]) {
     assert.throws(() => validate({ ...c, [key]: value }), new RegExp(String(key)));
   }
+});
+
+for (const owner of ["lane", "coordinator", "broadcast"]) test(`loading config rejects a lane ID that differs only by case from a ${owner}`, () => {
+  const root = tempDir("lanes-config-id");
+  const c = defaults(root, root);
+  const lane = { repo: "example/alpha", group: null, prompt: "prompt.md" };
+  c.lanes.push({ ...lane, id: "L7A", worktree: "first", branch: "first" });
+  if (owner === "lane") c.lanes.push({ ...lane, id: "L7a", worktree: "second", branch: "second" });
+  else if (owner === "coordinator") c.coordinator.id = "L7a";
+  else c.messages.broadcast = "L7a";
+  writeFileSync(join(root, "lanes.json"), JSON.stringify(c));
+  assert.throws(() => loadConfig(root), UsageError);
 });
 
 test("missing and unreadable installed defaults are not saved MCP consent", () => {

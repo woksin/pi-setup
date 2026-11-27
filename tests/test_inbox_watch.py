@@ -131,6 +131,16 @@ class InboxWatchSpecs(unittest.TestCase):
                    "ALL-from-s01Abc12-own.md", "ALL-from-r-ai-own.md"}
         self.assertEqual(matches(inbound | ignored, "--alias", "R-AI", "S01abc12"), inbound)
 
+    def test_configured_case_collision_keeps_exact_addresses_distinct(self):
+        delivered = {"L7A-to-L7a-task.md", "L7a-from-L7A-task.md", "L0-to-r-ai-alias.md"}
+        ignored = {"L0-to-L7A-task.md", "L7A-from-L0-task.md", "L0-to-l7a-ambiguous.md",
+                   "L0-to-L5-cc-L7A-task.md", "L7a-to-ALL-own.md", "ALL-from-L7a-own.md"}
+        for ids in (["L7A"], ["L7a", "L7A"]):
+            with self.subTest(configured=ids), tempfile.TemporaryDirectory() as root:
+                Path(root, "lanes.json").write_text(json.dumps({"lanes": [{"id": id} for id in ids]}))
+                self.assertEqual(matches(delivered | ignored, "--alias", "R-AI", "L7a",
+                                         env={"LANES_DIR": root}), delivered)
+
     def test_timestamp_prefixed_names(self):
         names = ["20261023-074001-L0-to-L15-x.md", "20261023T074001-L0-to-L15-y.md",
                  "20261023-074001-ALL-from-L0-z.md", "20261023-074001-L15-to-L0-own.md",

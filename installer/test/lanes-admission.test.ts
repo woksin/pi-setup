@@ -41,10 +41,10 @@ test("duplicate canonical cwd, malformed inventory and leases fail closed", asyn
 });
 const oldOwner = { pid: 999, start: "old" };
 const oldChild = { pid: 998, start: "old-child" };
-function oldLease({ ctx, request }: ReturnType<typeof setup>, child?: typeof oldChild) {
+function oldLease({ ctx, request }: ReturnType<typeof setup>, child?: typeof oldChild, version = 2) {
   const dir = join(ctx.piAgentDir, "lanes-admission"); const file = join(dir, "old.json");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  writeFileSync(file, JSON.stringify({ ...request, version: 1, token: "old", owner: oldOwner, child }));
+  writeFileSync(file, JSON.stringify({ ...request, version, token: "old", owner: oldOwner, child }));
   return file;
 }
 for (const [scenario, rows] of [
@@ -91,6 +91,37 @@ test("failed preparation does not leak a pending reservation", async () => {
   const { ctx, request } = setup();
   await assert.rejects(admit(ctx, request, async () => { throw new Error("changed handoff"); }), /changed handoff/);
   assert.deepEqual(readdirSync(join(ctx.piAgentDir, "lanes-admission")), []);
+});
+for (const process of [oldOwner, oldChild]) test(`a differing legacy start for PID ${process.pid} retains the lease and refuses admission`, async () => {
+  const f = setup([{ ...process, ppid: 1, start: "Thu Jun 11 16:40:00 2026", pi: false }]);
+  const file = oldLease(f, oldChild, 1);
+  const recorded = JSON.parse(readFileSync(file, "utf8"));
+  recorded.owner.start = recorded.child.start = "Thu Jun 11 09:40:00 2026";
+  writeFileSync(file, JSON.stringify(recorded));
+  await assert.rejects(admit(f.ctx, { ...f.request, cwd: "/new" }), (error: Error) => error.message.includes(file));
+  assert.ok(existsSync(file));
+});
+test("native lease owner and child are recorded and compared in UTC and the C locale", async () => {
+  const { ctx, request } = setup();
+  delete ctx.admissionInventory;
+  const childPid = process.pid + 1;
+  const utcStart = "Thu Jun 11 16:40:00 2026";
+  let childLive = true;
+  ctx.run = async (_cmd, _args, options) => {
+    const utc = options?.env?.TZ === "UTC" && options.env.LC_ALL === "C";
+    const start = utc ? utcStart : "jeu. juin 11 09:40:00 2026";
+    const child = childLive ? `\n${childPid} ${process.pid} ${start} wrapper` : "";
+    return { code: 0, stdout: `${process.pid} 1 ${start} node${child}\n`, stderr: "", timedOut: false };
+  };
+  const lease = await admit(ctx, request);
+  await lease.child(childPid);
+  const dir = join(ctx.piAgentDir, "lanes-admission");
+  const { owner, child } = JSON.parse(readFileSync(join(dir, readdirSync(dir)[0]), "utf8"));
+  assert.equal(owner.start, utcStart);
+  assert.equal(child.start, utcStart);
+  await assert.rejects(lease.release());
+  childLive = false;
+  await lease.release();
 });
 test("native inventory never treats probe failure as empty", async () => {
   await assert.rejects(inventory(laneCtx()), /inventory/);

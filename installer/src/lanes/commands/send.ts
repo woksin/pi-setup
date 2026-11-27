@@ -69,9 +69,10 @@ function closestLive(to: string, rows: RosterRow[]): string {
   ranked.sort((a, b) => b.prefix - a.prefix || a.distance - b.distance || Number(b.row.state === "idle") - Number(a.row.state === "idle") || a.row.lane.localeCompare(b.row.lane));
   return ranked.slice(0, 3).map(({ row }) => `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${row.state}`).join(", ");
 }
-function matchingRecipient(to: string, ids: Iterable<string>): string | undefined {
+function matchingRecipient(to: string, ids: Set<string>): string | undefined {
+  if (ids.has(to)) return to;
   const key = to.toLowerCase();
-  const matches = [...new Set(ids)].filter(id => id.toLowerCase() === key);
+  const matches = [...ids].filter(id => id.toLowerCase() === key);
   if (matches.length > 1) throw new UsageError(`ambiguous recipient ${to}: ${matches.sort().join(", ")}`);
   return matches[0];
 }
@@ -80,8 +81,8 @@ async function resolveRecipient(to: string, deps: SendContext): Promise<string> 
   if (["ALL", c.messages.broadcast, ...c.lanes.map(l => l.group)].includes(to)) return to;
   const live = await liveRoster(deps);
   const liveIds = live.rows.filter(row => row.identity !== "unregistered").map(row => row.lane);
-  const canonical = matchingRecipient(to, [...live.registered, ...liveIds])
-    ?? matchingRecipient(to, [c.coordinator.id, ...c.lanes.map(l => l.id)]);
+  const ids = new Set([c.coordinator.id, ...c.lanes.map(l => l.id), ...live.registered, ...liveIds]);
+  const canonical = matchingRecipient(to, ids);
   if (canonical) return canonical;
   if (!validId(to)) throw new UsageError("invalid to");
   ctx.err(`warning: unknown recipient ${to}; sending anyway`);

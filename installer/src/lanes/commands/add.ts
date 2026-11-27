@@ -33,10 +33,11 @@ export async function add(
   ctx.out(`next: lanes start ${id}`); return 0;
 }
 function validateInput(id: string, opts: Options, c: Config): void {
-  if (!validId(id) || ["ALL", c.messages.broadcast, c.coordinator.id].includes(id)) {
+  const key = id.toLowerCase();
+  if (!validId(id) || ["all", c.messages.broadcast.toLowerCase(), c.coordinator.id.toLowerCase()].includes(key)) {
     throw new UsageError("invalid lane id");
   }
-  if (c.lanes.some(l => l.id === id)) throw new Error(`lane ${id} already exists`);
+  if (c.lanes.some(l => l.id.toLowerCase() === key)) throw new Error(`lane ${id} already exists`);
   validateRepo(opts.repo);
   validateIssueAndGoal(opts);
 }
@@ -94,7 +95,7 @@ function newOrchestrator(lane: NewLane, opts: Options, c: Config): NewLane {
   const name = lane.repo.split("/")[1];
   const id = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
   const reserved = [lane.id, c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.map(l => l.id)];
-  if (!validId(id) || reserved.includes(id)) {
+  if (!validId(id) || reserved.some(existing => existing.toLowerCase() === id.toLowerCase())) {
     throw new Error("repo-orch ID collision or invalid ID; choose --orchestrator-id");
   }
   const lower = id.toLowerCase();

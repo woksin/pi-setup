@@ -66,6 +66,40 @@ for name in "$lane" ${group:+"$group"} ${aliases[@]+"${aliases[@]}"}; do
         exit 2
     fi
 done
+me=("$lane" ${aliases[@]+"${aliases[@]}"})
+# Keep exact addresses distinct even for legacy configs with case collisions.
+foldable_lanes=$(python3 - "${LANES_DIR:-}" "${me[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root, *own = sys.argv[1:]
+cwd = Path.cwd()
+path = Path(root) / "lanes.json" if root else next(
+    (parent / "lanes.json" for parent in (cwd, *cwd.parents) if (parent / "lanes.json").exists()), None
+)
+configured = {"ALL"}
+if path is not None:
+    try:
+        config = json.loads(path.read_text())
+        configured.update(lane["id"] for lane in config["lanes"])
+        if "coordinator" in config:
+            configured.add(config["coordinator"]["id"])
+        if "messages" in config:
+            configured.add(config["messages"]["broadcast"])
+        if not all(isinstance(id, str) for id in configured):
+            sys.exit(0)
+    except (OSError, ValueError, KeyError, TypeError):
+        sys.exit(0)  # If the config is unreadable, only match exact addresses.
+for id in own:
+    if not any(other != id and other.lower() == id.lower() for other in configured):
+        print(id)
+PY
+)
+foldable=()
+while IFS= read -r id; do
+    if [[ -n $id ]]; then foldable+=("$id"); fi
+done <<< "$foldable_lanes"
 if [[ ${INBOX_DIR+x} ]]; then
     dir=$INBOX_DIR
 else
@@ -241,17 +275,27 @@ if [[ ! -e $mark && ! -L $mark ]]; then
     exit 1
 fi
 args=(. -maxdepth 1 -type f -name '*.md')
-me=("$lane" ${aliases[@]+"${aliases[@]}"})
 # has LIST ID: LIST is "-a-b-c-"; ID may itself contain dashes (R-AI).
 has() { [[ $1 == *"-$2-"* ]]; }
-has_lane() ( shopt -s nocasematch; has "$1" "$2"; )
-lane_prefix() (
-    shopt -s nocasematch
+has_lane() (
     local id
-    for id in "${me[@]}"; do
-        if [[ $1 == "$id" || $1 == "$id"-* ]]; then printf '%s\n' "$id"; return 0; fi
+    for id in "${me[@]}"; do has "$1" "$id" && return 0; done
+    shopt -s nocasematch
+    for id in ${foldable[@]+"${foldable[@]}"}; do has "$1" "$id" && return 0; done
+    return 1
+)
+match_prefix() {
+    local text=$1 id
+    shift
+    for id in "$@"; do
+        if [[ $text == "$id" || $text == "$id"-* ]]; then printf '%s\n' "$id"; return 0; fi
     done
     return 1
+}
+lane_prefix() (
+    match_prefix "$1" "${me[@]}" && return 0
+    shopt -s nocasematch
+    match_prefix "$1" ${foldable[@]+"${foldable[@]}"}
 )
 is_id() {
     local tok=$1 id
@@ -296,10 +340,10 @@ inbound() {
     parsed=$(parse "$name")
     parsed=${parsed#*|}
     senders=${parsed%%|*}; rcpts=${parsed#*|}
-    for id in "${me[@]}"; do has_lane "$senders" "$id" && return 1; done
+    has_lane "$senders" && return 1
     [[ $name == ALL-* ]] && return 0
     [[ -n $group && $name == "$group"-* ]] && return 0
-    for id in "${me[@]}"; do has_lane "$rcpts" "$id" && return 0; done
+    has_lane "$rcpts" && return 0
     for id in ALL ${group:+"$group"}; do has "$rcpts" "$id" && return 0; done
     return 1
 }

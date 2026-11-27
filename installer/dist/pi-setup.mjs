@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 1cee80c1bfebdf687b08870d1630898b77a8b6ffa05015ce21c77ae1decb8307
+// pi-setup-source-sha256: 9a7c40869c8213e8c7f9309ef3e29755cf9ee20a01e585ea4b34aa3a8b16e1d0
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -535,7 +535,8 @@ function validate(value, root = process.cwd(), home = homedir3()) {
     require2(typeof r2.auto === "boolean", "messages.retention.auto");
     archiveDir(c2, root, home);
   }
-  require2(c2.coordinator && typeof c2.coordinator.id === "string" && validId(c2.coordinator.id) && !["ALL", c2.messages.broadcast].includes(c2.coordinator.id), "coordinator.id");
+  const reservedIds = ["all", c2.messages.broadcast.toLowerCase()];
+  require2(c2.coordinator && typeof c2.coordinator.id === "string" && validId(c2.coordinator.id) && !reservedIds.includes(c2.coordinator.id.toLowerCase()), "coordinator.id");
   require2(text4(c2.coordinator.cwd), "coordinator.cwd");
   require2(text4(c2.coordinator.prompt), "coordinator.prompt");
   if (c2.coordinator.maxRunning === void 0) c2.coordinator.maxRunning = 6;
@@ -552,11 +553,11 @@ function validate(value, root = process.cwd(), home = homedir3()) {
     require2(Array.isArray(c2.github.excludeLabels) && c2.github.excludeLabels.every(text4), "github.excludeLabels");
   }
   require2(Array.isArray(c2.lanes), "lanes");
-  const ids = /* @__PURE__ */ new Set([c2.coordinator.id, "ALL", c2.messages.broadcast]);
+  const ids = /* @__PURE__ */ new Set([c2.coordinator.id.toLowerCase(), ...reservedIds]);
   for (const [i2, lane] of c2.lanes.entries()) {
     const key = `lanes.${i2}`;
-    require2(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id), `${key}.id`);
-    ids.add(lane.id);
+    require2(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id.toLowerCase()), `${key}.id`);
+    ids.add(lane.id.toLowerCase());
     require2(absentCwdIdentity(lane, lane.repo) || typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo), `${key}.repo`);
     require2(absentCwdIdentity(lane, lane.branch) || text4(lane.branch), `${key}.branch`);
     require2(text4(lane.prompt), `${key}.prompt`);
@@ -3310,10 +3311,11 @@ async function add(id, opts, c2, root, ctx) {
   return 0;
 }
 function validateInput(id, opts, c2) {
-  if (!validNewId(id) || ["ALL", c2.messages.broadcast, c2.coordinator.id].includes(id)) {
+  const key = id.toLowerCase();
+  if (!validNewId(id) || ["all", c2.messages.broadcast.toLowerCase(), c2.coordinator.id.toLowerCase()].includes(key)) {
     throw new UsageError("invalid lane id");
   }
-  if (c2.lanes.some((l2) => l2.id === id)) throw new Error(`lane ${id} already exists`);
+  if (c2.lanes.some((l2) => l2.id.toLowerCase() === key)) throw new Error(`lane ${id} already exists`);
   validateRepo(opts.repo);
   validateIssueAndGoal(opts);
 }
@@ -3378,7 +3380,7 @@ function newOrchestrator(lane, opts, c2) {
   const name = lane.repo.split("/")[1];
   const id = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
   const reserved = [lane.id, c2.coordinator.id, "ALL", c2.messages.broadcast, ...c2.lanes.map((l2) => l2.id)];
-  if (!validNewId(id) || reserved.includes(id)) {
+  if (!validNewId(id) || reserved.some((existing) => existing.toLowerCase() === id.toLowerCase())) {
     throw new Error("repo-orch ID collision or invalid ID; choose --orchestrator-id");
   }
   const lower = id.toLowerCase();
@@ -4646,7 +4648,7 @@ async function inventory2(ctx) {
   return rows;
 }
 async function nativeInventory(ctx) {
-  const result3 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4e3 });
+  const result3 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4e3, env: { TZ: "UTC", LC_ALL: "C" } });
   if (result3.code !== 0 || result3.timedOut || !result3.stdout.trim()) throw new Error("admission inventory unavailable");
   const rows = [];
   for (const line of result3.stdout.trim().split("\n")) {
@@ -4701,10 +4703,11 @@ function identity(value) {
 function readLease(file) {
   if (!lstatSync6(file).isFile()) throw new Error("admission lease is not a regular file");
   const v = JSON.parse(readFileSync20(file, "utf8"));
-  if (v?.version === 1 && (!identity(v.owner) || v.child !== void 0 && !identity(v.child))) {
+  if (v?.version !== 1 && v?.version !== 2) throw new Error("admission lease malformed");
+  if (!identity(v.owner) || v.child !== void 0 && !identity(v.child)) {
     throw uncertainLease(file, "recorded owner or child identity unreadable");
   }
-  if (v?.version !== 1 || v.priorPi !== void 0 && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)) || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some((s) => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
+  if (v.priorPi !== void 0 && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)) || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some((s) => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
   return v;
 }
 function store(file, lease) {
@@ -4752,9 +4755,19 @@ async function leaseInventory(ctx, entries) {
     throw error;
   }
 }
+function checkLegacyStart({ file, lease }, rows) {
+  if (lease.version !== 1) return;
+  for (const id of [lease.owner, lease.child]) {
+    if (id && rows.some((row) => row.pid === id.pid && row.start !== id.start)) {
+      throw uncertainLease(file, `start time differs for pid ${id.pid} in a legacy lease without a known timezone or locale`);
+    }
+  }
+}
 function leases(entries, rows) {
   const all = entries.map((e) => e.lease);
-  return entries.flatMap(({ file, lease }) => {
+  return entries.flatMap((entry2) => {
+    checkLegacyStart(entry2, rows);
+    const { file, lease } = entry2;
     if (alive2(lease.owner, rows)) return [lease];
     if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
     if (alive2(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
@@ -4773,7 +4786,7 @@ async function admit(ctx, request2, beforeLaunch) {
     const pis = rows.filter((r2) => r2.pi);
     if (active.some((l2) => l2.cwd === request2.cwd) || pis.some((p) => p.cwd === request2.cwd)) throw new Error(`already running in ${request2.cwd}`);
     const value = {
-      version: 1,
+      version: 2,
       token: randomUUID5(),
       owner: { pid: owner.pid, start: owner.start },
       root: request2.root,
@@ -5201,8 +5214,9 @@ function closestLive(to, rows) {
   return ranked.slice(0, 3).map(({ row }) => `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${row.state}`).join(", ");
 }
 function matchingRecipient(to, ids) {
+  if (ids.has(to)) return to;
   const key = to.toLowerCase();
-  const matches = [...new Set(ids)].filter((id) => id.toLowerCase() === key);
+  const matches = [...ids].filter((id) => id.toLowerCase() === key);
   if (matches.length > 1) throw new UsageError(`ambiguous recipient ${to}: ${matches.sort().join(", ")}`);
   return matches[0];
 }
@@ -5211,7 +5225,8 @@ async function resolveRecipient(to, deps) {
   if (["ALL", c2.messages.broadcast, ...c2.lanes.map((l2) => l2.group)].includes(to)) return to;
   const live = await liveRoster(deps);
   const liveIds = live.rows.filter((row) => row.identity !== "unregistered").map((row) => row.lane);
-  const canonical3 = matchingRecipient(to, [...live.registered, ...liveIds]) ?? matchingRecipient(to, [c2.coordinator.id, ...c2.lanes.map((l2) => l2.id)]);
+  const ids = /* @__PURE__ */ new Set([c2.coordinator.id, ...c2.lanes.map((l2) => l2.id), ...live.registered, ...liveIds]);
+  const canonical3 = matchingRecipient(to, ids);
   if (canonical3) return canonical3;
   if (!validId(to)) throw new UsageError("invalid to");
   ctx.err(`warning: unknown recipient ${to}; sending anyway`);

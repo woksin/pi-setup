@@ -6,7 +6,8 @@ import type { LanesCtx } from "./ctx.ts";
 export interface AdmissionProcess { pid: number; ppid: number; start: string; pi: boolean; cwd?: string }
 interface Identity { pid: number; start: string }
 interface Lease {
-  version: 1; token: string; owner: Identity; child?: Identity; priorPi?: Identity[];
+  // v1 used the caller's timezone and locale; v2 records lstart in UTC/C.
+  version: 1 | 2; token: string; owner: Identity; child?: Identity; priorPi?: Identity[];
   root: string; cwd: string; id: string; pool: "worker" | "orchestration";
 }
 export interface AdmissionRequest {
@@ -38,7 +39,7 @@ export async function inventory(ctx: LanesCtx): Promise<AdmissionProcess[]> {
   return rows;
 }
 async function nativeInventory(ctx: LanesCtx): Promise<AdmissionProcess[]> {
-  const result = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4000 });
+  const result = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4000, env: { TZ: "UTC", LC_ALL: "C" } });
   if (result.code !== 0 || result.timedOut || !result.stdout.trim()) throw new Error("admission inventory unavailable");
   const rows: AdmissionProcess[] = [];
   for (const line of result.stdout.trim().split("\n")) {
@@ -84,10 +85,11 @@ function identity(value: any): value is Identity { return value && Number.isSafe
 function readLease(file: string): Lease {
   if (!lstatSync(file).isFile()) throw new Error("admission lease is not a regular file");
   const v = JSON.parse(readFileSync(file, "utf8"));
-  if (v?.version === 1 && (!identity(v.owner) || (v.child !== undefined && !identity(v.child)))) {
+  if (v?.version !== 1 && v?.version !== 2) throw new Error("admission lease malformed");
+  if (!identity(v.owner) || (v.child !== undefined && !identity(v.child))) {
     throw uncertainLease(file, "recorded owner or child identity unreadable");
   }
-  if (v?.version !== 1 || (v.priorPi !== undefined && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)))
+  if ((v.priorPi !== undefined && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)))
     || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some(s => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
   return v;
 }
@@ -135,9 +137,19 @@ async function leaseInventory(ctx: LanesCtx, entries: LeaseEntry[]): Promise<Adm
     throw error;
   }
 }
+function checkLegacyStart({ file, lease }: LeaseEntry, rows: AdmissionProcess[]): void {
+  if (lease.version !== 1) return;
+  for (const id of [lease.owner, lease.child]) {
+    if (id && rows.some(row => row.pid === id.pid && row.start !== id.start)) {
+      throw uncertainLease(file, `start time differs for pid ${id.pid} in a legacy lease without a known timezone or locale`);
+    }
+  }
+}
 function leases(entries: LeaseEntry[], rows: AdmissionProcess[]): Lease[] {
   const all = entries.map(e => e.lease);
-  return entries.flatMap(({ file, lease }) => {
+  return entries.flatMap(entry => {
+    checkLegacyStart(entry, rows);
+    const { file, lease } = entry;
     if (alive(lease.owner, rows)) return [lease];
     if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
     if (alive(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
@@ -152,7 +164,7 @@ export async function admit(ctx: LanesCtx, request: AdmissionRequest, beforeLaun
     if (!owner) throw new Error("admission controller identity unavailable");
     const active = leases(entries, rows); const pis = rows.filter(r => r.pi);
     if (active.some(l => l.cwd === request.cwd) || pis.some(p => p.cwd === request.cwd)) throw new Error(`already running in ${request.cwd}`);
-    const value: Lease = { version: 1, token: randomUUID(), owner: { pid: owner.pid, start: owner.start }, root: request.root, cwd: request.cwd, id: request.id, pool: request.pool,
+    const value: Lease = { version: 2, token: randomUUID(), owner: { pid: owner.pid, start: owner.start }, root: request.root, cwd: request.cwd, id: request.id, pool: request.pool,
       priorPi: pis.map(p => ({ pid: p.pid, start: p.start })) };
     const file = join(dir, `${value.token}.json`); store(file, value);
     try { await beforeLaunch?.(); } catch (e) { unlinkSync(file); throw e; }

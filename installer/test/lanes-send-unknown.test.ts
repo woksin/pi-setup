@@ -49,11 +49,22 @@ for (const to of ["S01abc12", "S01ABC12", "s01ABC12"]) test(`live registration o
   assert.equal(await f.send(to), 0); assert.deepEqual(f.errors, []);
   assert.match(basename(f.lines.at(-1)!), /^C0-to-S01abc12-task-/);
 });
-for (const to of ["L7A", "l7a"]) test(`live case collision refuses ${to} without writing a message`, async () => {
-  const f = fixture(); f.registration("L7a", 20); f.registration("L7A", 21);
-  assert.equal(await f.send(to), 2);
+for (const second of ["live", "configured"]) test(`live and ${second} case collision routes exact IDs only`, async () => {
+  const f = fixture(); f.registration("L7a", 20);
+  if (second === "live") f.registration("L7A", 21);
+  else {
+    f.c.lanes.push({ id: "L7A", repo: "example/repo", worktree: "lane", branch: "lane", group: null, prompt: "prompt.md" });
+    saveConfig(f.home, f.c);
+  }
+  assert.equal(await f.send("l7a"), 2);
   assert.ok(f.errors.some(error => error.includes("L7A") && error.includes("L7a")));
   assert.ok(!existsSync(join(f.home, "messages")));
+  f.errors.length = 0;
+  for (const to of ["L7A", "L7a"]) {
+    assert.equal(await f.send(to), 0);
+    assert.ok(basename(f.lines.at(-1)!).startsWith(`C0-to-${to}-task-`));
+  }
+  assert.deepEqual(f.errors, []);
 });
 for (const mode of ["dead", "retired", "unknown"]) test(`no live candidates: ${mode} keeps the warning only`, async () => {
   const f = fixture();
