@@ -99,10 +99,12 @@ sync_file() { # sync_file <src> <dst>
 }
 write_stage() {
   mkdir -p agent skills tools/bin agent/lane-policy agent/launchd
+  # Repo-owned files the live install does not have (never delete them): the direct-link feature and pi-profile
+  # (retired live on 2026-11-27, still an installer feature).
   for d in agents extensions early-extensions lib workflows templates loose-threads; do
-    sync_dir "$STAGE/agent/$d/" "agent/$d/"
+    sync_dir "$STAGE/agent/$d/" "agent/$d/" --exclude='direct-link*'
   done
-  sync_dir "$STAGE/agent/bin/" agent/bin/ --exclude=fd --exclude=rg
+  sync_dir "$STAGE/agent/bin/" agent/bin/ --exclude=fd --exclude=rg --exclude=pi-profile
   sync_dir "$STAGE/agent/pi-phase/" agent/pi-phase/ --exclude=state --exclude=config.local.json --exclude='backup-*'
   sync_dir "$STAGE/agent/local-packages/pi-questions/" agent/local-packages/pi-questions/ "${PQ_EX[@]}"
   sync_file "$STAGE/agent/lane-policy/README.md" agent/lane-policy/README.md
