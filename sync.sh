@@ -31,8 +31,9 @@ done
 "${RS[@]}" --exclude=fd --exclude=rg "$PI/bin/" agent/bin/
 "${RS[@]}" --exclude=state --exclude=config.local.json --exclude='backup-*' "$PI/pi-phase/" agent/pi-phase/
 # pi-questions ships as source inside this repo (no npm package); dist/ is the CLI, rebuilt here
-(cd "$PI/local-packages/pi-questions" && node scripts/build.mjs)
+# built inside the stage so a sync (including --dry-run) never rewrites the live install
 "${RS[@]}" "${PQ_EX[@]}" --exclude='*.tgz' "$PI/local-packages/pi-questions/" agent/local-packages/pi-questions/
+(cd agent/local-packages/pi-questions && node scripts/build.mjs)
 # publishing sanitisers: per-user label in docker-guardian, author-specific inbox path and notes path
 sed -i '' -e "s#com\\.$(id -un)\\.#com.example.#g" agent/bin/docker-guardian agent/bin/pi-cleanup
 sed -i '' -e 's#\${INBOX_DIR:-[^}]*}#${INBOX_DIR:-$HOME/.pi/agent/inbox}#' agent/bin/inbox-watch
