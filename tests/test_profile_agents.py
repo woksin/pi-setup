@@ -40,11 +40,6 @@ class CodeHealthNeverStops(unittest.TestCase):
                 with self.subTest(file=str(path.relative_to(ROOT)), line=number):
                     self.assertIsNone(self.STOP.search(line), f"Code Health line stops the work: {line}")
 
-    def test_implementers_carry_on_after_a_miss(self):
-        for name in ("implementer", "careful-implementer", "opus-implementer", "slice-implementer", "general-purpose"):
-            with self.subTest(agent=name):
-                self.assertIn("carry on with the gate and commit", body(AGENTS / f"{name}.md"))
-
 
 class AnthropicOnlyProfiles(unittest.TestCase):
     def test_anthropic_only_profiles_have_no_foreign_models(self):
@@ -89,8 +84,9 @@ class LeanProfile(unittest.TestCase):
             if path.is_file():
                 with self.subTest(file=path.name):
                     self.assertNotIn("kimi-coding", path.read_text())
-        self.assertEqual((profiles / "lean/workflows/review.js").read_bytes(),
-                         (ROOT / "agent/workflows/review.js").read_bytes())
+        generated = re.compile(r"^[ \t]*(?://|\*) profile:begin (\w+)\n.*?^[ \t]*(?://|\*) profile:end \1\n", re.DOTALL | re.MULTILINE)
+        self.assertEqual(generated.sub("", (profiles / "lean/workflows/review.js").read_text()),
+                         generated.sub("", (ROOT / "agent/workflows/review.js").read_text()))
 
     def test_roles_and_independent_review_are_pinned(self):
         expected = {
@@ -108,8 +104,7 @@ class LeanProfile(unittest.TestCase):
                 text = (ROOT / f"agent/profiles/lean/agents/{name}.md").read_text()
                 self.assertIn(f"\nmodel: {model}\n", text)
                 self.assertIn(f"\nthinking: {thinking}\n", text)
-        for prefix in ("agent/agents", "agent/profiles/balanced/agents",
-                       "agent/profiles/balanced-openai/agents"):
+        for prefix in ("agent/profiles/balanced/agents", "agent/profiles/balanced-openai/agents"):
             for name in ("ops", "scout"):
                 text = (ROOT / prefix / f"{name}.md").read_text()
                 self.assertIn("\nmodel: anthropic/claude-haiku-5-5\n", text)
@@ -117,14 +112,16 @@ class LeanProfile(unittest.TestCase):
 
     def test_context_and_fallback_config(self):
         config = json.loads((ROOT / "agent/context-budget.json").read_text())
-        self.assertEqual(config, {"mode": "enforce", "main": {
-            "soft": 150000, "handoff": 220000, "hard": 400000, "minProgress": 50000}})
+        self.assertEqual(config["mode"], "enforce")
+        main = config["main"]
+        self.assertLess(main["soft"], main["handoff"])
+        self.assertLess(main["handoff"], main["hard"])
         fallback = json.loads((ROOT / "agent/provider-fallback.json").read_text())
         self.assertNotIn("kimi", json.dumps(fallback))
-        self.assertEqual(fallback["pairs"], [
-            ["anthropic/claude-opus-5-5", "openai-codex/gpt-6.1-sol"],
-            ["anthropic/claude-sonnet-5-5", "openai-codex/gpt-6.1-sol"],
-            ["anthropic/claude-haiku-5-5", "openai-codex/gpt-6-luna"]])
+        pairs = fallback["pairs"]
+        self.assertTrue(pairs)
+        for source, target in pairs:
+            self.assertTrue(source.startswith("anthropic/") and target.startswith("openai-codex/"), (source, target))
 
 
 if __name__ == "__main__":

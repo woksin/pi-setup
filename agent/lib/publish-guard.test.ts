@@ -4,6 +4,16 @@ import { PUBLICATION_REASON, publicationGuard, publicationInput } from "./publis
 import publishGuard from "../extensions/publish-guard.ts";
 import { setGuards } from "./guards.ts";
 
+test("issue/comment edit commands are blocked with append-only guidance", () => {
+	for (const command of [
+		"gh issue edit 3 --body replacement", "gh issue edit 3 --body-file input.md", "gh issue edit 3 --title replacement",
+		"gh issue comment 3 --edit-last --body replacement", "gh issue comment 3 --edit-last --editor",
+		"gh api repos/o/r/issues/comments/3 -XPATCH -f body=replacement",
+		"gh api --method PATCH repos/o/r/issues/3 --input input.json",
+	]) assert.equal(publicationGuard(command), "gh-publication");
+	assert.match(PUBLICATION_REASON, /append-only.*issue bodies\/titles.*existing comments/);
+	assert.equal(publicationGuard("gh issue edit 3 --add-assignee @me"), undefined);
+});
 const writes = [
 	"gh issue create", "gh pr comment 1 --body x", "gh issue reopen 1 --comment x", "gh pr reopen 1 -cmessage",
 	"gh issue edit 1 -tTitle", "gh pr review 1 -abtext", "gh pr merge 1 --subject=Title", "gh issue close 1 -Ffile",

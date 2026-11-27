@@ -233,13 +233,9 @@ const fakeRun: Runner = async (cmd, args) => {
 	if (cmd === "python3") {
 		const file = args[args.indexOf("--file") + 1];
 		call.file = readFileSync(file, "utf8");
-		call.absent = args.includes("--expect-absent");
-		if (!call.absent) call.expected = readFileSync(args[args.indexOf("--expect-file") + 1], "utf8");
+		assert.ok(!args.includes("--expect-absent") && !args.includes("--expect-file"));
 		if (failStatus) throw Object.assign(new Error("Command failed"), { stderr: "gh api failed: HTTP 403" });
-		// Like issue-status.py --expect-file/--expect-absent: refuse with exit 3 when the exact block differs.
-		if (rawStatusBlock(issueBody) !== (call.absent ? undefined : call.expected))
-			throw Object.assign(new Error("Command failed"), { code: 3, stderr: "status-mismatch" });
-		return { stdout: "Updated status block.", stderr: "" };
+		return { stdout: "published", stderr: "" };
 	}
 	throw new Error(`unexpected ${cmd} ${args.join(" ")}`);
 };
@@ -257,14 +253,49 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-test("claim assigns, writes the status block via a temp file, then records", async () => {
+for (const historicalState of ["In progress", "In review"]) test(`legacy ${historicalState} body does not hold an issue on another branch`, async () => {
+	const body = `Requirements\n<!-- agent-status:start -->\n**State:** ${historicalState}\n**Branch:** abandoned-branch\n<!-- agent-status:end -->`;
+	issueBody = body;
+	assert.match(await claim(deps(), session(), { repo: "o/r", issue: 5 }), /Claimed o\/r#5/);
+	assert.equal((await readEvents(deps()))[0].state, "in-progress");
+	assert.ok(calls.some(c => c.args[0] === "issue" && c.args[1] === "edit" && c.args.includes("--add-assignee")));
+	assert.equal(issueBody, body);
+	assert.ok(!calls.some(c => c.cmd === "python3"));
+});
+
+for (const state of ["blocked", "paused"] as const) test(`${state} requires a nonblank reason note before GitHub or local writes`, async () => {
+	for (const note of [undefined, "", " \n "]) await assert.rejects(
+		update(deps(), session(), { repo: "o/r", issue: 5, state, note }), /requires a note with the reason and remaining work/);
+	assert.equal(calls.length, 0);
+	assert.deepEqual(await readEvents(deps()), []);
+});
+
+test("unchanged state/PR keeps notes local; a new PR or state appends one event", async () => {
+	const d = deps();
+	const args = { repo: "o/r", issue: 5, state: "in-review" as const, pr: "https://github.com/o/r/pull/7" };
+	await update(d, session(), args);
+	assert.equal(calls.filter(c => c.cmd === "python3").length, 1);
+	await update(d, session(), { ...args, repo: "O/R", note: "Still awaiting review" });
+	await update(d, session(), { ...args, pr: undefined });
+	assert.equal(calls.filter(c => c.cmd === "python3").length, 1, "same state and inherited PR stay silent");
+	await update(d, session(), { ...args, pr: "https://github.com/o/r/pull/8" });
+	assert.equal(calls.filter(c => c.cmd === "python3").length, 2, "a different PR is a new event");
+	await update(d, session(), { repo: "o/r", issue: 5, state: "paused", note: "Waiting for access; work remains" });
+	assert.match(calls.filter(c => c.cmd === "python3").at(-1)!.file!, /https:\/\/github.com\/o\/r\/pull\/8/);
+	await appendEvent(d, ev({ issue: 5, source: "detected", pr: "https://github.com/o/r/pull/9" }));
+	await update(d, session(), { repo: "o/r", issue: 5, state: "paused", note: "Still waiting" });
+	assert.equal(calls.filter(c => c.cmd === "python3").length, 3, "passive touches do not replace the last update's PR");
+	const events = await readEvents(d);
+	assert.equal(events.at(-1)!.note, "Still waiting");
+	assert.equal(events.at(-1)!.pr, "https://github.com/o/r/pull/8");
+});
+
+test("claim assigns and records locally without editing the body or posting a comment", async () => {
 	const out = await claim(deps(), session(), { repo: "o/r", issue: 5, note: "Fix the thing" });
 	assert.match(out, /Claimed o\/r#5 "Title"/);
 	assert.deepEqual(calls.find((c) => c.cmd === "gh" && c.args[1] === "edit")!.args, ["issue", "edit", "5", "--repo", "o/r", "--add-assignee", "@me"]);
-	const write = calls.find((c) => c.cmd === "python3")!;
-	assert.deepEqual(write.args.slice(1, 6), ["update", "--repo", "o/r", "--issue", "5"]);
-	assert.match(write.file!, /\*\*State:\*\* In progress\n\*\*Branch:\*\* feat\/x\n\*\*Scope:\*\* Fix the thing/);
-	assert.deepEqual(readdirSync(join(dir, "tmp")), [], "temp status file removed");
+	assert.ok(!calls.some((c) => c.cmd === "python3"));
+	assert.equal(issueBody, "Body");
 	const events = await readEvents(deps());
 	assert.equal(events.length, 1);
 	assert.equal(events[0].state, "in-progress");
@@ -285,14 +316,13 @@ test("claim refuses when another live session holds the issue", async () => {
 	assert.equal(calls.length, 0, "no GitHub calls when refusing");
 	alivePids.clear(); // the holder died: claim is allowed
 	issueBody = `x\n<!-- agent-status:start -->\n## Status\n**State:** In progress\n**Branch:** b2\n<!-- agent-status:end -->`;
-	await assert.rejects(claim(d, session(), { repo: "o/r", issue: 5 }), /force: true/);
-	await claim(d, session(), { repo: "o/r", issue: 5, force: true });
+	await claim(d, session(), { repo: "o/r", issue: 5 });
 	assert.equal(foldRegistry(await readEvents(d)).get("o/r#5")!.sessions.length, 2);
 });
 
 test("registry is not updated when the GitHub write fails, and errors carry stderr", async () => {
 	failStatus = true;
-	await assert.rejects(claim(deps(), session(), { repo: "o/r", issue: 5 }), /issue-status\.py update failed: .*HTTP 403/);
+	await assert.rejects(update(deps(), session(), { repo: "o/r", issue: 5, state: "paused", note: "Waiting for review" }), /issue-status\.py update failed: .*HTTP 403/);
 	assert.deepEqual(await readEvents(deps()), []);
 	assert.deepEqual(readdirSync(join(dir, "tmp")), []);
 });
@@ -305,13 +335,16 @@ test("claim refuses closed issues and validates input", async () => {
 	await assert.rejects(update(deps(), session(), { repo: "o/r", issue: 5, state: "in-review", pr: "not a url" }), /pr must be/);
 });
 
-test("update rewrites the existing block and records; list shows sessions and anomalies", async () => {
+test("done records locally for the closing comment, leaving the existing block untouched", async () => {
 	issueBody = `Body\n\n<!-- agent-status:start -->\n${existing}\n<!-- agent-status:end -->`;
-	const out = await update(deps(), session(), { repo: "o/r", issue: 5, state: "done", pr: "https://github.com/o/r/pull/7" });
+	const out = await update(deps(), session(), { repo: "o/r", issue: 5, state: "done", pr: "https://github.com/o/r/pull/7", note: "Delivered; follow-ups: none" });
 	assert.match(out, /Done.*still open: close it explicitly/);
-	const write = calls.find((c) => c.cmd === "python3")!;
-	assert.match(write.file!, /^\*\*Scope:\*\* Keep this scope\.$/m);
-	assert.match(write.file!, /^- https:\/\/github\.com\/o\/r\/pull\/7$/m);
+	assert.ok(!calls.some(c => c.cmd === "python3"), "the explicit close step owns the done comment");
+	assert.equal(issueBody, `Body\n\n<!-- agent-status:start -->\n${existing}\n<!-- agent-status:end -->`);
+	assert.equal((await readEvents(deps())).at(-1)!.note, "Delivered; follow-ups: none");
+	issueState = "CLOSED";
+	assert.doesNotMatch(await update(deps(), session(), { repo: "o/r", issue: 5, state: "done" }), /still open/);
+	assert.ok(!calls.some(c => c.cmd === "python3"), "no duplicate done comment after the closing step either");
 	assert.equal(await list(deps(), { fetch: false }), "No active issues (use all to include done).");
 	const all = await list(deps(), { all: true, fetch: false, ownSessionId: "me" });
 	assert.match(all, /o\/r#5 \[Done\] Title/);
@@ -566,15 +599,8 @@ test("check ignores edits confined to the agent status block", async () => {
 	assert.match(await check(deps(), session(), { repo: "o/r", issue: 5 }), /No new activity on o\/r#5 since 1h ago/);
 });
 
-test("successful claim keeps the pre-fetch watermark and ignores its own assignment and first status block", async () => {
-	const d: Deps = { ...deps(), run: async (cmd, args, opts) => {
-		const result = await fakeRun(cmd, args, opts);
-		if (cmd === "python3") {
-			issueBody = `Body\n\n<!-- agent-status:start -->\n${calls.at(-1)!.file}<!-- agent-status:end -->\n`;
-			now = "2026-10-08T12:01:00.000Z";
-		}
-		return result;
-	} };
+test("successful claim keeps the pre-fetch watermark and ignores its own assignment", async () => {
+	const d = deps();
 	await claim(d, session(), { repo: "o/r", issue: 5 });
 	assert.equal(seenRecords()[0].sources.issueComments.checkedAt, "2026-10-08T12:00:00.000Z");
 	assert.deepEqual(seenRecords()[0].assignees, ["woksin"]);
@@ -596,7 +622,7 @@ test("done is gated by new activity, records it as seen, then passes on retry", 
 	assert.equal(seenRecords()[0].sources.issueComments.checkedAt, "2026-10-08T12:30:00.000Z");
 	assert.match(await update(d, session(), { repo: "o/r", issue: 5, state: "done" }), /Updated o\/r#5 to Done/);
 	assert.equal((await readEvents(d)).length, 2);
-	assert.equal(githubWrites().length, 1);
+	assert.equal(githubWrites().length, 0, "done leaves its public summary to the closing step");
 });
 
 test("done is gated even when the earlier record came from check, not claim", async () => {
@@ -617,7 +643,7 @@ test("re-claim is gated by new activity even with force, then passes on retry", 
 	assert.equal(githubWrites().length, 0);
 	assert.equal((await readEvents(d)).length, 1);
 	assert.match(await claim(d, session(), args), /Claimed o\/r#5/);
-	assert.equal(githubWrites().length, 2);
+	assert.equal(githubWrites().length, 1, "only assignment is sent to GitHub");
 	assert.equal((await readEvents(d)).length, 2);
 });
 
@@ -625,16 +651,17 @@ for (const state of ["in-progress", "in-review", "blocked", "paused"] as const) 
 	await check(deps(), session(), { repo: "o/r", issue: 5 });
 	issueComments = [comment("person", "2026-10-08T12:01:00Z", "New requirement")];
 	now = "2026-10-08T12:02:00.000Z";
-	const text = await update(deps(), session(), { repo: "o/r", issue: 5, state });
+	const text = await update(deps(), session(), { repo: "o/r", issue: 5, state,
+		...(["blocked", "paused"].includes(state) ? { note: "Waiting for review; implementation remains" } : {}) });
 	assert.match(text, /Updated o\/r#5/);
 	assert.match(text, /New requirement/);
 	assert.doesNotMatch(text, /Not applied/);
-	assert.equal(githubWrites().length, 1);
+	assert.equal(githubWrites().length, state === "in-progress" || state === "done" ? 0 : 1);
 	assert.equal((await readEvents(deps()))[0].state, state);
 	assert.equal(seenRecords()[0].sources.issueComments.checkedAt, "2026-10-08T12:01:00.000Z");
 });
 
-test("activity fetch failure does not block claim; the original issue fetch still protects status writes", async () => {
+test("activity fetch failure does not block claim; the original issue fetch still protects assignment", async () => {
 	const d: Deps = { ...deps(), run: async (cmd, args, opts) => {
 		if (args.includes("title,url,body,state,labels,assignees,comments,updatedAt"))
 			throw Object.assign(new Error("Command failed"), { killed: true, stderr: "offline\ntry later" });
@@ -643,7 +670,7 @@ test("activity fetch failure does not block claim; the original issue fetch stil
 	const text = await claim(d, session(), { repo: "o/r", issue: 5 });
 	assert.match(text, /Claimed o\/r#5/);
 	assert.match(text, /Could not check for new activity: timed out: offline try later/);
-	assert.equal(githubWrites().length, 2);
+	assert.equal(githubWrites().length, 1, "only assignment is sent to GitHub");
 	assert.equal((await readEvents(d)).length, 1);
 	assert.equal(existsSync(join(dir, "seen")), false, "failed checks do not acknowledge unread activity");
 });
@@ -922,7 +949,8 @@ for (const newer of [false, true]) test(`first done compares recent issue commen
 	issueComments = [comment("person", newer ? "2026-10-08T11:30:00Z" : "2026-10-08T10:30:00Z", "Feedback near our edit")];
 	const text = await update(deps(), session(), { repo: "o/r", issue: 5, state: "done" });
 	assert.match(text, newer ? /Not applied: unresolved recent activity/ : /Updated o\/r#5 to Done/);
-	assert.equal(githubWrites().length, newer ? 0 : 1);
+	assert.equal(githubWrites().length, 0, "done never posts a separate comment");
+	assert.equal((await readEvents(deps())).at(-1)!.state, newer ? "paused" : "done");
 });
 
 test("first done gates outstanding PR review requests and passes after acknowledgement", async () => {
@@ -1185,37 +1213,28 @@ test("extension check works without UI, defaults repo, requires issue and remain
 
 // ---------- review fixes ----------
 
-test("item 1: a concurrent status edit is re-read and kept; a second mismatch fails without recording", async () => {
-	const block = "## Status\n**State:** Paused\n**Remaining:** - item-a";
-	issueBody = `Body\n<!-- agent-status:start -->\n${block}\n<!-- agent-status:end -->`;
-	let views = 0;
-	afterView = () => { if (++views === 1) issueBody = issueBody.replace("- item-a", "- item-a\n- b (added concurrently)"); };
-	await update(deps(), session(), { repo: "o/r", issue: 5, state: "blocked", note: "waiting" });
-	const writes = calls.filter((c: any) => c.cmd === "python3") as any[];
-	assert.equal(writes.length, 2, "first write refused, recomputed once");
-	assert.equal(writes[0].expected.trim(), block);
-	assert.match(writes[1].file, /- b \(added concurrently\)/);
-	assert.match(writes[1].file, /^\*\*State:\*\* Blocked — waiting$/m);
+test("concurrent body changes cannot be overwritten by an event comment", async () => {
+	issueBody = "Original requirements";
+	afterView = () => { issueBody = "Human edit during fetch"; };
+	await update(deps(), session(), { repo: "o/r", issue: 5, state: "blocked", note: "Waiting for access; implementation remains" });
+	const writes = calls.filter(c => c.cmd === "python3");
+	assert.equal(writes.length, 1, "comments need no body compare/rewrite retry");
+	assert.equal(writes[0].file, "**State:** Blocked\n\n**Reason / remaining work:** Waiting for access; implementation remains\n");
+	assert.equal(issueBody, "Human edit during fetch");
 	assert.equal((await readEvents(deps())).length, 1);
-
-	calls = []; views = 0;
-	afterView = () => { issueBody = issueBody.replace("**Remaining:**", `**Remaining:** x${++views}`); };
-	await assert.rejects(update(deps(), session(), { repo: "o/r", issue: 6, state: "paused" }), /keeps changing concurrently/);
-	assert.equal(calls.filter((c) => c.cmd === "python3").length, 2);
-	assert.equal((await readEvents(deps())).filter((e) => e.issue === 6).length, 0);
+	assert.deepEqual(readdirSync(join(dir, "tmp")), [], "event snapshots are removed");
 });
 
-test("item 1: no block is sent as --expect-absent; CRLF blocks are sent byte-exact", async () => {
-	await claim(deps(), session(), { repo: "o/r", issue: 5 });
-	assert.equal((calls.find((c) => c.cmd === "python3") as any).absent, true);
-	calls = [];
-	const raw = "\r\n## Status\r\n**State:** Paused\r\n**Scope:** s\r\n";
-	issueBody = `Body\r\n<!-- agent-status:start -->${raw}<!-- agent-status:end -->\r\n`;
-	await update(deps(), session(), { repo: "o/r", issue: 6, state: "blocked" });
-	const writes = calls.filter((c) => c.cmd === "python3") as any[];
-	assert.equal(writes.length, 1, "no spurious mismatch");
-	assert.equal(writes[0].expected, raw);
-	assert.equal(writes[0].absent, false);
+for (const state of ["in-review", "paused"] as const) test(`${state} appends a self-contained event without legacy body text`, async () => {
+	const body = "Body\r\n<!-- agent-status:start -->\r\n**State:** Paused\r\n**Scope:** Legacy text\r\n<!-- agent-status:end -->\r\n";
+	issueBody = body;
+	await update(deps(), session(), { repo: "o/r", issue: 5, state, pr: "https://github.com/o/r/pull/7", note: "Public event summary; follow-up #8" });
+	const writes = calls.filter(c => c.cmd === "python3");
+	assert.equal(writes.length, 1);
+	assert.match(writes[0].file!, /https:\/\/github.com\/o\/r\/pull\/7/);
+	assert.match(writes[0].file!, /Public event summary; follow-up #8/);
+	assert.doesNotMatch(writes[0].file!, /Legacy text|agent-status|feat\/x/);
+	assert.equal(issueBody, body);
 });
 
 test("item 3: two simultaneous claims through the real flock helper: one wins, one is refused", async () => {
@@ -1405,10 +1424,13 @@ test("plan is truncated at 600 characters and absent when not given", () => {
 	assert.doesNotMatch(rewriteStatusBlock("## Status\n**Scope:** s", { state: "paused", plan: "   " }), /Plan/);
 });
 
-test("update with plan writes the Plan field to GitHub", async () => {
-	issueBody = `Body\n\n<!-- agent-status:start -->\n## Status\n**State:** In progress\n**Branch:** feat/x\n**Scope:** s\n<!-- agent-status:end -->`;
+test("in-progress updates keep the plan and state local without comments or body edits", async () => {
+	const body = `Body\n\n<!-- agent-status:start -->\n## Status\n**State:** In progress\n**Branch:** feat/x\n**Scope:** s\n<!-- agent-status:end -->`;
+	issueBody = body;
 	await update(deps(), session(), { repo: "o/r", issue: 5, state: "in-progress", plan: "Approach X" });
-	assert.match(calls.find((c) => c.cmd === "python3")!.file!, /\*\*Scope:\*\* s\n\*\*Plan:\*\* Approach X/);
+	assert.ok(!calls.some((c) => c.cmd === "python3"));
+	assert.equal(issueBody, body);
+	assert.equal((await readEvents(deps()))[0].plan, "Approach X");
 });
 
 test("an unchanged issue body is not reprinted; a changed body or new comment prints with the untrusted warning", async () => {

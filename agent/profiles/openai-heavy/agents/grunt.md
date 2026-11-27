@@ -5,7 +5,7 @@ description: Worker (GPT-6.1 Terra, low) for mechanical, well-specified work —
 color: gray
 model: openai-codex/gpt-6.1-terra
 thinking: low
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, subagent-cache, observation-mask]
+extensions: [kill-guard, cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: append
 ---

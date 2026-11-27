@@ -6,7 +6,7 @@ color: teal
 model: kimi-coding/k3-256k
 thinking: high
 tools: read, write, edit, bash, grep, find, ls
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, subagent-cache, observation-mask]
+extensions: [kill-guard, cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: true
 prompt_mode: append
 ---

@@ -13,6 +13,9 @@ approval and is not a full cross-provider review.
 
 ## 1. Scope and budget
 
+- Do not stack this optional loop before a required review of the same scope;
+  run one or the other. Tier C changes need neither.
+
 - Run `git status --short --branch` and record the exact base and head SHAs.
   Do not stash, discard, switch branches or fetch unless the task authorises it.
 - State the intent, the allowed paths and what is out of scope.

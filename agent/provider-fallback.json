@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "defaultLimitMinutes": 60,
+  "defaultLimitMinutes": 10,
   "maxFallbacksPerPrompt": 2,
   "maxContextTokensForFallback": "auto",
   "fallbackContextRatio": 0.5,
@@ -18,12 +18,16 @@
   },
   "pairs": [
     [
+      "anthropic/claude-fable-5-2",
+      "openai-codex/gpt-6.2-astra"
+    ],
+    [
       "anthropic/claude-opus-5-5",
-      "openai-codex/gpt-6.1-sol"
+      "openai-codex/gpt-6.2-sol"
     ],
     [
       "anthropic/claude-sonnet-5-5",
-      "openai-codex/gpt-6.1-sol"
+      "openai-codex/gpt-6.2-sol"
     ],
     [
       "anthropic/claude-haiku-5-5",

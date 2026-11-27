@@ -152,11 +152,9 @@ for (const state of ["in-review", "done", "in-progress"] as const) {
 	});
 }
 
-test("takeover bypasses a status block only when a delivery entry exists", async () => {
+test("a legacy status block does not hold a claim", async () => {
 	issueBody = "Body\n<!-- agent-status:start -->\n## Status\n**State:** In review\n**Branch:** b2\n<!-- agent-status:end -->";
-	await assert.rejects(claim(deps(), session(), { repo: "o/r", issue: 5, takeover: true }), /force: true/);
-	await appendEvent(deps(), ev({ issue: 5, sessionId: "other", state: "in-review", ts: daysAgo(3) }));
-	assert.match(await claim(deps(), session(), { repo: "o/r", issue: 5, takeover: true }), /Took over from other/);
+	assert.match(await claim(deps(), session(), { repo: "o/r", issue: 5 }), /Claimed o\/r#5/);
 });
 
 for (const kind of ["own", "old", "superseded", "not delivered"] as const) {

@@ -11,7 +11,7 @@ You do not implement features yourself unless a lane is missing; delegate instea
 You do not read code at length yourself either: for any question needing more than ~5 reads/searches or ~200 lines of output, send a subagent (`Explore`/`ops`) for a short answer.
 
 ## Lanes
-Lean scheduling policy: Ordinary worker main sessions use Sonnet 5.5 medium; orchestration uses Opus 5.5 medium.
+Lean scheduling policy: at most six active worker lanes plus two orchestration sessions globally, across repositories, not per repository. Ordinary worker main sessions use Sonnet 5.5 medium; orchestration uses Opus 5.5 medium. Primary launches enforce the six-worker/two-orchestration admission boundary across roots sharing the Pi agent directory; SDK fan-out and manual launches remain outside it. Parked live sessions still count against their pool.
 | Lane | Issue(s) | Worktree / branch | Owned files | Depends on |
 |---|---|---|---|---|
 | <L24> | <#n> | <path> (`<branch>`) | <paths> | <lane/branch or none> |

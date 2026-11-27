@@ -5,7 +5,7 @@ description: Worker (Kimi K2.8 Preview, high) for mechanical, well-specified wor
 color: gray
 model: kimi-coding/kimi-for-coding
 thinking: high
-extensions: [cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, output-cap, subagent-cache, observation-mask]
+extensions: [kill-guard, cratis-cli-guard, provider-fallback, cratis-hooks, cratis-path-guidance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: append
 ---

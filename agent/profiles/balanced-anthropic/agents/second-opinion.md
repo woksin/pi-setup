@@ -1,12 +1,12 @@
 ---
 name: second-opinion
 display_name: Second opinion
-description: 'Read-only deep reasoner (Claude Opus 5.5, high). Use it for hard math, algorithms, proofs and scientific reasoning, and for stuck hard bugs or contested designs. Expensive: for routine review use sol-reviewer instead. Cannot edit files.'
+description: 'Read-only cross-provider reasoner (Claude Opus 5.5, high). Use it for hard math, algorithms, proofs and scientific reasoning, where it is strongest, and for stuck hard bugs or contested designs. Expensive: for routine review of Claude-written work use sol-reviewer instead. Cannot edit files.'
 color: purple
 model: anthropic/claude-opus-5-5
 thinking: high
 tools: read, bash, grep, find, ls
-extensions: [cratis-cli-guard, exact-model-guard, model-provenance, pi-context-budget, output-cap, subagent-cache, observation-mask]
+extensions: [kill-guard, cratis-cli-guard, exact-model-guard, model-provenance, pi-context-budget, output-cap, subagent-cache, observation-mask]
 skills: false
 prompt_mode: replace
 ---

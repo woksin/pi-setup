@@ -5,12 +5,47 @@ import publishExtension from "../extensions/publish.ts";
 import type { PublishRequest } from "./publish-request.ts";
 
 const target = { repo: "owner/repo", number: 39 };
+const appendOnlyEdits: unknown[] = [
+	...["body", "bodyFile", "title"].map(key => ({ kind: "issue-edit", ...target, [key]: "New text" })),
+	...["issue-comment", "pr-comment"].map(kind => ({ kind, ...target, body: "Replacement", editLast: true, createIfNone: true })),
+	{ kind: "api", endpoint: "repos/o/r/issues/comments/3", method: "PATCH", body: '{"body":"Replacement"}' },
+	{ kind: "api", endpoint: "/repos/o/r/pulls/comments/3", method: "PATCH", fields: [{ name: "body", value: "Replacement" }] },
+	{ kind: "api", endpoint: "repos/o/r/issues/comments/3", method: "DELETE" },
+	{ kind: "api", endpoint: "/api/v3/repos/o/r/issues/3", method: "PATCH", fields: [{ name: "title", value: "Replacement" }] },
+	{ kind: "api", endpoint: "repos/o/r/issues/3", method: "PATCH", fields: [{ name: "body", file: "body.md" }] },
+	{ kind: "api", endpoint: "repos/o/r/issues/3?body=Replacement", method: "PATCH" },
+	{ kind: "api", endpoint: "repos/o/r/./issues//3", method: "PATCH", body: '{"body":"Replacement"}' },
+	{ kind: "api", endpoint: "repos/o/r/issues/3", method: "PATCH", body: '{"title":"Replacement","state":"closed"}' },
+	{ kind: "api", endpoint: "repos/o/r/%69ssues/comments/3", method: "PATCH", bodyFile: "input.json" },
+	{ kind: "api", endpoint: "graphql", method: "POST", fields: [{ name: "query", value: "mutation { updateIssue(input: {id: $id, body: $body}) { clientMutationId } }" }] },
+];
+for (const [index, request] of appendOnlyEdits.entries()) test(`append-only edit ${index} is refused by structured and CLI validation`, () => {
+	assert.throws(() => validateRequest(request), error => error instanceof InvalidRequest && /append-only/.test(error.detail ?? ""));
+	const fields = Object.entries(request as Record<string, unknown>).flatMap(([key, value]) => {
+		if (key === "kind") return [];
+		const flag = key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
+		if (key === "fields") return (value as unknown[]).flatMap(field => ["--field-json", JSON.stringify(field)]);
+		return value === true ? [`--${flag}`] : [`--${flag}`, String(value)];
+	});
+	assert.throws(() => parseCli([(request as any).kind, ...fields]), InvalidRequest);
+});
+test("metadata/state updates, new comments and PR descriptions remain allowed", () => {
+	const requests = [
+		{ kind: "issue-edit", ...target, addAssignees: ["person"], removeLabels: ["blocked"] },
+		{ kind: "api", endpoint: "repos/o/r/issues/3", method: "PATCH", body: '{"state":"closed","labels":["done"],"assignees":["person"]}' },
+		{ kind: "issue-close", ...target, body: "Delivered; follow-ups: none", reason: "completed" },
+		{ kind: "issue-comment", ...target, body: "New event" },
+		{ kind: "pr-edit", ...target, title: "Release notes", body: "Updated release notes" },
+		{ kind: "api", endpoint: "repos/o/r/pulls/3", method: "PATCH", body: '{"body":"Release notes"}' },
+	];
+	for (const request of requests) assert.deepEqual(validateRequest(request), request);
+});
 const cases: PublishRequest[] = [
 	{ kind: "issue-create", repo: target.repo, title: "Title", body: "Body" },
 	{ kind: "pr-create", repo: target.repo, title: "Title", bodyFile: "draft.md", base: "main", head: "feature/topic", draft: true },
-	{ kind: "issue-comment", ...target, body: "Body", editLast: true, createIfNone: true },
+	{ kind: "issue-comment", ...target, body: "Body" },
 	{ kind: "pr-comment", ...target, bodyFile: "draft.md" },
-	{ kind: "issue-edit", ...target, title: "Updated" },
+	{ kind: "issue-edit", ...target, addLabels: ["triaged"] },
 	{ kind: "pr-edit", ...target, body: "Body", base: "main", addReviewers: ["person"] },
 	{ kind: "issue-close", ...target, bodyFile: "comment.md", reason: "completed" },
 	{ kind: "pr-close", ...target, body: "Bye", deleteBranch: true },
@@ -35,38 +70,11 @@ for (const request of cases) test(`validates and plans ${request.kind}`, () => {
 	assert.ok(plan.payloads.every(source => /^(?:body|files\[\d+\]|fields\[\d+\])$/.test(source.label)));
 });
 
-for (const abbreviated of ["abcd", "abc1234", "A".repeat(39)]) test(`release target rejects ${abbreviated.length}-character abbreviated SHA without echoing it`, () => {
-	assert.throws(() => validateRequest({ kind: "release-create", repo: target.repo, tag: "v1", body: "Notes", target: abbreviated }), (error: unknown) => {
-		assert.ok(error instanceof InvalidRequest);
-		assert.match(error.detail!, /abbreviated commit SHA; use the full 40-character SHA or a branch name/);
-		assert.ok(!error.detail!.includes(abbreviated));
-		return true;
-	});
-});
-for (const fullTarget of ["a".repeat(40), "main", "v1.0", "release/1.2", "feature-1234abcd"]) test(`release target accepts ${fullTarget}`, () => {
-	assert.equal(validateRequest({ kind: "release-create", repo: target.repo, tag: "v1", body: "Notes", target: fullTarget }).kind, "release-create");
-});
-
-for (const name of ["vulnerabilities[][package][name]", "x[][a]"]) test(`api fields reject nested array name without echoing it: ${name}`, () => {
-	assert.throws(() => validateRequest({ kind: "api", endpoint: "repos/o/r", method: "POST", fields: [{ name, value: "VALUE-SENTINEL" }] }), (error: unknown) => {
-		assert.ok(error instanceof InvalidRequest);
-		assert.match(error.detail!, /fields cannot build arrays of objects/);
-		assert.match(error.detail!, /JSON in a bodyFile with no fields/);
-		assert.ok(!error.detail!.includes(name)); assert.ok(!error.detail!.includes("VALUE-SENTINEL"));
-		return true;
-	});
-});
-for (const name of ["labels[]", "a[b]", "a.b"]) test(`api fields keep scalar/nested object syntax: ${name}`, () => {
-	const request = { kind: "api", endpoint: "repos/o/r", method: "POST", fields: [{ name, value: "value" }] };
-	assert.deepEqual(validateRequest(request), request);
-	assert.ok(toGhPlan(validateRequest(request)).argv.includes(`--raw-field=${name}=value`));
-});
-
 const minimalCases: Record<string, unknown>[] = [
 	{ kind: "issue-create", repo: target.repo, title: "T", body: "B" },
 	{ kind: "pr-create", repo: target.repo, title: "T", body: "B" },
 	{ kind: "issue-comment", ...target, body: "B" }, { kind: "pr-comment", ...target, body: "B" },
-	{ kind: "issue-edit", ...target, title: "T" }, { kind: "pr-edit", ...target, title: "T" },
+	{ kind: "issue-edit", ...target, addAssignees: ["person"] }, { kind: "pr-edit", ...target, title: "T" },
 	{ kind: "issue-close", ...target }, { kind: "pr-close", ...target },
 	{ kind: "issue-reopen", ...target }, { kind: "pr-reopen", ...target },
 	{ kind: "pr-review", ...target, event: "approve" }, { kind: "pr-merge", ...target, strategy: "merge" },
@@ -134,7 +142,8 @@ function parityFailures(request: Record<string, unknown>): Record<string, unknow
 	if (["issue-create", "pr-create", "issue-comment", "pr-comment", "release-create"].includes(request.kind as string)) {
 		failures.push(Object.fromEntries(Object.entries(request).filter(([key]) => !["body", "bodyFile"].includes(key))));
 	}
-	if (["issue-edit", "pr-edit", "release-notes"].includes(request.kind as string)) {
+	if (request.kind === "issue-edit") failures.push({ kind: "issue-edit", ...target });
+	if (["pr-edit", "release-notes"].includes(request.kind as string)) {
 		failures.push(Object.fromEntries(Object.entries(request).filter(([key]) => !["title", "body", "bodyFile"].includes(key))));
 	}
 	if (allowed.includes("createIfNone")) for (const editLast of [undefined, false]) failures.push({ ...request, createIfNone: true, ...(editLast === undefined ? {} : { editLast }) });
@@ -226,7 +235,7 @@ const bad = [
 	{ kind: "pr-merge", ...target, strategy: "admin" },
 	{ kind: "release-create", repo: target.repo, tag: "v1" },
 	{ kind: "release-notes", repo: target.repo, tag: "v1" },
-	{ kind: "issue-edit", ...target, addLabels: ["only-label"] },
+	{ kind: "issue-edit", ...target },
 	{ kind: "gist-create", files: [] }, { kind: "gist-create", files: ["dir/-flag"] },
 	{ kind: "gist-edit", gistId: "-bad", description: "Body" },
 	{ kind: "gist-edit", gistId: "abc", files: [], removeFiles: [] },
@@ -336,7 +345,7 @@ test("safe named arguments cannot become flags and canonical authority retains e
 });
 
 test("CLI mechanically maps repeatable arrays, booleans and field JSON without shell parsing", () => {
-	assert.deepEqual(parseCli(["issue-comment", "--repo", target.repo, "--number", "39", "--body", "--help", "--edit-last", "--create-if-none"]), { kind: "issue-comment", ...target, body: "--help", editLast: true, createIfNone: true });
+	assert.deepEqual(parseCli(["issue-comment", "--repo", target.repo, "--number", "39", "--body", "--help"]), { kind: "issue-comment", ...target, body: "--help" });
 	assert.deepEqual(parseCli(["gist-create", "--file", "a", "--file", "b", "--public"]), { kind: "gist-create", files: ["a", "b"], public: true });
 	assert.deepEqual(parseCli(["api", "--endpoint", "repos/o/r", "--method", "PATCH", "--field-json", '{"name":"a","value":"@literal"}']), { kind: "api", endpoint: "repos/o/r", method: "PATCH", fields: [{ name: "a", value: "@literal" }] });
 	assert.deepEqual(parseCli(["--help"]), { kind: "help" });

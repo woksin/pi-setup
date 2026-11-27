@@ -3,7 +3,7 @@ name: scout
 display_name: Scout
 description: 'Read-only research helper (Claude Haiku 5.5, medium) with web search and local read access. Use it to fetch, extract and summarise sources — pages, docs, changelogs, local files — so the main model can judge them. Its output is raw material, not verified fact: it must return URLs and quotes for everything. Cannot edit files.'
 color: cyan
-model: anthropic/claude-haiku-5-5
+model: openai-codex/gpt-6.1-terra
 thinking: medium
 tools: read, grep, find, ls, ext:dist
 extensions: [kill-guard, dist, provider-fallback, pi-context-budget, output-cap, subagent-cache, observation-mask]

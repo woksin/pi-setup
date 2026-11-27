@@ -1,6 +1,6 @@
 /** New publication coverage only; legacy issue lifecycle specs remain unchanged. */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,7 +10,7 @@ import type { Deps, Runner, SessionInfo } from "./issue-work.ts";
 import issueWorkExtension from "../extensions/issue-work.ts";
 
 interface Fixture {
-	deps: Deps; calls: { cmd: string; args: string[]; opts: Parameters<Runner>[2] }[];
+	deps: Deps; calls: { cmd: string; args: string[] }[];
 	body: string; state: string; assignees: { login: string }[];
 }
 const now = "2026-10-08T12:00:00.000Z";
@@ -37,9 +37,9 @@ function fixture(t: TestContext): Fixture {
 		dataDir: root, statusScript: "/fake/issue-status.py", now: () => new Date(now),
 		isPidAlive: () => false, procStartTime: async () => undefined,
 		lock: async () => async () => {}, findPlan: async () => undefined,
-		run: async (cmd, args, opts) => {
-			f.calls.push({ cmd, args, opts });
-			if (cmd === "python3") return { stdout: "Updated status block.", stderr: "" };
+		run: async (cmd, args) => {
+			f.calls.push({ cmd, args });
+			if (cmd === "python3") return { stdout: "published", stderr: "" };
 			if (cmd === "gh") return { stdout: githubResponse(f, args), stderr: "" };
 			throw new Error("unexpected-fixture-call");
 		},
@@ -65,24 +65,11 @@ test("claim/update refuse raw new outbound note, plan, branch and PR before assi
 	assert.deepEqual(f.calls, []);
 });
 
-for (const kind of ["directory", "missing", "file"] as const) test(`claim/update start status writer in a live directory when session cwd is ${kind}`, async t => {
-	const f = fixture(t), root = f.deps.dataDir;
-	const cwd = kind === "directory" ? root : join(root, "session-cwd");
-	if (kind === "file") writeFileSync(cwd, "not a directory");
-	const s = { ...session(), cwd };
-	await claim(f.deps, s, { repo: "o/r", issue: 5 });
-	await update(f.deps, s, { repo: "o/r", issue: 5, state: "paused" });
-	const writes = f.calls.filter(call => call.cmd === "python3");
-	assert.equal(writes.length, 2);
-	for (const call of writes) {
-		assert.equal(call.opts.cwd, kind === "directory" ? cwd : join(root, "tmp"));
-		assert.ok(statSync(call.opts.cwd!).isDirectory());
-	}
-});
-
 test("only new issue fields are scanned, not fetched legacy public text", async t => {
 	const f = fixture(t); f.body = "Legacy public body /Users/alice/private-value";
 	assert.match(await claim(f.deps, session(), { repo: "o/r", issue: 5, note: "Safe new note", plan: "Safe plan" }), /Claimed/);
+	assert.ok(!f.calls.some(call => call.cmd === "python3"), "claim never invokes a body writer or comment publisher");
+	await update(f.deps, session(), { repo: "o/r", issue: 5, state: "paused", note: "Review pending; implementation remains" });
 	assert.ok(f.calls.some(call => call.cmd === "python3"));
 });
 

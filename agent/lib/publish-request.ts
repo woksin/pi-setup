@@ -10,13 +10,14 @@ type Hosted = { host?: string };
 type Target = Hosted & { repo: string; number: number };
 type Create = Body & Hosted & { repo: string; title: string; labels?: string[]; assignees?: string[] };
 type Comment = Body & Target & { editLast?: boolean; createIfNone?: boolean };
-type Edit = BodyOrTitle & Target & { title?: string; addLabels?: string[]; removeLabels?: string[]; addAssignees?: string[]; removeAssignees?: string[] };
+type IssueEdit = OptionalBody & Target & { title?: string; addLabels?: string[]; removeLabels?: string[]; addAssignees?: string[]; removeAssignees?: string[] };
+type Edit = BodyOrTitle & IssueEdit;
 export type ApiField = { name: string; value: string | number | boolean | null; file?: never } | { name: string; file: string; value?: never };
 export type PublishRequest =
 	| (Create & { kind: "issue-create" })
 	| (Create & { kind: "pr-create"; base?: string; head?: string; draft?: boolean; reviewers?: string[] })
 	| (Comment & { kind: "issue-comment" | "pr-comment" })
-	| (Edit & { kind: "issue-edit" })
+	| (IssueEdit & { kind: "issue-edit" })
 	| (Edit & { kind: "pr-edit"; base?: string; addReviewers?: string[]; removeReviewers?: string[] })
 	| (OptionalBody & Target & { kind: "issue-close"; reason?: "completed" | "not-planned" })
 	| (OptionalBody & Target & { kind: "pr-close"; deleteBranch?: boolean })
@@ -136,7 +137,9 @@ const contracts: Record<PublishRequest["kind"], Contract> = {
 // `host` qualifies a repository (or an api call); gist-* and check have no repository and reject it.
 for (const [kind, shape] of Object.entries(contracts)) if (shape.required.includes("repo") || kind === "api") shape.optional.push("host");
 const REQUIRED_BODY_KINDS = ["issue-create", "pr-create", "issue-comment", "pr-comment", "release-create"];
-const EDIT_KINDS = ["issue-edit", "pr-edit", "release-notes"];
+const EDIT_KINDS = ["pr-edit", "release-notes"];
+export const APPEND_ONLY_REASON = "Issues and comments are append-only: do not edit issue bodies/titles or existing comments; append a new event comment instead. PR descriptions remain editable.";
+const ISSUE_METADATA = ["addLabels", "removeLabels", "addAssignees", "removeAssignees"];
 /** `gh gist edit` takes single-valued --add/--remove/--desc, so one edit means exactly one operation with one value. */
 const GIST_EDIT_OPERATIONS = ["description", "files", "removeFiles"];
 export const publishRequestSchema = { type: "object", additionalProperties: false, properties: {
@@ -201,6 +204,7 @@ function validateBody(input: RecordValue): void {
 	if (input.createIfNone === true && input.editLast !== true) invalid();
 }
 function validateEdit(input: RecordValue): void {
+	if (input.kind === "issue-edit" && !ISSUE_METADATA.some(key => (input[key] as unknown[] | undefined)?.length)) invalid();
 	if (!EDIT_KINDS.includes(input.kind as string)) return;
 	if (!["title", "body", "bodyFile"].some(key => own(input, key))) invalid();
 }
@@ -223,15 +227,54 @@ function freeze<T>(value: T): T {
 	if (value && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value); }
 	return value;
 }
+/** Classify API targets without allowing encoded paths or enterprise prefixes to bypass the rule. */
+function apiTarget(input: RecordValue): { path: string; query: URLSearchParams } {
+	const endpoint = decodeURIComponent(input.endpoint as string).replace(/^\/+/, "").replace(/^api\/v3\//i, "");
+	const [path, query = ""] = endpoint.split("?", 2);
+	const normalized = path.split("#", 1)[0].split("/").filter(part => part && part !== ".").join("/").replace(/^api\/v3\//i, "");
+	return { path: normalized.toLowerCase(), query: new URLSearchParams(query) };
+}
+function issueTextField(name: string): boolean {
+	return /^(body|title)(?:\[|$)/i.test(name);
+}
+function validateApiAppendOnly(input: RecordValue, payload: string | undefined, source: string): void {
+	const { path, query } = apiTarget(input);
+	const fields = input.fields as ApiField[] | undefined;
+	if (/^(patch|put|delete)$/i.test(input.method as string)) {
+		if (/^repos\/[^/]+\/[^/]+\/(?:issues|pulls)\/comments\/[^/]+$/.test(path)
+			|| /^repos\/[^/]+\/[^/]+\/pulls\/[^/]+\/reviews\/[^/]+$/.test(path)) invalid(APPEND_ONLY_REASON);
+		if (/^(patch|put)$/i.test(input.method as string) && /^repos\/[^/]+\/[^/]+\/issues\/[^/]+$/.test(path)) {
+			if ([...query.keys(), ...(fields ?? []).map(field => field.name)].some(issueTextField)) invalid(APPEND_ONLY_REASON);
+			if (payload !== undefined && source === "body") {
+				let body: unknown;
+				try { body = JSON.parse(payload); } catch { invalid(APPEND_ONLY_REASON); }
+				if (!record(body) || Object.keys(body).some(issueTextField)) invalid(APPEND_ONLY_REASON);
+			}
+		}
+	}
+	// GraphQL exposes the same edits; inspect inline fields and captured JSON/file bytes too.
+	if (path === "graphql") {
+		let captured = payload ?? "";
+		try { captured = JSON.stringify(JSON.parse(captured)); } catch { /* query file may be plain GraphQL */ }
+		const text = [captured, ...query.values(), ...(fields ?? []).map(field => "value" in field ? String(field.value) : "")].join("\n");
+		if (/\b(?:updateIssue|(?:update|delete)(?:IssueComment|PullRequestReviewComment|PullRequestReview))\b/.test(text)) invalid(APPEND_ONLY_REASON);
+	}
+}
+/** Enforced both for structured input and again on the immutable captured API body. */
+export function validateAppendOnly(input: RecordValue, payload?: string, source = "body"): void {
+	if (input.kind === "issue-edit" && ["title", "body", "bodyFile"].some(key => own(input, key))) invalid(APPEND_ONLY_REASON);
+	if (input.editLast === true) invalid(APPEND_ONLY_REASON);
+	if (input.kind === "api") validateApiAppendOnly(input, payload ?? (typeof input.body === "string" ? input.body : undefined), source);
+}
 /** Returns a detached immutable request; failures never retain received values. */
 export function validateRequest(value: unknown): PublishRequest {
 	try {
 		if (!record(value)) invalid();
-		validateShape(value); validateBody(value); validateChanges(value); validateTarget(value); validateFields(value);
+		validateShape(value); validateAppendOnly(value); validateBody(value); validateChanges(value); validateTarget(value); validateFields(value);
 		const encoded = JSON.stringify(value);
 		if (Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES) invalid();
 		const detached = JSON.parse(encoded);
-		validateShape(detached); validateBody(detached); validateChanges(detached); validateTarget(detached); validateFields(detached);
+		validateShape(detached); validateAppendOnly(detached); validateBody(detached); validateChanges(detached); validateTarget(detached); validateFields(detached);
 		if (detached.host === DEFAULT_HOST) delete detached.host;
 		return freeze(detached) as PublishRequest;
 	} catch (error) { throw error instanceof InvalidRequest ? error : new InvalidRequest(); }

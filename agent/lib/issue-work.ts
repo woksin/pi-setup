@@ -1,5 +1,5 @@
 // Logic for the issue-work extension: registry fold, session liveness, bash command
-// detection, GitHub status-block rewriting, activity checks and the claim/update/list actions.
+// detection, append-only GitHub event comments, activity checks and the claim/update/list actions.
 // All I/O goes through injected dependencies (runner, clock, pid probe, data dir) so the
 // GitHub paths are testable with a fake runner and nothing here writes to real issues.
 import { execFile, spawn } from "node:child_process";
@@ -29,6 +29,7 @@ export interface RegistryEvent {
 	state?: IssueState;
 	note?: string;
 	pr?: string;
+	plan?: string;
 	sessionId: string;
 	sessionFile?: string;
 	cwd?: string;
@@ -762,46 +763,28 @@ export async function refreshCache(d: Deps, views: IssueView[], force = false, c
 /** Exit code of issue-status.py when the current block differs from --expect-file. */
 export const STATUS_MISMATCH_EXIT = 3;
 
-/**
- * Write the status text. `expected` is the exact text between the markers it was based on, as
- * fetched (undefined = no block); the script refuses with exit 3 when the block differs.
- */
-async function writeStatus(d: Deps, repo: string, issue: number, text: string, expected: string | undefined, session: SessionInfo): Promise<string> {
+/** Append an event through the hygiene script's scanned publication path. */
+async function writeStatus(d: Deps, repo: string, issue: number, text: string, session: SessionInfo): Promise<string> {
 	await mkdir(paths(d).tmp, { recursive: true });
 	const liveCwd = await stat(session.cwd).then(info => info.isDirectory()).catch(() => false);
 	const cwd = liveCwd ? session.cwd : paths(d).tmp;
 	const base = join(paths(d).tmp, `${short(session.sessionId)}-${repo.replace(/\//g, "_")}-${issue}-${randomBytes(4).toString("hex")}`);
 	const file = `${base}.md`;
-	const expectFile = `${base}.expected.md`;
 	await writeFile(file, `${text}\n`, "utf8");
-	if (expected !== undefined) await writeFile(expectFile, expected, "utf8"); // byte-exact
-	const expectArgs = expected === undefined ? ["--expect-absent"] : ["--expect-file", expectFile];
 	try {
-		const r = await d.run("python3", [d.statusScript, "update", "--repo", repo, "--issue", String(issue), "--file", file, ...expectArgs], { timeout: 60000, cwd });
+		const r = await d.run("python3", [d.statusScript, "update", "--repo", repo, "--issue", String(issue), "--file", file], { timeout: 60000, cwd });
 		return r.stdout.trim();
 	} finally {
 		await rm(file, { force: true }).catch(() => {});
-		await rm(expectFile, { force: true }).catch(() => {});
 	}
 }
 
-/**
- * Rewrite the status block from `data` and write it, guarded by --expect-file. When the block
- * changed since `data` was fetched, re-fetch, run `recheck`, recompute once, then fail.
- */
-async function writeRewritten(d: Deps, s: SessionInfo, repo: string, issue: number, data: IssueData, change: StatusChange, recheck?: (data: IssueData) => void | Promise<void>): Promise<{ data: IssueData; text: string; out: string }> {
-	for (let attempt = 0; ; attempt++) {
-		const block = extractStatusBlock(data.body);
-		const text = rewriteStatusBlock(block, change);
-		try {
-			return { data, text, out: await writeStatus(d, repo, issue, text, rawStatusBlock(data.body), s) };
-		} catch (e) {
-			const mismatch = (e as any)?.code === STATUS_MISMATCH_EXIT;
-			if (!mismatch || attempt >= 1) throw new Error(`issue-status.py update failed: ${errorText(e)}${mismatch ? " (the status block keeps changing concurrently; nothing written)" : ""}`);
-		}
-		data = await step("gh issue view", () => fetchIssue(d, repo, issue));
-		await recheck?.(data);
-	}
+function eventComment(a: UpdateArgs): string {
+	return [
+		`**State:** ${STATE_LABEL[a.state]}`,
+		a.pr ? `**PR:** ${a.pr}` : "",
+		a.note ? `**${a.state === "done" ? "Delivered / follow-ups" : "Reason / remaining work"}:** ${a.note}` : "",
+	].filter(Boolean).join("\n\n");
 }
 
 async function step<T>(label: string, fn: () => Promise<T>): Promise<T> {
@@ -1167,8 +1150,8 @@ async function planReminder(d: Deps, s: SessionInfo, repo: string, issue: number
 }
 
 /**
- * Claim an issue: refuse if another live session holds it; then assign @me, rewrite the status
- * block, and only after GitHub succeeded append the registry event.
+ * Claim an issue: refuse if another live session holds it; then assign @me and only after
+ * GitHub succeeded append the registry event. Never edit the body or post a claim comment.
  */
 export async function claim(d: Deps, s: SessionInfo, a: ClaimArgs): Promise<string> {
 	validate(a.repo, a.issue);
@@ -1197,15 +1180,7 @@ async function claimLocked(d: Deps, s: SessionInfo, a: ClaimArgs): Promise<strin
 	const delivery = claimDelivery({ events, liveness, now: now(), claim: a, session: s });
 	const checkClaimable = (data: IssueData) => {
 		if (data.state && data.state !== "OPEN") throw new Error(`${a.repo}#${a.issue} is ${data.state} on GitHub; not claiming.`);
-		const block = extractStatusBlock(data.body);
-		const ghState = statusStateOf(block);
-		if (!delivery.bypassStatus && statusStateIsHolding(ghState)) {
-			const branchLine = block?.split("\n").find((l) => fieldRe("Branch").test(l))?.replace(/^\s*\*\*Branch:\*\*\s*/, "").trim();
-			const ours = s.branch && branchLine && (branchLine === s.branch || branchLine.startsWith(`${s.branch} `));
-			const heldByUs = view?.sessions.some((t) => t.sessionId === s.sessionId && t.lastState && HOLDING.includes(t.lastState));
-			if (!ours && !heldByUs)
-				throw new Error(`${a.repo}#${a.issue} status block says "${ghState}" (branch ${branchLine ?? "?"}) and no live tracked session holds it. Confirm with the user it is abandoned, then claim again with force: true.`);
-		}
+		// Legacy body blocks are read-only history, never evidence of a current holder.
 	};
 	const activity = await inspectActivity(d, s, a.repo, a.issue);
 	if (activity.hasNew) return `${activity.text}\n${ACTIVITY_GATE}${await recordActivity(d, s, a.repo, a.issue, activity)}`;
@@ -1213,11 +1188,11 @@ async function claimLocked(d: Deps, s: SessionInfo, a: ClaimArgs): Promise<strin
 	checkClaimable(fetched);
 	await requireAcceptedAuthor(d, a, fetched);
 	await step("gh issue edit --add-assignee", () => d.run("gh", ["issue", "edit", String(a.issue), "--repo", a.repo, "--add-assignee", "@me"], { timeout: 60000 }));
-	const { data, text, out } = await writeRewritten(d, s, a.repo, a.issue, fetched, { state: "in-progress", branch: s.branch, note: a.note, claim: true, plan: a.plan }, async (latest) => { checkClaimable(latest); await requireAcceptedAuthor(d, a, latest); });
-	await appendEvent(d, event(s, now(), { repo: a.repo, issue: a.issue, url: data.url, title: data.title, state: "in-progress", note: a.note }));
-	await mergeCache(d, a.repo, a.issue, { ...infoFrom(data, now()), statusState: statusStateOf(text) });
+	const data = fetched;
+	await appendEvent(d, event(s, now(), { repo: a.repo, issue: a.issue, url: data.url, title: data.title, state: "in-progress", note: a.note, plan: planLine(a.plan) }));
+	await mergeCache(d, a.repo, a.issue, { ...infoFrom(data, now()), statusState: "In progress" });
 	const recorded = await recordActivity(d, s, a.repo, a.issue, activity, true);
-	return `Claimed ${a.repo}#${a.issue} "${data.title}" (${data.url}): assigned @me, status In progress${s.branch ? ` on ${s.branch}` : ""}. ${out}\n${activity.text}${recorded}${await planReminder(d, s, a.repo, a.issue)}${delivery.notice(now())}`;
+	return `Claimed ${a.repo}#${a.issue} "${data.title}" (${data.url}): assigned @me, local status In progress${s.branch ? ` on ${s.branch}` : ""}.\n${activity.text}${recorded}${await planReminder(d, s, a.repo, a.issue)}${delivery.notice(now())}`;
 }
 
 export interface UpdateArgs { repo: string; issue: number; state: IssueState; note?: string; pr?: string; plan?: string }
@@ -1227,17 +1202,25 @@ export async function update(d: Deps, s: SessionInfo, a: UpdateArgs): Promise<st
 	assertIssuePublication(s, a);
 	if (!(SETTABLE_STATES as readonly string[]).includes(a.state)) throw new Error(`state must be one of ${SETTABLE_STATES.join(", ")}`);
 	if (a.pr && !PR_RE.test(a.pr)) throw new Error("pr must be a full GitHub pull request URL");
+	if ((a.state === "blocked" || a.state === "paused") && !a.note?.trim()) throw new Error(`${a.state} requires a note with the reason and remaining work`);
+	const updates = (await readEvents(d)).filter(e => issueKey(e.repo, e.issue) === issueKey(a.repo, a.issue) && e.source === "tool" && e.state).reverse();
+	const previous = updates[0];
+	const previousPr = updates.find(e => typeof e.pr === "string" && PR_RE.test(e.pr))?.pr;
+	const pr = a.pr || previousPr;
+	const unchanged = previous?.state === a.state && previousPr === pr;
 	const now = () => (d.now?.() ?? new Date());
 	const activity = await inspectActivity(d, s, a.repo, a.issue, a.pr);
 	// Fail closed: closing without a successful activity check would skip the gate.
 	if (a.state === "done" && activity.failed) return `${activity.text}\nNot applied: done needs a successful activity check; fix the cause (e.g. the PR URL) or retry.`;
 	if (a.state === "done" && (activity.hasNew || activity.unresolved))
 		return `${activity.text}\n${activity.unresolved ? RECENT_GATE : ACTIVITY_GATE}${await recordActivity(d, s, a.repo, a.issue, activity)}`;
-	const fetched = activity.data ?? await step("gh issue view", () => fetchIssue(d, a.repo, a.issue));
-	const { data, text, out } = await writeRewritten(d, s, a.repo, a.issue, fetched, { state: a.state, branch: s.branch, note: a.note, pr: a.pr, plan: a.plan });
-	await appendEvent(d, event(s, now(), { repo: a.repo, issue: a.issue, url: data.url, title: data.title, state: a.state, note: a.note, pr: a.pr }));
-	await mergeCache(d, a.repo, a.issue, { ...infoFrom(data, now()), statusState: statusStateOf(text) });
-	const closeHint = a.state === "done" && data.state === "OPEN" ? " The issue is still open: close it explicitly with the publish tool (kind issue-close, reason completed and a closing body) when its scope is delivered." : "";
+	const data = activity.data ?? await step("gh issue view", () => fetchIssue(d, a.repo, a.issue));
+	// Done is local: the explicit close step supplies the single scanned closing comment.
+	const postEvent = a.state !== "in-progress" && a.state !== "done" && !unchanged;
+	const out = postEvent ? await step("issue-status.py update", () => writeStatus(d, a.repo, a.issue, eventComment({ ...a, pr }), s)) : "";
+	await appendEvent(d, event(s, now(), { repo: a.repo, issue: a.issue, url: data.url, title: data.title, state: a.state, note: a.note, pr, plan: planLine(a.plan) }));
+	await mergeCache(d, a.repo, a.issue, { ...infoFrom(data, now()), statusState: STATE_LABEL[a.state] });
+	const closeHint = a.state === "done" && data.state === "OPEN" ? " The issue is still open: close it explicitly with the publish tool (kind issue-close, reason completed and a closing body with what shipped, the merged PR and follow-ups) when its scope is delivered." : "";
 	const recorded = await recordActivity(d, s, a.repo, a.issue, activity);
 	return `Updated ${a.repo}#${a.issue} to ${STATE_LABEL[a.state]}. ${out}${closeHint}\n${activity.text}${recorded}`;
 }
@@ -1263,7 +1246,7 @@ function validate(repo: string, issue: number): void {
 export function event(s: SessionInfo, now: Date, fields: Partial<RegistryEvent> & { repo: string; issue: number }, source: "tool" | "detected" = "tool"): RegistryEvent {
 	const ev: RegistryEvent = {
 		ts: now.toISOString(), repo: fields.repo, issue: fields.issue, url: fields.url ?? issueUrl(fields.repo, fields.issue),
-		title: fields.title, state: fields.state, note: fields.note, pr: fields.pr, sessionId: s.sessionId, sessionFile: s.sessionFile,
+		title: fields.title, state: fields.state, note: fields.note, pr: fields.pr, plan: fields.plan, sessionId: s.sessionId, sessionFile: s.sessionFile,
 		cwd: s.cwd, branch: s.branch, model: s.model, pid: s.pid, source, command: fields.command,
 	};
 	for (const k of Object.keys(ev) as (keyof RegistryEvent)[]) if (ev[k] === undefined) delete ev[k];

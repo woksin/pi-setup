@@ -106,8 +106,8 @@ test("check, update and list distinguish outsider authorship", async () => {
 	association = "CONTRIBUTOR";
 	comments = [{ id: 1, user: { login: "visitor" }, created_at: now, body: "request", author_association: "FIRST_TIMER" }];
 	assert.match(await check(d, session, target), /visitor \[FIRST_TIMER\] \(outside author\)/);
-	assert.match(await update(d, { ...session, sessionId: "first-look" }, { ...target, state: "paused" }), /opener \[CONTRIBUTOR\] \(outside author\)/);
-	assert.match(await update(d, session, { ...target, state: "paused" }), /No new activity on o\/r#5/);
+	assert.match(await update(d, { ...session, sessionId: "first-look" }, { ...target, state: "paused", note: "Awaiting review; implementation remains" }), /opener \[CONTRIBUTOR\] \(outside author\)/);
+	assert.match(await update(d, session, { ...target, state: "paused", note: "Awaiting review; implementation remains" }), /No new activity on o\/r#5/);
 	assert.match(await list(d), /· outside author/);
 });
 
