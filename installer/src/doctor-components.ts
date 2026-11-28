@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { detectBackend } from "./lanes/terminal.ts";
-import { findRoot, loadConfig, preapprovalDefault } from "./lanes/config.ts";
+import { findLocalRoot, loadConfig, preapprovalDefault } from "./lanes/config.ts";
 import { COMPONENTS, CS_SKILLS } from "./components.ts";
 import type { Manifest } from "./manifest.ts";
 import { expectedUnit, launchdSkipReason, uid } from "./services.ts";
@@ -29,8 +29,8 @@ function lanesChecks(ctx: Ctx): DoctorCheck[] {
   const fix = good ? undefined : present && !linked ? "move ~/.local/bin/lanes away, then pi-setup install --with lanes" : "pi-setup install --with lanes";
   let config;
   let configError = "";
-  let root: string | undefined;
-  try { root = findRoot(undefined, ctx.env, ctx.cwd); } catch { /* no coordination folder here */ }
+  // Only a local config affects this check; otherwise report the installed defaults for new folders.
+  const root = findLocalRoot(undefined, ctx);
   if (root) { try { config = loadConfig(root); } catch (e) { configError = (e as Error).message; } }
   let installedPreapproval = false;
   try { installedPreapproval = preapprovalDefault(join(ctx.home, ".local/share/pi-setup/lanes/templates")); } catch (e) { configError ||= (e as Error).message; }

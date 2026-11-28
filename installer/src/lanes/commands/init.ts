@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { defaults, loadConfig, preapprovalDefault, validate } from "../config.ts";
+import { defaults, loadConfig, preapprovalDefault, rememberRoot, validate } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { readTemplate, renderTemplate, templateVars } from "../templates.ts";
 export async function init(args: string[], opts: Record<string, string>, ctx: LanesCtx): Promise<number> {
@@ -29,5 +29,6 @@ export async function init(args: string[], opts: Record<string, string>, ctx: La
   const missing = [".state/", "messages/"].filter((s) => !text.split(/\r?\n/).includes(s));
   if (missing.length) { writeFileSync(ignore, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`); ctx.out(`created ${ignore}`); }
   else ctx.out(`kept ${ignore}`);
+  rememberRoot(root, ctx, true);
   return 0;
 }
