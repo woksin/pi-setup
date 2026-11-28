@@ -585,6 +585,23 @@ for (const [message, category, advice] of [
 	assert.doesNotMatch(JSON.stringify(result), /PAYLOAD-SENTINEL|private-value/);
 });
 
+for (const [endpoint, status, hasHint] of [
+	["repos/owner/repo/security-advisories", 404, true],
+	["/repos/owner/repo/security-advisories/GHSA-example/forks?per_page=10", 404, true],
+	["repos/owner/repo/security-advisories-extra", 404, false],
+	["repos/owner/repo/security-advisories", 403, false],
+] as const) test(`api HTTP ${status} at ${endpoint} ${hasHint ? "includes" : "omits"} private advisory guidance`, async () => {
+	const mocks = adapters(() => {
+		const child = new Child(); queueMicrotask(() => { child.stderr.write(`gh: Request failed (HTTP ${status})`); child.finish(1); }); return child;
+	});
+	const result = await publish({ kind: "api", endpoint, method: "POST" }, safeContext, mocks);
+	code(result, "gh-failed");
+	assert.match(result.detail!, new RegExp(`^exit=1 category=${status === 404 ? "not-found" : "auth"}; status=${status}; message="Request failed"; do not retry`));
+	const hint = /private repositories.*report the vulnerability privately/i;
+	if (hasHint) assert.match(result.detail!, hint);
+	else assert.doesNotMatch(result.detail!, hint);
+});
+
 for (const termination of ["signal", "spawn", "child-error", "stream-error"] as const) test(`gh ${termination} has a value-free unclassified detail`, async () => {
 	const mocks = adapters(() => {
 		if (termination === "spawn") throw new Error("private-value");

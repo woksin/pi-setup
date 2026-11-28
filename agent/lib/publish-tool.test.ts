@@ -128,6 +128,16 @@ test("tool and CLI render safe validation details without echoing unknown keys o
 	assert.match(missingBody.text, /pr-create needs body or bodyFile/); assert.ok(!missingBody.text.includes("SENTINEL"));
 });
 
+test("tool refuses repo on an api request before admission and explains where it belongs", async () => {
+	const registered = tool({ admit: () => assert.fail("validate first"), send: async () => assert.fail("must not send") });
+	const input = { kind: "api", endpoint: "repos/owner/repo", method: "PATCH", repo: "owner/private-value" };
+	const result = await registered.execute("id", input, undefined, undefined, context);
+	assert.equal(result.isError, true);
+	assert.equal(result.details.code, "invalid-request");
+	assert.match(result.content[0].text, /`endpoint`.*remove `repo`/);
+	assert.doesNotMatch(JSON.stringify(result), /private-value/);
+});
+
 test("publisher detail is rendered after the unchanged first line and included in tool details", async () => {
 	const detail = "exit=1 category=rate-limit; retry once, then stop";
 	const send: typeof publish = async () => ({ ...outcome("gh-failed"), detail });

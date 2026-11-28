@@ -174,7 +174,8 @@ for (const request of minimalCases) test(`${request.kind} preserves runtime reje
 		const key = Object.keys(invalid).find(key => !(key in request))!;
 		assert.throws(() => validateRequest(invalid), error => {
 			assert.ok(error instanceof InvalidRequest);
-			assert.ok(error.detail?.startsWith(`unknown field for ${request.kind}: ${key};`));
+			if (request.kind === "api" && key === "repo") assert.match(error.detail!, /`endpoint`.*remove `repo`/);
+			else assert.ok(error.detail?.startsWith(`unknown field for ${request.kind}: ${key};`));
 			return true;
 		}, `${request.kind} must forbid valid-typed ${key}`);
 	}

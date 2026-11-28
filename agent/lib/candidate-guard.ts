@@ -3,7 +3,7 @@ import { tokenizeShell } from './issue-work.ts';
 import { listManifests, normalizeRepo, repoKey } from './train-manifest.mjs';
 import { scanRepository } from './train-concurrency.mjs';
 import { nativeGuardGit, changedDirectory, commandTokens } from './train-guard.ts';
-import { parseCli, toGhPlan, validateRequest } from './publish-request.ts';
+import { API_REPO_HINT, InvalidRequest, parseCli, toGhPlan, validateRequest } from './publish-request.ts';
 
 type Git = typeof nativeGuardGit;
 type Decision = { block?: string; warn?: string; log?: string };
@@ -157,7 +157,10 @@ export interface PublicationDecisionContext { cwd: string; env?: NodeJS.ProcessE
 export async function publicationDecision(value: unknown, context: PublicationDecisionContext): Promise<Decision> {
   let request;
   try { request = validateRequest(value); }
-  catch { return { block: 'Candidate guard: invalid publication request.' }; }
+  catch (error) {
+    const detail = error instanceof InvalidRequest && error.detail === API_REPO_HINT ? API_REPO_HINT : 'invalid publication request.';
+    return { block: `Candidate guard: ${detail}` };
+  }
   if (request.kind !== 'pr-create') return {};
   const env = context.env ?? process.env, exceptionName = env.PI_CANDIDATE_EXCEPTION ?? '';
   const segment: Segment = { tokens: ['gh', ...toGhPlan(request).authority.ghArgs], cwd: context.cwd,
