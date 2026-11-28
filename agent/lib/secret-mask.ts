@@ -169,7 +169,7 @@ function keySegments(name: string): string {
 export function isSecretKey(name: string): boolean {
 	const segments = keySegments(name);
 	if (/(?:_(?:count|limit|type|name|ttl|length)|hash|policy)$/.test(segments)) return false;
-	return /password|passwd/i.test(name) || /(?:^|_)(?:password|passwd|pass|pwd|secret|token|api_?key|access_?key|secret_?key|client_?secret|private_?key|credentials?|connection_?string|account_?key|shared_?access_?key|shared_?access_?signature|sas|sig)(?:_|$)/.test(segments);
+	return /password|passwd/i.test(name) || /(?:^|_)(?:password|passwd|passphrase|pass|pwd|secret|token|api_?key|access_?key|secret_?key|client_?secret|private_?key|credentials?|connection_?string|account_?key|shared_?access_?key|shared_?access_?signature|sas|sig)(?:_|$)/.test(segments);
 }
 
 function nonCredentialValue(value: string): boolean {
@@ -316,6 +316,20 @@ function sourceLineReference(field: string, value: string): boolean {
 		&& /^\d+(?::\d+)?(?:[-–]\d+)?[`'")\],.;:]*$/.test(value);
 }
 
+function proseField(text: string, index: number, field: string, value: string): boolean {
+	if (field === "pass" && /^[a-z]+(?:\+[a-z]+)+$/.test(value)) {
+		// Other words before "pass" can describe the credential, not a review phase.
+		const teaching = /(?<=\bteaching[ \t]+)/iy;
+		teaching.lastIndex = index;
+		return teaching.test(text);
+	}
+	if (!/^(?:PASS|FAIL|PASSED)$/.test(field) || !/^(?:[A-Z]?[a-z]+|[A-Z]+)(?:\/(?:[A-Z]?[a-z]+|[A-Z]+))+[.)`]?$/.test(value)) return false;
+	// Only a known verdict context ("review PASS:", "Tier 1 PASS:") counts; other words can describe a credential.
+	const verdict = /(?<=\b(?:review|verdict|gate|checks?|tests?|build|lint|status|result|tier[ \t]+[0-9]+)[ \t]+)/iy;
+	verdict.lastIndex = index;
+	return verdict.test(text);
+}
+
 function connectionCandidate(text: string, field: string, [start, end]: [number, number], out: Candidate[]): void {
 	const value = text.slice(start, end);
 	if (sourceLineReference(field, value)) return;
@@ -326,20 +340,46 @@ function connectionCandidate(text: string, field: string, [start, end]: [number,
 	out.push({ start, end, kind: "connection-string", ...(!connection ? { via: "field" as const } : {}) });
 }
 
+function adoPassword(text: string, index: number, field: string, separator: string): boolean {
+	// In an ADO string the semicolon separates fields, not code statements.
+	if (separator !== "=" || !/^(?:password|pwd)$/i.test(field)) return false;
+	const afterConnectionField = /(?<=(?:^|[;"'\s])(?:Server|Data Source|Database|Initial Catalog|User ID|UID)[ \t]*=[^;\r\n]+;[ \t]*)/iy;
+	afterConnectionField.lastIndex = index;
+	return afterConnectionField.test(text);
+}
+
+function sourceFieldValue(text: string, index: number, field: string, value: string): boolean {
+	// A named argument can repeat the parameter name. Other values remain credential candidates.
+	const closedCall = /^(?:[A-Za-z_]+\.)*([A-Za-z_]+)\)+(?:\.[A-Za-z_]+\([A-Za-z_]*\)\)*)*$/.exec(value);
+	if (closedCall?.[1].toLowerCase() === field.toLowerCase()) {
+		const argument = /(?<=[(,]\s*)/y;
+		argument.lastIndex = index;
+		return argument.test(text);
+	}
+	if (!/^[A-Za-z_]+(?:\.[A-Za-z_]+)*\{$/.test(value)) return false;
+	const declaration = /(?<=\b(?:class|interface)[ \t]+)/y;
+	declaration.lastIndex = index;
+	return declaration.test(text);
+}
+
 function connections(text: string, out: Candidate[]): void {
-	const fields = /(?<![\w$.-])(["']?)([A-Za-z_$][\w$.-]{0,255})\1[ \t]*[=:][ \t]*(?:(["'])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s"';,&]{8,}))/gd;
+	const fields = /(?<![\w$.-])(["']?)([A-Za-z_$][\w$.-]{0,255})\1[ \t]*([=:])[ \t]*(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|([^\s"';,&]{8,}))/gd;
 	for (const match of text.matchAll(fields)) {
-		if (!isSecretKey(match[2])) continue;
-		const group = match[3] ? 4 : 5;
+		const [, keyQuote, field, separator, valueQuote] = match;
+		if (!isSecretKey(field)) continue;
+		const group = valueQuote ? 5 : 6;
 		const value = match[group];
 		const [start, end] = match.indices![group]!;
 		// The bare-value capture excludes delimiters; retain that code-expression signal.
-		const terminated = text[end] === ";" || text[end] === ",";
+		const terminated = text[end] === "," || (text[end] === ";" && !adoPassword(text, match.index, field, separator));
 		// A JS declaration's regex literal may contain quotes that truncate the capture.
-		const regexLiteral = !match[3] && value.startsWith("/")
+		const regexLiteral = !valueQuote && value.startsWith("/")
 			&& /\b(?:const|let|var)[ \t]+$/.test(text.slice(text.lastIndexOf("\n", match.index) + 1, match.index));
-		if (value.length < 8 || regexLiteral || !secretValue(value, !!match[3], terminated)) continue;
-		connectionCandidate(text, match[2], [start, end], out);
+		if (value.length < 8 || regexLiteral || !secretValue(value, !!valueQuote, terminated)) continue;
+		// Do not infer prose or code from a bare prefix cut off by a quote or '&'.
+		const bareColon = separator === ":" && !keyQuote && !valueQuote && /^[\s,;]?$/.test(text[end] ?? "");
+		if (bareColon && (proseField(text, match.index, field, value) || sourceFieldValue(text, match.index, field, value))) continue;
+		connectionCandidate(text, field, [start, end], out);
 	}
 }
 

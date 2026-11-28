@@ -461,6 +461,114 @@ for (const code of [
 	"secret = " + "unquotedIdentifier12345;", "token = computeSignature(payload, other);", "token = Record<string, unknown>",
 	'"token": "String"', "token = SomeExtremelyLongConfigurationType",
 ]) test(`source expression stays intact: ${code}`, () => assert.equal(scan(code).text, code));
+for (const [description, samples] of [
+	["C# cancellation token named argument", [
+		"cancellationToken: cancellationToken",
+		"FindAsync(filter, cancellationToken: cancellationToken)",
+		"FindAsync(filter, cancellationToken: this.cancellationToken)",
+		"await collection.FindAsync(filter, cancellationToken: cancellationToken).ConfigureAwait(false);",
+		"await collection.FindAsync(filter, cancellationToken: CancellationToken).ConfigureAwait(false);",
+	]],
+	["C# OAuth configuration references", [
+		"ClientSecret = someConfigVariable",
+		"ClientSecret = configuration.OAuth.ClientSecret;",
+		[
+			'options.TokenEndpoint = "https://github.com/login/oauth/access_token";',
+			'options.AuthorizationEndpoint = "https://github.com/login/oauth/authorize";',
+			"options.ClientSecret = someConfigVariable;",
+		].join("\n"),
+		"Use(ClientSecret = someConfigVariable);",
+	]],
+	["C# type and interface declarations and DI registration", [
+		"public interface IWorkerCallbackTokenStore",
+		"public class WorkerCallbackTokenStore : IWorkerCallbackTokenStore{",
+		"services.AddSingleton<IWorkerCallbackTokenStore, WorkerCallbackTokenStore>();",
+	]],
+	["uppercase verdict prose", [
+		`On green + review PASS: ${["push", "PR", "merge"].join("/")} on green, release, then report.`,
+		`Tier 1 PASS: ${["build", "test", "lint"].join("/")}`,
+		...["PASS", "FAIL", "PASSED"].map(verdict => `review ${verdict}: ${["build", "test", "lint"].join("/")}`),
+		`review PASS: ${["build", "test", "lint"].join("/")}.`,
+		`(review PASS: ${["build", "test", "lint"].join("/")})`,
+		`review PASS: ${["build", "test", "lint"].join("/")}\``,
+		`review PASS: ${["Build", "Test", "Lint"].join("/")}`,
+	]],
+	["lowercase teaching-pass prose", ["Teaching", "TEACHING"].map(label => `${label} pass: ${["arc", "fundamentals"].join("+")}`)],
+] as const) test(`${description} is not a named credential field`, () => {
+	for (const text of samples) {
+		for (const options of [{}, { mode: "outbound" }] as const) {
+			assert.deepEqual(scan(text, [], options), { text, kinds: [], count: 0, skipped: false });
+		}
+	}
+});
+
+for (const [description, prefix, value, suffix = ""] of [
+	["Wi-Fi pass", "wifi pass: ", ["purple", "monkey", "dishwasher"].join("+")],
+	["root pass", "the root pass: ", ["correct", "horse", "battery"].join("+")],
+	["database pass", "Database pass: ", ["correct", "horse", "battery", "staple"].join("+")],
+	["db pass", "db pass: ", ["correct", "horse", "battery", "staple"].join("+")],
+	["standalone PASS", "PASS: ", ["correct", "horse", "battery", "staple"].join("/")],
+	["standalone PASS with a shorter list", "PASS: ", ["hunter", "winter", "summer"].join("/")],
+	["compose PASS", "environment:\n  PASS: ", ["letmein", "please"].join("/")],
+	["PASS after prose on a different line", "review\nPASS: ", ["correct", "horse", "battery", "staple"].join("/")],
+	["db PASS", "db PASS: ", ["correct", "horse", "battery", "staple"].join("/")],
+	["DB PASS", "DB PASS: ", ["correct", "horse", "battery", "staple"].join("/")],
+	["mysql root PASS", "mysql root PASS: ", ["hunter", "winter", "summer"].join("/")],
+	["export PASS", "export PASS: ", ["letmein", "please"].join("/")],
+	["indented environment PASS", "  environment PASS: ", ["letmein", "please"].join("/")],
+	["Admin PASS with capitalised words", "Admin PASS: ", ["Correct", "Horse", "Battery"].join("/")],
+	["database PASS with capitalised words", "database PASS: ", ["Correct", "Horse", "Battery", "Staple"].join("/")],
+	["wifi PASS with trailing full stop", "wifi PASS: ", ["purple", "monkey", "dishwasher"].join("/"), "."],
+	["mixed-case value after a verdict label", "review PASS: ", ["abCDef", "ghIJkl", "mnOPqr"].join("/")],
+	["password in connection details", "Connection details (password: ", "CedarVelvetHarborLantern", ")"],
+	["admin account password", "The admin account (password: ", "CorrectHorseBatteryStaple", ")"],
+	["password following a comma", "(user: admin, password: ", "CorrectHorseBatteryStaple", ") works"],
+	["login password assignment", "login(user, password=", "CorrectHorseBatteryStaple", ")"],
+	["API key assignment in a call", "curl(api_key=", "abcdEFGHabcdEFGHabcdXYZ", ")"],
+	["token in a call", "foo(token: ", "abcdEFGHabcdEFGHabcd", ")"],
+	["same-name value in an assignment", "foo(password=", "Password", ").ConfigureAwait(false);"],
+]) test(`${description} still masks the credential`, () => {
+	for (const options of [{}, { mode: "outbound" }] as const) {
+		const result = scan(prefix + value + suffix, [], options);
+		assert.equal(result.count, 1);
+		assert.deepEqual(result.kinds, ["connection-string"]);
+		assert.ok(!result.text.includes(value));
+	}
+});
+
+for (const field of ["password", "passwd", "passphrase", "db_pass", "secret", "token", "api_key"]) {
+	test(`${field} still masks quoted and bare credential literals`, () => {
+		const value = ["qA9b", "!Rx2Y", "/tM7p"].join("");
+		for (const quote of ["", '"', "'"]) {
+			const out = scan(`${field}: ${quote}${value}${quote}`);
+			assert.equal(out.text, `${field}: ${quote}[REDACTED:connection-string]${quote}`);
+			assert.equal(out.count, 1);
+		}
+	});
+}
+
+test("prose exceptions do not exempt quoted values, assignments, or secret-like values", () => {
+	const slash = ["push", "PR", "merge"].join("/");
+	const plus = ["arc", "fundamentals"].join("+");
+	for (const [prefix, value, suffix] of [
+		['review PASS: "', slash, '"'], ["review PASS=", slash, ""], ["pass: ", plus, ""],
+		["Verdict PASS: ", slash, "&other"], ["Teaching pass: ", plus, "&other"],
+		["Verdict PASS: ", "qA9b/Rx2Y/tM7p", ""], ["Teaching pass: ", "qA9b+Rx2Y+tM7p", ""],
+	]) assert.equal(scan(prefix + value + suffix).text, prefix + "[REDACTED:connection-string]" + suffix);
+});
+
+test("code punctuation does not exempt credentials in arguments or connection strings", () => {
+	const mixed = ["qA9b", "!Rx2Y", "/tM7p"].join("");
+	const identifier = ["qA9b", "Rx2Y", "tM7p"].join("");
+	const known = "ghp_" + "a".repeat(36);
+	for (const value of [mixed, identifier]) {
+		assert.equal(scan(`Use(cancellationToken: ${value});`).count, 1);
+		assert.equal(scan(`Server=db;Password=${value};Database=local`).text,
+			"Server=db;Password=[REDACTED:connection-string];Database=local");
+	}
+	assert.equal(scan(`Use(cancellationToken: ${known});`).text, "Use(cancellationToken: [REDACTED:github-token]);");
+});
+
 for (const input of ['apiKey = "' + "d8f7a6s5" + 'd4f3g2h1"', '"AdminPassword": "Pr0d!pass"', 'secret="' + "VeryLongMixed" + 'CaseSecretLiteral"']) test(`secret-like connection literal: ${input}`, () => {
 	assert.equal(scan(input).count, 1);
 	assert.deepEqual(scan(input).kinds, ["connection-string"]);
