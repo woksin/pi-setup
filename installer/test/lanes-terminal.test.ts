@@ -30,10 +30,17 @@ test("all terminal backends quote shell and AppleScript without executing a term
   assert.ok(!cmd.includes("pi-session"));
   assert.ok(cmd.includes("cli.ts"));
   assert.equal(await terminalBackend("print").start(ctx, { id: "L1", cwd, command: cmd }), 0); assert.deepEqual(lines, [cmd]); assert.equal(calls.length, 0);
-  for (const backend of ["terminal-app", "iterm", "tmux"]) assert.equal(await terminalBackend(backend).start(ctx, { id: "L1", cwd, command: cmd }), 0);
-  assert.equal(calls[0][0], "osascript"); assert.ok(calls[0][1].join(" ").includes(appleScriptString(cmd)));
+  for (const backend of ["terminal-app", "iterm"]) {
+    assert.equal(await terminalBackend(backend).start(ctx, { id: "L1", cwd, command: cmd }), 0);
+    const [name, args] = calls.at(-1)!;
+    assert.equal(name, "osascript");
+    const script = args.join(" ");
+    assert.ok(script.includes(appleScriptString(`${cmd} || { printf `)));
+    assert.ok(script.includes(appleScriptString('"$?" 30 >&2; sleep 30; exit 0; }')));
+  }
   assert.ok(calls[1][1].join(" ").includes("create window with default profile"));
-  assert.ok(calls.some(([name, args]) => name === "tmux" && args.includes("new-window")));
+  assert.equal(await terminalBackend("tmux").start(ctx, { id: "L1", cwd, command: cmd }), 0);
+  assert.ok(calls.some(([name, args]) => name === "tmux" && args.includes("new-window") && args.includes(`sh -c ${shellQuote(cmd)}`)));
   calls.length = 0; ctx.env.TMUX = "yes"; await terminalBackend("tmux").start(ctx, { id: "L1", cwd, command: cmd }); assert.equal(calls[0][1][0], "new-window");
   ctx.env = {}; ctx.run = async (name, args) => { calls.push([name, args]); return { code: 1, stdout: "", stderr: "no", timedOut: false }; };
   assert.equal(await terminalBackend("terminal-app").start(ctx, { id: "L1", cwd, command: cmd }), 1); assert.equal(lines.at(-1), cmd);
