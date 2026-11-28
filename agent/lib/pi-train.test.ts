@@ -842,9 +842,11 @@ test('sync-base merges the fetched base, checkpoints it and requires fresh Tier 
   const base = await f.advanceBase('base-only.txt');
   await seedTier1(f, prior.head);
   const ship = ['ship', '--label', 'patch', '--allow-unconfigured-gate'];
+  // Some git versions update the remote-tracking ref on a push by URL; the dry run itself must not move it.
+  const tracking = f.git(f.wt, 'rev-parse', f.ref);
   assert.equal(await f.invoke('sync-base', '--dry-run'), 0, f.errors.join('\n'));
   assert.equal(f.git(f.wt, 'rev-parse', 'HEAD'), prior.head);
-  assert.equal(f.git(f.wt, 'rev-parse', f.ref), prior.base.sha);
+  assert.equal(f.git(f.wt, 'rev-parse', f.ref), tracking);
   assert.equal(await readFile(f.path, 'utf8'), before);
   assert.equal(await f.invoke(...ship), 1, f.errors.join('\n'));
 
