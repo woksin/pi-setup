@@ -96,6 +96,7 @@ test("grep and ripgrep source locations are not named credentials", () => {
 		["src/token-store.ts", "initialize();"],
 		["src/views/password-reset.tsx", 'renderReset("email");'],
 		["scripts/api_key.py", "import secrets"],
+		["src/password-reset.cs", "Initialize();"],
 	]) {
 		for (const location of ["1", "42:7"]) {
 			const source = [path, location, code].join(":");
@@ -125,7 +126,7 @@ test("grep locations do not exempt named credentials", () => {
 });
 
 test("grep locations keep masking short and dotted bare values", () => {
-	for (const value of [["Ab12", "Cd"].join(""), ["Ab12", "Cd34"].join("."), ["abcd", "efgh"].join("")]) {
+	for (const value of [["Ab12", "Cd"].join(""), ["Ab12", "Cd34"].join("."), ["abcd", "efgh"].join(""), ["db_password", ["Ab12", "Cd"].join("")].join("=")]) {
 		const source = ["secret.json", "42", value].join(":");
 		for (const mode of [undefined, "outbound"] as const) {
 			const result = scan(source, [], { mode });

@@ -378,9 +378,9 @@ function grepContent(text: string, [locationStart, start]: [number, number], fie
 	token.lastIndex = start;
 	const content = token.exec(text)?.[0] ?? "";
 	// Clearly source code: indentation, a common source keyword or a letters-only call name.
-	if (!content || SOURCE_KEYWORD.test(content) || /^[a-z][A-Za-z]*\(/.test(content)) return;
-	// A nested credential field (db_password: ...) is matched and masked by its own field rule.
-	const nested = /^([A-Za-z_$][\w$.-]*)[=:]/.exec(content);
+	if (!content || SOURCE_KEYWORD.test(content) || /^[A-Za-z]+\(/.test(content)) return;
+	// A nested credential label whose value follows after whitespace (db_password: ...) is judged by its own field rule.
+	const nested = /^([A-Za-z_$][\w$.-]*)[=:]$/.exec(content);
 	if (nested && isSecretKey(nested[1])) return;
 	// Otherwise keep the pre-grep-location judgement of the whole bare value, but mask only the content.
 	const end = start + content.length, value = text.slice(locationStart, end);
