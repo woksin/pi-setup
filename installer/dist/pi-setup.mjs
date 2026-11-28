@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 37496db095c9d7826dc252b68a430df843642c6a4899c38214acb1251d557dd3
+// pi-setup-source-sha256: 4c448791b6e2401d5b2705d5d15ae236cefba004060f8893f307d8627ca9fc1e
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -4755,18 +4755,28 @@ async function leaseInventory(ctx, entries) {
     throw error;
   }
 }
+function legacyStartUtc(start2) {
+  if (!/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(start2)) return void 0;
+  const d = new Date(start2);
+  if (Number.isNaN(d.getTime())) return void 0;
+  return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
+}
 function checkLegacyStart({ file, lease }, rows) {
   if (lease.version !== 1) return;
   for (const id of [lease.owner, lease.child]) {
-    if (id && rows.some((row) => row.pid === id.pid && row.start !== id.start)) {
+    const row = id && rows.find((r2) => r2.pid === id.pid);
+    if (!id || !row || row.start === id.start) continue;
+    if (legacyStartUtc(id.start) !== row.start) {
       throw uncertainLease(file, `start time differs for pid ${id.pid} in a legacy lease without a known timezone or locale`);
     }
+    id.start = row.start;
   }
+  for (const prior of lease.priorPi ?? []) prior.start = legacyStartUtc(prior.start) ?? prior.start;
 }
 function leases(entries, rows) {
   const all = entries.map((e) => e.lease);
+  for (const entry2 of entries) checkLegacyStart(entry2, rows);
   return entries.flatMap((entry2) => {
-    checkLegacyStart(entry2, rows);
     const { file, lease } = entry2;
     if (alive2(lease.owner, rows)) return [lease];
     if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
@@ -4828,7 +4838,7 @@ async function admit(ctx, request2, beforeLaunch) {
     }
   };
 }
-var StartUnavailable, pause;
+var StartUnavailable, pause, DAYS, MONTHS, two;
 var init_admission = __esm({
   "src/lanes/admission.ts"() {
     StartUnavailable = class extends Error {
@@ -4839,6 +4849,9 @@ var init_admission = __esm({
       }
     };
     pause = (ms) => new Promise((done) => setTimeout(done, ms));
+    DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    two = (n3) => String(n3).padStart(2, "0");
   }
 });
 
