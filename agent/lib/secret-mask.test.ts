@@ -90,6 +90,40 @@ test("source file line references are not named credentials", () => {
 	}
 });
 
+test("grep and ripgrep source locations are not named credentials", () => {
+	for (const [path, code] of [
+		["extensions/secret-mask.ts", 'import type { X } from "y";'],
+		["src/token-store.ts", "initialize();"],
+		["src/views/password-reset.tsx", 'renderReset("email");'],
+		["scripts/api_key.py", "import secrets"],
+	]) {
+		for (const location of ["1", "42:7"]) {
+			const source = [path, location, code].join(":");
+			for (const mode of [undefined, "outbound"] as const) {
+				assert.deepEqual(scan(source, [], { mode }), { text: source, count: 0, kinds: [], skipped: false }, source);
+			}
+		}
+	}
+});
+
+test("grep locations do not exempt named credentials", () => {
+	const value = ["qB7vR3mL", "8kW2jN5z"].join("");
+	for (const source of [
+		["secret", value].join(": "), ["db_password", value].join(": "), ["config.secret.ts", value].join(": "),
+		["db_password", "42", value].join(":"), ["secret.txt", "42", value].join(":"),
+		["config.secret.ts", `42:${value}`].join("="),
+		["config.secret.ts", `"42:${value}"`].join(":"), ["config.secret.ts", `'42:${value}'`].join(":"),
+		["extensions/secret-mask.ts", "42", ["db_password", value].join("=")].join(":"),
+		["src/token-store.ts", "42:7", ["db_password", value].join(": ")].join(":"),
+	]) {
+		for (const mode of [undefined, "outbound"] as const) {
+			const result = scan(source, [], { mode });
+			assert.equal(result.count, 1, source);
+			assert.ok(!result.text.includes(value), source);
+		}
+	}
+});
+
 test("file reference exemptions never apply to dotted properties or non-line values", () => {
 	for (const source of [
 		"db.password=" + "hunter2" + "xyz77Q", "app.secret: " + "AbC123" + "xYz789", "secret.json:" + "4f9a8b" + "7c6d5e",

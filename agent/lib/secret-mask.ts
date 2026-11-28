@@ -311,9 +311,11 @@ function publicEndpoint(field: string, value: string): boolean {
 		&& /^https:\/\/[a-z0-9.-]+(?::\d{1,5})?(?:\/[a-z][a-z_.-]{0,31}){1,6}\/?$/.test(value);
 }
 
+const SOURCE_FILE_SUFFIX = String.raw`\.(?:ts|tsx|js|mjs|cjs|cs|py|go|rs|java|kt|rb|sh|md|json|yaml|yml|toml)`;
+const SOURCE_FILE_EXTENSION = new RegExp(`${SOURCE_FILE_SUFFIX}$`);
+
 function sourceLineReference(field: string, value: string): boolean {
-	return /\.(?:ts|tsx|js|mjs|cjs|cs|py|go|rs|java|kt|rb|sh|md|json|yaml|yml|toml)$/.test(field)
-		&& /^\d+(?::\d+)?(?:[-–]\d+)?[`'")\],.;:]*$/.test(value);
+	return SOURCE_FILE_EXTENSION.test(field) && /^\d+(?::\d+)?(?:[-–]\d+)?[`'")\],.;:]*$/.test(value);
 }
 
 function proseField(text: string, index: number, field: string, value: string): boolean {
@@ -362,13 +364,31 @@ function sourceFieldValue(text: string, index: number, field: string, value: str
 	return declaration.test(text);
 }
 
+// Consume only the grep location prefix so credentials in the source text can still be matched.
+const GREP_LOCATION = String.raw`(?<=${SOURCE_FILE_SUFFIX}:)\d+:(?:\d+:)?`;
+const CONNECTION_FIELDS = new RegExp(
+	String.raw`(?<![\w$.-])(["']?)([A-Za-z_$][\w$.-]{0,255})\1[ \t]*([=:])[ \t]*(?:${GREP_LOCATION}|(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|([^\s"';,&]{8,}))`,
+	"gd",
+);
+
+function grepContent(text: string, start: number, field: string, out: Candidate[]): void {
+	const token = /[^\s"';,&]{8,}/y;
+	token.lastIndex = start;
+	const content = token.exec(text)?.[0];
+	if (content && secretValue(content, false, false)) connectionCandidate(text, field, [start, start + content.length], out);
+}
+
 function connections(text: string, out: Candidate[]): void {
-	const fields = /(?<![\w$.-])(["']?)([A-Za-z_$][\w$.-]{0,255})\1[ \t]*([=:])[ \t]*(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|([^\s"';,&]{8,}))/gd;
-	for (const match of text.matchAll(fields)) {
+	for (const match of text.matchAll(CONNECTION_FIELDS)) {
 		const [, keyQuote, field, separator, valueQuote] = match;
 		if (!isSecretKey(field)) continue;
 		const group = valueQuote ? 5 : 6;
 		const value = match[group];
+		if (value === undefined) {
+			// A grep location, not a field value; the line content itself may still be a bare secret.
+			grepContent(text, match.index + match[0].length, field, out);
+			continue;
+		}
 		const [start, end] = match.indices![group]!;
 		// The bare-value capture excludes delimiters; retain that code-expression signal.
 		const terminated = text[end] === "," || (text[end] === ";" && !adoPassword(text, match.index, field, separator));
