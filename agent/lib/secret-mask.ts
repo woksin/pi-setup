@@ -371,11 +371,21 @@ const CONNECTION_FIELDS = new RegExp(
 	"gd",
 );
 
-function grepContent(text: string, start: number, field: string, out: Candidate[]): void {
-	const token = /[^\s"';,&]{8,}/y;
+const SOURCE_KEYWORD = /^(?:import|export|from|const|let|var|function|return|class|interface|type|enum|public|private|protected|internal|static|readonly|async|await|if|else|for|foreach|while|switch|case|try|catch|finally|throw|new|using|namespace|record|def|package|module|require|describe|test|it|expect|assert|void|string|int|bool)$/;
+
+function grepContent(text: string, [locationStart, start]: [number, number], field: string, out: Candidate[]): void {
+	const token = /[^\s"';,&]*/y;
 	token.lastIndex = start;
-	const content = token.exec(text)?.[0];
-	if (content && secretValue(content, false, false)) connectionCandidate(text, field, [start, start + content.length], out);
+	const content = token.exec(text)?.[0] ?? "";
+	// Clearly source code: indentation, a common source keyword or a letters-only call name.
+	if (!content || SOURCE_KEYWORD.test(content) || /^[a-z][A-Za-z]*\(/.test(content)) return;
+	// A nested credential field (db_password: ...) is matched and masked by its own field rule.
+	const nested = /^([A-Za-z_$][\w$.-]*)[=:]/.exec(content);
+	if (nested && isSecretKey(nested[1])) return;
+	// Otherwise keep the pre-grep-location judgement of the whole bare value, but mask only the content.
+	const end = start + content.length, value = text.slice(locationStart, end);
+	if (value.length < 8 || !secretValue(value, false, text[end] === "," || text[end] === ";")) return;
+	connectionCandidate(text, field, [start, end], out);
 }
 
 function connections(text: string, out: Candidate[]): void {
@@ -386,7 +396,8 @@ function connections(text: string, out: Candidate[]): void {
 		const value = match[group];
 		if (value === undefined) {
 			// A grep location, not a field value; the line content itself may still be a bare secret.
-			grepContent(text, match.index + match[0].length, field, out);
+			const locationEnd = match.index + match[0].length;
+			grepContent(text, [locationEnd - match[0].replace(/^.*?[=:][ \t]*/s, "").length, locationEnd], field, out);
 			continue;
 		}
 		const [start, end] = match.indices![group]!;

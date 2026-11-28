@@ -124,6 +124,17 @@ test("grep locations do not exempt named credentials", () => {
 	}
 });
 
+test("grep locations keep masking short and dotted bare values", () => {
+	for (const value of [["Ab12", "Cd"].join(""), ["Ab12", "Cd34"].join("."), ["abcd", "efgh"].join("")]) {
+		const source = ["secret.json", "42", value].join(":");
+		for (const mode of [undefined, "outbound"] as const) {
+			const result = scan(source, [], { mode });
+			assert.equal(result.count, 1, source);
+			assert.ok(!result.text.includes(value), source);
+		}
+	}
+});
+
 test("file reference exemptions never apply to dotted properties or non-line values", () => {
 	for (const source of [
 		"db.password=" + "hunter2" + "xyz77Q", "app.secret: " + "AbC123" + "xYz789", "secret.json:" + "4f9a8b" + "7c6d5e",
