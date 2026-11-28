@@ -35,6 +35,7 @@ export class InvalidRequest extends Error {
 	readonly detail?: string;
 	constructor(detail?: string) { super("publish: invalid-request"); if (detail) this.detail = detail; }
 }
+export const API_REPO_HINT = "kind api takes the repository in `endpoint`; remove `repo`.";
 const invalid = (detail?: string): never => { throw new InvalidRequest(detail); };
 const own = (object: object, key: string) => Object.prototype.hasOwnProperty.call(object, key);
 type RecordValue = Record<string, unknown>;
@@ -164,9 +165,10 @@ export function kindContract(kind: PublishRequest["kind"]): string {
 		: kind === "release-notes" ? "; at least one of title/body/bodyFile for edits" : "";
 	return `${kind} requires: ${shape.required.join(", ")}${body}${edit}; optional: ${shape.optional.join(", ")}`;
 }
-function unknownFieldsDetail(keys: string[], kind: PublishRequest["kind"]): string {
+function unknownFieldsDetail(keys: string[], kind: PublishRequest["kind"], contract: string): string {
+	if (kind === "api" && keys.includes("repo")) return API_REPO_HINT;
 	const known = keys.filter(key => own(properties, key)), count = keys.length - known.length;
-	return [known.length ? `unknown field for ${kind}: ${known.join(", ")}` : "", count ? `unknown fields: ${count}` : ""].filter(Boolean).join("; ");
+	return [known.length ? `unknown field for ${kind}: ${known.join(", ")}` : "", count ? `unknown fields: ${count}` : "", contract].filter(Boolean).join("; ");
 }
 function validateShape(input: RecordValue): void {
 	const suppliedKind = input.kind;
@@ -175,7 +177,7 @@ function validateShape(input: RecordValue): void {
 	const shape = contracts[kind], contract = kindContract(kind);
 	const allowed = new Set(["kind", ...shape.required, ...shape.optional]);
 	const unknown = Object.keys(input).filter(key => !allowed.has(key));
-	if (unknown.length) invalid(`${unknownFieldsDetail(unknown, kind)}; ${contract}`);
+	if (unknown.length) invalid(unknownFieldsDetail(unknown, kind, contract));
 	const missing = shape.required.filter(key => !own(input, key));
 	if (missing.length) invalid(`missing: ${missing.join(", ")}; ${contract}`);
 	for (const key of Object.keys(input).filter(key => key !== "kind")) {

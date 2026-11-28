@@ -9,7 +9,7 @@ import type { Readable } from "node:stream";
 import { scanPublication } from "./publish-scan.ts";
 import type { PublicationContext, PublicationScan } from "./publish-scan.ts";
 import { InvalidRequest, MAX_REQUEST_BYTES, MAX_STRING_BYTES, toGhPlan, validateAppendOnly, validateRequest } from "./publish-request.ts";
-import type { GhCommand, GhPlan, PayloadSource, PayloadSlot } from "./publish-request.ts";
+import type { GhCommand, GhPlan, PayloadSource, PayloadSlot, PublishRequest } from "./publish-request.ts";
 
 export type PublishCode = "published" | "scan-clean" | "invalid-request" | "unsupported-platform" | "payload-unreadable" | "payload-too-large" | "payload-not-utf8" | "scan-refused" | "gh-unavailable" | "gh-failed" | "gh-timeout" | "cancelled" | "gh-output-limit" | "cleanup-failed" | "payload-not-found" | "payload-symlink" | "payload-not-file" | "payload-permission" | "host-unauthenticated";
 export interface PublishResult { code: PublishCode; text: string; isError: boolean; detail?: string; diagnostics?: { source: string; count: number; findings: PublicationScan["findings"] } }
@@ -313,17 +313,21 @@ function ghMessage(stderr: string, reflect: string[], run: Runtime): string {
 		return scanPublication(line, run.scanContext).count === 0;
 	}).map(line => line.slice(0, 120)).join(" ").slice(0, 400);
 }
-function ghDetail(stderr: string, reflect: string[], run: Runtime): string {
+const PRIVATE_ADVISORY_HINT = "Repository security advisories are not available for private repositories (GitHub returns 404); if the repository is private, report the vulnerability privately another way.";
+function ghDetail(stderr: string, { reflect, advisoryEndpoint }: ChildOptions, run: Runtime, advice: string): string {
+	if (!reflect) return advice;
 	const status = stderr.match(/HTTP (\d{3})/)?.[1], message = ghMessage(stderr, reflect, run);
-	return [status ? `status=${status}` : "", message ? `message=${JSON.stringify(message)}` : ""].filter(Boolean).join("; ");
+	const hint = status === "404" && advisoryEndpoint ? PRIVATE_ADVISORY_HINT : "";
+	return [status ? `status=${status}` : "", message ? `message=${JSON.stringify(message)}` : "", advice, hint].filter(Boolean).join("; ");
 }
-function childFailure(state: { code: number | null; failure?: PublishCode; stderr: string; reflect?: string[]; run: Runtime }): Failure | undefined {
+function childFailure(state: { code: number | null; failure?: PublishCode; stderr: string; options: ChildOptions; run: Runtime }): Failure | undefined {
 	if (state.failure) return new Failure(state.failure);
 	if (state.code === 0) return undefined;
 	const category = classifyStderr(state.stderr);
 	const exit = Number.isInteger(state.code) && state.code! >= 0 && state.code! <= 255 ? state.code : "none";
-	const detail = state.code === null || !state.reflect ? "" : ghDetail(state.stderr, state.reflect, state.run);
-	return new Failure("gh-failed", undefined, `exit=${exit} category=${category}${detail ? `; ${detail}` : ""}; ${GH_ADVICE[category]}`);
+	const advice = GH_ADVICE[category];
+	const detail = state.code === null ? advice : ghDetail(state.stderr, state.options, state.run, advice);
+	return new Failure("gh-failed", undefined, `exit=${exit} category=${category}; ${detail}`);
 }
 function textCapture(limit: number) {
 	let text = "", remaining = limit;
@@ -337,7 +341,7 @@ function textCapture(limit: number) {
 		take() { const captured = text + decoder.decode(); text = ""; return captured; },
 	};
 }
-interface ChildOptions { reflect?: string[]; expect?: readonly string[] }
+interface ChildOptions { reflect?: string[]; expect?: readonly string[]; advisoryEndpoint?: boolean }
 function confirmedOutput(expected: readonly string[], text: string): string {
 	const output = text.trim();
 	if (expected.includes(output)) return output;
@@ -359,7 +363,7 @@ function monitor(child: PublisherChild, run: Runtime, options: ChildOptions): Pr
 		child.on("error", () => stop("gh-failed"));
 		child.once("close", (code: number | null) => {
 			cancelTimer(); run.context.signal?.removeEventListener("abort", abort);
-			const error = childFailure({ code, failure, stderr: stderr.take(), reflect: options.reflect, run });
+			const error = childFailure({ code, failure, stderr: stderr.take(), options, run });
 			if (error) return reject(error);
 			try { resolve(expected && confirmedOutput(expected, stdout.take())); } catch (unexpected) { reject(unexpected); }
 		});
@@ -382,14 +386,17 @@ function skipCommand({ onLastOutput, skipIfBlank }: GhCommand, lastOutput: strin
 	if (onLastOutput !== undefined && onLastOutput !== lastOutput) return true;
 	return skipIfBlank !== undefined && !decoded(bytes[skipIfBlank]).trim();
 }
-async function send(plan: GhPlan, state: SendState, run: Runtime): Promise<void> {
+function targetsSecurityAdvisories(request: PublishRequest): boolean {
+	return request.kind === "api" && /^\/?(?:api\/v3\/)?repos\/[^/?#]+\/[^/?#]+\/security-advisories(?:[/?#]|$)/.test(request.endpoint);
+}
+async function send(plan: GhPlan, state: SendState, run: Runtime, advisoryEndpoint: boolean): Promise<void> {
 	const env = environment(run.env, plan.host), reflect = reflectionTexts(plan, state.bytes);
 	let lastOutput: string | undefined;
 	for (const command of [plan, ...(plan.followups ?? [])]) {
 		if (skipCommand(command, lastOutput, state.bytes)) continue;
 		const { argv, expect, postsCloseComment } = command;
 		if (postsCloseComment) state.closeComment = "uncertain";
-		const output = await runGh(() => argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), env, run, { reflect, expect });
+		const output = await runGh(() => argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), env, run, { reflect, expect, advisoryEndpoint });
 		if (postsCloseComment) state.closeComment = "posted";
 		if (output === "pr") throw new Failure("gh-failed", undefined, "target is a pull request; use pr-close instead");
 		lastOutput = output ?? lastOutput;
@@ -436,7 +443,7 @@ export async function publish(value: unknown, context: PublisherContext = {}, ad
 		await run.io.chmod(directory, 0o700);
 		const paths = await snapshots({ dir: directory, plan, bytes }, run);
 		state = { bytes, paths };
-		await send(plan, state, run);
+		await send(plan, state, run, targetsSecurityAdvisories(request));
 		outcome = result("published");
 	} catch (error) { outcome = failed(error); }
 	return closeCommentAdvice(await cleanup({ directory, outcome }, run.io), state?.closeComment);

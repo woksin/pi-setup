@@ -46,6 +46,12 @@ test('typed and CLI PR create share head/repo, candidate and trusted exception r
   assert.ok(!JSON.stringify(invalid).includes('private-value'));
 });
 
+test('candidate admission refuses repo on an api request and points to endpoint', async () => {
+  const decision = await publicationDecision({ kind: 'api', endpoint: 'repos/acme/widget', method: 'PATCH', repo: 'acme/private-value' }, { cwd: '/repo' });
+  assert.match(decision.block!, /^Candidate guard: .*`endpoint`.*remove `repo`/);
+  assert.doesNotMatch(JSON.stringify(decision), /private-value/);
+});
+
 test('an open candidate admits metadata-only edits but still refuses off-train PR creation', async t => {
   const f = await fixture(t), context = { cwd: '/repo', env: f.env, git: f.git };
   const target = { kind: 'pr-edit', repo: f.manifest.repo, number: 17 };
