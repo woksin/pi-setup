@@ -24,7 +24,7 @@ const runFixture = (databaseId = 10, extra = {}) => ({ databaseId, status: 'in_p
   headSha: SHA, workflowName: 'CI', name: 'Tests', event: 'pull_request', ...extra });
 
 type Fixture = Awaited<ReturnType<typeof setup>>;
-async function setup(t: any, init = true) {
+async function setup(t: any, init = true, repo = REPO) {
   const root = await mkdtemp(join(tmpdir(), 'pi-train-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const output: string[] = [], errors: string[] = [], calls: any[] = [];
@@ -33,14 +33,14 @@ async function setup(t: any, init = true) {
     openPRs: [] as any[], failBefore: '', failAfter: '', closed: 0, comments: 0, merges: 0, aborts: 0,
     raw: [] as string[][], localBranches: {} as Record<string, string>, branchPR: true, unknownAncestor: false, checkedOut: true, trainPR: null as any, creates: 0, edits: 0, pushes: 0, remoteHead: '', candidates: {} as Record<string, number>, failCandidates: false, wtBranch: '' };
   const env = { HOME: root, USER: 'me', PI_TRAIN_DIR: join(root, 'store') };
-  const path = manifestPath(env, REPO, TRAIN);
-  const manifest = { v: 1, repo: REPO, train: TRAIN, base: { ref: 'origin/main', sha: BASE },
+  const path = manifestPath(env, repo, TRAIN);
+  const manifest = { v: 1, repo, train: TRAIN, base: { ref: 'origin/main', sha: BASE },
     worktree: join(root, 'worktree'), owner: 'me', state: 'open', head: BASE, pr: null, shippedHead: null,
     label: null, items: [], notes: {}, packages: [], upstream: [], downstream: [], log: [] };
   if (init) { await saveManifest(path, manifest); await mkdir(manifest.worktree, { recursive: true }); }
   const ghRoutes = {
     'api user': () => ok('me\n'),
-    [`api repos/${REPO}/pulls/42`]: async (args: string[]) => {
+    [`api repos/${repo}/pulls/42`]: async (args: string[]) => {
       assert.equal(args[args.indexOf('--method') + 1], 'PATCH');
       const field = args[args.indexOf('--field') + 1];
       assert.ok(field.startsWith('body=@'));
@@ -68,7 +68,7 @@ async function setup(t: any, init = true) {
       state.creates++;
       state.trainPR = { number: 42, body: await readFile(args[args.indexOf('--body-file') + 1], 'utf8'),
         labels: [{ name: args[args.indexOf('--label') + 1] }], comments: [] };
-      return ok('https://github.com/acme/widget/pull/42\n');
+      return ok(`https://github.com/${repo}/pull/42\n`);
     },
     'pr edit': async (args: string[]) => {
       state.edits++;
@@ -82,7 +82,7 @@ async function setup(t: any, init = true) {
     'run cancel': (args: string[]) => { state.runs.find(run => String(run.databaseId) === args[2]).status = 'completed'; return ok(); },
   };
   const gitRoutes = {
-    remote: () => ok('git@github.com:acme/widget.git\n'),
+    remote: () => ok(`git@github.com:${repo}.git\n`),
     'check-ref-format': () => ok(),
     'show-ref': (args: string[]) => {
       if (!args.includes('--hash')) return state.branchExists ? ok() : bad();
@@ -810,6 +810,75 @@ test('real local bare origin: init, merge, ancestor rerun and conflict abort kee
   assert.equal(git(wt, 'rev-parse', 'HEAD'), foldedHead);
 });
 
+async function setupSyncBase(t: any) {
+  const f = await setup(t, false), repo = join(f.root, 'repo'), origin = join(f.root, 'origin.git'), wt = join(f.root, 'train');
+  const branch = 'release/stable', ref = `origin/${branch}`;
+  await mkdir(repo); await mkdir(origin);
+  const git = (cwd: string, ...args: string[]) => {
+    const result = nativeGit(cwd, args); assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
+  };
+  git(origin, 'init', '--bare'); git(repo, 'init', '-b', branch);
+  await writeFile(join(repo, 'file.txt'), 'base\n'); git(repo, 'add', '.'); git(repo, 'commit', '-m', 'base');
+  git(repo, 'remote', 'add', 'origin', origin); git(repo, 'push', '-u', 'origin', branch);
+  const mock = f.ctx.run;
+  f.ctx.run = async (command, args) => command === 'git' && args[2] !== 'remote' ? nativeGit(args[1], args.slice(2)) : mock(command, args);
+  f.ctx.cwd = repo;
+  assert.equal(await f.invoke('init', '.', TRAIN, '--from', ref, '--worktree', wt), 0, f.errors.join('\n'));
+  git(repo, 'checkout', '-b', 'fix/local');
+  await writeFile(join(repo, 'file.txt'), 'feature\n'); git(repo, 'commit', '-am', 'feature');
+  f.state.branchPR = false; f.state.runs = [];
+  assert.equal(await f.invoke('fold', 'fix/local'), 0, f.errors.join('\n'));
+  git(repo, 'checkout', branch);
+  const advanceBase = async (file: string) => {
+    await writeFile(join(repo, file), 'updated base\n'); git(repo, 'add', file); git(repo, 'commit', '-m', 'updated base');
+    git(repo, 'push', origin, branch);
+    return git(repo, 'rev-parse', 'HEAD');
+  };
+  return { ...f, git, wt, ref, advanceBase };
+}
+
+test('sync-base merges the fetched base, checkpoints it and requires fresh Tier 1 evidence', async t => {
+  const f = await setupSyncBase(t), prior = await f.read(), before = await readFile(f.path, 'utf8');
+  const base = await f.advanceBase('base-only.txt');
+  await seedTier1(f, prior.head);
+  const ship = ['ship', '--label', 'patch', '--allow-unconfigured-gate'];
+  assert.equal(await f.invoke('sync-base', '--dry-run'), 0, f.errors.join('\n'));
+  assert.equal(f.git(f.wt, 'rev-parse', 'HEAD'), prior.head);
+  assert.equal(f.git(f.wt, 'rev-parse', f.ref), prior.base.sha);
+  assert.equal(await readFile(f.path, 'utf8'), before);
+  assert.equal(await f.invoke(...ship), 1, f.errors.join('\n'));
+
+  assert.equal(await f.invoke('sync-base', '--train', TRAIN), 0, f.errors.join('\n'));
+  const synced = await f.read();
+  assert.deepEqual(f.git(f.wt, 'rev-list', '--parents', '-1', 'HEAD').split(' '), [synced.head, prior.head, base]);
+  assert.deepEqual(synced.base, { ref: f.ref, sha: base });
+  assert.deepEqual(synced.log, [...prior.log, { at: f.ctx.now(), op: 'sync-base', detail: f.ref }]);
+  assert.deepEqual(synced.items, prior.items);
+  assert.equal(await f.invoke(...ship), 1);
+  assert.match(f.errors.at(-1)!, /no verified Tier 1/);
+  await seedTier1(f, synced.head);
+  assert.equal(await f.invoke(...ship, '--dry-run'), 0, f.errors.join('\n'));
+});
+
+test('sync-base is a no-op when the base is already contained', async t => {
+  const f = await setupSyncBase(t), prior = await f.read(), before = await readFile(f.path, 'utf8');
+  assert.equal(await f.invoke('sync-base'), 0, f.errors.join('\n'));
+  assert.ok(f.output.at(-1)?.includes(f.ref));
+  assert.equal(f.git(f.wt, 'rev-parse', 'HEAD'), prior.head);
+  assert.equal(await readFile(f.path, 'utf8'), before);
+});
+
+test('sync-base aborts a conflict and leaves the worktree and manifest unchanged', async t => {
+  const f = await setupSyncBase(t), prior = await f.read(), before = await readFile(f.path, 'utf8');
+  await f.advanceBase('file.txt');
+  assert.equal(await f.invoke('sync-base'), 1);
+  assert.match(f.errors.at(-1)!, /conflicts: file\.txt/);
+  assert.equal(f.git(f.wt, 'status', '--porcelain'), '');
+  assert.notEqual(nativeGit(f.wt, ['rev-parse', '--verify', 'MERGE_HEAD']).status, 0);
+  assert.equal(f.git(f.wt, 'rev-parse', 'HEAD'), prior.head);
+  assert.equal(await readFile(f.path, 'utf8'), before);
+});
+
 test('adopt lists first-parent and ancestor PR candidates without folding; fold closes and cancels without merge', async t => {
   const f = await setup(t, false);
   f.state.branchExists = true; f.state.head = MERGE; f.state.ancestor = true;
@@ -836,15 +905,18 @@ test('adopt attaches an unchecked-out branch without recreating it; dry run crea
   assert.equal(f.calls.some(call => call.args.includes('branch') && call.args.includes(TRAIN)), false);
 });
 
+async function seedTier1(f: Fixture, head: string, components = [{ kind: 'test', label: 'Tier 1' }]) {
+  const ledger = join(f.root, '.pi/agent/pi-phase/state/ledger'); await mkdir(ledger, { recursive: true });
+  const records = components.map(component => JSON.stringify({ outcome: 'passed', verified: true, head, dirty: 'clean', ...component }));
+  await writeFile(join(ledger, '2000-01-01.jsonl'), records.join('\n') + '\n');
+}
+
 async function readyToShip(t: any, closed = false, seed = true) {
   const f = await setup(t);
   f.state.pr.labels = [{ name: 'patch' }, { name: 'minor' }];
   assert.equal(await f.invoke('fold', '7'), 0, f.errors.join('\n'));
   // Ship tests exercise the legacy any-build/test evidence; the fail-closed default has its own test.
-  if (seed) { // ship is fail-closed: seed verified Tier 1 evidence for the merge head
-    const ledger = join(f.root, '.pi/agent/pi-phase/state/ledger'); await mkdir(ledger, { recursive: true });
-    await writeFile(join(ledger, '2000-01-01.jsonl'), JSON.stringify({ outcome: 'passed', verified: true, head: MERGE, dirty: 'clean', kind: 'test', label: 'Tier 1' }) + '\n');
-  }
+  if (seed) await seedTier1(f, MERGE);
   if (!closed) { const invoke = f.invoke; f.invoke = (...args: string[]) => invoke(...(args[0] === 'ship' ? [...args, '--allow-unconfigured-gate'] : args)); }
   return f;
 }
@@ -856,6 +928,21 @@ test('ship fails closed without a Tier 1 component set, and the override is logg
   assert.equal(await f.invoke('ship', '--allow-unconfigured-gate'), 0, f.errors.join('\n'));
   assert.match(f.errors.join('\n'), /--allow-unconfigured-gate: no gateComponents for acme\/widget/);
 });
+
+for (const userOverride of [false, true]) {
+  test(`ship finds ${userOverride ? 'user-overridden' : 'built-in'} Tier 1 components regardless of repository key casing`, async t => {
+    const f = await setup(t, true, 'cratis/chronicle');
+    assert.equal(await f.invoke('fold', '7'), 0, f.errors.join('\n'));
+    const components = userOverride ? [{ kind: 'test', label: 'custom specs' }]
+      : [{ kind: 'build', label: 'tier-1 release' }, { kind: 'test', label: 'tier-1 specs' }];
+    if (userOverride) {
+      const gateComponents = { 'CRATIS/Chronicle': [{ id: 'custom', ...components[0] }] };
+      await writeFile(join(f.ctx.env.PI_TRAIN_DIR, 'config.json'), JSON.stringify({ gateComponents }));
+    }
+    await seedTier1(f, MERGE, components);
+    assert.equal(await f.invoke('ship', '--label', 'patch', '--dry-run'), 0, f.errors.join('\n'));
+  });
+}
 
 test('ship creates a PR, aggregates notes, links items and is idempotent', async t => {
   const f = await readyToShip(t);

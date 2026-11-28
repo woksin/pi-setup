@@ -25,10 +25,8 @@ async function cleanTrain(api, manifest) {
   if (branch !== manifest.train || dirty) throw new TrainError('train worktree must be clean and on the train branch');
 }
 
-async function performMerge(api, manifest, resolved) {
-  const name = resolved.pr ? `#${resolved.pr.number}` : resolved.branch;
-  const message = `Fold ${name} (${resolved.branch}) into ${manifest.train}`;
-  const result = await api.git(manifest.worktree, ['merge', '--no-ff', '--no-edit', '-m', message, resolved.sha],
+async function performMerge(api, manifest, sha, message) {
+  const result = await api.git(manifest.worktree, ['merge', '--no-ff', '--no-edit', '-m', message, sha],
     { mutate: true, allowFailure: true });
   if (result.status === 0) return;
   const conflicts = (await api.git(manifest.worktree, ['diff', '--name-only', '--diff-filter=U'])).stdout.trim();
@@ -37,11 +35,13 @@ async function performMerge(api, manifest, resolved) {
   throw new TrainError(`merge failed${detail}: ${result.stderr}`);
 }
 
-export async function mergeHead(api, manifest, resolved, dryRun) {
+export async function mergeHead(api, manifest, { sha, message }, dryRun) {
   await cleanTrain(api, manifest);
-  const ancestor = await api.git(manifest.worktree, ['merge-base', '--is-ancestor', resolved.sha, 'HEAD'], { allowFailure: true });
+  const ancestor = await api.git(manifest.worktree, ['merge-base', '--is-ancestor', sha, 'HEAD'], { allowFailure: true });
   // A dry run cannot fetch missing objects without changing the repository.
   if (ancestor.status > 1 && !dryRun) throw new TrainError(ancestor.stderr || 'cannot check ancestry', 2);
-  if (ancestor.status !== 0) await performMerge(api, manifest, resolved);
-  return dryRun ? manifest.head : (await api.git(manifest.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
+  const merged = ancestor.status !== 0;
+  if (merged) await performMerge(api, manifest, sha, message);
+  const head = dryRun ? manifest.head : (await api.git(manifest.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
+  return { head, merged };
 }

@@ -1,7 +1,7 @@
 import { readFile, readdir, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { TrainError } from './train-gh.mjs';
-import { trainHome } from './train-manifest.mjs';
+import { normalizeRepo, trainHome } from './train-manifest.mjs';
 
 // Built-in Tier 1 component sets, derived from each repository's CI; the user's config.json wins per repository.
 const DEFAULTS = new URL('./train-gate-defaults.json', import.meta.url);
@@ -18,6 +18,12 @@ export async function shipConfig(ctx) {
   validateComponents(config);
   if (defaults.gateComponents) config.gateComponents = { ...defaults.gateComponents, ...config.gateComponents };
   return config;
+}
+
+export function gateComponentsFor(config, repo) {
+  const key = normalizeRepo(repo);
+  // Search user entries (spread after the built-ins) first, including differently cased overrides.
+  return Object.entries(config.gateComponents ?? {}).findLast(([name]) => normalizeRepo(name) === key)?.[1];
 }
 
 function validateComponent(component) {
@@ -72,8 +78,8 @@ function describeEvidence(record) {
   return `${record.kind}: ${record.label ?? ''} (${record.ts ?? ''})`;
 }
 
-function componentEvidence(manifest, config, records) {
-  const matches = config.gateComponents[manifest.repo].map(component => ({ component, record: records.find(record =>
+function componentEvidence(manifest, components, records) {
+  const matches = components.map(component => ({ component, record: records.find(record =>
     record.kind === component.kind && new RegExp(component.label, 'i').test(record.label ?? '')) }));
   const missing = matches.filter(match => !match.record).map(match => match.component.id);
   if (missing.length) throw new TrainError(`Tier 1 incomplete for ${manifest.head.slice(0, 7)}: missing ${missing.join(', ')}`);
@@ -94,8 +100,8 @@ export async function gateEvidence(ctx, manifest, config, options = {}) {
   const directory = join(ctx.env.HOME, '.pi', 'agent', 'pi-phase', 'state', 'ledger');
   const records = await ledgerEntries(directory);
   const evidence = records.filter(record => validGateRecord(record, manifest));
-  const components = config.gateComponents?.[manifest.repo];
-  if (components) return componentEvidence(manifest, config, evidence);
+  const components = gateComponentsFor(config, manifest.repo);
+  if (components) return componentEvidence(manifest, components, evidence);
   return unconfiguredEvidence(ctx, manifest, evidence, options);
 }
 

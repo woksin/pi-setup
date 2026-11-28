@@ -1,7 +1,7 @@
 import { readFile, readdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { shipConfig } from './train-ship-check.mjs';
+import { gateComponentsFor, shipConfig } from './train-ship-check.mjs';
 
 export const phaseState = env => env.PI_PHASE_STATE || join(env.HOME || homedir(), '.pi', 'agent', 'pi-phase', 'state');
 
@@ -150,7 +150,7 @@ export async function gateEstimate(ctx, api, manifest, override) {
   if (configured) return configured;
   const { groups, eligible } = await phaseDurations(ctx, api, manifest);
   const config = await shipConfig(ctx);
-  const chains = chainSpans(eligible, config.gateComponents?.[manifest.repo]);
+  const chains = chainSpans(eligible, gateComponentsFor(config, manifest.repo));
   if (chains.length >= 3) return { gateSeconds: median(chains), gateSource: 'ledger-chain', gateRuns: chains.length };
   const gateRuns = Object.values(groups).reduce((sum, values) => sum + values.length, 0);
   return { gateSeconds: gateRuns ? Object.values(groups).reduce((sum, values) => sum + p90(values), 0) : null,
