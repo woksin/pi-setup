@@ -23,13 +23,15 @@ The repo is `Owner/Name` from the git origin, so all worktrees of one repo share
 One tool with an `action`:
 
 - `ask`: kind, title, body, evidence, review, options, recommended, urgency, blocking, links, tags, cc, for, global, project, distinctFrom. Research and review are checked before the duplicate check (below).
-- `list`: default is open and deferred-due items for the current repo, global items and your own. `all: true` shows every repo with the asker lane on each item. `project`, `repo`, `status` (or `all`), `mine` filter.
-- `get`: `format: "text"` or `"record"` (a plain decision record for exporting by hand).
+- `list`: default is open and deferred-due items for the current repo, global items and your own. `all: true` shows every repo with the asker lane on each item. `project`, `repo`, `status` (or `all`), `mine` filter. Each item shows its last update (UTC) and latest history event (type, actor and age). `sort: "activity"` orders all matches newest-first by their latest event instead of grouping by priority.
+- `get`: `format: "text"` shows the item, any answer and its history with the last 5 comments (`all: true` shows every comment). `format: "record"` is a plain decision record for exporting by hand.
 - `search`: all statuses, so agents check decided and closed items before asking again.
 - `update`: your own open or deferred items, including setting or replacing evidence and review. On any item you may add links, or add yourself to cc.
 - `comment`: any item.
 - `withdraw`, `supersede`, `close`: your own items. `close` applies to answered or decided items, or fyi. "Own" means the same session or the same lane as the asker.
 - `record_answer`: only the user's exact words (see below).
+
+`list` and `/questions` mark open items stale after 7 days without a history event. Set `PI_QUESTIONS_STALE_DAYS` to a positive whole number to change that threshold.
 
 Subagents (no UI) get `list`, `get` and `search` only; mutations are refused with "report to your parent session". Subagents also get no status line, no heartbeat and no delivery.
 
@@ -40,7 +42,7 @@ Before asking a `question`, `decision` or `approval`, the global rule requires r
 - `evidence`: sources checked, with file:line, run ids or URLs. Example: `"store.ts:42; run 123456"`.
 - `review`: independent reviewer agent/provider and verdict. Example: `"sol-reviewer (Claude): agrees, sources verified"`.
 
-Missing, blank or short fields refuse the ask without creating an item. `fyi` is exempt. The fields are optional in stored items: legacy items still load and display unchanged. `get` shows Evidence and Review sections when present in both text and record formats; `list` is unchanged.
+Missing, blank or short fields refuse the ask without creating an item. `fyi` is exempt. The fields are optional in stored items: legacy items still load and display unchanged. `get` shows Evidence and Review sections when present in both text and record formats; `list` does not show those fields.
 
 ### Duplicate check
 
@@ -54,7 +56,7 @@ User commands are verbatim by construction. `record_answer` is for an answer the
 
 ## User commands
 
-- `/questions [all|decided|repo|search <terms>]`: open items grouped as Blocking, High, Normal, Low. `all` shows every repo with asker lanes.
+- `/questions [all|decided|repo|search <terms>]`: open items grouped as Blocking, High, Normal, Low, with the same activity fields as `list`. `all` shows every repo with asker lanes.
 - `/q <id> [reopen|comment <text>|answer|decide|defer|close ...]`: show or act on one item.
 - `/answer <id> <text>`, `/decide <id> <option key or number> [rationale]`, `/defer <id> [YYYY-MM-DD] [reason]`, `/close <id> [reason]`.
 - `/lane [ID|clear]`: show, set or clear the current session's lane mapping.
