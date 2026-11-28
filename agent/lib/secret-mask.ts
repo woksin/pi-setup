@@ -324,8 +324,8 @@ function proseField(text: string, index: number, field: string, value: string): 
 		return teaching.test(text);
 	}
 	if (!/^(?:PASS|FAIL|PASSED)$/.test(field) || !/^(?:[A-Z]?[a-z]+|[A-Z]+)(?:\/(?:[A-Z]?[a-z]+|[A-Z]+))+[.)`]?$/.test(value)) return false;
-	// The label follows prose on this line (e.g. "review" or "Tier 1"); it is not a standalone key.
-	const verdict = /(?<=\b[A-Za-z]+(?:[ \t]+[0-9]+)*[ \t]+)/y;
+	// Only a known verdict context ("review PASS:", "Tier 1 PASS:") counts; other words can describe a credential.
+	const verdict = /(?<=\b(?:review|verdict|gate|checks?|tests?|build|lint|status|result|tier[ \t]+[0-9]+)[ \t]+)/iy;
 	verdict.lastIndex = index;
 	return verdict.test(text);
 }
