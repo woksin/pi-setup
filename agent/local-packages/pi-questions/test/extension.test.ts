@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { readItem } from "../src/store.ts";
 import defaultExtension from "../src/extension.ts";
-import { gitRepo, seed, session, tempDir, writeUser } from "./helpers.ts";
+import { gitRepo, RESEARCH, seed, session, tempDir, writeUser } from "./helpers.ts";
 
 function env(t: Parameters<typeof tempDir>[0]) {
 	const root = tempDir(t);
@@ -96,6 +96,52 @@ test("list: default scope, all with asker lanes, project, status, mine", async t
 	assert.match(text(await a.call({ action: "list", status: "answered" })), /No matching items/);
 });
 
+test("list shows latest activity and open-only staleness, with optional newest-first order", async t => {
+	const { root, home } = env(t);
+	const start = Date.parse("2026-05-01T10:00:00Z");
+	const day = 86_400_000;
+	let now = start;
+	writeUser(root, "alice");
+	const s = session(t, { root, home, sessionId: "private-asker-session", lane: "PRIVATE-ASKER-LANE", now: () => now });
+	await s.call({ action: "ask", kind: "fyi", title: "Pending database migration", blocking: "release" });
+	await s.call({ action: "ask", kind: "fyi", title: "Alternative color palette" });
+	await s.call({ action: "ask", kind: "fyi", title: "Completed documentation review" });
+	await s.call({ action: "close", id: "Q-3" });
+	now = start + 6 * day;
+	await s.command("q", "2 comment private-comment-body");
+
+	const list = { action: "list", status: "all" };
+	now = start + 7 * day - 1;
+	assert.doesNotMatch(text(await s.call(list)), /\bstale\b/);
+	++now;
+	const grouped = text(await s.call(list));
+	const ids = (output: string) => Array.from(output.matchAll(/^(Q-\d+) /gm), match => match[1]);
+	const entry = (id: string) => grouped.split(/(?=^Q-\d+ )/m).find(part => part.startsWith(`${id} `))!.replace(/\s+/g, " ");
+	assert.deepEqual(ids(grouped), ["Q-1", "Q-2", "Q-3"]);
+	assert.match(entry("Q-1"), /updated 2026-05-01 10:00Z.*created by agent \(7d ago\).*\bstale\b/);
+	assert.match(entry("Q-2"), /updated 2026-05-07 10:00Z.*comment by user alice \(24h ago\)/);
+	for (const id of ["Q-2", "Q-3"]) assert.doesNotMatch(entry(id), /\bstale\b/);
+	assert.doesNotMatch(grouped, /private-asker-session|PRIVATE-ASKER-LANE|private-comment-body/);
+	const sorted = await s.call({ ...list, sort: "activity" });
+	assert.deepEqual(ids(text(sorted)), ["Q-2", "Q-1", "Q-3"]);
+	assert.deepEqual(sorted.details.items.map((i: { id: string }) => i.id), ids(text(sorted)));
+	await s.command("questions", "");
+	assert.equal(s.notes.at(-1)!.text.split("\n").slice(1).join("\n"), text(await s.call({ action: "list" })));
+});
+
+test("list staleness accepts a positive day count from the environment; invalid values keep the default", async t => {
+	const { root, home } = env(t);
+	const now = Date.parse("2026-05-04T10:00:00Z");
+	seed(home, { title: "Quarterly planning question", global: true }, {}, now - 3 * 86_400_000);
+	for (const [setting, stale] of [["3", true], ["0", false], ["invalid", false]] as const) {
+		const s = session(t, {
+			root, home, sessionId: "s1", now: () => now,
+			extra: { env: { PI_CODING_AGENT_DIR: join(root, "agent"), ORCH_HOME: join(root, "orch"), PI_QUESTIONS_STALE_DAYS: setting } },
+		});
+		assert.equal(/\bstale\b/.test(text(await s.call({ action: "list" }))), stale, setting);
+	}
+});
+
 test("/questions all uses the all-repos view with asker lanes", async t => {
 	const { root, home, repoA, repoB } = env(t);
 	const a = session(t, { root, home, sessionId: "sa", lane: "LANE-A", cwd: repoA });
@@ -115,7 +161,9 @@ test("/questions all uses the all-repos view with asker lanes", async t => {
 
 test("get text and record, and search covers decided and closed items", async t => {
 	const { root, home } = env(t);
-	const s = session(t, { root, home, sessionId: "s1" });
+	writeUser(root, "alice");
+	const at = "2026-05-01T10:00:00.000Z";
+	const s = session(t, { root, home, sessionId: "s1", now: () => Date.parse(at) });
 	await s.call({ action: "ask", kind: "decision", title: "Choose license", options: [{ key: "a", text: "MIT" }] });
 	await s.command("decide", "1 a simplest");
 	await s.call({ action: "close", id: "Q-1", note: "done" });
@@ -123,8 +171,11 @@ test("get text and record, and search covers decided and closed items", async t 
 	assert.match(txt, /^Q-1 \[decision\] Choose license/);
 	assert.match(txt, /Answer \[option a: MIT\]: simplest \(by .+ via command/);
 	const rec = text(await s.call({ action: "get", id: "1", format: "record" }));
-	assert.match(rec, /^Decision record Q-1: Choose license\n/);
-	assert.match(rec, /Outcome: a \(MIT\)\nStatement: simplest\nDecided by /);
+	assert.equal(rec, [
+		"Decision record Q-1: Choose license", "Kind: decision", "Status: closed", "Repo: global", `Asked: ${at}`,
+		"", "Evidence:", RESEARCH.evidence, "", "Review:", RESEARCH.review, "", "Options:", "  a: MIT",
+		"", "Outcome: a (MIT)", "Statement: simplest", `Decided by alice on ${at}`,
+	].join("\n"));
 	const found = await s.call({ action: "search", query: "license" });
 	assert.deepEqual(found.details.items.map((i: any) => [i.id, i.status, i.answer]), [["Q-1", "closed", "simplest"]]);
 	assert.deepEqual((await s.call({ action: "search", query: "license", kind: "question" })).details.items, []);
@@ -325,7 +376,7 @@ test("no hard-coded /Users paths in src or test", () => {
 	assert.ok(!readFileSync("test/extension.test.ts", "utf8").split("\n").some(l => l.includes(`"${["", "Users"].join("/")}`)));
 });
 
-test("mutating actions return a one-line status; get trims to the last 5 comments unless all:true", async t => {
+test("mutating actions return a one-line status", async t => {
 	const { root, home } = env(t);
 	const a = session(t, { root, home, sessionId: "sa", lane: "LANE-A" });
 	await a.call({ action: "ask", kind: "fyi", title: `Heads up ${"long title ".repeat(10)}` });
@@ -337,10 +388,28 @@ test("mutating actions return a one-line status; get trims to the last 5 comment
 	assert.match(status, /^Q-1 \[fyi\] open · rev \d+ · 7 comments · Heads up long title /);
 	assert.ok(status.endsWith("…"));
 	assert.ok(status.split(" · ")[3].length <= 60);
-	const trimmed = text(await a.call({ action: "get", id: "Q-1" }));
-	assert.match(trimmed, /… 2 earlier comments \(get with all: true\)/);
-	assert.ok(!trimmed.includes("note number 2"));
-	assert.ok(trimmed.includes("note number 3") && trimmed.includes("note number 7"));
-	const full = text(await a.call({ action: "get", id: "Q-1", all: true }));
-	assert.ok(full.includes("note number 1") && !full.includes("earlier comment"));
+});
+
+test("get shows every history entry in order with clipped notes and no private metadata", async t => {
+	const { root, home } = env(t);
+	const now = () => Date.parse("2026-05-01T10:00:00Z");
+	writeUser(root, "alice");
+	const a = session(t, { root, home, sessionId: "asker", now });
+	const b = session(t, { root, home, sessionId: "private-actor-session", lane: "PRIVATE-ACTOR-LANE", now });
+	await a.call({ action: "ask", kind: "decision", title: "Select library", options: [{ key: "hidden-field", text: "Alpha" }] });
+	for (let i = 1; i <= 6; i++) await b.call({ action: "comment", id: "Q-1", text: `note number ${i}` });
+	await b.call({ action: "comment", id: "Q-1", text: `Long note\n${"details ".repeat(50)}clipped-tail` });
+	await b.type("private-input-prefix: Use Alpha.");
+	await b.call({ action: "record_answer", id: "Q-1", quote: "Use Alpha.", option: "hidden-field" });
+
+	const out = text(await a.call({ action: "get", id: "Q-1" }));
+	assert.match(out, /Answer .*Use Alpha\. \(by alice via quote in chat/);
+	const [, history] = out.split("\nHistory:\n");
+	assert.deepEqual(Array.from(history.matchAll(/^  #(\d+)/gm), match => Number(match[1])), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+	assert.match(history, /2026-05-01 10:00Z created by agent/);
+	for (let i = 1; i <= 6; i++) assert.ok(history.includes(`note number ${i}`));
+	assert.match(history, /comment by agent: Long note details[\s\S]*…/);
+	assert.match(history, /decided by user alice: Use Alpha\./);
+	assert.doesNotMatch(out, /private-actor-session|PRIVATE-ACTOR-LANE|private-input-prefix|clipped-tail/);
+	assert.doesNotMatch(history, /hidden-field/);
 });

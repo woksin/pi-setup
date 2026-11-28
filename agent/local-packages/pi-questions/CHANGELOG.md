@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- `user_questions list` and `/questions` show the last update, latest history event and a staleness hint for open items inactive for 7 days (`PI_QUESTIONS_STALE_DAYS` overrides the threshold).
+- `user_questions list` accepts `sort: "activity"` for newest activity first. The default priority groups are unchanged.
+- `user_questions get` shows the full history with clipped notes in text mode. Decision records and CLI output are unchanged.
+
 ## 0.2.1
 
 - Mutating actions (comment, update, withdraw, supersede, close, record_answer) return a one-line status instead of the full item.

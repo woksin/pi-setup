@@ -9,7 +9,7 @@ import * as actions from "./actions.ts";
 import { completeDecide, completeIds, completeQ, parseAnswer, parseClose, parseDecide, parseDefer, parseQ, parseQuestions } from "./commands.ts";
 import { Deliverer, pending, type Entry, type LiveSession } from "./delivery.ts";
 import { possibleDuplicates } from "./dedup.ts";
-import { renderCandidates, renderItem, statusLine, renderList, renderRecord, statusText, noticeText } from "./format.ts";
+import { newestActivityFirst, renderCandidates, renderItem, statusLine, renderList, renderRecord, statusText, noticeText } from "./format.ts";
 import { laneOf, liveness, orchHome, repoOf, userName } from "./identity.ts";
 import { laneWarnings } from "./lane-warnings.ts";
 import { clearLane, setLane } from "./lanes.ts";
@@ -82,8 +82,9 @@ const PARAMETERS = {
 		distinctFrom: { ...strList, description: "ask: ids of every duplicate candidate, to create anyway" },
 		status: { type: "string", enum: ["open", "answered", "decided", "deferred", "withdrawn", "superseded", "closed", "all"] },
 		repo: { type: "string", description: "Owner/Name" },
-		all: { type: "boolean", description: "list: every repo, with the asker lane on each item; get: show all comments" },
+		all: { type: "boolean", description: "list: every repo, with the asker lane on each item" },
 		mine: { type: "boolean", description: "list: only your own items" },
+		sort: { type: "string", enum: ["activity"], description: "list: newest activity first; omit for the default priority groups" },
 		query: str,
 		tag: str,
 		format: { type: "string", enum: ["text", "record"] },
@@ -114,6 +115,8 @@ export function createQuestionsExtension(opts: Options = {}) {
 		const env = opts.env ?? process.env;
 		const home = opts.home ?? resolveHome(env);
 		const clock = opts.now ?? Date.now;
+		const configuredStaleDays = Number(env.PI_QUESTIONS_STALE_DAYS);
+		const staleDays = Number.isSafeInteger(configuredStaleDays) && configuredStaleDays > 0 ? configuredStaleDays : 7;
 		const orch = orchHome(env);
 		const budgetDir = opts.budgetDir ?? join(env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "context-budget", "status");
 		const setIv = opts.setInterval ?? ((fn: () => void, ms: number) => {
@@ -349,12 +352,14 @@ export function createQuestionsExtension(opts: Options = {}) {
 						const status = params.status;
 						const { items, warnings } = listItems(home);
 						const picked = selectItems(items, { status, repo: params.repo, all: !!params.all, mine: !!params.mine, project: params.project }, me, now);
-						const out = renderList(picked, { now, showAsker: !!params.all, warnings, empty: "No matching items.", duplicates: possibleDuplicates(items) });
+						const byActivity = params.sort === "activity";
+						if (byActivity) picked.sort(newestActivityFirst);
+						const out = renderList(picked, { now, showAsker: !!params.all, warnings, empty: "No matching items.", duplicates: possibleDuplicates(items), staleDays, ungrouped: byActivity });
 						return text(out, { items: picked.map(compact), warnings });
 					}
 					case "get": {
 						const item = actions.getItem(home, need(params.id, "id"));
-						return text(params.format === "record" ? renderRecord(item) : renderItem(item, now, possibleDuplicates(listItems(home).items).get(item.id), !!params.all), { item });
+						return text(params.format === "record" ? renderRecord(item) : renderItem(item, now, possibleDuplicates(listItems(home).items).get(item.id), "compact"), { item });
 					}
 					case "search": {
 						const { items, warnings } = listItems(home);
@@ -436,7 +441,8 @@ export function createQuestionsExtension(opts: Options = {}) {
 		const listFor = (ctx: any, f: Parameters<typeof selectItems>[1], heading: string, showAsker = false) => {
 			const me = whoOf(identity(ctx));
 			const { items, warnings } = listItems(home);
-			notify(ctx, renderList(selectItems(items, f, me, clock()), { now: clock(), showAsker, warnings, heading, empty: "No matching items.", duplicates: possibleDuplicates(items) }));
+			const now = clock();
+			notify(ctx, renderList(selectItems(items, f, me, now), { now, showAsker, warnings, heading, empty: "No matching items.", duplicates: possibleDuplicates(items), staleDays }));
 		};
 
 		function setSessionLane(ctx: any, lane: string): void {
@@ -480,7 +486,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 				if (p.mode === "decided") return listFor(ctx, { status: "decided" }, "Decided");
 				if (p.mode === "repo") return listFor(ctx, { repo: me.repo ?? undefined, all: !me.repo }, `Open questions in ${me.repo ?? "any repo"}`);
 				const { items, warnings } = listItems(home);
-				notify(ctx, renderList(searchItems(items, { query: p.terms }), { now: clock(), showAsker: true, warnings, heading: `Search: ${p.terms}`, empty: "No matching items." }));
+				notify(ctx, renderList(searchItems(items, { query: p.terms }), { now: clock(), showAsker: true, warnings, heading: `Search: ${p.terms}`, empty: "No matching items.", staleDays }));
 			}),
 		});
 
