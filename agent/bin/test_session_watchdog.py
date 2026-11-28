@@ -2,6 +2,10 @@ import importlib.machinery, importlib.util, io, json, os, shutil, subprocess, te
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime, timezone
 from unittest.mock import patch
+from pathlib import Path
+
+from hold_register import Register
+from test_holds import hold_fixture
 
 P = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-watchdog")
 loader = importlib.machinery.SourceFileLoader("session_watchdog", P)
@@ -29,6 +33,9 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        env = patch.dict(os.environ, {"PI_CODING_AGENT_DIR": os.path.join(self.tmp.name, "agent")})
+        env.start()
+        self.addCleanup(env.stop)
         self.sessions = os.path.join(self.tmp.name, "sessions")
         self.msgs = os.path.join(self.tmp.name, "msgs")
         os.makedirs(self.msgs)
@@ -468,6 +475,18 @@ class Board(Base):
         self.run_wd(inject_ttys={100: "ttys001", 200: "ttys002"}, **kw)
         with open(os.path.join(sw.STATE_DIR, "board.json")) as f:
             return {r["pid"]: r for r in json.load(f)["sessions"]}
+
+    def test_active_holds_are_visible_without_live_sessions_and_disappear_after_lift(self):
+        with patch.dict(os.environ, hold_fixture(Path(self.tmp.name)), clear=True):
+            register = Register()
+            hold_id = register.add("L7", "Publish disabled", "server-upgraded", NOW, scheduler=lambda _: True)
+            with patch.dict(os.environ, {"LANES_DIR": self.tmp.name}):
+                for active in (True, False):
+                    self.assertEqual(self.board(procs={}), {})
+                    doc = json.loads(Path(sw.STATE_DIR, "board.json").read_text())
+                    self.assertEqual([h["id"] for h in doc["holds"]], [hold_id] if active else [])
+                    self.assertEqual(hold_id in Path(sw.STATE_DIR, "board.md").read_text(), active)
+                    register.lift(hold_id, NOW + 1)
 
     def test_idle_working_stuck_and_unmapped_rows(self):
         os.environ["LANE_STATUS_DIR"] = os.path.join(self.tmp.name, "lanes")

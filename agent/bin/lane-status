@@ -21,6 +21,8 @@ Exit: 0 ok, 1 negative answer (suppressed/get), 2 usage or I/O error.
 import argparse, os, re, sys, tempfile, time
 from datetime import datetime, timezone
 
+from hold_register import lane_root, summaries, summary_line
+
 LANE_RE = re.compile(r"^[A-Z][A-Z0-9-]{0,15}$")
 LINE_RE = re.compile(r'^(waiting-on|barred-by|parked) "(.*)" until (\S+)$')
 
@@ -151,12 +153,21 @@ def cmd_list(a, now):
     try:
         names = sorted(os.listdir(d))
     except FileNotFoundError:
-        return 0
+        names = []
     for n in names:
         if n.endswith(".status") and LANE_RE.fullmatch(n[:-7]):
             line = read_line(n[:-7])
             if line is not None:
                 print(f"{n[:-7]}: {line}" + (" (expired)" if is_expired(line, now) else ""))
+    root = lane_root()
+    if root is not None:
+        active, unavailable = summaries(root=root, now=now)
+        if active or unavailable:
+            print("Active holds:")
+            for hold in active:
+                print(summary_line(hold))
+            if unavailable:
+                raise Err("hold register unavailable or incomplete")
     return 0
 
 

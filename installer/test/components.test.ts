@@ -2,8 +2,10 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { parseArgs } from "../src/args.ts";
+import { planServices } from "../src/services.ts";
 import { available, detectDefaults, dropExtensions, dropGuardExtension, resolveComponents, stripSections } from "../src/components.ts";
 
 const roots: string[] = [];
@@ -13,7 +15,7 @@ const tmp = () => {
   roots.push(d);
   return d;
 };
-const none = { "docker-guardian": false, cleanup: false, "secret-sweep": false, "disk-growth": false, codescene: false, cratis: false, web: false, lanes: false };
+const none = { "docker-guardian": false, cleanup: false, "secret-sweep": false, "disk-growth": false, holds: false, codescene: false, cratis: false, web: false, lanes: false };
 
 test("precedence: flag > answer > saved > installed > detected", () => {
   const r = resolveComponents({
@@ -89,4 +91,25 @@ test("--with and --without parse for install, validate ids and reject both at on
   assert.ok(!bad.ok && bad.error.includes("docker-guardian"));
   assert.ok(!parseArgs(["--with", "web", "--without", "web"], "/w").ok);
   assert.ok(!parseArgs(["uninstall", "--with", "web"], "/w").ok);
+});
+
+test("holds only installs its five-minute user agent on macOS with opt-in", () => {
+  const home = tmp();
+  const ctx = { home, env: { USER: "operator" }, repoDir: fileURLToPath(new URL("../../", import.meta.url)),
+    platform: "darwin" as const, which: () => undefined };
+  assert.equal(detectDefaults(ctx, { github: { orgs: [] } as never }, home).holds, false);
+  for (const [platform, on] of [["darwin", false], ["linux", true]] as const) {
+    const plan = planServices({ ...ctx, platform }, undefined, { holds: on });
+    assert.deepEqual(plan.actions, []);
+    assert.deepEqual(plan.records.holds, { on: false });
+  }
+  const plan = planServices(ctx, undefined, { holds: true });
+  const action = plan.actions[0];
+  assert.equal(plan.actions.length, 1);
+  assert.equal(plan.records.holds.service?.label, "com.operator.holds");
+  assert.ok(action.op === "install");
+  assert.ok(action.content.toString().includes(`<string>${home}/.pi/agent/bin/holds</string>`));
+  assert.match(action.content.toString(), /<string>sweep<\/string>/);
+  assert.match(action.content.toString(), /<key>StartInterval<\/key><integer>300<\/integer>/);
+  assert.match(action.content.toString(), /<key>RunAtLoad<\/key><true\/>/);
 });

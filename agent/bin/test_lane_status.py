@@ -1,4 +1,9 @@
 import contextlib, importlib.machinery, importlib.util, io, os, tempfile, time, unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from hold_register import Register
+from test_holds import hold_fixture
 
 P = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lane-status")
 loader = importlib.machinery.SourceFileLoader("lane_status", P)
@@ -15,7 +20,7 @@ class T(unittest.TestCase):
         self.inbox = os.path.join(self.tmp.name, "inbox")
         os.makedirs(self.inbox)
         self.sd = os.path.join(self.tmp.name, "st")
-        env = {"LANE_STATUS_DIR": self.sd, "INBOX_DIR": self.inbox}
+        env = {"LANE_STATUS_DIR": self.sd, "INBOX_DIR": self.inbox, "PI_CODING_AGENT_DIR": os.path.join(self.tmp.name, "agent")}
         old = {k: os.environ.get(k) for k in env}
         os.environ.update(env)
         self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v) for k, v in old.items()])
@@ -36,6 +41,21 @@ class T(unittest.TestCase):
         self.assertEqual(ls.status_dir(), os.path.join(self.inbox, "status"))
         del os.environ["INBOX_DIR"]
         self.assertTrue(ls.status_dir().endswith(".pi/agent/lane-status"))
+
+    def test_active_holds_append_only_for_this_root_without_a_status_file(self):
+        with patch.dict(os.environ, hold_fixture(Path(self.tmp.name)), clear=True):
+            register = Register()
+            hold_id = register.add("L7", "Publish disabled", "server-upgraded", NOW, scheduler=lambda _: True)
+            rc, output, _ = self.run_ls("list")
+            self.assertEqual(rc, 0)
+            self.assertIn(hold_id, output)
+            self.assertIn("unchecked", output)
+            self.assertEqual(self.run_ls("get", "L7")[:2], (1, ""))
+            self.assertEqual(self.run_ls("suppressed", "L7")[:2], (1, ""))
+            with patch.dict(os.environ, {"LANES_DIR": self.tmp.name}):
+                self.assertEqual(self.run_ls("list")[:2], (0, ""))
+            register.lift(hold_id, NOW + 1)
+            self.assertEqual(self.run_ls("list")[:2], (0, ""))
 
     def test_set_get_clear_suppressed(self):
         rc, out, _ = self.run_ls("set", "A1", "waiting-on", "PR #5", "--until", "+90m")
