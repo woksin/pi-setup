@@ -137,18 +137,34 @@ async function leaseInventory(ctx: LanesCtx, entries: LeaseEntry[]): Promise<Adm
     throw error;
   }
 }
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const two = (n: number) => String(n).padStart(2, "0");
+/** A v1 C-locale lstart written in this host's local timezone, re-expressed as the v2 UTC/C lstart. */
+export function legacyStartUtc(start: string): string | undefined {
+  if (!/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(start)) return undefined;
+  const d = new Date(start);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
+}
+/** v1 leases recorded local time. A live PID whose start matches either as recorded or converted to UTC is the
+ * same process (normalised in memory); any other differing start stays uncertain and is never reclaimed. */
 function checkLegacyStart({ file, lease }: LeaseEntry, rows: AdmissionProcess[]): void {
   if (lease.version !== 1) return;
   for (const id of [lease.owner, lease.child]) {
-    if (id && rows.some(row => row.pid === id.pid && row.start !== id.start)) {
+    const row = id && rows.find(r => r.pid === id.pid);
+    if (!id || !row || row.start === id.start) continue;
+    if (legacyStartUtc(id.start) !== row.start) {
       throw uncertainLease(file, `start time differs for pid ${id.pid} in a legacy lease without a known timezone or locale`);
     }
+    id.start = row.start;
   }
+  for (const prior of lease.priorPi ?? []) prior.start = legacyStartUtc(prior.start) ?? prior.start;
 }
 function leases(entries: LeaseEntry[], rows: AdmissionProcess[]): Lease[] {
   const all = entries.map(e => e.lease);
+  for (const entry of entries) checkLegacyStart(entry, rows);
   return entries.flatMap(entry => {
-    checkLegacyStart(entry, rows);
     const { file, lease } = entry;
     if (alive(lease.owner, rows)) return [lease];
     if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
