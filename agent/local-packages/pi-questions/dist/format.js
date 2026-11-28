@@ -52,7 +52,23 @@ export function ageOf(iso        , now        )         {
 
 export const askerName = (item      ) => item.asker.lane ?? item.asker.sessionId.slice(0, 8);
 
-function itemLines(item      , now        , showAsker         )           {
+const utcMinute = (iso        ) => `${iso.slice(0, 16).replace("T", " ")}Z`;
+const historyActor = ({ actor }              ) => actor.name ? `${actor.kind} ${actor.name}` : actor.kind;
+const activityAt = (item      ) => item.history.at(-1)?.at ?? item.updatedAt;
+
+export function newestActivityFirst(a      , b      )         {
+	return Date.parse(activityAt(b)) - Date.parse(activityAt(a));
+}
+
+function activityMeta(item      , now        , staleDays        )           {
+	const latest = item.history.at(-1);
+	const meta = [`updated ${utcMinute(item.updatedAt)}`];
+	if (latest) meta.push(`${latest.type} by ${historyActor(latest)} (${ageOf(latest.at, now)} ago)`);
+	if (item.status === "open" && now - Date.parse(activityAt(item)) >= staleDays * 86_400_000) meta.push("stale");
+	return meta;
+}
+
+function itemLines(item      , now        , showAsker         , staleDays         )           {
 	const head = `${item.id} [${item.kind}] ${item.title}`;
 	const meta = [item.status === "deferred" && item.deferredUntil ? `deferred until ${item.deferredUntil.slice(0, 10)}` : item.status, item.urgency];
 	meta.push(item.repo ?? "global");
@@ -60,15 +76,12 @@ function itemLines(item      , now        , showAsker         )           {
 	if (showAsker) meta.push(`asker ${askerName(item)}`);
 	if (item.for?.length) meta.push(`for ${item.for.join(", ")}`);
 	meta.push(ageOf(item.createdAt, now));
+	if (staleDays !== undefined) meta.push(...activityMeta(item, now, staleDays));
 	if (item.blocking) meta.push(`blocks: ${item.blocking}`);
 	return [...wrap(head, WIDTH, "      "), ...wrap(`    ${meta.join(", ")}`, WIDTH, "      ")];
 }
 
-/** Items grouped as Blocking, High, Normal, Low; within a group by repo, then id. */
-export function renderList(items        , opts                                                                                                                               )         {
-	const lines           = [];
-	if (opts.heading) lines.push(...wrap(opts.heading));
-	if (!items.length) lines.push(opts.empty ?? "No items.");
+function priorityGroups(items        )                     {
 	const groups                                   = [
 		["Blocking", i => !!i.blocking],
 		["High", i => !i.blocking && i.urgency === "high"],
@@ -76,15 +89,25 @@ export function renderList(items        , opts                                  
 		["Low", i => !i.blocking && i.urgency === "low"],
 	];
 	const num = (i      ) => Number(i.id.slice(2));
-	for (const [name, pick] of groups) {
-		const group = items.filter(pick).sort((a, b) => (a.repo ?? "").localeCompare(b.repo ?? "") || num(a) - num(b));
-		if (!group.length) continue;
-		lines.push(`${name} (${group.length})`);
-		for (const item of group) {
-			lines.push(...itemLines(item, opts.now, !!opts.showAsker));
-			const dup = opts.duplicates?.get(item.id);
-			if (dup) lines.push(`      possible duplicate of ${dup}`);
-		}
+	return groups.map(([name, pick]) => [name, items.filter(pick).sort((a, b) => (a.repo ?? "").localeCompare(b.repo ?? "") || num(a) - num(b))]);
+}
+
+function listItemLines(item      , opts                                  )           {
+	const lines = itemLines(item, opts.now, !!opts.showAsker, opts.staleDays);
+	const dup = opts.duplicates?.get(item.id);
+	if (dup) lines.push(`      possible duplicate of ${dup}`);
+	return lines;
+}
+
+/** Items grouped as Blocking, High, Normal, Low, then by repo and id; ungrouped keeps input order. */
+export function renderList(items        , opts                                                                                                                                                                        )         {
+	const lines           = [];
+	if (opts.heading) lines.push(...wrap(opts.heading));
+	if (!items.length) lines.push(opts.empty ?? "No items.");
+	const groups = opts.ungrouped ? [["", items]         ] : priorityGroups(items);
+	for (const [name, group] of groups) {
+		if (name && group.length) lines.push(`${name} (${group.length})`);
+		for (const item of group) lines.push(...listItemLines(item, opts));
 	}
 	for (const w of opts.warnings ?? []) lines.push(...wrap(`warning: ${w}`));
 	return plain(lines);
@@ -128,20 +151,24 @@ export function renderItem(item      , now        , duplicateOf         , allCom
 	}
 	const a = answerLine(item);
 	if (a) lines.push("", ...wrap(a, WIDTH, "  "));
-	lines.push("", "History:");
-	const comments = item.history.filter(h => h.type === "comment");
+	return plain(lines.concat("", "History:", historyLines(item.history, allComments)).flatMap(l => fit(l)));
+}
+
+function historyLines(history                , allComments         )           {
+	const lines           = [];
+	const comments = history.filter(h => h.type === "comment");
 	const hidden = allComments ? 0 : Math.max(0, comments.length - SHOWN_COMMENTS);
 	const skip = new Set(comments.slice(0, hidden));
 	let noted = false;
-	for (const h of item.history) {
+	for (const h of history) {
 		if (skip.has(h)) {
 			if (!noted) lines.push(`  … ${hidden} earlier comment${hidden === 1 ? "" : "s"} (get with all: true)`);
 			noted = true;
 			continue;
 		}
-		lines.push(...wrap(`  #${h.seq} ${h.at.slice(0, 16)} ${h.actor.kind}${h.actor.name ? ` ${h.actor.name}` : ""} ${h.type}${h.text ? `: ${h.text}` : ""}`, WIDTH, "      "));
+		lines.push(...wrap(`  #${h.seq} ${h.at.slice(0, 16)} ${historyActor(h)} ${h.type}${h.text ? `: ${h.text}` : ""}`, WIDTH, "      "));
 	}
-	return plain(lines.flatMap(l => fit(l)));
+	return lines;
 }
 
 function researchSections(item      )           {
