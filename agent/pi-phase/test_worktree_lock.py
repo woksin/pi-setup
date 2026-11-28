@@ -186,16 +186,21 @@ class WorktreeLockTests(Harness):
     def test_missing_worktree_lease_recovery_requires_dead_holder_and_empty_groups(self):
         dead = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
         dead.wait(timeout=3)
-        cases = (("dead", dead.pid, dead.pid, True),
-                 ("holder-alive", os.getpid(), dead.pid, False),
-                 ("group-alive", dead.pid, os.getpgrp(), False))
+        month_ago = time.time() - 30 * 86400
+        # (case, holder pid, nested pgid, recovered, acquired): a live pid that started after the lease was acquired is a reused pid.
+        cases = (("dead", dead.pid, dead.pid, True, None),
+                 ("holder-alive", os.getpid(), dead.pid, False, None),
+                 ("holder-alive-since-acquired", os.getpid(), dead.pid, False, time.time() + 60),
+                 ("pid-reused", os.getpid(), dead.pid, True, month_ago),
+                 ("group-alive", dead.pid, os.getpgrp(), False, None))
         for action in ("status", "claim"):
-            for case, pid, pgid, recovered in cases:
+            for case, pid, pgid, recovered, acquired in cases:
                 with self.subTest(action=action, case=case):
                     root = os.path.realpath(self.root / f"{action}-{case}")
                     path, info, key = pi_phase.worktree_paths(self.state, root)
                     path.touch()
-                    pi_phase.save(info, dict(token="old", pid=pid, pgid=dead.pid, root=root))
+                    pi_phase.save(info, dict(token="old", pid=pid, pgid=dead.pid, root=root,
+                                             **({} if acquired is None else {"acquired": acquired})))
                     guard = path.with_suffix(".groups") / "nested.json"
                     guard.parent.mkdir()
                     pi_phase.save(guard, dict(token="old", pgid=pgid))

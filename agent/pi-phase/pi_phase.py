@@ -3086,6 +3086,19 @@ def worktree_groups_alive(path, info, deadline=None):
     return live is None or bool(pgids & live)
 
 
+def process_started_after(pid, moment, timeout=2):
+    """True only when ps proves the live process started after `moment` (a reused pid). Unknown is False."""
+    if type(moment) not in (int, float):
+        return False
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=timeout, check=True, env=dict(os.environ, LC_ALL="C")).stdout.strip()
+        started = time.mktime(time.strptime(" ".join(out.split()), "%a %b %d %H:%M:%S %Y"))
+    except (OSError, ValueError, OverflowError, subprocess.SubprocessError):
+        return False
+    return started > moment + 2  # lstart has one-second resolution.
+
+
 def worktree_lease_alive(path, info, deadline=None):
     pid = info.get("pid")
     if not info.get("retired") and type(pid) is int and pid > 0:
@@ -3096,7 +3109,8 @@ def worktree_lease_alive(path, info, deadline=None):
         except (OSError, OverflowError):
             return True  # Permission denied or an indeterminate probe is not proof of death.
         else:
-            return True
+            if not process_started_after(pid, info.get("acquired")):
+                return True
     return worktree_groups_alive(path, info, deadline)
 
 
