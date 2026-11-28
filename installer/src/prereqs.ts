@@ -46,6 +46,8 @@ export interface Step {
   sudo: boolean;
   /** Changes the system outside the user's home. */
   system: boolean;
+  /** Effective npm global prefix of the pi runtime install, if this step installs pi. */
+  piPrefix?: string;
 }
 
 export const isRequired = (tool: string): boolean => TOOLS.find((t) => t.tool === tool)?.required ?? false;
@@ -155,8 +157,10 @@ export async function piStep(ctx: Ctx, probeVersion = true): Promise<PiPlan> {
     if (compareVersions(have, pin.min) >= 0) return {};
   }
   const prefix = await ctx.run("npm", ["prefix", "-g"], { timeoutMs: 8000 });
-  const argv = piArgv(ctx, range, prefix.code === 0 ? prefix.stdout.trim() || undefined : undefined);
-  return { step: { id: "pi", label: "Install pi", argv, sudo: false, system: false } };
+  const globalPrefix = prefix.code === 0 ? prefix.stdout.trim() || undefined : undefined;
+  const argv = piArgv(ctx, range, globalPrefix);
+  const piPrefix = argv.includes("--prefix") ? join(ctx.home, ".local") : globalPrefix;
+  return { step: { id: "pi", label: "Install pi", argv, sudo: false, system: false, piPrefix } };
 }
 
 /** One copy-pasteable command (or a link) that installs `tool` here. Used by doctor and error messages. */

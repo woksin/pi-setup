@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 66c11cd34d26bdcbcb39d11ebdeb719ccffc56da07ceab3850263d9390082c38
+// pi-setup-source-sha256: bec2c9590310de4d661565690c4e633db6a892de83bea026618bf3e75a455f4c
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -2641,8 +2641,8 @@ function invalidRequest(args, lane, opts) {
   return Boolean(opts.clear) === Boolean(opts.until);
 }
 function until(value, ctx) {
-  const relative10 = /^\+(\d+)m$/.exec(value);
-  return relative10 ? ctx.now().getTime() + Number(relative10[1]) * 6e4 : Date.parse(value);
+  const relative11 = /^\+(\d+)m$/.exec(value);
+  return relative11 ? ctx.now().getTime() + Number(relative11[1]) * 6e4 : Date.parse(value);
 }
 function clear(path2) {
   try {
@@ -4755,18 +4755,28 @@ async function leaseInventory(ctx, entries) {
     throw error;
   }
 }
+function legacyStartUtc(start2) {
+  if (!/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(start2)) return void 0;
+  const d = new Date(start2);
+  if (Number.isNaN(d.getTime())) return void 0;
+  return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
+}
 function checkLegacyStart({ file, lease }, rows) {
   if (lease.version !== 1) return;
   for (const id of [lease.owner, lease.child]) {
-    if (id && rows.some((row) => row.pid === id.pid && row.start !== id.start)) {
+    const row = id && rows.find((r2) => r2.pid === id.pid);
+    if (!id || !row || row.start === id.start) continue;
+    if (legacyStartUtc(id.start) !== row.start) {
       throw uncertainLease(file, `start time differs for pid ${id.pid} in a legacy lease without a known timezone or locale`);
     }
+    id.start = row.start;
   }
+  for (const prior of lease.priorPi ?? []) prior.start = legacyStartUtc(prior.start) ?? prior.start;
 }
 function leases(entries, rows) {
   const all = entries.map((e) => e.lease);
+  for (const entry2 of entries) checkLegacyStart(entry2, rows);
   return entries.flatMap((entry2) => {
-    checkLegacyStart(entry2, rows);
     const { file, lease } = entry2;
     if (alive2(lease.owner, rows)) return [lease];
     if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
@@ -4828,7 +4838,7 @@ async function admit(ctx, request2, beforeLaunch) {
     }
   };
 }
-var StartUnavailable, pause;
+var StartUnavailable, pause, DAYS, MONTHS, two;
 var init_admission = __esm({
   "src/lanes/admission.ts"() {
     StartUnavailable = class extends Error {
@@ -4839,6 +4849,9 @@ var init_admission = __esm({
       }
     };
     pause = (ms) => new Promise((done) => setTimeout(done, ms));
+    DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    two = (n3) => String(n3).padStart(2, "0");
   }
 });
 
@@ -6990,8 +7003,8 @@ var init_backups = __esm({
       /** Copy abs into this run's folder; returns the path relative to .pi-setup/backups/. */
       backup(abs) {
         const run2 = this.runDir();
-        const inside = abs.startsWith(`${this.piDir}/`);
-        const rel = inside ? relative9(this.piDir, abs) : `_home/${relative9(this.home, abs)}`;
+        const inside2 = abs.startsWith(`${this.piDir}/`);
+        const rel = inside2 ? relative9(this.piDir, abs) : `_home/${relative9(this.home, abs)}`;
         const target = join50(run2, rel);
         if (!existsSync26(target)) {
           mkdirSync16(dirname12(target), { recursive: true });
@@ -7399,8 +7412,10 @@ ${out.stderr}`);
     if (compareVersions(have, pin.min) >= 0) return {};
   }
   const prefix = await ctx.run("npm", ["prefix", "-g"], { timeoutMs: 8e3 });
-  const argv = piArgv(ctx, range, prefix.code === 0 ? prefix.stdout.trim() || void 0 : void 0);
-  return { step: { id: "pi", label: "Install pi", argv, sudo: false, system: false } };
+  const globalPrefix = prefix.code === 0 ? prefix.stdout.trim() || void 0 : void 0;
+  const argv = piArgv(ctx, range, globalPrefix);
+  const piPrefix = argv.includes("--prefix") ? join52(ctx.home, ".local") : globalPrefix;
+  return { step: { id: "pi", label: "Install pi", argv, sudo: false, system: false, piPrefix } };
 }
 function installCommand(ctx, tool) {
   const range = piMinimum(ctx.repoDir)?.range ?? "latest";
@@ -8591,9 +8606,126 @@ var init_doctor_probes = __esm({
   }
 });
 
+// src/pi-chunks.ts
+import { constants as constants4, copyFileSync as copyFileSync5, mkdtempSync, readdirSync as readdirSync24, realpathSync as realpathSync5, rmSync as rmSync2, statSync as statSync21, utimesSync as utimesSync4 } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute as isAbsolute7, join as join61, relative as relative10, sep as sep3 } from "node:path";
+function chunkDir(prefix, packagePath) {
+  const pkg = realpathSync5(packagePath);
+  if (!inside(prefix, pkg)) throw new Error("pi package resolves outside the npm global prefix");
+  const chunks = realpathSync5(join61(pkg, "dist/bundle/chunks"));
+  if (!inside(pkg, chunks)) throw new Error("pi chunks resolve outside the pi package");
+  return chunks;
+}
+async function npmGlobalModules(ctx, prefix) {
+  const result3 = await ctx.run("npm", ["root", "-g", "--prefix", prefix], { timeoutMs: 8e3 });
+  const modules = result3.stdout.trim();
+  if (result3.code !== 0 || result3.timedOut || !isAbsolute7(modules)) throw new Error("could not resolve npm's global package directory");
+  return modules;
+}
+async function locateOldChunks(ctx, prefix) {
+  if (!isAbsolute7(prefix)) throw new Error("npm global prefix is not absolute");
+  try {
+    const resolvedPrefix = realpathSync5(prefix);
+    const packagePath = join61(await npmGlobalModules(ctx, prefix), PI_PACKAGE);
+    return { resolvedPrefix, packagePath, dir: chunkDir(resolvedPrefix, packagePath) };
+  } catch (error) {
+    if (errorCode2(error) !== "ENOENT") throw error;
+    return void 0;
+  }
+}
+function snapshotChunks(dir, temp) {
+  const files2 = [];
+  for (const entry2 of readdirSync24(dir, { withFileTypes: true })) {
+    if (!entry2.isFile() || !entry2.name.endsWith(".js")) continue;
+    const source = join61(dir, entry2.name);
+    const { mtimeMs } = statSync21(source);
+    copyFileSync5(source, join61(temp, entry2.name));
+    files2.push({ name: entry2.name, mtimeMs });
+  }
+  return files2;
+}
+function warn(ctx, action, error) {
+  const message = `warning: could not ${action} pi bundle chunks: ${error instanceof Error ? error.message : String(error)}`;
+  ctx.err(message);
+  appendLog(ctx, `${message}
+`);
+}
+function restoreChunks(ctx, dir, temp, files2) {
+  const cutoff = ctx.now().getTime() - MAX_AGE_MS;
+  let preserved = 0;
+  try {
+    for (const { name, mtimeMs } of files2) {
+      if (mtimeMs < cutoff) continue;
+      const dest = join61(dir, name);
+      try {
+        copyFileSync5(join61(temp, name), dest, constants4.COPYFILE_EXCL);
+      } catch (error) {
+        if (errorCode2(error) === "EEXIST") continue;
+        throw error;
+      }
+      preserved++;
+      utimesSync4(dest, mtimeMs / 1e3, mtimeMs / 1e3);
+    }
+  } finally {
+    appendLog(ctx, `[pi-chunks preserved=${preserved}]
+`);
+  }
+}
+function removeSnapshot(ctx, temp) {
+  try {
+    rmSync2(temp, { recursive: true, force: true });
+  } catch (error) {
+    warn(ctx, "remove the snapshot of", error);
+  }
+}
+async function takeSnapshot(ctx, prefix) {
+  let temp;
+  try {
+    const old = await locateOldChunks(ctx, prefix);
+    if (!old) return void 0;
+    temp = mkdtempSync(join61(tmpdir(), "pi-setup-chunks-"));
+    return { ...old, temp, files: snapshotChunks(old.dir, temp) };
+  } catch (error) {
+    warn(ctx, "snapshot", error);
+    if (temp) removeSnapshot(ctx, temp);
+    return void 0;
+  }
+}
+async function installWithPiChunks(ctx, prefix, install) {
+  const old = await takeSnapshot(ctx, prefix);
+  if (!old) return install();
+  try {
+    const result3 = await install();
+    if (result3.code === 0 && !result3.timedOut) {
+      try {
+        restoreChunks(ctx, chunkDir(old.resolvedPrefix, old.packagePath), old.temp, old.files);
+      } catch (error) {
+        warn(ctx, "restore", error);
+      }
+    }
+    return result3;
+  } finally {
+    removeSnapshot(ctx, old.temp);
+  }
+}
+var MAX_AGE_MS, errorCode2, inside;
+var init_pi_chunks = __esm({
+  "src/pi-chunks.ts"() {
+    init_install_log();
+    init_prereqs();
+    MAX_AGE_MS = 30 * 24 * 60 * 60 * 1e3;
+    errorCode2 = (error) => error?.code;
+    inside = (parent, child) => {
+      const rel = relative10(parent, child);
+      return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep3}`) && !isAbsolute7(rel);
+    };
+  }
+});
+
 // src/prereqs-run.ts
-import { mkdirSync as mkdirSync19, readFileSync as readFileSync34, rmSync as rmSync2, writeFileSync as writeFileSync13 } from "node:fs";
-import { dirname as dirname16, join as join61 } from "node:path";
+import { mkdirSync as mkdirSync19, readFileSync as readFileSync34, rmSync as rmSync3, writeFileSync as writeFileSync13 } from "node:fs";
+import { dirname as dirname16, join as join62 } from "node:path";
 function consentFor(options, interactive, fresh3) {
   if (options.skipNpm || options.installPrereqs === false) return "no";
   if (options.installPrereqs === true) return "yes";
@@ -8603,7 +8735,7 @@ function consentFor(options, interactive, fresh3) {
 function record2(ctx, failed) {
   try {
     if (!failed) {
-      rmSync2(statePath(ctx), { force: true });
+      rmSync3(statePath(ctx), { force: true });
       return;
     }
     mkdirSync19(dirname16(statePath(ctx)), { recursive: true });
@@ -8669,10 +8801,14 @@ async function runStep(ctx, step, nonInteractive) {
   appendLog(ctx, `
 $ ${command}
 `);
-  const r2 = await ctx.run(step.argv[0], step.argv.slice(1), { timeoutMs: 18e5, inherit: step.sudo && !nonInteractive });
-  appendLog(ctx, `${r2.stdout}${r2.stderr}
-[exit ${r2.code}]
+  const run2 = async () => {
+    const result3 = await ctx.run(step.argv[0], step.argv.slice(1), { timeoutMs: 18e5, inherit: step.sudo && !nonInteractive });
+    appendLog(ctx, `${result3.stdout}${result3.stderr}
+[exit ${result3.code}]
 `);
+    return result3;
+  };
+  const r2 = await (step.piPrefix ? installWithPiChunks(ctx, step.piPrefix, run2) : run2());
   if (r2.code === 0 && !r2.timedOut) {
     ctx.out(`\u2713 ${step.label}`);
     return;
@@ -8746,51 +8882,52 @@ var init_prereqs_run = __esm({
   "src/prereqs-run.ts"() {
     init_install_log();
     init_prereqs();
+    init_pi_chunks();
     init_doctor_checks();
     init_types();
     init_install_log();
-    statePath = (ctx) => join61(ctx.home, ".local/state/pi-setup/bootstrap.json");
+    statePath = (ctx) => join62(ctx.home, ".local/state/pi-setup/bootstrap.json");
     minutes = (steps) => steps.some((s) => s.system) ? "about 2-5 minutes" : "about a minute";
   }
 });
 
 // src/services.ts
-import { existsSync as existsSync35, mkdirSync as mkdirSync20, readFileSync as readFileSync35, statSync as statSync21 } from "node:fs";
-import { join as join62, resolve as resolve15 } from "node:path";
+import { existsSync as existsSync35, mkdirSync as mkdirSync20, readFileSync as readFileSync35, statSync as statSync22 } from "node:fs";
+import { join as join63, resolve as resolve15 } from "node:path";
 import { userInfo } from "node:os";
 function serviceUser(env) {
   return (env.USER ?? "").replace(/[^A-Za-z0-9-]/g, "") || "pi-setup";
 }
 function systemdUnits(home) {
-  const dir = join62(home, ".config/systemd/user");
+  const dir = join63(home, ".config/systemd/user");
   return [
     {
-      path: join62(dir, "pi-cleanup.service"),
+      path: join63(dir, "pi-cleanup.service"),
       content: Buffer.from(
         "[Unit]\nDescription=pi-setup scheduled cleanup\n\n[Service]\nType=oneshot\nEnvironment=PYTHONDONTWRITEBYTECODE=1\nExecStart=%h/.pi/agent/bin/pi-cleanup --scheduled\n"
       )
     },
     {
-      path: join62(dir, TIMER),
+      path: join63(dir, TIMER),
       content: Buffer.from("[Unit]\nDescription=pi-setup scheduled cleanup (daily)\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
     }
   ];
 }
 function launchdUnit(ctx, id) {
   const name = LAUNCHD_NAME[id];
-  const src = join62(ctx.repoDir, "agent", "launchd", `com.example.${name}.plist`);
+  const src = join63(ctx.repoDir, "agent", "launchd", `com.example.${name}.plist`);
   if (!name || !existsSync35(src)) return void 0;
   const user = serviceUser(ctx.env);
   const text4 = readFileSync35(src, "utf8").split("__HOME__").join(xml(ctx.home)).split("com.example.").join(`com.${user}.`);
-  return { unit: { path: join62(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text4) }, label: `com.${user}.${name}` };
+  return { unit: { path: join63(ctx.home, "Library/LaunchAgents", `com.${user}.${name}.plist`), content: Buffer.from(text4) }, label: `com.${user}.${name}` };
 }
 function expectedUnit(ctx, id) {
   if (ctx.platform === "darwin") {
     const name = LAUNCHD_NAME[id];
     const label = `com.${serviceUser(ctx.env)}.${name}`;
-    return name ? { kind: "launchd", label, file: join62(ctx.home, "Library/LaunchAgents", `${label}.plist`) } : void 0;
+    return name ? { kind: "launchd", label, file: join63(ctx.home, "Library/LaunchAgents", `${label}.plist`) } : void 0;
   }
-  return id === "cleanup" ? { kind: "systemd", label: TIMER, file: join62(ctx.home, ".config/systemd/user", TIMER) } : void 0;
+  return id === "cleanup" ? { kind: "systemd", label: TIMER, file: join63(ctx.home, ".config/systemd/user", TIMER) } : void 0;
 }
 function planServices(ctx, manifest, on) {
   const out = { actions: [], records: {}, notes: [] };
@@ -8821,7 +8958,7 @@ function planServices(ctx, manifest, on) {
     const actions = [];
     for (const u3 of units) {
       const rel = homeRel(ctx.home, u3.path);
-      const there = existsSync35(u3.path) && statSync21(u3.path).isFile();
+      const there = existsSync35(u3.path) && statSync22(u3.path).isFile();
       if (!there) actions.push({ op: "install", path: u3.path, content: u3.content, mode: 420, existed: false, decision: "new" });
       else if (readFileSync35(u3.path).equals(u3.content)) actions.push({ op: "adopt", path: u3.path });
       else if (manifest?.files[rel] && fileSha(u3.path) === manifest.files[rel].sha256) {
@@ -8858,7 +8995,7 @@ async function syncServices(ctx, components, changed, dryRun) {
   for (const [id, c2] of Object.entries(components)) {
     const svc = c2.service;
     if (!c2.on || !svc?.managed) continue;
-    const plist = join62(ctx.home, svc.files[0]);
+    const plist = join63(ctx.home, svc.files[0]);
     const domain = `gui/${uid()}`;
     if (svc.kind === "launchd") {
       if (skipLaunchd(ctx)) continue;
@@ -8866,9 +9003,9 @@ async function syncServices(ctx, components, changed, dryRun) {
         ctx.out(`would load ${svc.label} (launchctl bootstrap ${domain} ${plist})`);
         continue;
       }
-      mkdirSync20(join62(ctx.home, ".pi/agent/logs"), { recursive: true });
+      mkdirSync20(join63(ctx.home, ".pi/agent/logs"), { recursive: true });
       const loaded = (await sh(ctx, "launchctl", ["print", `${domain}/${svc.label}`])).ok;
-      if (loaded && !svc.files.some((f) => changed.has(join62(ctx.home, f)))) continue;
+      if (loaded && !svc.files.some((f) => changed.has(join63(ctx.home, f)))) continue;
       if (loaded) await sh(ctx, "launchctl", ["bootout", `${domain}/${svc.label}`]);
       const r2 = await sh(ctx, "launchctl", ["bootstrap", domain, plist]);
       if (!r2.ok) ctx.err(`warning: could not load ${id}: launchctl bootstrap ${domain} ${plist}`);
@@ -8927,8 +9064,8 @@ var init_services = __esm({
 });
 
 // src/doctor-components.ts
-import { existsSync as existsSync36, lstatSync as lstatSync11, readlinkSync as readlinkSync4, statSync as statSync22 } from "node:fs";
-import { join as join63 } from "node:path";
+import { existsSync as existsSync36, lstatSync as lstatSync11, readlinkSync as readlinkSync4, statSync as statSync23 } from "node:fs";
+import { join as join64 } from "node:path";
 async function isLoaded(ctx, kind, label) {
   try {
     const r2 = kind === "launchd" ? await ctx.run("launchctl", ["print", `gui/${uid()}/${label}`], { timeoutMs: 5e3 }) : await ctx.run("systemctl", ["--user", "is-active", label], { timeoutMs: 5e3 });
@@ -8938,8 +9075,8 @@ async function isLoaded(ctx, kind, label) {
   }
 }
 function lanesChecks(ctx) {
-  const bin = join63(ctx.home, ".local/bin/lanes");
-  const target = join63(ctx.home, ".local/share/pi-setup/lanes/lanes.mjs");
+  const bin = join64(ctx.home, ".local/bin/lanes");
+  const target = join64(ctx.home, ".local/share/pi-setup/lanes/lanes.mjs");
   let linked = false;
   let present2 = false;
   try {
@@ -8966,7 +9103,7 @@ function lanesChecks(ctx) {
   }
   let installedPreapproval = false;
   try {
-    installedPreapproval = preapprovalDefault(join63(ctx.home, ".local/share/pi-setup/lanes/templates"));
+    installedPreapproval = preapprovalDefault(join64(ctx.home, ".local/share/pi-setup/lanes/templates"));
   } catch (e) {
     configError ||= e.message;
   }
@@ -8976,7 +9113,7 @@ function lanesChecks(ctx) {
     check2("lanes", good ? "ok" : "warn", good ? "lanes is installed" : "lanes link or bundle is missing or points elsewhere", fix),
     check2("lanes-git", ctx.which("git") ? "ok" : "warn", ctx.which("git") ? "git is on PATH" : "git is missing", ctx.which("git") ? void 0 : "install git"),
     check2("lanes-terminal", "ok", backend === "print" ? "print (no Terminal.app, iTerm or tmux detected; lanes start will print the command)" : backend),
-    check2("lanes-preapprove-mcp", configError ? "warn" : "ok", configError || `MCP preapproval is ${enabled ? "on (trusts project MCP server definitions)" : "off"}${config ? ` in ${join63(root, "lanes.json")}` : " for new folders (no lanes.json found)"}`)
+    check2("lanes-preapprove-mcp", configError ? "warn" : "ok", configError || `MCP preapproval is ${enabled ? "on (trusts project MCP server definitions)" : "off"}${config ? ` in ${join64(root, "lanes.json")}` : " for new folders (no lanes.json found)"}`)
   ];
 }
 async function componentChecks(ctx, manifest) {
@@ -9004,10 +9141,10 @@ async function componentChecks(ctx, manifest) {
     }
   }
   if (comps.codescene?.on) {
-    const dir = join63(ctx.home, ".agents/skills");
+    const dir = join64(ctx.home, ".agents/skills");
     const missing = CS_SKILLS.filter((n3) => {
       try {
-        return !statSync22(join63(dir, n3)).isDirectory();
+        return !statSync23(join64(dir, n3)).isDirectory();
       } catch {
         return true;
       }
@@ -9112,7 +9249,7 @@ var init_doctor_compact = __esm({
 
 // src/doctor.ts
 import { chmodSync as chmodSync3 } from "node:fs";
-import { join as join64 } from "node:path";
+import { join as join65 } from "node:path";
 function doctorExitCode(checks2) {
   return checks2.some((c2) => c2.status === "fail") ? 2 : checks2.some((c2) => c2.status === "warn") ? 1 : 0;
 }
@@ -9126,7 +9263,7 @@ function render2(checks2) {
 async function inspect2(ctx) {
   let manifest;
   try {
-    manifest = readManifest(join64(ctx.home, ".pi/agent"));
+    manifest = readManifest(join65(ctx.home, ".pi/agent"));
     if (manifest) validateManifest(ctx.home, manifest);
   } catch {
     manifest = void 0;
@@ -9149,11 +9286,11 @@ async function runDoctor(ctx, options, baseCtx, prompter) {
       if (result3.ran) fixed.push("prereqs");
     }
     if (fixable.has("npm")) {
-      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join64(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
+      const r2 = await ctx.run("npm", ["install", "--legacy-peer-deps"], { cwd: join65(ctx.home, ".pi/agent/npm"), inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("npm");
     }
     if (fixable.has("restore") && report.facts.checkoutClean === true && report.facts.head && report.facts.head === report.manifest?.source.commit) {
-      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join64(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
+      const r2 = await ctx.run(ctx.nodePath ?? process.execPath, [join65(ctx.repoDir, "installer/dist/pi-setup.mjs"), "install", "--yes", "--skip-npm"], { inherit: !options.json, timeoutMs: 12e4 });
       if (r2.code === 0 && !r2.timedOut) fixed.push("restore");
     }
     if (fixable.has("chmod") && report.manifest) {
@@ -9290,7 +9427,7 @@ var init_report = __esm({
 
 // src/uninstall.ts
 import {
-  copyFileSync as copyFileSync5,
+  copyFileSync as copyFileSync6,
   existsSync as existsSync37,
   lstatSync as lstatSync12,
   mkdirSync as mkdirSync21,
@@ -9298,17 +9435,17 @@ import {
   readlinkSync as readlinkSync5,
   renameSync as renameSync8,
   rmdirSync as rmdirSync3,
-  statSync as statSync23,
+  statSync as statSync24,
   unlinkSync as unlinkSync7
 } from "node:fs";
-import { dirname as dirname17, join as join65 } from "node:path";
+import { dirname as dirname17, join as join66 } from "node:path";
 function restore(from, to) {
   mkdirSync21(dirname17(to), { recursive: true });
   try {
     renameSync8(from, to);
   } catch (error) {
     if (error.code !== "EXDEV") throw error;
-    copyFileSync5(from, to);
+    copyFileSync6(from, to);
     unlinkSync7(from);
   }
 }
@@ -9411,7 +9548,7 @@ function revertOps(ctx, m2, rel, match, dryRun) {
     const wasTracked = Boolean(tracked) && fileSha(path2) === tracked.sha256;
     entry2.edited ||= fileSha(path2) !== entry2.sha256After;
     atomicWrite(path2, `${JSON.stringify(data, null, 2)}
-`, statSync23(path2).mode & 4095);
+`, statSync24(path2).mode & 4095);
     const sha2 = sha256(readFileSync36(path2));
     entry2.sha256After = sha2;
     if (wasTracked) tracked.sha256 = sha2;
@@ -9421,7 +9558,7 @@ function revertOps(ctx, m2, rel, match, dryRun) {
   return lines2;
 }
 async function runUninstall(ctx, options, prompter) {
-  const piDir = join65(ctx.home, ".pi", "agent");
+  const piDir = join66(ctx.home, ".pi", "agent");
   const manifest = readManifest(piDir);
   if (!manifest) {
     ctx.out(`No pi-setup manifest at ${manifestPath(piDir)}; nothing is tracked (installs older than this version are adopted by running ./install.sh once).`);
@@ -9458,7 +9595,7 @@ function finalize(ctx, piDir, old, left2) {
     left2.dirs = left2.dirs.filter((d) => lstatExists2(fromHomeRel(ctx.home, d)));
     saveIfChanged(piDir, old, left2, ctx.now());
   }
-  const cache = join65(piDir, ".pi-setup/update-check.json");
+  const cache = join66(piDir, ".pi-setup/update-check.json");
   if (existsSync37(cache)) unlinkSync7(cache);
   tidy(piDir);
   const rest = listBackups(piDir, pinnedBackups(empty ? void 0 : left2));
@@ -9503,7 +9640,7 @@ var init_uninstall = __esm({
       }
       backupFile(rel) {
         if (!rel) return void 0;
-        const path2 = join65(this.backups, rel);
+        const path2 = join66(this.backups, rel);
         return existsSync37(path2) ? path2 : void 0;
       }
       add(line, run2) {
@@ -9613,7 +9750,7 @@ var init_uninstall = __esm({
           delete this.remaining.json[rel];
           return;
         }
-        const mode = statSync23(path2).mode & 4095;
+        const mode = statSync24(path2).mode & 4095;
         atomicWrite(path2, `${JSON.stringify(data, null, 2)}
 `, mode);
         if (left2.length === 0) {
@@ -9629,13 +9766,13 @@ var init_uninstall = __esm({
 
 // src/retire.ts
 import { existsSync as existsSync38, readFileSync as readFileSync37 } from "node:fs";
-import { join as join66 } from "node:path";
+import { join as join67 } from "node:path";
 function wasOn(manifest, current, id) {
   const saved2 = manifest?.components?.[id];
   return saved2 ? saved2.on : current[id] === true;
 }
 function leftWebPackages(ctx, manifest) {
-  const path2 = join66(ctx.home, PI, "settings.json");
+  const path2 = join67(ctx.home, PI, "settings.json");
   if (!existsSync38(path2)) return [];
   let packages2;
   try {
@@ -9697,9 +9834,9 @@ var init_retire = __esm({
 });
 
 // src/finish.ts
-import { join as join67 } from "node:path";
+import { join as join68 } from "node:path";
 async function applyPlain({ ctx, options, r: r2, applyOptions, manifest, off, editPath }) {
-  const live = await retire(ctx, join67(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
+  const live = await retire(ctx, join68(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
   const result3 = await apply(ctx, r2.actions, applyOptions, live);
   if (result3.code === 0) {
     await syncServices(ctx, r2.records, installedPaths(r2), options.dryRun);
@@ -9709,7 +9846,7 @@ async function applyPlain({ ctx, options, r: r2, applyOptions, manifest, off, ed
 }
 async function applySteps(run2, quiet, spin) {
   const { ctx, options, r: r2, applyOptions, manifest, off, editPath } = run2;
-  const live = await retire(quiet, join67(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
+  const live = await retire(quiet, join68(ctx.home, ".pi", "agent"), manifest, off, options.dryRun);
   const result3 = await apply(quiet, r2.actions, { ...applyOptions, spinner: spin }, live);
   if (result3.code !== 0) return result3;
   if (Object.values(r2.records).some((c2) => c2.on && c2.service?.managed)) spin.message?.("Setting up schedules");
@@ -9914,9 +10051,9 @@ var init_args = __esm({
 });
 
 // src/reconcile.ts
-import { existsSync as existsSync39, mkdtempSync, readFileSync as readFileSync38, rmSync as rmSync3, writeFileSync as writeFileSync14 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join as join68 } from "node:path";
+import { existsSync as existsSync39, mkdtempSync as mkdtempSync2, readFileSync as readFileSync38, rmSync as rmSync4, writeFileSync as writeFileSync14 } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join69 } from "node:path";
 function newVersionNeedsWrite(newPath, content) {
   return !(existsSync39(newPath) && readFileSync38(newPath).equals(content));
 }
@@ -9950,9 +10087,9 @@ function applyTakes(actions, takes) {
   return actions.map((a2) => a2.op === "keep" && takes.has(a2.path) ? { op: "install", path: a2.path, content: a2.content, mode: a2.mode, mtimeMs: a2.mtimeMs, existed: true, decision: "take" } : a2);
 }
 async function diffText(ctx, conflict) {
-  const dir = mkdtempSync(join68(tmpdir(), "pisetup-diff."));
+  const dir = mkdtempSync2(join69(tmpdir2(), "pisetup-diff."));
   try {
-    const tmp = join68(dir, "new");
+    const tmp = join69(dir, "new");
     writeFileSync14(tmp, conflict.content);
     const result3 = await ctx.run("diff", ["-u", conflict.path, tmp], { timeoutMs: 1e4 });
     if (result3.code === null || result3.code > 1) return `(diff is not available; the new version is in ${conflict.newPath})`;
@@ -9961,7 +10098,7 @@ async function diffText(ctx, conflict) {
     return lines2.slice(0, DIFF_LINES).join("\n") + (lines2.length > DIFF_LINES ? `
 \u2026 ${lines2.length - DIFF_LINES} more lines` : "");
   } finally {
-    rmSync3(dir, { recursive: true, force: true });
+    rmSync4(dir, { recursive: true, force: true });
   }
 }
 var DIFF_LINES;
@@ -9973,9 +10110,9 @@ var init_reconcile = __esm({
 });
 
 // src/setup-issue.ts
-import { readFileSync as readFileSync39, readdirSync as readdirSync24 } from "node:fs";
+import { readFileSync as readFileSync39, readdirSync as readdirSync25 } from "node:fs";
 import { arch, release } from "node:os";
-import { join as join69 } from "node:path";
+import { join as join70 } from "node:path";
 function reportRepo(component) {
   if (Object.values(REPORT_REPOS).includes(component)) return component;
   const name = component.replace(/^@[^/]+\//, "");
@@ -9994,7 +10131,7 @@ function version2(value) {
   return typeof value === "string" && /^v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(value) ? value : void 0;
 }
 async function setupVersion(ctx) {
-  const source = readJson3(join69(ctx.home, ".pi/agent/.pi-setup/manifest.json"))?.source;
+  const source = readJson3(join70(ctx.home, ".pi/agent/.pi-setup/manifest.json"))?.source;
   if (version2(source?.release)) return source.release;
   if (typeof source?.commit === "string" && /^[a-f0-9]{7,40}$/.test(source.commit)) return source.commit;
   const tag = await ctx.run("git", ["describe", "--tags", "--exact-match", "HEAD"], { cwd: ctx.repoDir, timeoutMs: 2e3 });
@@ -10003,14 +10140,14 @@ async function setupVersion(ctx) {
   return commit.code === 0 && /^[a-f0-9]{40}$/.test(commit.stdout.trim()) ? commit.stdout.trim() : "unknown";
 }
 function packageVersions(ctx) {
-  const dir = join69(ctx.home, ".pi/agent/npm/node_modules/@woksin");
+  const dir = join70(ctx.home, ".pi/agent/npm/node_modules/@woksin");
   let names;
   try {
-    names = readdirSync24(dir).sort();
+    names = readdirSync25(dir).sort();
   } catch {
     return ["woksin packages: none found"];
   }
-  return names.filter((name) => /^[a-z0-9][a-z0-9-]*$/.test(name)).map((name) => `@woksin/${name}: ${version2(readJson3(join69(dir, name, "package.json"))?.version) ?? "unknown"}`);
+  return names.filter((name) => /^[a-z0-9][a-z0-9-]*$/.test(name)).map((name) => `@woksin/${name}: ${version2(readJson3(join70(dir, name, "package.json"))?.version) ?? "unknown"}`);
 }
 async function runReport(ctx, options) {
   const target = reportRepo(options.component);
@@ -11952,8 +12089,8 @@ var run_exports = {};
 __export(run_exports, {
   main: () => main2
 });
-import { existsSync as existsSync40, readdirSync as readdirSync25, readFileSync as readFileSync40 } from "node:fs";
-import { join as join70 } from "node:path";
+import { existsSync as existsSync40, readdirSync as readdirSync26, readFileSync as readFileSync40 } from "node:fs";
+import { join as join71 } from "node:path";
 function pickProfile(options, activeBefore, ready3, profiles, names, readOnly = false) {
   if (options.profile && options.profile !== "auto") {
     if (!names.includes(options.profile)) {
@@ -11998,10 +12135,10 @@ function extraRows(ctx, options, saved2, detection, manifest) {
   };
 }
 function savedPreapproval(ctx) {
-  return preapprovalDefault(join70(ctx.home, ".local/share/pi-setup/lanes/templates"));
+  return preapprovalDefault(join71(ctx.home, ".local/share/pi-setup/lanes/templates"));
 }
 function resolveAll(ctx, options, detection, saved2, answers, manifest, prompted = false) {
-  const piDir = join70(ctx.home, ".pi", "agent");
+  const piDir = join71(ctx.home, ".pi", "agent");
   const settings3 = resolveSettings({
     flagUser: answers.user ?? options.user,
     flagRoot: answers.root ?? options.reposRoot,
@@ -12069,7 +12206,7 @@ function resolveAll(ctx, options, detection, saved2, answers, manifest, prompted
     ...settings3.warnings,
     ...componentNotes.filter((n3) => n3.startsWith("warning:")).map((n3) => n3.slice(9)),
     ...detection.warnings,
-    ...pinWarnings(pinnedModels(join70(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
+    ...pinWarnings(pinnedModels(join71(profilesDir(ctx.repoDir), choice.name)), ready3, detection.catalog),
     ...kimi ? [kimi] : []
   ];
   return { settings: settings3, choice, actions, warnings, profile: profile3, ready: ready3, activeBefore, piDir, npm: needsNpm(actions, piDir, manifest, options.reinstallNpm), conflicts: conflicts2, components, records, componentNotes: componentNotes.filter((n3) => !n3.startsWith("warning:")) };
@@ -12132,7 +12269,7 @@ function addToolWarnings(r2, detection, toolErrors, ctx) {
 }
 async function guidedResolution({ ctx, options, detection, saved: saved2, manifest, p, toolErrors }) {
   const profiles = loadProfiles(ctx.repoDir);
-  const activeBefore = readActive(join70(ctx.home, ".pi/agent"));
+  const activeBefore = readActive(join71(ctx.home, ".pi/agent"));
   const initial = pickProfile(options, activeBefore, readyProviders(detection), profiles, profileNames(ctx.repoDir));
   let resolved;
   const result3 = await runRails(p, {
@@ -12173,8 +12310,8 @@ async function guidedResolution({ ctx, options, detection, saved: saved2, manife
   return result3 === CANCEL ? CANCEL : { r: resolved, editPath: result3.editPath };
 }
 async function execute(ctx, options, prompter, baseCtx) {
-  const piDir = join70(ctx.home, ".pi", "agent");
-  const saved2 = readSettings(join70(piDir, "user.json"));
+  const piDir = join71(ctx.home, ".pi", "agent");
+  const saved2 = readSettings(join71(piDir, "user.json"));
   const manifest = readManifest(piDir);
   const readOnly = options.dryRun || options.plan;
   const names = profileNames(ctx.repoDir);
@@ -12349,7 +12486,7 @@ var init_run2 = __esm({
     };
     readdirSyncSafe = (dir) => {
       try {
-        return readdirSync25(dir);
+        return readdirSync26(dir);
       } catch {
         return [];
       }
@@ -12358,7 +12495,7 @@ var init_run2 = __esm({
 });
 
 // src/cli.ts
-import { dirname as dirname18, join as join71 } from "node:path";
+import { dirname as dirname18, join as join72 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 var MIN = [22, 19, 0];
 function nodeTooOld(version3) {
@@ -12373,7 +12510,7 @@ if (nodeTooOld(process.version)) {
 `);
   process.exit(1);
 }
-var repoDir = join71(dirname18(fileURLToPath2(import.meta.url)), "..", "..");
+var repoDir = join72(dirname18(fileURLToPath2(import.meta.url)), "..", "..");
 var { realContext: realContext2 } = await Promise.resolve().then(() => (init_context(), context_exports));
 var { main: main3 } = await Promise.resolve().then(() => (init_run2(), run_exports));
 process.exitCode = await main3(process.argv.slice(2), realContext2(repoDir));
