@@ -20,6 +20,11 @@ export function launchCommand(c: Config, root: string, cwd: string, id: string, 
   if (opts["handoff-digest"]) args.push("--handoff-digest", opts["handoff-digest"]);
   return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages)} LANE_STATUS_DIR=${shellQuote(join(messages, "status"))} ${args.map(shellQuote).join(" ")}`;
 }
+function appleScriptTabCommand(command: string): string {
+  const delay = 30;
+  // Exit cleanly so profiles that close on a clean shell exit also close this tab.
+  return appleScriptString(`${command} || { printf '\\nLane launch failed (exit %s); this shell will exit in %s seconds.\\n' "$?" ${delay} >&2; sleep ${delay}; exit 0; }`);
+}
 interface Launch { id: string; cwd: string; command: string }
 export interface TerminalBackend {
   quit(ctx: LanesCtx, tty: string, beforeSend: () => Promise<void>): Promise<"sent" | "not-found">;
@@ -32,9 +37,9 @@ export function terminalBackend(name: string): TerminalBackend {
     if (name === "print") { ctx.out(command); return 0; }
     let cmd: string; let args: string[];
     if (name === "terminal-app") {
-      cmd = "osascript"; args = ["-e", `tell application "Terminal" to do script "${appleScriptString(command)}"`, "-e", 'tell application "Terminal" to activate'];
+      cmd = "osascript"; args = ["-e", `tell application "Terminal" to do script "${appleScriptTabCommand(command)}"`, "-e", 'tell application "Terminal" to activate'];
     } else if (name === "iterm") {
-      cmd = "osascript"; args = ["-e", `tell application "iTerm2"\ncreate window with default profile\ntell current session of current window to write text "${appleScriptString(command)}"\nactivate\nend tell`];
+      cmd = "osascript"; args = ["-e", `tell application "iTerm2"\ncreate window with default profile\ntell current session of current window to write text "${appleScriptTabCommand(command)}"\nactivate\nend tell`];
     } else {
       cmd = "tmux";
       if (ctx.env.TMUX) args = ["new-window", "-n", id, "-c", cwd];
