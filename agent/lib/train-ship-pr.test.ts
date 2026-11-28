@@ -1,13 +1,38 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { notesMarker, reviewerNotes } from './train-ship-pr.mjs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { notesMarker, reviewerNotes, upsertTrainPR } from './train-ship-pr.mjs';
+import type { PublishRequest } from './publish-request.ts';
 import { scan } from './secret-mask.ts';
 import { scanPublication } from './publish-scan.ts';
 
 const sha = ['0123456789abcdef', 'abcdef0123456789', '01234567'].join('');
 const branch = 'fix/secret-mask-false-positives';
 const evidence = 'Tier 1 passed';
+
+for (const githubUser of ['configured-maintainer', undefined]) {
+  test(`train PR creation ${githubUser ? 'assigns the setup login through publish' : 'works without a setup login'}`, async t => {
+    const home = await mkdtemp(join(tmpdir(), 'train-ship-assignee-'));
+    t.after(() => rm(home, { recursive: true, force: true }));
+    if (githubUser) {
+      const directory = join(home, '.pi', 'agent');
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, 'user.json'), JSON.stringify({ githubUser }));
+    }
+    const manifest = { repo: 'owner/repo', worktree: home, train: 'train/test', base: { ref: 'origin/main' }, items: [] };
+    const requests: PublishRequest[] = [];
+    const ctx = { env: { HOME: home }, publish: async (request: PublishRequest) => { requests.push(request); return { isError: false }; } };
+    const api = { json: async () => requests.length ? [{ number: 42 }] : [] };
+    const result = await upsertTrainPR({ ctx, api, manifest, options: { title: 'Release train' } }, { body: 'Notes', label: 'patch' });
+    assert.equal(result.number, 42);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].kind, 'pr-create');
+    assert.deepEqual(requests[0].assignees, githubUser ? [githubUser] : undefined);
+  });
+}
 
 for (const pr of [undefined, 7]) {
   test(`reviewer notes render ${pr ? 'PR' : 'branch'} and SHA as code, not a credential assignment`, () => {

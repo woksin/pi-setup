@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 41de610e513fbec5384d64672f24ceee1ba181333e207df936a07cc7361b002f
+// pi-setup-source-sha256: 9a7c40869c8213e8c7f9309ef3e29755cf9ee20a01e585ea4b34aa3a8b16e1d0
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -455,12 +455,13 @@ function messageTokenMatch(name, id) {
 function sessionDirFor(cwd, piAgentDir) {
   return join4(piAgentDir, "sessions", `--${resolve2(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
 }
-var ID, validNewId, validId, validTopic, slug;
+var ID, validNewId, validId, validRecipientId, validTopic, slug;
 var init_names = __esm({
   "src/lanes/names.ts"() {
     ID = "(?:[A-Z][A-Z0-9]*[a-z]?|[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)+)";
     validNewId = (s) => s.length <= 32 && /^(?:[A-Z][A-Z0-9]*[a-z]?|R-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)$/.test(s);
     validId = (s) => s.length <= 32 && new RegExp(`^${ID}$`).test(s);
+    validRecipientId = (s) => s.length <= 32 && /^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*$/i.test(s);
     validTopic = (s) => /^[a-z0-9][a-z0-9-]{0,47}$/.test(s);
     slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32).replace(/-$/, "") || "task";
   }
@@ -534,7 +535,8 @@ function validate(value, root = process.cwd(), home = homedir3()) {
     require2(typeof r2.auto === "boolean", "messages.retention.auto");
     archiveDir(c2, root, home);
   }
-  require2(c2.coordinator && typeof c2.coordinator.id === "string" && validId(c2.coordinator.id) && !["ALL", c2.messages.broadcast].includes(c2.coordinator.id), "coordinator.id");
+  const reservedIds = ["all", c2.messages.broadcast.toLowerCase()];
+  require2(c2.coordinator && typeof c2.coordinator.id === "string" && validId(c2.coordinator.id) && !reservedIds.includes(c2.coordinator.id.toLowerCase()), "coordinator.id");
   require2(text4(c2.coordinator.cwd), "coordinator.cwd");
   require2(text4(c2.coordinator.prompt), "coordinator.prompt");
   if (c2.coordinator.maxRunning === void 0) c2.coordinator.maxRunning = 6;
@@ -551,11 +553,11 @@ function validate(value, root = process.cwd(), home = homedir3()) {
     require2(Array.isArray(c2.github.excludeLabels) && c2.github.excludeLabels.every(text4), "github.excludeLabels");
   }
   require2(Array.isArray(c2.lanes), "lanes");
-  const ids = /* @__PURE__ */ new Set([c2.coordinator.id, "ALL", c2.messages.broadcast]);
+  const ids = /* @__PURE__ */ new Set([c2.coordinator.id.toLowerCase(), ...reservedIds]);
   for (const [i2, lane] of c2.lanes.entries()) {
     const key = `lanes.${i2}`;
-    require2(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id), `${key}.id`);
-    ids.add(lane.id);
+    require2(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id.toLowerCase()), `${key}.id`);
+    ids.add(lane.id.toLowerCase());
     require2(absentCwdIdentity(lane, lane.repo) || typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo), `${key}.repo`);
     require2(absentCwdIdentity(lane, lane.branch) || text4(lane.branch), `${key}.branch`);
     require2(text4(lane.prompt), `${key}.prompt`);
@@ -1735,7 +1737,7 @@ var init_backend = __esm({
         this.broadcast = broadcast;
       }
       async send(m2) {
-        if (!validId(m2.from) || !validId(m2.to) || !validTopic(m2.topic)) throw new Error("invalid message name");
+        if (!validId(m2.from) || !validRecipientId(m2.to) || !validTopic(m2.topic)) throw new Error("invalid message name");
         mkdirSync2(this.dir, { recursive: true });
         const at = this.now();
         for (let i2 = 1; ; i2++) {
@@ -3309,10 +3311,11 @@ async function add(id, opts, c2, root, ctx) {
   return 0;
 }
 function validateInput(id, opts, c2) {
-  if (!validNewId(id) || ["ALL", c2.messages.broadcast, c2.coordinator.id].includes(id)) {
+  const key = id.toLowerCase();
+  if (!validNewId(id) || ["all", c2.messages.broadcast.toLowerCase(), c2.coordinator.id.toLowerCase()].includes(key)) {
     throw new UsageError("invalid lane id");
   }
-  if (c2.lanes.some((l2) => l2.id === id)) throw new Error(`lane ${id} already exists`);
+  if (c2.lanes.some((l2) => l2.id.toLowerCase() === key)) throw new Error(`lane ${id} already exists`);
   validateRepo(opts.repo);
   validateIssueAndGoal(opts);
 }
@@ -3377,7 +3380,7 @@ function newOrchestrator(lane, opts, c2) {
   const name = lane.repo.split("/")[1];
   const id = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
   const reserved = [lane.id, c2.coordinator.id, "ALL", c2.messages.broadcast, ...c2.lanes.map((l2) => l2.id)];
-  if (!validNewId(id) || reserved.includes(id)) {
+  if (!validNewId(id) || reserved.some((existing) => existing.toLowerCase() === id.toLowerCase())) {
     throw new Error("repo-orch ID collision or invalid ID; choose --orchestrator-id");
   }
   const lower = id.toLowerCase();
@@ -4637,18 +4640,20 @@ async function bounded(work) {
 }
 async function inventory2(ctx) {
   const rows = await bounded(ctx.admissionInventory ? ctx.admissionInventory() : nativeInventory(ctx));
-  if (!Array.isArray(rows) || rows.length > 2e4 || rows.some((r2) => !Number.isSafeInteger(r2.pid) || r2.pid < 1 || !Number.isSafeInteger(r2.ppid) || r2.ppid < 0 || typeof r2.start !== "string" || !r2.start.trim() || typeof r2.pi !== "boolean" || r2.pi && !r2.cwd) || new Set(rows.map((r2) => r2.pid)).size !== rows.length) {
+  if (!Array.isArray(rows) || rows.length > 2e4 || rows.some((r2) => !Number.isSafeInteger(r2.pid) || r2.pid < 1 || !Number.isSafeInteger(r2.ppid) || r2.ppid < 0 || typeof r2.pi !== "boolean" || r2.pi && !r2.cwd) || new Set(rows.map((r2) => r2.pid)).size !== rows.length) {
     throw new Error("admission inventory malformed or identity unavailable");
   }
+  const unreadable = rows.find((r2) => typeof r2.start !== "string" || !r2.start.trim());
+  if (unreadable) throw new StartUnavailable(unreadable.pid);
   return rows;
 }
 async function nativeInventory(ctx) {
-  const result3 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4e3 });
+  const result3 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4e3, env: { TZ: "UTC", LC_ALL: "C" } });
   if (result3.code !== 0 || result3.timedOut || !result3.stdout.trim()) throw new Error("admission inventory unavailable");
   const rows = [];
   for (const line of result3.stdout.trim().split("\n")) {
     const m2 = /^(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.+)$/.exec(line.trim());
-    if (!m2) throw new Error("admission inventory malformed");
+    if (!m2) throw unreadableProcess(line);
     const row = { pid: Number(m2[1]), ppid: Number(m2[2]), start: m2[3].replace(/\s+/g, " "), pi: basename5(m2[4]) === "pi" };
     if (row.pi) {
       if (ctx.readCwd) row.cwd = await ctx.readCwd(row.pid);
@@ -4662,6 +4667,10 @@ async function nativeInventory(ctx) {
     rows.push(row);
   }
   return rows;
+}
+function unreadableProcess(line) {
+  const pid = /^\s*(\d+)\s+\d+(?:\s|$)/.exec(line);
+  return pid ? new StartUnavailable(Number(pid[1])) : new Error("admission inventory malformed");
 }
 function privateDir(path2) {
   mkdirSync11(path2, { recursive: true, mode: 448 });
@@ -4689,12 +4698,16 @@ async function locked(dir, work) {
   }
 }
 function identity(value) {
-  return value && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.start === "string" && value.start.length > 0;
+  return value && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.start === "string" && value.start.trim().length > 0;
 }
 function readLease(file) {
   if (!lstatSync6(file).isFile()) throw new Error("admission lease is not a regular file");
   const v = JSON.parse(readFileSync20(file, "utf8"));
-  if (v?.version !== 1 || !identity(v.owner) || v.child !== void 0 && !identity(v.child) || v.priorPi !== void 0 && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)) || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some((s) => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
+  if (v?.version !== 1 && v?.version !== 2) throw new Error("admission lease malformed");
+  if (!identity(v.owner) || v.child !== void 0 && !identity(v.child)) {
+    throw uncertainLease(file, "recorded owner or child identity unreadable");
+  }
+  if (v.priorPi !== void 0 && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)) || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some((s) => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
   return v;
 }
 function store(file, lease) {
@@ -4703,9 +4716,7 @@ function store(file, lease) {
   renameSync6(temp, file);
 }
 function alive2(id, rows) {
-  const row = rows.find((r2) => r2.pid === id.pid);
-  if (row && row.start !== id.start) throw new Error(`admission identity uncertain: pid ${id.pid} reused`);
-  return Boolean(row);
+  return rows.some((row) => row.pid === id.pid && row.start === id.start);
 }
 function below2(row, owner, rows) {
   const seen = /* @__PURE__ */ new Set();
@@ -4730,15 +4741,35 @@ function registry2(dir) {
     return { file, lease: readLease(file) };
   });
 }
-function leases(dir, rows) {
-  const entries = registry2(dir);
-  const all = entries.map((e) => e.lease);
-  return entries.flatMap(({ file, lease }) => {
-    if (alive2(lease.owner, rows)) {
-      if (lease.child) alive2(lease.child, rows);
-      return [lease];
+function uncertainLease(file, detail) {
+  return new Error(`admission lease uncertain: ${file}: ${detail}; confirm neither the recorded owner nor any child is still running, then move this lease out of the admission directory`);
+}
+async function leaseInventory(ctx, entries) {
+  try {
+    return await inventory2(ctx);
+  } catch (error) {
+    if (error instanceof StartUnavailable) {
+      const entry2 = entries.find(({ lease }) => lease.owner.pid === error.pid || lease.child?.pid === error.pid);
+      if (entry2) throw uncertainLease(entry2.file, `start time unavailable for pid ${error.pid}`);
     }
-    if (!lease.child) throw new Error("admission lease uncertain: dead owner with unrecorded child");
+    throw error;
+  }
+}
+function checkLegacyStart({ file, lease }, rows) {
+  if (lease.version !== 1) return;
+  for (const id of [lease.owner, lease.child]) {
+    if (id && rows.some((row) => row.pid === id.pid && row.start !== id.start)) {
+      throw uncertainLease(file, `start time differs for pid ${id.pid} in a legacy lease without a known timezone or locale`);
+    }
+  }
+}
+function leases(entries, rows) {
+  const all = entries.map((e) => e.lease);
+  return entries.flatMap((entry2) => {
+    checkLegacyStart(entry2, rows);
+    const { file, lease } = entry2;
+    if (alive2(lease.owner, rows)) return [lease];
+    if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
     if (alive2(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
     unlinkSync5(file);
     return [];
@@ -4747,14 +4778,15 @@ function leases(dir, rows) {
 async function admit(ctx, request2, beforeLaunch) {
   const dir = join36(ctx.piAgentDir, "lanes-admission");
   const lease = await locked(dir, async () => {
-    const rows = await inventory2(ctx);
+    const entries = registry2(dir);
+    const rows = await leaseInventory(ctx, entries);
     const owner = rows.find((r2) => r2.pid === process.pid);
     if (!owner) throw new Error("admission controller identity unavailable");
-    const active = leases(dir, rows);
+    const active = leases(entries, rows);
     const pis = rows.filter((r2) => r2.pi);
     if (active.some((l2) => l2.cwd === request2.cwd) || pis.some((p) => p.cwd === request2.cwd)) throw new Error(`already running in ${request2.cwd}`);
     const value = {
-      version: 1,
+      version: 2,
       token: randomUUID5(),
       owner: { pid: owner.pid, start: owner.start },
       root: request2.root,
@@ -4788,16 +4820,24 @@ async function admit(ctx, request2, beforeLaunch) {
       await locked(dir, async () => {
         const current = readLease(file);
         if (current.token !== lease.token || current.owner.pid !== process.pid || current.owner.start !== lease.owner.start) throw new Error("admission lease ownership changed");
-        const rows = await inventory2(ctx);
-        if (lease.child && alive2(lease.child, rows) || uncertainPi(lease, registry2(dir).map((e) => e.lease), rows)) throw new Error("admission child cleanup uncertain; lease retained");
+        const entries = registry2(dir);
+        const rows = await leaseInventory(ctx, entries);
+        if (lease.child && alive2(lease.child, rows) || uncertainPi(lease, entries.map((e) => e.lease), rows)) throw new Error("admission child cleanup uncertain; lease retained");
         unlinkSync5(file);
       });
     }
   };
 }
-var pause;
+var StartUnavailable, pause;
 var init_admission = __esm({
   "src/lanes/admission.ts"() {
+    StartUnavailable = class extends Error {
+      pid;
+      constructor(pid) {
+        super(`admission inventory: start time unavailable for pid ${pid}`);
+        this.pid = pid;
+      }
+    };
     pause = (ms) => new Promise((done) => setTimeout(done, ms));
   }
 });
@@ -5111,25 +5151,25 @@ var init_resume = __esm({
 import { readFileSync as readFileSync21 } from "node:fs";
 import { resolve as resolve10 } from "node:path";
 async function send(args, opts, c2, root, ctx) {
-  let [to, topic, file] = args;
-  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to, topic, file }, opts);
-  const known = [c2.coordinator.id, "ALL", c2.messages.broadcast, ...c2.lanes.flatMap((l2) => [l2.id, l2.group])];
-  if (!known.includes(to)) await warnUnknown(to, { c: c2, root, ctx });
-  const refusal = await guardIssue(to, opts, { c: c2, root, ctx });
+  const [recipient2, topic, file] = args;
+  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to: recipient2, topic, file }, opts);
+  const deps = { c: c2, root, ctx };
+  const to = await resolveRecipient(recipient2, deps);
+  const refusal = await guardIssue(to, opts, deps);
   if (refusal) return refusal;
   let body = await messageBody(file, opts, ctx);
   if (!body.trim()) throw new UsageError("empty message body");
   if (opts.force !== void 0) body = `Ownership override (--force): ${opts.force}
 
 ${body}`;
-  to = route({ to, from, direct: opts.direct }, c2, ctx);
-  ctx.out((await backendFor(c2, ctx, root).send({ from, to, topic, body })).path);
+  const target = route({ to, from, direct: opts.direct }, c2, ctx);
+  ctx.out((await backendFor(c2, ctx, root).send({ from, to: target, topic, body })).path);
   return 0;
 }
 function validateMessage(input, opts) {
   if (!input.from) throw new UsageError("set --from or PI_ORCH_ID");
   if (!validId(input.from)) throw new UsageError("invalid from");
-  if (!validId(input.to)) throw new UsageError("invalid to");
+  if (!validRecipientId(input.to)) throw new UsageError("invalid to");
   if (!validTopic(input.topic)) throw new UsageError("invalid topic");
   if (opts.m !== void 0 && input.file !== void 0) throw new UsageError("choose a file or -m, not both");
   return input.from;
@@ -5173,12 +5213,26 @@ function closestLive(to, rows) {
   ranked.sort((a2, b) => b.prefix - a2.prefix || a2.distance - b.distance || Number(b.row.state === "idle") - Number(a2.row.state === "idle") || a2.row.lane.localeCompare(b.row.lane));
   return ranked.slice(0, 3).map(({ row }) => `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${row.state}`).join(", ");
 }
-async function warnUnknown(to, deps) {
+function matchingRecipient(to, ids) {
+  if (ids.has(to)) return to;
+  const key = to.toLowerCase();
+  const matches = [...ids].filter((id) => id.toLowerCase() === key);
+  if (matches.length > 1) throw new UsageError(`ambiguous recipient ${to}: ${matches.sort().join(", ")}`);
+  return matches[0];
+}
+async function resolveRecipient(to, deps) {
+  const { c: c2, ctx } = deps;
+  if (["ALL", c2.messages.broadcast, ...c2.lanes.map((l2) => l2.group)].includes(to)) return to;
   const live = await liveRoster(deps);
-  if (live.registered.has(to)) return;
-  deps.ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  const liveIds = live.rows.filter((row) => row.identity !== "unregistered").map((row) => row.lane);
+  const ids = /* @__PURE__ */ new Set([c2.coordinator.id, ...c2.lanes.map((l2) => l2.id), ...live.registered, ...liveIds]);
+  const canonical3 = matchingRecipient(to, ids);
+  if (canonical3) return canonical3;
+  if (!validId(to)) throw new UsageError("invalid to");
+  ctx.err(`warning: unknown recipient ${to}; sending anyway`);
   const candidates = closestLive(to, live.rows);
-  if (candidates) deps.ctx.err(`closest live: ${candidates}`);
+  if (candidates) ctx.err(`closest live: ${candidates}`);
+  return to;
 }
 function assignmentRepo(to, c2) {
   const lanes = c2.lanes.filter((l2) => l2.id === to && !l2.retired && !l2.closed);

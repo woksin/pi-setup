@@ -46,6 +46,16 @@ test('typed and CLI PR create share head/repo, candidate and trusted exception r
   assert.ok(!JSON.stringify(invalid).includes('private-value'));
 });
 
+test('an open candidate admits metadata-only edits but still refuses off-train PR creation', async t => {
+  const f = await fixture(t), context = { cwd: '/repo', env: f.env, git: f.git };
+  const target = { kind: 'pr-edit', repo: f.manifest.repo, number: 17 };
+  assert.deepEqual(await publicationDecision({ ...target, addLabels: ['ai-corpus: tracked'] }, context), {});
+  assert.deepEqual(await publicationDecision({ ...target, addAssignees: ['maintainer'] }, context), {});
+  assert.deepEqual(await f.decide('pi-publish pr-edit --repo acme/widget --number 17 --add-reviewer maintainer'), {});
+  assert.ok((await publicationDecision(target, context)).block);
+  assert.ok((await publicationDecision({ kind: 'pr-create', repo: f.manifest.repo, head: 'fix/local', title: 'T', body: 'B' }, context)).block);
+});
+
 test('mixed-case PR targets, manifest repos and legacy store directories cannot bypass candidates', async t => {
   const f = await fixture(t), directory = join(f.env.PI_TRAIN_DIR, 'AcMe__WiDgEt');
   await rename(join(f.env.PI_TRAIN_DIR, 'acme__widget'), directory);

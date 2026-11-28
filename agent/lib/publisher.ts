@@ -9,7 +9,7 @@ import type { Readable } from "node:stream";
 import { scanPublication } from "./publish-scan.ts";
 import type { PublicationContext, PublicationScan } from "./publish-scan.ts";
 import { InvalidRequest, MAX_REQUEST_BYTES, MAX_STRING_BYTES, toGhPlan, validateAppendOnly, validateRequest } from "./publish-request.ts";
-import type { GhPlan, PayloadSource, PayloadSlot } from "./publish-request.ts";
+import type { GhCommand, GhPlan, PayloadSource, PayloadSlot } from "./publish-request.ts";
 
 export type PublishCode = "published" | "scan-clean" | "invalid-request" | "unsupported-platform" | "payload-unreadable" | "payload-too-large" | "payload-not-utf8" | "scan-refused" | "gh-unavailable" | "gh-failed" | "gh-timeout" | "cancelled" | "gh-output-limit" | "cleanup-failed" | "payload-not-found" | "payload-symlink" | "payload-not-file" | "payload-permission" | "host-unauthenticated";
 export interface PublishResult { code: PublishCode; text: string; isError: boolean; detail?: string; diagnostics?: { source: string; count: number; findings: PublicationScan["findings"] } }
@@ -325,8 +325,8 @@ function childFailure(state: { code: number | null; failure?: PublishCode; stder
 	const detail = state.code === null || !state.reflect ? "" : ghDetail(state.stderr, state.reflect, state.run);
 	return new Failure("gh-failed", undefined, `exit=${exit} category=${category}${detail ? `; ${detail}` : ""}; ${GH_ADVICE[category]}`);
 }
-function stderrCapture() {
-	let text = "", remaining = STDERR_LIMIT;
+function textCapture(limit: number) {
+	let text = "", remaining = limit;
 	const decoder = new TextDecoder();
 	return {
 		append(chunk: Buffer | string) {
@@ -337,10 +337,18 @@ function stderrCapture() {
 		take() { const captured = text + decoder.decode(); text = ""; return captured; },
 	};
 }
-function monitor(child: PublisherChild, run: Runtime, reflect?: string[]): Promise<void> {
+interface ChildOptions { reflect?: string[]; expect?: readonly string[] }
+function confirmedOutput(expected: readonly string[], text: string): string {
+	const output = text.trim();
+	if (expected.includes(output)) return output;
+	throw new Failure("gh-failed", undefined, "GitHub did not confirm the expected issue state or close reason; check the issue before retrying");
+}
+function monitor(child: PublisherChild, run: Runtime, options: ChildOptions): Promise<string | undefined> {
 	return new Promise((resolve, reject) => {
 		let failure: PublishCode | undefined;
-		const stderr = stderrCapture();
+		const stderr = textCapture(STDERR_LIMIT);
+		const expected = options.expect;
+		const stdout = textCapture(OUTPUT_LIMIT);
 		const stop = (code: PublishCode) => {
 			if (failure) return;
 			failure = code;
@@ -351,25 +359,46 @@ function monitor(child: PublisherChild, run: Runtime, reflect?: string[]): Promi
 		child.on("error", () => stop("gh-failed"));
 		child.once("close", (code: number | null) => {
 			cancelTimer(); run.context.signal?.removeEventListener("abort", abort);
-			const error = childFailure({ code, failure, stderr: stderr.take(), reflect, run });
-			if (error) reject(error); else resolve();
+			const error = childFailure({ code, failure, stderr: stderr.take(), reflect: options.reflect, run });
+			if (error) return reject(error);
+			try { resolve(expected && confirmedOutput(expected, stdout.take())); } catch (unexpected) { reject(unexpected); }
 		});
-		watchStream(child.stdout, stop); watchStream(child.stderr, stop, stderr.append);
+		watchStream(child.stdout, stop, expected ? stdout.append : undefined); watchStream(child.stderr, stop, stderr.append);
 		run.context.signal?.addEventListener("abort", abort, { once: true });
 		if (run.context.signal?.aborted) abort();
 	});
 }
-async function runGh(argv: () => string[], env: NodeJS.ProcessEnv, run: Runtime, reflect?: string[]): Promise<void> {
+async function runGh(argv: () => string[], env: NodeJS.ProcessEnv, run: Runtime, options: ChildOptions = {}): Promise<string | undefined> {
 	const executable = await ghExecutable(run);
 	cancelled(run.context.signal);
 	const args = argv();
 	try {
 		const child = run.spawn(executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"], env, cwd: run.context.cwd });
-		await monitor(child, run, reflect);
+		return await monitor(child, run, options);
 	} catch (error) { if (error instanceof Failure) throw error; throw new Failure("gh-failed"); }
 }
-async function send(plan: GhPlan, state: { bytes: Buffer[]; paths: string[] }, run: Runtime): Promise<void> {
-	await runGh(() => plan.argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), environment(run.env, plan.host), run, reflectionTexts(plan, state.bytes));
+interface SendState { bytes: Buffer[]; paths: string[]; closeComment?: "uncertain" | "posted" }
+function skipCommand({ onLastOutput, skipIfBlank }: GhCommand, lastOutput: string | undefined, bytes: Buffer[]): boolean {
+	if (onLastOutput !== undefined && onLastOutput !== lastOutput) return true;
+	return skipIfBlank !== undefined && !decoded(bytes[skipIfBlank]).trim();
+}
+async function send(plan: GhPlan, state: SendState, run: Runtime): Promise<void> {
+	const env = environment(run.env, plan.host), reflect = reflectionTexts(plan, state.bytes);
+	let lastOutput: string | undefined;
+	for (const command of [plan, ...(plan.followups ?? [])]) {
+		if (skipCommand(command, lastOutput, state.bytes)) continue;
+		const { argv, expect, postsCloseComment } = command;
+		if (postsCloseComment) state.closeComment = "uncertain";
+		const output = await runGh(() => argv.map(arg => typeof arg === "string" ? arg : materialize(arg, state)), env, run, { reflect, expect });
+		if (postsCloseComment) state.closeComment = "posted";
+		if (output === "pr") throw new Failure("gh-failed", undefined, "target is a pull request; use pr-close instead");
+		lastOutput = output ?? lastOutput;
+	}
+}
+function closeCommentAdvice(outcome: PublishResult, comment: SendState["closeComment"]): PublishResult {
+	if (!outcome.isError || !comment) return outcome;
+	const detail = comment === "posted" ? "comment already posted; retry issue-close without body" : "check the issue before retrying";
+	return { ...outcome, detail };
 }
 /** A non-default host must already hold a stored gh credential; output is discarded, failure is a fixed code. */
 async function hostPreflight(host: string, run: Runtime): Promise<void> {
@@ -391,6 +420,7 @@ async function cleanup(state: { directory?: string; outcome: PublishResult }, io
 export async function publish(value: unknown, context: PublisherContext = {}, adapters: PublisherAdapters = {}): Promise<PublishResult> {
 	const run = runtime(context, adapters);
 	let directory: string | undefined;
+	let state: SendState | undefined;
 	let outcome: PublishResult;
 	try {
 		cancelled(context.signal);
@@ -405,8 +435,9 @@ export async function publish(value: unknown, context: PublisherContext = {}, ad
 		directory = await run.io.mkdtemp(join(run.temporaryRoot(), "pi-publish-"));
 		await run.io.chmod(directory, 0o700);
 		const paths = await snapshots({ dir: directory, plan, bytes }, run);
-		await send(plan, { bytes, paths }, run);
+		state = { bytes, paths };
+		await send(plan, state, run);
 		outcome = result("published");
 	} catch (error) { outcome = failed(error); }
-	return cleanup({ directory, outcome }, run.io);
+	return closeCommentAdvice(await cleanup({ directory, outcome }, run.io), state?.closeComment);
 }

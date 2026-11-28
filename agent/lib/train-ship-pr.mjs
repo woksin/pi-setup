@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { TrainError } from './train-gh.mjs';
 import { baseBranch } from './train-init.mjs';
 import { renderNotes } from './train-notes.mjs';
@@ -53,10 +55,18 @@ async function editTrainPR(session, pr, files) {
   await publishText(ctx, options, request, manifest);
 }
 
+async function configuredAssignees({ env }) {
+  if (!env.HOME) return {};
+  try {
+    const { githubUser } = JSON.parse(await readFile(join(env.HOME, '.pi', 'agent', 'user.json'), 'utf8')) ?? {};
+    return typeof githubUser === 'string' && githubUser ? { assignees: [githubUser] } : {};
+  } catch { return {}; }
+}
+
 async function createTrainPR(session, files) {
   const { ctx, api, manifest, options } = session;
   await publishText(ctx, options, { kind: 'pr-create', repo: manifest.repo, title: shipTitle(options, manifest), body: files.body,
-    labels: [files.label], base: baseBranch(manifest), head: manifest.train }, manifest);
+    labels: [files.label], base: baseBranch(manifest), head: manifest.train, ...await configuredAssignees(ctx) }, manifest);
   // The publisher never returns gh output, so the new PR number is re-read.
   const found = await api.json(manifest.repo, ['pr', 'list', '--head', manifest.train, '--state', 'open', '--json', 'number']);
   if (found.length !== 1) throw new TrainError('train PR created but not found; rerun ship', 2);

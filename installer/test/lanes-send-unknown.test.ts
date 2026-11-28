@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { tempDir } from "./helpers/home.ts";
 import type { LanesCtx } from "../src/lanes/ctx.ts";
 import { defaults, saveConfig } from "../src/lanes/config.ts";
@@ -18,7 +18,7 @@ function fixture() {
   const c = defaults(home, home); c.coordinator.id = "C0"; c.messages.broadcast = "BCAST"; saveConfig(home, c);
   const registration = (id: string, pid: number, fields = {}) => {
     const cwd = join(home, id); cwds.set(pid, cwd); mkdirSync(join(home, ".state/roster"), { recursive: true });
-    writeFileSync(join(home, `.state/roster/${id}.json`), JSON.stringify({ id, pid, cwd, startedAt: ctx.now().toISOString(), ...fields }));
+    writeFileSync(join(home, `.state/roster/${pid}.json`), JSON.stringify({ id, pid, cwd, startedAt: ctx.now().toISOString(), ...fields }));
   };
   const send = (to = "L7") => main(["send", to, "task", "-m", "body"], ctx);
   return { home, ctx, c, cwds, errors, lines, registration, send };
@@ -37,16 +37,34 @@ test("edit distance precedes idle preference after shared prefix", async () => {
   assert.ok(warning.indexOf("L73 [launched]") < warning.indexOf("L72 [launched]"));
   assert.ok(warning.indexOf("L72 [launched]") < warning.indexOf("L700 [launched]"));
 });
-test("candidate similarity is case-insensitive and distance beats a longer ID", async () => {
-  const f = fixture(); f.registration("L7a", 20); f.registration("L7B", 21); f.registration("L7AA", 22);
-  assert.equal(await f.send("L7A"), 0); const warning = f.errors.join("\n");
-  assert.ok(warning.indexOf("L7a [launched]") < warning.indexOf("L7AA [launched]"));
-  assert.ok(warning.indexOf("L7AA [launched]") < warning.indexOf("L7B [launched]"));
+test("candidate similarity is case-insensitive", async () => {
+  const f = fixture(); f.registration("L7Az", 20); f.registration("L7B", 21); f.registration("L7AAA", 22);
+  assert.equal(await f.send("L7AZZ"), 0); const warning = f.errors.join("\n");
+  assert.ok(warning.indexOf("L7Az [launched]") < warning.indexOf("L7AAA [launched]"));
+  assert.ok(warning.indexOf("L7AAA [launched]") < warning.indexOf("L7B [launched]"));
 });
-test("a live registration outside config is known even when process discovery fails", async () => {
-  const f = fixture(); f.registration("L7", 20);
+for (const to of ["S01abc12", "S01ABC12", "s01ABC12"]) test(`live registration outside config resolves ${to} without warnings`, async () => {
+  const f = fixture(); f.registration("S01abc12", 20);
   f.ctx.run = async () => ({ code: 1, stdout: "", stderr: "unavailable", timedOut: false });
-  assert.equal(await f.send(), 0); assert.deepEqual(f.errors, []);
+  assert.equal(await f.send(to), 0); assert.deepEqual(f.errors, []);
+  assert.match(basename(f.lines.at(-1)!), /^C0-to-S01abc12-task-/);
+});
+for (const second of ["live", "configured"]) test(`live and ${second} case collision routes exact IDs only`, async () => {
+  const f = fixture(); f.registration("L7a", 20);
+  if (second === "live") f.registration("L7A", 21);
+  else {
+    f.c.lanes.push({ id: "L7A", repo: "example/repo", worktree: "lane", branch: "lane", group: null, prompt: "prompt.md" });
+    saveConfig(f.home, f.c);
+  }
+  assert.equal(await f.send("l7a"), 2);
+  assert.ok(f.errors.some(error => error.includes("L7A") && error.includes("L7a")));
+  assert.ok(!existsSync(join(f.home, "messages")));
+  f.errors.length = 0;
+  for (const to of ["L7A", "L7a"]) {
+    assert.equal(await f.send(to), 0);
+    assert.ok(basename(f.lines.at(-1)!).startsWith(`C0-to-${to}-task-`));
+  }
+  assert.deepEqual(f.errors, []);
 });
 for (const mode of ["dead", "retired", "unknown"]) test(`no live candidates: ${mode} keeps the warning only`, async () => {
   const f = fixture();
@@ -59,8 +77,8 @@ test("roster failures cannot prevent an unknown-recipient message", async () => 
   let calls = 0; f.ctx.now = () => { if (++calls === 1) throw new Error("roster unavailable"); return new Date("2026-01-20T12:00:00Z"); };
   assert.equal(await f.send(), 0); assert.match(f.errors.join("\n"), /warning: unknown recipient L7/); assert.equal(readFileSync(f.lines.at(-1)!, "utf8"), "body");
 });
-for (const to of ["ALL", "BCAST", "GROUP1", "L1"]) test(`configured or broadcast target ${to} keeps the fast path`, async () => {
+for (const to of ["ALL", "BCAST", "GROUP1", "L1", "l1"]) test(`configured or broadcast target ${to} sends without warning`, async () => {
   const f = fixture(); f.c.lanes.push({ id: "L1", repo: "example/repo", worktree: "lane", branch: "lane", group: "GROUP1", prompt: "prompt.md" }); saveConfig(f.home, f.c);
-  f.ctx.run = async () => { throw new Error("must not discover roster"); };
   assert.equal(await f.send(to), 0); assert.deepEqual(f.errors, []);
+  assert.ok(basename(f.lines.at(-1)!).startsWith(`C0-to-${to.toUpperCase()}-task-`));
 });
