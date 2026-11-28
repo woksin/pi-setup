@@ -12,6 +12,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -430,9 +431,16 @@ class CleanupTests(GuardianCase):
         self.run_guardian()
         self.assertEqual(sorted(self.call_lines('docker rmi')), ['docker rmi acme/app:1.0.0', 'docker rmi ' + DANGLING])  # 30 >= 20: no pressure
 
-    def test_pressure_respects_no_image_prune_switch(self):
+    def test_image_opt_out_does_not_change_build_cache_retention_under_pressure(self):
         self.pressure_scenario()
         (self.state / 'no-image-prune').touch()
+        self.run_guardian()
+        self.assertEqual(self.call_lines('docker rmi'), [])
+        self.assertIn('docker builder prune -f --keep-storage 0', self.call_lines('docker'))
+
+    def test_local_disk_pressure_does_not_lower_retention_for_a_remote_engine(self):
+        self.pressure_scenario()
+        self.extra_env['DOCKER_HOST'] = 'tcp://192.0.2.1:2375'
         self.run_guardian()
         self.assertEqual(self.call_lines('docker rmi'), [])
         self.assertIn('docker builder prune -f --keep-storage 8GB', self.call_lines('docker'))
@@ -634,18 +642,14 @@ class CleanupTests(GuardianCase):
         self.assertEqual(sorted(self.call_lines('docker rmi')), [
             'docker rmi acme/app:invalid-local', 'docker rmi acme/app:zero-local'])
 
-    def test_images_are_left_alone_with_switch_or_busy_integration_phase(self):
-        self.image_scenario()
-        (self.state / 'no-image-prune').touch()
-        self.run_guardian()
-        self.assertEqual(self.call_lines('docker rmi'), [])
-        (self.state / 'no-image-prune').unlink()
-        self.set_state('last-gc', 0)
+    def test_disk_pressure_does_not_override_integration_image_safety(self):
+        self.pressure_scenario()
         (self.home / '.pi/agent/bin/pi-phase').write_text(
             '#!/bin/sh\necho "pi-phase: integration x pid=1 cwd=/x elapsed=5s running"\n')
         self.run_guardian()
         self.assertEqual(self.call_lines('docker rmi'), [])
-        self.assertIn('images: skipped (integration running or phase state unknown)', self.log_text())
+        self.assertIn('integration phase active', self.log_text())
+        self.assertIn('docker builder prune -f --keep-storage 0', self.call_lines('docker'))
 
     def test_suffixed_status_lines_are_understood(self):
         # Current pi-phase appends " fast policy=<p> source=<s>"; a busy integration phase must still block.
@@ -654,7 +658,7 @@ class CleanupTests(GuardianCase):
         stub.write_text('#!/bin/sh\necho "pi-phase: integration x pid=1 cwd=/x elapsed=5s running policy=queued source=default"\n')
         self.run_guardian()
         self.assertEqual(self.call_lines('docker rmi'), [])
-        self.assertIn('images: skipped (integration running or phase state unknown)', self.log_text())
+        self.assertIn('integration phase active', self.log_text())
         stub.write_text('#!/bin/sh\necho "pi-phase: build x pid=1 cwd=/x elapsed=5s running fast policy=direct source=cli"\n')
         self.set_state('last-gc', 0)
         self.run_guardian()
@@ -667,14 +671,48 @@ class CleanupTests(GuardianCase):
             'echo "pi-phase: no active phases"\n')
         self.run_guardian()
         self.assertEqual(self.call_lines('docker rmi'), [])
-        self.assertIn('images: skipped (integration running or phase state unknown)', self.log_text())
+        self.assertIn('phase-status unparseable', self.log_text())
 
-    def test_images_skipped_when_phase_state_is_unknown(self):
+    def test_image_cleanup_explains_missing_phase_command(self):
         self.image_scenario()
         (self.home / '.pi/agent/bin/pi-phase').unlink()
         self.run_guardian()
         self.assertEqual(self.call_lines('docker rmi'), [])
-        self.assertIn('images: skipped (integration running or phase state unknown)', self.log_text())
+        self.assertIn('phase-status failed', self.log_text())
+
+    def test_phase_status_timeout_and_exhausted_pass_have_distinct_reasons(self):
+        self.pressure_scenario()
+        # Run the real image worker with a controllable clock and status timeout. All Docker calls are
+        # still recorded by the regular stubs. The second status check runs just before an image removal.
+        self.stub('python3', f'''#!{sys.executable}
+import os, subprocess, sys, time
+if sys.argv[1:3] != ['-', 'images']:
+    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+real_run, real_clock = subprocess.run, time.monotonic
+elapsed, checks = 0, 0
+def run(cmd, **kwargs):
+    global elapsed, checks
+    if cmd[0].endswith('/pi-phase'):
+        checks += 1
+        if os.environ['STUB_DEADLINE'] == 'probe' or checks == 2:
+            elapsed = 45 if checks == 2 else 10
+            raise subprocess.TimeoutExpired(cmd, kwargs['timeout'])
+    return real_run(cmd, **kwargs)
+time.monotonic = lambda: real_clock() + elapsed
+subprocess.run = run
+sys.argv = sys.argv[1:]
+exec(compile(sys.stdin.read(), '<image cleanup>', 'exec'))
+''')
+        for deadline, reason in [('probe', 'phase-status timed out'), ('pass', 'cleanup time budget exhausted')]:
+            with self.subTest(deadline=deadline):
+                self.extra_env['STUB_DEADLINE'] = deadline
+                self.set_state('last-gc', 0)
+                self.log.unlink(missing_ok=True)
+                self.calls.write_text('')
+                self.run_guardian()
+                self.assertEqual(self.call_lines('docker rmi'), [])
+                self.assertIn(reason, self.log_text())
+                self.assertIn('docker builder prune -f --keep-storage 0', self.call_lines('docker'))
 
 
 if __name__ == '__main__':

@@ -79,7 +79,8 @@ snapshot(){ local f="${LOG%/*}/docker-guardian-snapshots.log"
   } >> "$f" 2>&1; }
 
 # Narrow image cleanup: no force/prune, fail closed on missing inventory or phase state.
-prune_superseded_images(){ python3 - "$S/pinned.txt" "$HOME/.pi/agent/bin/pi-phase" "$(cd "$(dirname "$0")" && pwd)/phase_status.py" <<'PY'
+# Both modes run in a dl subshell; exec lets its outer deadline signal Python directly.
+image_cleanup(){ exec python3 - "$1" "$S/pinned.txt" "$HOME/.pi/agent/bin/pi-phase" "$(cd "$(dirname "$0")" && pwd)/phase_status.py" "${2:-}" <<'PY'
 import datetime as dt
 import fnmatch
 import json
@@ -91,27 +92,50 @@ import subprocess
 import sys
 import time
 
-end = time.monotonic() + 45
+mode, pin_file, pi_phase, phase_parser, pressure_gib = sys.argv[1:]
+end = time.monotonic() + (10 if mode == 'pressure' else 45)
 
-def run(cmd):
+class CleanupBudgetExhausted(Exception):
+    pass
+
+def command(cmd):
     remaining = end - time.monotonic()
     if remaining <= 0:
-        return None
+        raise CleanupBudgetExhausted
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=min(10, remaining))
-        return p.stdout + p.stderr if p.returncode == 0 else None
+        p = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=min(10, remaining))
+        return p.stdout + p.stderr
+    except subprocess.TimeoutExpired:
+        if remaining <= 10 or time.monotonic() >= end:
+            raise CleanupBudgetExhausted from None
+        raise
+
+def run(cmd):
+    try:
+        return command(cmd)
     except (OSError, subprocess.SubprocessError):
         return None
 
-def phases_safe():
-    text = run([sys.argv[2], 'status'])
-    if text is None:
-        return False
+def phase_block_reason():
     try:
-        phases = runpy.run_path(sys.argv[3])['active_phases'](text)
-    except (OSError, KeyError, SyntaxError):
-        return False  # parser missing: state unknown
-    return phases is not None and all(phase['kind'] in ('build', 'test', 'ci') for phase in phases)
+        text = command([pi_phase, 'status'])
+    except subprocess.TimeoutExpired:
+        return 'phase-status timed out'
+    except (OSError, subprocess.SubprocessError):
+        return 'phase-status failed'
+    except UnicodeError:
+        return 'phase-status unparseable'
+    try:
+        phases = runpy.run_path(phase_parser)['active_phases'](text)
+    except (OSError, KeyError, SyntaxError, ValueError):
+        phases = None
+    if phases is None:
+        return 'phase-status unparseable'
+    if any(phase['kind'] == 'integration' for phase in phases):
+        return 'integration phase active'
+    if any(phase['kind'] not in ('build', 'test', 'ci') for phase in phases):
+        return 'unsupported phase kind active'
+    return None
 
 def decode(output):
     try:
@@ -188,14 +212,26 @@ def pressure_threshold():
         pass
     return 40.0
 
-def under_pressure():
-    # Unknown free space is NOT pressure: the strict policy stays in force.
+def local_context_block_reason():
+    context = run(['docker', 'context', 'show'])
+    if (context is None or context.strip() not in ('default', 'desktop-linux')
+            or (os.environ.get('DOCKER_HOST') and not os.environ['DOCKER_HOST'].startswith('unix://'))):
+        return 'not a verified local context'
+    host = decode(run(['docker', 'context', 'inspect', context.strip(), '--format', '{{json .Endpoints.docker.Host}}']))
+    if not isinstance(host, str) or not host.startswith('unix://'):
+        return 'not a local Unix endpoint'
+    return None
+
+def report_pressure():
+    # Local disk pressure must not reduce retention on a remote/unknown Docker engine.
     text = run(['df', '-Pk', os.environ['HOME']])
     try:
         free_kib = int(text.strip().splitlines()[-1].split()[3])
     except (AttributeError, IndexError, ValueError):
-        return False
-    return free_kib / 1048576 < pressure_threshold()
+        return  # Unknown free space is NOT pressure.
+    threshold = pressure_threshold()
+    if 0 <= free_kib / 1048576 < threshold and not local_context_block_reason():
+        print(format(threshold, 'g'))
 
 def pressure_candidates(images, used, dangling_ids):
     # Disk pressure: every unused image goes (pins/age/floating ignored) except <1h old or unknown age.
@@ -212,9 +248,16 @@ def pressure_candidates(images, used, dangling_ids):
     return candidates
 
 def remove(candidates):
+    try:
+        remove_while_safe(candidates)
+    except CleanupBudgetExhausted:
+        print('images: stopped (cleanup time budget exhausted)')
+
+def remove_while_safe(candidates):
     for ref, iid in candidates:
-        if not phases_safe():
-            print('images: stopped (integration/unknown phase state)')
+        reason = phase_block_reason()
+        if reason:
+            print(f'images: stopped ({reason})')
             break
         current_used = used_images()
         if current_used is None:
@@ -231,28 +274,20 @@ def remove(candidates):
             print('images: kept ' + ref + ' (rmi refused/unknown)')
 
 def main():
-    if Path(sys.argv[1]).with_name('no-image-prune').is_file():
+    if Path(pin_file).with_name('no-image-prune').is_file():
         print('images: skipped (no-image-prune switch)')
         return
-    if not phases_safe():
-        print('images: skipped (integration running or phase state unknown)')
-        return
-    context = run(['docker', 'context', 'show'])
-    if (context is None or context.strip() not in ('default', 'desktop-linux')
-            or (os.environ.get('DOCKER_HOST') and not os.environ['DOCKER_HOST'].startswith('unix://'))):
-        print('images: skipped (not a verified local context)')
-        return
-    host = decode(run(['docker', 'context', 'inspect', context.strip(), '--format', '{{json .Endpoints.docker.Host}}']))
-    if not isinstance(host, str) or not host.startswith('unix://'):
-        print('images: skipped (not a local Unix endpoint)')
+    reason = phase_block_reason() or local_context_block_reason()
+    if reason:
+        print(f'images: skipped ({reason})')
         return
     try:
-        pins = patterns(Path(sys.argv[1]))
+        pins = patterns(Path(pin_file))
     except OSError:
         print('images: skipped (pin list unreadable)')
         return
     try:
-        local_tags = patterns(Path(sys.argv[1]).with_name('local-tags.txt'))
+        local_tags = patterns(Path(pin_file).with_name('local-tags.txt'))
     except FileNotFoundError:
         local_tags = ['*-local', 'stage-train-*', '*-train-*', 'ci', '*-cand:*', '*-main:*',
                       '*:[0-9][0-9][0-9]-[a-z]*', '*:[0-9][0-9][0-9][0-9]-[a-z]*',
@@ -279,8 +314,8 @@ def main():
             or any(not isinstance(i, dict) or not valid_id(i.get('Id')) for i in images)):
         print('images: skipped (image/container inventory unknown)')
         return
-    if under_pressure():
-        print('images: pressure (free space below ' + format(pressure_threshold(), 'g') + ' GiB)')
+    if pressure_gib:
+        print('images: pressure (free space below ' + pressure_gib + ' GiB)')
         remove(pressure_candidates(images, used, dangling_ids))
         return
     repositories = {}
@@ -342,7 +377,14 @@ def main():
                     candidates.append((ref, iid))
     remove(candidates)
 
-main()
+try:
+    if mode == 'pressure':
+        report_pressure()
+    else:
+        main()
+except CleanupBudgetExhausted:
+    if mode == 'images':
+        print('images: skipped (cleanup time budget exhausted)')
 PY
 }
 
@@ -381,10 +423,16 @@ if [ "${PLANNED:-0}" != 1 ] && healthy; then
   # Snapshot image references before either doctor or guardian removes exited containers.
   last=$(cat "$S/last-gc" 2>/dev/null || echo 0)
   if [ $((now-last)) -ge 900 ]; then
-    image_actions=$(dl 55 prune_superseded_images 2>&1)
+    # Sample pressure independently of the image pass; a skipped pass does not change cache retention.
+    pressure_gib=$(dl 12 image_cleanup pressure 2>/dev/null) || pressure_gib=
+    image_actions=$(dl 55 image_cleanup images "$pressure_gib" 2>&1)
     image_exit=$?
     while IFS= read -r action; do [ -z "$action" ] || log "$action"; done <<< "$image_actions"
-    [ "$image_exit" -eq 0 ] || log "images: failed/timeout exit=$image_exit (guardian continues)"
+    case "$image_exit" in
+      0) ;;
+      124) log "images: stopped (cleanup time budget exhausted)" ;;
+      *) log "images: failed/timeout exit=$image_exit (guardian continues)" ;;
+    esac
   fi
   # Independent timestamp: a missing/failed doctor never blocks guardian health/GC.
   doctor="$(dirname "$0")/dev-doctor"
@@ -409,7 +457,7 @@ if [ "${PLANNED:-0}" != 1 ] && healthy; then
     dl 60 docker network prune -f --filter until=30m >/dev/null 2>&1
     dl 120 docker volume prune -f >/dev/null 2>&1
     keep_storage=8GB
-    case "$image_actions" in *'images: pressure'*) keep_storage=0;; esac  # disk pressure: drop the whole build cache
+    [ -z "$pressure_gib" ] || keep_storage=0  # verified local disk pressure: drop the whole build cache
     dl 300 docker builder prune -f --keep-storage "$keep_storage" >/dev/null 2>&1
     nets=$(dl 15 docker network ls -q 2>/dev/null | wc -l | tr -d ' ')
     log "gc: removed $n containers; networks $nets_before -> $nets"

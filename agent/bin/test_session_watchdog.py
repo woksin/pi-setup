@@ -78,6 +78,66 @@ class Base(unittest.TestCase):
         return calls
 
 
+class Deadline(Base):
+    def test_slow_first_probe_leaves_lsof_only_the_remaining_budget(self):
+        elapsed = 0
+        calls = []
+        private_output = "private-session-cwd"
+
+        def probe(cmd, *, timeout, **kwargs):
+            nonlocal elapsed
+            calls.append((cmd[0], timeout))
+            if cmd[0] == "ps":
+                elapsed += 18
+                return subprocess.CompletedProcess(cmd, 0, "100 Wed Jan  1 00:00:00 2025 /bin/pi\n")
+            raise subprocess.TimeoutExpired(cmd, timeout, output=private_output)
+
+        with patch.object(sw, "time", wraps=time) as clock, patch.object(sw.subprocess, "run", side_effect=probe):
+            clock.monotonic.side_effect = lambda: elapsed
+            self.assertEqual(sw.main(["--once"]), 0)
+        self.assertEqual(calls, [("ps", 20), ("lsof", 17)])
+        with open(sw.LOG) as f:
+            log = f.read()
+        self.assertRegex(log, r"ps-live=\d+\.\d+s lsof-cwd=\d+\.\d+s")
+        self.assertIn("partial", log)
+        self.assertNotIn(private_output, log)
+
+    def test_lsof_partial_failure_keeps_the_readable_cwds(self):
+        def probe(cmd, *, timeout, **kwargs):
+            if cmd[0] == "ps":
+                return subprocess.CompletedProcess(cmd, 0, "100 Wed Jan  1 00:00:00 2025 /bin/pi\n101 Wed Jan  1 00:00:00 2025 /bin/pi\n")
+            raise subprocess.CalledProcessError(1, cmd, output="p100\nn/work/a\n")
+
+        with patch.object(sw.subprocess, "run", side_effect=probe), sw.PassBudget(False) as budget:
+            procs = sw.live_pi_procs(budget)
+        self.assertEqual(list(procs), [100])
+        self.assertEqual(procs[100][0], "/work/a")
+
+    def test_deadline_also_interrupts_session_enumeration(self):
+        calls = self.patch_notify()
+        start = time.monotonic()
+        with patch.object(sw, "PASS_SECONDS", 0.2), patch.object(sw, "heartbeat_sessions", side_effect=lambda *a: time.sleep(5)):
+            self.assertEqual(self.run_wd(), [])
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertEqual(calls, [])
+        with open(sw.LOG) as f:
+            self.assertRegex(f.read(), r"session-enumeration=\d+\.\d+s .*partial")
+
+    def test_later_probe_stall_preserves_completed_notice_and_skips_board(self):
+        self.write([msg("a", NOW - 700, "assistant", [call("c1", command="hang")], stopReason="toolUse")])
+        notices = self.patch_notify()
+        phase_state = os.path.join(self.tmp.name, "phase")
+
+        def stall(cmd, *, timeout, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, timeout)
+
+        with patch.object(sw.subprocess, "run", side_effect=stall) as probe:
+            self.assertEqual(len(self.run_wd(swap=None, phase_state=phase_state)), 1)
+        self.assertEqual([a.args[0][:2] for a in probe.call_args_list], [["sysctl", "-n"]])
+        self.assertEqual(self.run_wd(now=NOW + 60, inject_ttys={}, phase_state=phase_state), [])
+        self.assertEqual([notice[0] for notice in notices], ["stuck"])
+
+
 class Analyse(Base):
     def test_hanging_tool_call_notifies_once(self):
         calls = self.patch_notify()
@@ -322,7 +382,10 @@ class QueueWait(Base):
             self.assertEqual(self.run_wd(phase_state=self.phase_state(os.getpid(), label=label), ppids={}, inject_ttys={}), [])
         notification.assert_not_called()
         self.assertEqual(self.files(), [])
-        self.assertFalse(os.path.exists(sw.LOG))
+        with open(sw.LOG) as f:
+            timing = f.read()
+        for restricted in (header, value, "sid-1"):
+            self.assertNotIn(restricted, timing)
         for name in ("board.json", "board.md", "state.json"):
             with open(os.path.join(sw.STATE_DIR, name)) as f:
                 text = f.read()

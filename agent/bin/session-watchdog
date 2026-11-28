@@ -21,7 +21,8 @@ Only such sessions may produce ALL- "stuck" notices. In a cwd that has live pi p
 mapping (found with `ps` + `lsof -d cwd`), a stuck-looking log modified after the youngest unmapped process
 started (ps lstart) is reported only to PISETUP-to-L0 as "possibly-stuck / unconfirmed". Dead logs are ignored.
 """
-import argparse, glob, json, os, re, shlex, subprocess, sys, time
+import argparse, glob, json, os, re, shlex, signal, subprocess, sys, time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 HOME = os.path.expanduser("~")
@@ -31,6 +32,8 @@ LOG = os.path.join(HOME, ".pi/agent/logs/session-watchdog.log")
 HEARTBEATS = os.path.join(HOME, ".pi/orch/heartbeats")
 PHASE_STATE = os.path.join(HOME, ".pi/agent/pi-phase/state")
 HEARTBEAT_FRESH = 300     # heartbeat file must be younger than 5 min
+PASS_SECONDS = 35        # work deadline; leave margin for startup/unwinding under the guardian's 45s
+TIMING_LOG_SECONDS = 1   # best-effort final timing log must not hang the caller
 
 STUCK_AFTER = 600          # 10 min
 BASH_TIMEOUT_GRACE = 120   # bash with timeout > 10 min: stuck after timeout + 2 min
@@ -57,6 +60,75 @@ def log(msg):
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
     except OSError:
         pass
+
+
+class PassStopped(Exception):
+    """The rest of this pass is optional; do not publish results from unfinished stages."""
+
+
+class PassBudget:
+    def __init__(self, dry_run):
+        self.dry_run = dry_run
+        self.timings = []
+
+    def __enter__(self):
+        self.started = time.monotonic()
+        self.end = self.started + PASS_SECONDS
+        # The watchdog runs on the main thread on macOS. Bound Python-side file work too:
+        # checking the clock between files cannot interrupt a blocked read or enumeration.
+        self.previous_handler = signal.signal(signal.SIGALRM, self.expire)
+        signal.setitimer(signal.ITIMER_REAL, self.remaining())
+        return self
+
+    def __exit__(self, exc_type, exc, _traceback):
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if not self.dry_run:
+                remaining = self.end + TIMING_LOG_SECONDS - time.monotonic()
+                if remaining > 0:
+                    signal.setitimer(signal.ITIMER_REAL, remaining)
+                    stages = " ".join(f"{name}={elapsed:.3f}s" for name, elapsed in self.timings)
+                    total = time.monotonic() - self.started
+                    outcome = f"partial: {exc}" if exc_type is PassStopped else "failed" if exc_type else "complete"
+                    log(f"pass timing: total={total:.3f}s {stages} ({outcome})")
+        except PassStopped:
+            pass  # The final log cannot use more than the reserved margin.
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, self.previous_handler)
+        return exc_type is PassStopped
+
+    @staticmethod
+    def expire(*_):
+        raise PassStopped("deadline exhausted")
+
+    def remaining(self):
+        remaining = self.end - time.monotonic()
+        if remaining <= 0:
+            self.expire()
+        return remaining
+
+    @contextmanager
+    def stage(self, name):
+        started = time.monotonic()
+        try:
+            self.remaining()
+            yield
+        finally:
+            self.timings.append((name, time.monotonic() - started))
+
+    def probe(self, name, cap, cmd, partial_ok=False, **kwargs):
+        try:
+            with self.stage(name):
+                return subprocess.run(cmd, capture_output=True, text=True, check=True,
+                                      timeout=min(cap, self.remaining()), **kwargs).stdout
+        except subprocess.TimeoutExpired:
+            raise PassStopped(f"{name} timed out") from None
+        except subprocess.CalledProcessError as e:
+            # lsof exits 1 when one listed pid vanished or is unreadable but still reports the others.
+            return e.stdout if partial_ok and e.stdout and e.stdout.strip() else None
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            return None
 
 
 def parse_ts(s):
@@ -182,12 +254,11 @@ def pid_alive(pid):
     return True
 
 
-def ppid_map():
-    """{pid: ppid} for all processes; empty on failure."""
-    try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=20).stdout
-    except (OSError, subprocess.SubprocessError):
-        return {}
+def ppid_map(budget):
+    """{pid: ppid} for all processes; do not infer a stuck session if the probe failed."""
+    out = budget.probe("ps-ancestry", 20, ["ps", "-axo", "pid=,ppid="])
+    if out is None:
+        raise PassStopped("ps-ancestry failed")
     return {int(a): int(b) for a, b in (l.split() for l in out.splitlines() if len(l.split()) == 2) if a.isdigit() and b.isdigit()}
 
 
@@ -258,26 +329,25 @@ def queue_text(w):
     return ", ".join(parts)
 
 
-def live_pi_procs():
-    """{pid: (cwd, start_epoch)} for every live process named `pi`. Empty dict if the probe fails."""
+def live_pi_procs(budget):
+    """{pid: (cwd, start_epoch)} for every live process named `pi`. Stop on probe failure."""
     env = dict(os.environ, LC_ALL="C")
-    try:
-        out = subprocess.run(["ps", "-axo", "pid=,lstart=,comm="], capture_output=True, text=True, timeout=20, env=env).stdout
-        procs = {}
-        for l in out.splitlines():
-            parts = l.split(None, 6)
-            if len(parts) == 7 and os.path.basename(parts[6].strip()) == "pi":
-                try:
-                    procs[int(parts[0])] = ["", time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))]
-                except ValueError:
-                    continue
-        if not procs:
-            return {}
-        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(map(str, procs))],
-                             capture_output=True, text=True, timeout=30).stdout
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
-        log(f"live-process probe failed: {e}")
+    out = budget.probe("ps-live", 20, ["ps", "-axo", "pid=,lstart=,comm="], env=env)
+    if out is None:
+        raise PassStopped("ps-live failed")
+    procs = {}
+    for l in out.splitlines():
+        parts = l.split(None, 6)
+        if len(parts) == 7 and os.path.basename(parts[6].strip()) == "pi":
+            try:
+                procs[int(parts[0])] = ["", time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))]
+            except ValueError:
+                continue
+    if not procs:
         return {}
+    out = budget.probe("lsof-cwd", 30, ["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(map(str, procs))], partial_ok=True)
+    if out is None:
+        raise PassStopped("lsof-cwd failed")
     pid = None
     for l in out.splitlines():
         if l.startswith("p") and l[1:].isdigit():
@@ -349,15 +419,11 @@ def session_facts(path):
     return last, turn_end
 
 
-def pi_ttys(pids):
+def pi_ttys(pids, budget):
     """{pid: tty} from ps; empty on failure."""
     if not pids:
         return {}
-    try:
-        out = subprocess.run(["ps", "-o", "pid=,tty=", "-p", ",".join(map(str, pids))], capture_output=True,
-                             text=True, timeout=20).stdout
-    except (OSError, subprocess.SubprocessError):
-        return {}
+    out = budget.probe("ps-tty", 20, ["ps", "-o", "pid=,tty=", "-p", ",".join(map(str, pids))]) or ""
     return {int(a): b.strip() for a, b in (l.split(None, 1) for l in out.splitlines() if len(l.split(None, 1)) == 2) if a.isdigit()}
 
 
@@ -411,7 +477,7 @@ def board_rows(procs, mapped, infos, now, ttys, status_dir):
                 row["queue"] = queue_text(info["waiting"]) if info and info.get("waiting") else None
                 row["lane"], row["lane_status"] = lane_for(name, status_dir)
             except OSError as e:
-                log(f"board {path}: {e}")
+                log(f"board session read failed: {type(e).__name__}")
         rows.append(row)
     return rows
 
@@ -439,21 +505,21 @@ def human(sec):
     return f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec >= 3600 else f"{sec // 60}m{sec % 60:02d}s"
 
 
-def swap_usage_mb():
+def swap_usage_mb(budget):
+    out = budget.probe("swap-usage", 10, ["sysctl", "-n", "vm.swapusage"]) or ""
     try:
-        out = subprocess.run(["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=10).stdout
         vals = dict(re.findall(r"(total|used|free) = ([\d.]+)M", out))
         return float(vals["used"]), float(vals["free"])
-    except (OSError, subprocess.SubprocessError, KeyError, ValueError):
+    except (KeyError, ValueError):
         return None
 
 
-def memory_level():
+def memory_level(budget):
     """kern.memorystatus_level (percent available), or None."""
+    out = budget.probe("memory-level", 10, ["sysctl", "-n", "kern.memorystatus_level"]) or ""
     try:
-        return float(subprocess.run(["sysctl", "-n", "kern.memorystatus_level"], capture_output=True,
-                                    text=True, timeout=10).stdout.strip())
-    except (OSError, subprocess.SubprocessError, ValueError):
+        return float(out.strip())
+    except ValueError:
         return None
 
 
@@ -464,11 +530,8 @@ def memory_pressure(level, swap_used_mb):
                                               and swap_used_mb > SWAP_USED_MAX_MB)
 
 
-def fseventsd_rss_mb():
-    try:
-        out = subprocess.run(["ps", "-axo", "rss=,comm="], capture_output=True, text=True, timeout=20).stdout
-    except (OSError, subprocess.SubprocessError):
-        return 0.0
+def fseventsd_rss_mb(budget):
+    out = budget.probe("ps-fseventsd", 20, ["ps", "-axo", "rss=,comm="]) or ""
     best = 0.0
     for l in out.splitlines():
         parts = l.strip().split(None, 1)
@@ -510,58 +573,66 @@ def notify(suffix, title, text, messages_dir, dry_run):
                 with open(os.path.join(messages_dir, f"{prefix}-session-watchdog-{time.strftime('%H%M')}-{suffix}.md"), "w") as f:
                     f.write(text + "\n")
             except OSError as e:
-                log(f"message file failed: {e}")
-    short = text.replace("\\", " ").replace('"', "'")[:230]
-    try:
-        subprocess.run(["osascript", "-e", f'display notification "{short}" with title "session-watchdog"'],
-                       capture_output=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        pass
+                log(f"message file failed: {type(e).__name__}")
     log(f"notified {suffix}: {text.splitlines()[0] if text else ''}")
+    return text.replace("\\", " ").replace('"', "'")[:230]
 
 
 def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS, messages_dir=None, swap=None, level=-1, fsevents_mb=None, sessions=SESSIONS, inject_ttys=None, phase_state=PHASE_STATE, ppids=None):
+    stuck = []
+    with PassBudget(dry_run) as budget:
+        run_pass(budget, stuck, dry_run, no_memory, now, procs, hb_dir, messages_dir, swap,
+                 level, fsevents_mb, sessions, inject_ttys, phase_state, ppids)
+    return stuck
+
+
+def run_pass(budget, stuck, dry_run, no_memory, now, procs, hb_dir, messages_dir, swap,
+             level, fsevents_mb, sessions, inject_ttys, phase_state, ppids):
     now = time.time() if now is None else now
     if messages_dir is None:
         messages_dir = os.environ.get("SESSION_WATCHDOG_MESSAGES") or os.environ.get("DOCKER_GUARDIAN_MESSAGES", "")
-    state = load_state()
+    with budget.stage("state-load"):
+        state = load_state()
     notified = state.setdefault("notified", {})
-    procs = live_pi_procs() if procs is None else procs
-    mapped = heartbeat_sessions(procs, now, hb_dir, sessions)
-    unmapped = unmapped_candidates(procs, set(mapped.values()), set(mapped), now, sessions)
-    files = []
-    for p in mapped:
-        try:
-            files.append((p, os.stat(p).st_mtime, procs[mapped[p]][0]))
-        except OSError:
-            pass
-    stuck, possible = [], []
-    infos = {}
-    entries = phase_entries(phase_state)
-    if entries and ppids is None:
-        ppids = ppid_map()
-    ppids = ppids or {}
-    pid_of = {p: pid for p, pid in mapped.items()}
-    for confirmed, group in ((True, list(files)), (False, unmapped)):
-        for path, mtime, cwd in group:
+    procs = live_pi_procs(budget) if procs is None else procs
+    with budget.stage("session-enumeration"):
+        mapped = heartbeat_sessions(procs, now, hb_dir, sessions)
+        unmapped = unmapped_candidates(procs, set(mapped.values()), set(mapped), now, sessions)
+        files = []
+        for p in mapped:
             try:
-                info = analyse(path)
-            except OSError as e:
-                log(f"{path}: {e}")
-                continue
-            infos[path] = info
-            w = queue_wait(info, pid_of.get(path), cwd, entries, ppids, now)
-            if w:
-                info["waiting"] = w
-                continue
-            if not info or now - info["since"] <= threshold(info):
-                continue
-            sid, hcwd, name = read_head_info(path)
-            sid = sid or os.path.basename(path)
-            key = f"{sid}|{info['record_id']}" + ("" if confirmed else "|unmapped")
-            if now - notified.get(key, 0) < RENOTIFY:
-                continue
-            (stuck if confirmed else possible).append((key, sid, name, hcwd or cwd, info, now - info["since"]))
+                files.append((p, os.stat(p).st_mtime, procs[mapped[p]][0]))
+            except OSError:
+                pass
+    with budget.stage("phase-enumeration"):
+        entries = phase_entries(phase_state)
+    if entries and ppids is None:
+        ppids = ppid_map(budget)
+    ppids = ppids or {}
+    possible = []
+    infos = {}
+    with budget.stage("session-analysis"):
+        pid_of = {p: pid for p, pid in mapped.items()}
+        for confirmed, group in ((True, files), (False, unmapped)):
+            for path, mtime, cwd in group:
+                try:
+                    info = analyse(path)
+                except OSError as e:
+                    log(f"session read failed: {type(e).__name__}")
+                    continue
+                infos[path] = info
+                w = queue_wait(info, pid_of.get(path), cwd, entries, ppids, now)
+                if w:
+                    info["waiting"] = w
+                    continue
+                if not info or now - info["since"] <= threshold(info):
+                    continue
+                sid, hcwd, name = read_head_info(path)
+                sid = sid or os.path.basename(path)
+                key = f"{sid}|{info['record_id']}" + ("" if confirmed else "|unmapped")
+                if now - notified.get(key, 0) < RENOTIFY:
+                    continue
+                (stuck if confirmed else possible).append((key, sid, name, hcwd or cwd, info, now - info["since"]))
 
     def describe(items):
         lines = []
@@ -572,54 +643,69 @@ def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS,
             notified[key] = now
         return lines
 
+    def emit(suffix, text):
+        with budget.stage("notice"):
+            short = notify(suffix, "session-watchdog", text, messages_dir, dry_run)
+            if not dry_run:
+                # Keep completed lane notices deduplicated if a later optional probe stalls.
+                try:
+                    save_state(state)
+                except OSError as e:
+                    log(f"notice state save failed: {type(e).__name__}")
+        if short is not None:
+            budget.probe("desktop-notification", 15,
+                         ["osascript", "-e", f'display notification "{short}" with title "session-watchdog"'])
+
     if stuck:
         lines = describe(stuck)
-        notify("stuck", "session-watchdog",
-               f"session-watchdog ({time.strftime('%H:%M')}): {len(stuck)} pi session(s) look stuck. "
-               "Likely a hanging tool, a blocking prompt (guard/priority grant) or a stalled provider request. "
-               "Check the terminal.\n" + "\n".join(lines), messages_dir, dry_run)
+        emit("stuck",
+             f"session-watchdog ({time.strftime('%H:%M')}): {len(stuck)} pi session(s) look stuck. "
+             "Likely a hanging tool, a blocking prompt (guard/priority grant) or a stalled provider request. "
+             "Check the terminal.\n" + "\n".join(lines))
     if possible:
         lines = describe(possible)
-        notify("possibly-stuck", "session-watchdog",
-               f"session-watchdog ({time.strftime('%H:%M')}): {len(possible)} stuck-looking session log(s), "
-               "unconfirmed: session not positively mapped to a live process (no pi-orch heartbeat; a live pi "
-               "process in the same cwd started before the log was last written).\n" + "\n".join(lines),
-               messages_dir, dry_run)
+        emit("possibly-stuck",
+             f"session-watchdog ({time.strftime('%H:%M')}): {len(possible)} stuck-looking session log(s), "
+             "unconfirmed: session not positively mapped to a live process (no pi-orch heartbeat; a live pi "
+             "process in the same cwd started before the log was last written).\n" + "\n".join(lines))
     files = files + unmapped
     # all sessions silent
     if len(procs) >= SILENT_MIN_SESSIONS and files and all(now - m > SILENT_AFTER for _, m, _ in files) and due(state, "silent", now):
         quiet = human(now - max(m for _, m, _ in files))
-        notify("silent", "session-watchdog",
-               f"session-watchdog ({time.strftime('%H:%M')}): {len(procs)} live pi sessions and none has written a record for {quiet} (>15 min). "
-               "Possible host-wide stall (memory, network or provider).", messages_dir, dry_run)
         state["silent"] = now
+        emit("silent",
+             f"session-watchdog ({time.strftime('%H:%M')}): {len(procs)} live pi sessions and none has written a record for {quiet} (>15 min). "
+             "Possible host-wide stall (memory, network or provider).")
     # memory notices (notify-only)
-    sw = None if no_memory else (swap_usage_mb() if swap is None else swap)
-    lv = None if no_memory else (memory_level() if level == -1 else level)
+    sw = None if no_memory else (swap_usage_mb(budget) if swap is None else swap)
+    lv = None if no_memory else (memory_level(budget) if level == -1 else level)
     if memory_pressure(lv, sw[0] if sw else None) and due(state, "swap", now):
-        notify("memory", "session-watchdog",
-               f"session-watchdog ({time.strftime('%H:%M')}): memory pressure: {lv:g}% available"
-               + (f", swap used {sw[0]/1024:.1f} GB" if sw else "")
-               + f" (notice when < {LEVEL_LOW_PERCENT}% with swap used > 12 GB, or < {LEVEL_CRITICAL_PERCENT}%). "
-               "Shed heavy phases/Docker load.", messages_dir, dry_run)
         state["swap"] = now
-    fs = 0.0 if no_memory else (fseventsd_rss_mb() if fsevents_mb is None else fsevents_mb)
+        emit("memory",
+             f"session-watchdog ({time.strftime('%H:%M')}): memory pressure: {lv:g}% available"
+             + (f", swap used {sw[0]/1024:.1f} GB" if sw else "")
+             + f" (notice when < {LEVEL_LOW_PERCENT}% with swap used > 12 GB, or < {LEVEL_CRITICAL_PERCENT}%). "
+             "Shed heavy phases/Docker load.")
+    fs = 0.0 if no_memory else (fseventsd_rss_mb(budget) if fsevents_mb is None else fsevents_mb)
     if fs > FSEVENTSD_RSS_MAX_MB and due(state, "fseventsd", now):
-        notify("fseventsd", "session-watchdog",
-               f"session-watchdog ({time.strftime('%H:%M')}): fseventsd RSS is {fs/1024:.1f} GB (> 4 GB). "
-               "Restarting it needs root: `sudo killall fseventsd` (run by a human; the watchdog never does).", messages_dir, dry_run)
         state["fseventsd"] = now
+        emit("fseventsd",
+             f"session-watchdog ({time.strftime('%H:%M')}): fseventsd RSS is {fs/1024:.1f} GB (> 4 GB). "
+             "Restarting it needs root: `sudo killall fseventsd` (run by a human; the watchdog never does).")
     for k in [k for k, v in notified.items() if now - v > 2 * RECENT]:
         del notified[k]
-    try:
-        rows = board_rows(procs, mapped, infos, now, pi_ttys(list(procs)) if inject_ttys is None else inject_ttys, lane_status_dir())
-        if not dry_run:
-            write_board(rows, now)
-    except OSError as e:
-        rows = []
-        log(f"board failed: {e}")
+    ttys = pi_ttys(list(procs), budget) if inject_ttys is None else inject_ttys
+    with budget.stage("board"):
+        try:
+            rows = board_rows(procs, mapped, infos, now, ttys, lane_status_dir())
+            if not dry_run:
+                write_board(rows, now)
+        except OSError as e:
+            rows = []
+            log(f"board failed: {type(e).__name__}")
     if not dry_run:
-        save_state(state)
+        with budget.stage("state-save"):
+            save_state(state)
     else:
         print(f"[dry-run] live pi procs={len(procs)} positively mapped={len(mapped)} ambiguous candidate files={len(unmapped)} stuck={len(stuck)} possibly-stuck={len(possible)} "
               f"level={'n/a' if lv is None else f'{lv:g}%'} swap={'n/a' if not sw else f'used {sw[0]:.0f}M free {sw[1]:.0f}M'} fseventsd={fs:.0f}M")
@@ -627,7 +713,6 @@ def run(dry_run=False, no_memory=False, now=None, procs=None, hb_dir=HEARTBEATS,
         for r in rows:
             by_state[r["state"]] = by_state.get(r["state"], 0) + 1
         print("[dry-run] board (not written): " + (", ".join(f"{k}={v}" for k, v in sorted(by_state.items())) or "no live pi processes"))
-    return stuck
 
 
 EPILOG = """Examples:
@@ -650,7 +735,7 @@ def main(argv=None):
     try:
         run(dry_run=a.dry_run, no_memory=a.no_memory)
     except Exception as e:  # never break the caller
-        log(f"watchdog error: {type(e).__name__}: {e}")
+        log(f"watchdog error: {type(e).__name__}")
         print(f"session-watchdog: error: {e}", file=sys.stderr)
         return 0 if not a.dry_run else 1
     return 0
