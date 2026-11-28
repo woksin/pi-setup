@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Register a protective change and notify when it may be safe to review."""
+import argparse
+import sys
+import time
+
+from hold_register import HoldError, Register, summaries, summary_line, sweep
+
+
+HELP = """Examples:
+  holds add --owner L7 --what 'Publish disabled' --lift server-upgraded
+  holds list
+  holds lift ID   # after authorized removal
+Exit codes: 0 success, 2 invalid input, unavailable register or delivery error
+See also: docs/reference.md, lane-status --help
+"""
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, epilog=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    add = sub.add_parser("add", help="register a hold before placing it (needs the holds LaunchAgent)")
+    add.add_argument("--owner", required=True)
+    add.add_argument("--what", required=True)
+    add.add_argument("--lift", required=True, help="name of a read-only executable in holds/checks/")
+    sub.add_parser("list", help="list active holds across lane workspaces")
+    lift = sub.add_parser("lift", help="record an authorized removal; never changes the protected resource")
+    lift.add_argument("id")
+    sub.add_parser("sweep", help="internal: check active holds and post directed notifications")
+    args = parser.parse_args(argv)
+    now = time.time()
+    try:
+        register = Register()
+        if args.command == "add":
+            print(register.add(args.owner, args.what, args.lift, now))
+        elif args.command == "lift":
+            print(f"{args.id}: " + ("lifted" if register.lift(args.id, now) else "already lifted"))
+        elif args.command == "list":
+            active, unavailable = summaries(now=now)
+            for hold in active:
+                print(summary_line(hold))
+            if unavailable:
+                raise HoldError("register unavailable or incomplete")
+        else:
+            return sweep(register)
+    except (HoldError, OSError) as e:
+        print(f"holds: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

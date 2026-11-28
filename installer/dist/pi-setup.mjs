@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 9e2f820b5f1d6a0f77cc78ecb8a18349d3facc1a3af05606dea910e7f83d7501
+// pi-setup-source-sha256: 292706a66312e04b1b1dd8424cc7b83417d05de4921fe54e9a8d6ffbd3099cdf
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -7713,7 +7713,7 @@ import { existsSync as existsSync29, readdirSync as readdirSync20, readFileSync 
 import { join as join55 } from "node:path";
 function available(id, ctx) {
   if (id === "docker-guardian") return ctx.platform === "darwin" ? true : "needs Docker Desktop on macOS";
-  if (["secret-sweep", "disk-growth"].includes(id)) return ctx.platform === "darwin" ? true : "its schedule is a macOS launchd job";
+  if (["secret-sweep", "disk-growth", "holds"].includes(id)) return ctx.platform === "darwin" ? true : "its schedule is a macOS launchd job";
   if (id === "lanes") return ctx.which("git") ? true : "needs git";
   if (id === "cleanup") return ctx.platform === "darwin" || ctx.which("systemctl") ? true : "needs launchd (macOS) or systemd";
   return true;
@@ -7781,6 +7781,7 @@ function detectDefaults(ctx, detection, reposRoot) {
     cleanup: ctx.platform === "darwin" || Boolean(ctx.which("systemctl")),
     "secret-sweep": ctx.platform === "darwin" && Boolean(ctx.which("gitleaks")),
     "disk-growth": ctx.platform === "darwin",
+    holds: false,
     codescene: Boolean(ctx.which("cs-mcp")) || Boolean(ctx.env.CS_ACCESS_TOKEN),
     cratis,
     web: true,
@@ -7793,6 +7794,7 @@ function hintFor(def, on, source = "detected") {
     cleanup: ["a scheduler is available", "no scheduler found"],
     "secret-sweep": ["gitleaks found", "gitleaks not found"],
     "disk-growth": ["macOS launchd available", "needs macOS launchd"],
+    holds: ["macOS launchd available", "opt-in on macOS"],
     codescene: ["cs-mcp or a token found", "no cs-mcp or token found"],
     cratis: ["Cratis repos found", "no Cratis repos found"],
     web: ["on by default", "off"],
@@ -7839,12 +7841,13 @@ function codesceneNotes(ctx) {
 var COMPONENT_IDS, COMPONENTS, isComponentId, readJson, WEB_PACKAGES, LIMIT, markerRe, CS_REPO, CS_SKILLS;
 var init_components = __esm({
   "src/components.ts"() {
-    COMPONENT_IDS = ["docker-guardian", "cleanup", "secret-sweep", "disk-growth", "codescene", "cratis", "web", "lanes"];
+    COMPONENT_IDS = ["docker-guardian", "cleanup", "secret-sweep", "disk-growth", "holds", "codescene", "cratis", "web", "lanes"];
     COMPONENTS = [
       { id: "docker-guardian", label: "docker-guardian", explain: "restarts a hung Docker Desktop every 2 minutes (macOS launchd)", service: true },
       { id: "cleanup", label: "cleanup schedule", explain: "daily disk cleanup of pi's caches (launchd or systemd timer)", service: true },
       { id: "secret-sweep", label: "secret-sweep", explain: "daily scan of pi sessions for leaked secrets (macOS launchd; needs gitleaks)", service: true },
       { id: "disk-growth", label: "disk-growth alert", explain: "every minute: alerts when free disk drops 5 GiB within 5 minutes and names the top writers (macOS launchd)", service: true },
+      { id: "holds", label: "holds sweep", explain: "checks protective holds every five minutes and notifies the owner or coordinator (macOS launchd)", service: true },
       { id: "codescene", label: "CodeScene", explain: "Code Health MCP server and policy in AGENTS.md (needs cs-mcp and a token)", service: false },
       { id: "cratis", label: "Cratis conventions", explain: "Cratis rules, cratis-cli guard and agent, and the Cratis sections of AGENTS.md", service: false },
       { id: "lanes", label: "lanes", explain: "run several pi sessions in parallel, coordinated by one session", service: false },
@@ -9104,7 +9107,7 @@ var init_services = __esm({
   "src/services.ts"() {
     init_components();
     init_manifest();
-    LAUNCHD_NAME = { "docker-guardian": "docker-guardian", cleanup: "pi-cleanup", "secret-sweep": "secret-sweep", "disk-growth": "disk-growth" };
+    LAUNCHD_NAME = { "docker-guardian": "docker-guardian", cleanup: "pi-cleanup", "secret-sweep": "secret-sweep", "disk-growth": "disk-growth", holds: "holds" };
     TIMER = "pi-cleanup.timer";
     TIMEOUT = 5e3;
     xml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

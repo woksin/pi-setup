@@ -25,6 +25,8 @@ import argparse, glob, json, os, re, shlex, signal, subprocess, sys, time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from hold_register import summaries, summary_line
+
 HOME = os.path.expanduser("~")
 SESSIONS = os.path.join(HOME, ".pi/agent/sessions")
 STATE_DIR = os.path.join(HOME, ".pi/agent/session-watchdog")
@@ -493,6 +495,16 @@ def write_board(rows, now, board_dir=None):
         lane = f"{r['lane']}: {r['lane_status']}" if r["lane"] else "-"
         md.append(f"| {r['pid']} | {r['tty']} | {r['cwd']} | {r['session_id']} | {r['session_name']} | {r['last_record']} | "
                   f"{r['last_turn_end']} | {r['state'] + (' on queue: ' + r['queue'] if r.get('queue') else '')} | {lane.replace('|', '/')} |")
+    doc["holds"], unavailable = summaries(now=now)
+    md.extend(["", "## Active holds", ""])
+    for hold in doc["holds"]:
+        text = re.sub(r"([\\`*_<>~\[\]&])", r"\\\1", summary_line(hold))
+        md.append(f"- {text}")
+    if unavailable:
+        doc["holds_unavailable"] = True
+        md.append("Hold register unavailable or incomplete.")
+    elif not doc["holds"]:
+        md.append("No active holds.")
     for name, text in (("board.json", json.dumps(doc, indent=1) + "\n"), ("board.md", "\n".join(md) + "\n")):
         tmp = os.path.join(board_dir, f"{name}.tmp.{os.getpid()}")
         with open(tmp, "w") as f:

@@ -46,6 +46,11 @@ Enforcement levels: **tool** (the setup does it or warns), **rule** (an `AGENTS.
 - **Rule:** before merging or authorizing anything that triggers an org-wide write workflow, list open PRs touching the same files, get a dry-run list of files and repositories, and compare it with recent deliberate deletions. Bootstrap commits never carry CI skip tokens.
 - **Enforced:** rule (`agent/AGENTS.md`, "Destructive-action safety").
 
+### A protective hold outlived its owner
+- **Symptom:** Publish stayed disabled for hours after its lift condition was met because the original session had ended.
+- **Rule:** Prefer an in-workflow condition to disabling Publish. If a protective disable is necessary, [register it before disabling](reference.md#lanes-and-messaging-opt-in) with a check of the deployed condition. Readiness asks for review, not permission to remove the protection.
+- **Enforced:** practice (register before disabling), and tool (`holds` retains the record and notifies the owner or coordinator).
+
 ### Unused local build tags escape semver cleanup
 - **Symptom:** eight unused local build tags retained about 6 GiB at the 25 GiB disk floor.
 - **Cause:** image cleanup only considered superseded versions and dangling images; reproducible `Created` timestamps also hid recent tagging.

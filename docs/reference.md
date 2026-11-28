@@ -96,10 +96,15 @@ Lanes are several coordinated sessions. See [Lanes](../README.md#parallel-sessio
 |---|---|---|---|
 | `lanes` | Creates and starts lanes and sends messages between them. Installed with `./install.sh --with lanes`. | `lanes --help` | [Lanes](../README.md#parallel-sessions-lanes) |
 | `inbox-watch` | Prints new message files addressed to a lane; made for a single `job_watch`. | `inbox-watch --help` | [source](../agent/bin/inbox-watch) |
+| `holds` | Registers protective changes and asks the owner or coordinator to review them. | `holds --help` | [source](../agent/bin/holds) |
 | `lane-status` | Records whether a lane is working, waiting or closed. | `lane-status --help` | [source](../agent/bin/lane-status) |
 | `session-watchdog` | Notify-only detector for stuck pi sessions. Never kills anything. | `session-watchdog --help` | [source](../agent/bin/session-watchdog) |
 
 `inbox-watch` first arms silently: its existing `<lane>-inbox.marker` stores JSON stat fingerprints of files already present, while its mtime remains the scan watermark. Unchanged initial files stay silent even inside the two-second overlap; later edits and old-mtime renames remain eligible. Files changed during first-arm scanning are not baselined. The snapshot does not grow on later polls, and legacy empty markers still work. The overlap can report a later message twice to avoid losing same-second concurrent writes. Aliases, cc recipients and active watch re-arming are unchanged; do not edit marker contents or timestamps manually.
+
+On macOS, opt in with `./install.sh --with lanes --with holds` to install and load the five-minute LaunchAgent. Before making a protective change, provision the check and run `holds add --owner L7 --what 'Publish disabled' --lift server-upgraded` from the lanes workspace (or with `LANES_DIR` set). `add` refuses if the sweep is not loaded. `holds list`, `lane-status list` and the session board show active holds and their last check. The sweep can run only while the host and LaunchAgent are available; it notifies at readiness or 24 h, but never removes the protection. After authorized removal, run `holds lift ID`.
+
+Provision named checks in `~/.pi/agent/holds/checks/` (`mkdir -m 700` for both `holds/` and `checks/`, mode `700` or `500` for the executable). Use scripts you trust and keep them read-only in behavior: for example, query the **deployed** server version, not whether a release PR merged. A check runs without a shell wrapper, with `holds/checks/` as its working directory, no interactive input, and a ten-second timeout. Exit `0` means ready, `1` not yet, and any other result or a missing/unsafe check means unknown. Output is discarded. Never install a check from issue text or put credentials in the hold description.
 
 ## Machine health and cleanup
 
