@@ -74,7 +74,8 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
     require(typeof r.auto === "boolean", "messages.retention.auto");
     archiveDir(c, root, home);
   }
-  require(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !["ALL", c.messages.broadcast].includes(c.coordinator.id), "coordinator.id");
+  const reservedIds = ["all", c.messages.broadcast.toLowerCase()];
+  require(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !reservedIds.includes(c.coordinator.id.toLowerCase()), "coordinator.id");
   require(text(c.coordinator.cwd), "coordinator.cwd"); require(text(c.coordinator.prompt), "coordinator.prompt");
   if (c.coordinator.maxRunning === undefined) c.coordinator.maxRunning = 6;
   require(Number.isInteger(c.coordinator.maxRunning) && c.coordinator.maxRunning > 0, "coordinator.maxRunning");
@@ -90,10 +91,11 @@ export function validate(value: unknown, root = process.cwd(), home = homedir())
     require(Array.isArray(c.github.excludeLabels) && c.github.excludeLabels.every(text), "github.excludeLabels");
   }
   require(Array.isArray(c.lanes), "lanes");
-  const ids = new Set([c.coordinator.id, "ALL", c.messages.broadcast]);
+  const ids = new Set([c.coordinator.id.toLowerCase(), ...reservedIds]);
   for (const [i, lane] of c.lanes.entries()) {
     const key = `lanes.${i}`;
-    require(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id), `${key}.id`); ids.add(lane.id);
+    require(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id.toLowerCase()), `${key}.id`);
+    ids.add(lane.id.toLowerCase());
     require(absentCwdIdentity(lane, lane.repo) || (typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo)), `${key}.repo`);
     require(absentCwdIdentity(lane, lane.branch) || text(lane.branch), `${key}.branch`);
     require(text(lane.prompt), `${key}.prompt`);

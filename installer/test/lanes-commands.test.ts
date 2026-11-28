@@ -65,6 +65,16 @@ test("status is read-only, shows coordinator, missing worktrees, status and mess
   const before = snapshot(home); assert.equal(await main(["status"], ctx), 0); assert.deepEqual(snapshot(home), before);
   assert.match(lines.at(-1)!, /L1.*example\/alpha.*l1-test.*missing.*waiting-on test.*L0-to-L1/);
 });
+test("add refuses an ID differing only by case before creating a worktree", async () => {
+  const { ctx, home, calls } = fixture();
+  const c = defaults(home, home);
+  c.lanes.push({ id: "L7a", repo: "example/alpha", worktree: "lane", branch: "lane", group: null, prompt: "prompt.md" });
+  saveConfig(home, c);
+  const before = snapshot(home);
+  assert.equal(await main(["add", "L7A", "--repo", "example/alpha"], ctx), 1);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(snapshot(home), before);
+});
 test("add validation, clone errors and undo after a worktree failure", async () => {
   const { ctx, home, errors } = fixture(); await main(["init", home], ctx);
   for (const args of [["ALL", "--repo", "example/alpha"], ["L1", "--repo", "../alpha"], ["L1", "--repo", "example/alpha", "--issue", "no"], ["L1", "--repo", "example/alpha", "--group", "bad"]]) assert.equal(await main(["add", ...args], ctx), 2);
