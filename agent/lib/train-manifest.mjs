@@ -96,6 +96,19 @@ export async function saveManifest(path, manifest) {
   } finally { await rm(temporary, { force: true }); }
 }
 
+export function manifestRecorder(ctx, options, path, manifest) {
+  let checkpoint = JSON.stringify(manifest);
+  return {
+    now: ctx.now,
+    save: async (op, detail) => {
+      if (options.dryRun || JSON.stringify(manifest) === checkpoint) return;
+      manifest.log.push({ at: ctx.now(), op, detail });
+      await saveManifest(path, manifest);
+      checkpoint = JSON.stringify(manifest);
+    },
+  };
+}
+
 function dead(pid) {
   try { process.kill(pid, 0); return false; }
   catch (error) { return error.code === 'ESRCH'; }
