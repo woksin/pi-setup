@@ -94,7 +94,7 @@ test("grep and ripgrep source locations are not named credentials", () => {
 	for (const [path, code] of [
 		["extensions/secret-mask.ts", 'import type { X } from "y";'],
 		["src/token-store.ts", "initialize();"],
-		["src/views/password-reset.tsx", 'renderReset("email");'],
+		["src/views/password-reset.tsx", "renderReset();"],
 		["scripts/api_key.py", "import secrets"],
 		["src/password-reset.cs", "Initialize();"],
 	]) {
@@ -131,6 +131,25 @@ test("a digit-only credential after an rg column location stays masked and keeps
 		const result = scan(location + pin, [], { mode });
 		assert.equal(result.count, 1);
 		assert.ok(!result.text.includes(pin));
+	}
+});
+
+test("grep source-line exemption needs a bare colon value with no call arguments", () => {
+	const pin = ["4815", "1623", "42"].join("");
+	const arg = ["Syn7", "hetic42"].join("");
+	for (const [source, value] of [
+		[["config.secret.ts", `"42:Initialize(${arg})"`].join(":"), arg],
+		[["config.secret.ts", `42:Initialize(${arg})`].join(":"), arg],
+		[["src/token_store.py", "42", "7", `initialize(db_password=${pin})`].join(":"), pin],
+		[["secret.ts", `"42:Initialize()"`].join(":"), "Initialize()"],
+		[["secret.ts", "42:Initialize()"].join("="), "Initialize()"],
+		[["secret.ts", "42:import&mode=test"].join(":"), "import"],
+	] as const) {
+		for (const mode of [undefined, "outbound"] as const) {
+			const result = scan(source, [], { mode });
+			assert.ok(result.count >= 1, source);
+			assert.ok(!result.text.includes(value), source);
+		}
 	}
 });
 

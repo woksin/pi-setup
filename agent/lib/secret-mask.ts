@@ -311,8 +311,8 @@ function publicEndpoint(field: string, value: string): boolean {
 		&& /^https:\/\/[a-z0-9.-]+(?::\d{1,5})?(?:\/[a-z][a-z_.-]{0,31}){1,6}\/?$/.test(value);
 }
 
-// grep -n / rg --column output: <file>:<line>:[<column>:] followed by a keyword or a letters-only call name.
-const GREP_SOURCE_LINE = /^\d+:(?:\d{1,4}:)?(?:(?:import|export|from|const|let|var|function|return|class|interface|type|enum|public|private|protected|internal|static|readonly|async|await|if|else|for|foreach|while|switch|case|try|catch|finally|throw|new|using|namespace|record|def|package|module|require|describe|test|it|expect|assert|void|string|int|bool)|[A-Za-z]+\([^\s]*)$/;
+// grep -n / rg --column output: <file>:<line>:[<column>:] followed by only a keyword or an empty letters-only call.
+const GREP_SOURCE_LINE = /^\d+:(?:\d{1,4}:)?(?:(?:import|export|from|const|let|var|function|return|class|interface|type|enum|public|private|protected|internal|static|readonly|async|await|if|else|for|foreach|while|switch|case|try|catch|finally|throw|new|using|namespace|record|def|package|module|require|describe|test|it|expect|assert|void|string|int|bool)|[A-Za-z]+\(\)?)$/;
 
 function grepSourceLine(field: string, value: string): boolean {
 	return /\.(?:ts|tsx|js|mjs|cjs|cs|py|go|rs|java|kt|rb|sh|md|json|yaml|yml|toml)$/.test(field) && GREP_SOURCE_LINE.test(value);
@@ -339,7 +339,7 @@ function proseField(text: string, index: number, field: string, value: string): 
 
 function connectionCandidate(text: string, field: string, [start, end]: [number, number], out: Candidate[]): void {
 	const value = text.slice(start, end);
-	if (sourceLineReference(field, value) || grepSourceLine(field, value)) return;
+	if (sourceLineReference(field, value)) return;
 	// Bare captures may stop before a credential-bearing suffix. Never exempt only its public prefix.
 	if (!/[,;&\[\]{}()<>\\|`]/.test(text[end] ?? "") && publicEndpoint(field, value)) return;
 	const connection = connectionField(field);
@@ -385,6 +385,8 @@ function connections(text: string, out: Candidate[]): void {
 		if (value.length < 8 || regexLiteral || !secretValue(value, !!valueQuote, terminated)) continue;
 		// Do not infer prose or code from a bare prefix cut off by a quote or '&'.
 		const bareColon = separator === ":" && !keyQuote && !valueQuote && /^[\s,;]?$/.test(text[end] ?? "");
+		// Only a bare, unquoted, fully captured value can be a grep source line.
+		if (bareColon && grepSourceLine(field, value)) continue;
 		if (bareColon && (proseField(text, match.index, field, value) || sourceFieldValue(text, match.index, field, value))) continue;
 		connectionCandidate(text, field, [start, end], out);
 	}
