@@ -1457,14 +1457,14 @@ def select_policy(state, args, options, fingerprint, *, history=None, identity=N
     if policy is None:
         policy, source = configured_policy(state, args, options, fingerprint, history=history, identity=identity)
     if policy == "direct":
-        policy = safe_direct_policy(state, args.kind, fingerprint, identity)
+        policy = safe_direct_policy(state, args.kind, fingerprint)
     if policy == "fast":
         policy = hinted_fast_policy(state, args, options["fast_lane"], fingerprint, history=history, identity=identity)
     return policy, source
 
 
-def safe_direct_policy(state, kind, fingerprint, identity=None):
-    refusal = direct_refusal(state, kind, fingerprint, identity)
+def safe_direct_policy(state, kind, fingerprint):
+    refusal = direct_refusal(state, kind, fingerprint)
     if refusal:
         note(f"direct policy ignored: {refusal}; queued")
         return "queued"
@@ -1477,15 +1477,21 @@ def hinted_fast_policy(state, args, settings, fingerprint, *, history=None, iden
     return "fast" if fast_phase(state, fast_args, settings, fingerprint, history=history, identity=identity) else "queued"
 
 
-def container_test_known(state, fingerprint, identity=None):
+def container_test_known(state, fingerprint):
+    # A family can mix container producers with unrelated commands in the same cwd.
+    return metadata(state / "container-tests.json").get(fingerprint) is True
+
+
+def light_container_veto(state, fingerprint, identity):
+    # The pressure exception stays conservative without classifying the command as a container test.
     known = metadata(state / "container-tests.json")
-    return known.get(fingerprint) is True or (identity is not None and known.get(f"family:{identity.family_key}") is True)
+    return known.get(fingerprint) is True or known.get(f"family:{identity.family_key}") is True
 
 
-def direct_refusal(state, kind, fingerprint, identity=None):
+def direct_refusal(state, kind, fingerprint):
     if kind == "integration":
         return "integration phase"
-    if container_test_known(state, fingerprint, identity):
+    if container_test_known(state, fingerprint):
         return "recorded container test"
     return None
 
@@ -1579,7 +1585,7 @@ def slow_fast_history(history, threshold):
 
 
 def fast_refusal(state, fingerprint, history, threshold, *, phase_history=None, identity=None):
-    if container_test_known(state, fingerprint, identity):
+    if container_test_known(state, fingerprint):
         return "recorded container test"
     if slow_fast_history(history, threshold):
         return "history says this phase is slow"
@@ -5004,7 +5010,7 @@ def run(args, state, configuration, output=None):
             ledger.guard_level = guard_level(options)
         guard_noted = None
         if (args.kind == "test" and options["container_test_detection"] == "promote"
-                and container_test_known(state, fingerprint, identity)):
+                and container_test_known(state, fingerprint)):
             admission_args.kind = "integration"
             note("recorded container test: also claiming an integration permit (container_test_detection)")
         heavy, integration = settings
@@ -5030,7 +5036,7 @@ def run(args, state, configuration, output=None):
             deadline = light_queue.deadline(guard)
             admission_args.light = (light_proven and guard.get("level") in (2, 3)
                                     and not guard.get("stale")
-                                    and not container_test_known(state, fingerprint, identity))
+                                    and not light_container_veto(state, fingerprint, identity))
             if time.monotonic() >= deadline:
                 light_queue.timeout_note(hold)
                 if ledger:
