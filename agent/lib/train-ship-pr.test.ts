@@ -26,7 +26,7 @@ for (const githubUser of ['configured-maintainer', undefined]) {
     const requests: PublishRequest[] = [];
     const ctx = { env: { HOME: home }, publish: async (request: PublishRequest) => { requests.push(request); return { isError: false }; } };
     const api = { json: async () => requests.length ? [{ number: 42 }] : [] };
-    const result = await upsertTrainPR({ ctx, api, manifest, options: { title: 'Release train' } }, { body: 'Notes', label: 'patch' });
+    const result = await upsertTrainPR({ ctx, api, manifest, options: { title: 'Release train' } }, { body: 'Notes', label: 'patch' }, null);
     assert.equal(result.number, 42);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].kind, 'pr-create');

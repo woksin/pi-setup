@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { TrainError } from './train-gh.mjs';
 import { baseBranch } from './train-init.mjs';
-import { renderNotes } from './train-notes.mjs';
+import { closeFence, extractSummary, GENERATED_NOTES_MARKER, renderNotes } from './train-notes.mjs';
 import { publishText } from './train-publish.mjs';
 
 const RELEASE_LABELS = ['major', 'minor', 'patch', 'no-release'];
@@ -23,8 +23,10 @@ function allNoRelease(prs) {
   return prs.length > 0 && prs.every(pr => (pr.labels ?? []).some(label => label.name === 'no-release'));
 }
 
-export function shipBody(manifest, summary) {
-  return [summary.trim(), renderNotes(manifest.notes)].filter(Boolean).join('\n\n') + '\n';
+export function shipBody(manifest, summary, previousBody = '') {
+  const notes = renderNotes(manifest.notes);
+  const human = (summary ?? extractSummary(previousBody, notes)).replace(/^(?:[ \t]*\r?\n)+/, '').trimEnd();
+  return [closeFence(human), GENERATED_NOTES_MARKER, notes].filter(Boolean).join('\n\n') + '\n';
 }
 
 export function reviewerNotes(manifest, evidence) {
@@ -73,11 +75,13 @@ async function createTrainPR(session, files) {
   return { number: found[0].number, comments: [] };
 }
 
-export async function upsertTrainPR(session, files) {
-  const { api, manifest } = session;
+export async function findTrainPR(api, manifest) {
   const prs = await api.json(manifest.repo, ['pr', 'list', '--head', manifest.train, '--state', 'open', '--json', 'number,body,labels,comments']);
   if (prs.length > 1) throw new TrainError('multiple open train PRs');
-  const pr = prs[0];
+  return prs[0] ?? null;
+}
+
+export async function upsertTrainPR(session, files, pr) {
   if (!pr) return createTrainPR(session, files);
   await editTrainPR(session, pr, files);
   return pr;

@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import { loadManifest, saveManifest, slug, withManifestLock } from './train-manifest.mjs';
 import { selectTrain } from './train-resolve.mjs';
 import { checkBody, checkPackageLeaks, checkShip, gateEvidence, shipConfig } from './train-ship-check.mjs';
-import { linkFoldedPRs, notesMarker, reviewerNotes, shipBody, shipLabel, shipTitle, upsertTrainPR } from './train-ship-pr.mjs';
+import { findTrainPR, linkFoldedPRs, notesMarker, reviewerNotes, shipBody, shipLabel, shipTitle, upsertTrainPR } from './train-ship-pr.mjs';
 import { preflight, publishText } from './train-publish.mjs';
 import { baseBranch } from './train-init.mjs';
 
@@ -14,13 +14,13 @@ async function pushTrain(api, manifest) {
 }
 
 async function publish(ctx, api, operation) {
-  const { manifest, options, prs, files, save } = operation;
+  const { manifest, options, prs, trainPR, files, save } = operation;
   await pushTrain(api, manifest);
   if (options.dryRun) { ctx.out(`would open or update train PR for ${manifest.train}`); return; }
   manifest.shippedHead = manifest.head;
   await save();
   const session = { ctx, api, manifest, options };
-  const pr = await upsertTrainPR(session, files);
+  const pr = await upsertTrainPR(session, files, trainPR);
   manifest.pr = pr.number;
   await save();
   const marker = notesMarker(manifest, files.notes);
@@ -51,8 +51,9 @@ export async function shipTrain(ctx, api, options, repo) {
     const config = await shipConfig(ctx);
     const evidence = await gateEvidence(ctx, manifest, config, options);
     const label = shipLabel(options, prs);
-    const summary = options.summaryFile ? await readFile(resolve(ctx.cwd, options.summaryFile), 'utf8') : '';
-    const body = shipBody(manifest, summary), notes = reviewerNotes(manifest, evidence);
+    const summary = options.summaryFile ? await readFile(resolve(ctx.cwd, options.summaryFile), 'utf8') : undefined;
+    const trainPR = await findTrainPR(api, manifest);
+    const body = shipBody(manifest, summary, trainPR?.body ?? ''), notes = reviewerNotes(manifest, evidence);
     const directory = join(manifest.worktree, '.ai-work', 'trains', slug(manifest.train));
     const notesComment = `${notes}\n${notesMarker(manifest, notes)}\n`;
     const files = { body, notes, notesComment, label, bodyFile: join(directory, 'pr-body.md'), notesFile: join(directory, 'pr-notes.md') };
@@ -61,7 +62,7 @@ export async function shipTrain(ctx, api, options, repo) {
     if (!options.dryRun) await writeShipFiles(directory, manifest, files);
     await checkBody(ctx, manifest, config, { files, dryRun: options.dryRun });
     const save = () => saveManifest(selected.path, manifest);
-    await publish(ctx, api, { manifest, options, prs, files, save });
+    await publish(ctx, api, { manifest, options, prs, trainPR, files, save });
   };
   if (options.dryRun) await perform();
   else await withManifestLock(selected.path, perform);

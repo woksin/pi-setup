@@ -1,5 +1,58 @@
 export const SECTIONS = ['Added', 'Changed', 'Fixed', 'Removed', 'Deprecated', 'Security'];
+export const GENERATED_NOTES_MARKER = '<!-- pi-train:generated-notes -->';
 const normalise = text => text.replace(/^[-*]\s+/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+function nextFence(fence, line) {
+  const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+  if (!match) return fence;
+  const [, delimiter, rest] = match;
+  if (fence) return delimiter[0] === fence[0] && delimiter.length >= fence.length && !rest.trim() ? null : fence;
+  return delimiter[0] === '`' && rest.includes('`') ? null : delimiter;
+}
+
+function withoutComments(state, line) {
+  if (state.comment) {
+    const end = line.indexOf('-->');
+    if (end === -1) return '';
+    line = line.slice(end + 3);
+  }
+  line = line.replace(/<!--.*?-->/g, '');
+  const start = line.indexOf('<!--');
+  state.comment = start !== -1;
+  return state.comment ? line.slice(0, start) : line;
+}
+
+function* markdownLines(body) {
+  const state = { comment: false };
+  let fence = null, offset = 0;
+  for (const raw of body.split('\n')) {
+    const line = raw.replace(/\r$/, ''), start = offset;
+    offset += raw.length + 1;
+    const before = fence;
+    if (!state.comment) fence = nextFence(fence, line);
+    if (before || fence) { yield { fence }; continue; }
+    const marker = /^ {0,3}</.test(line) && line.trimEnd().trimStart() === GENERATED_NOTES_MARKER;
+    yield { text: withoutComments(state, line), start, marker };
+  }
+}
+
+export function closeFence(summary) {
+  let fence;
+  for (const line of markdownLines(summary)) fence = line.fence;
+  return fence ? `${summary}\n${fence}` : summary;
+}
+
+export function extractSummary(body, notes) {
+  const text = body.trimEnd();
+  // Older bodies had no marker. Remove only an exact generated suffix, not arbitrary human headings.
+  const legacyStart = notes && (text === notes || text.endsWith(`\n\n${notes}`)) ? text.length - notes.length : -1;
+  let legacyBoundary = false;
+  for (const { marker, start } of markdownLines(text)) {
+    if (marker) return text.slice(0, start);
+    if (start === legacyStart) legacyBoundary = true;
+  }
+  return legacyBoundary ? text.slice(0, legacyStart) : text;
+}
 
 function flush(state) {
   const { bullet, section, group } = state;
@@ -26,10 +79,11 @@ function collectLine(state, line) {
 
 export function extractBullets(body = '') {
   const state = { notes: {}, section: null, group: null, bullet: null, summaryDropped: false };
-  for (const line of body.replace(/<!--[\s\S]*?-->/g, '').split(/\r?\n/)) {
-    const heading = line.match(/^##\s+(.+?)\s*#*$/);
+  for (const { text } of markdownLines(body)) {
+    if (text === undefined) { flush(state); continue; }
+    const heading = text.match(/^##\s+(.+?)\s*#*$/);
     if (heading) setSection(state, heading[1]);
-    else if (state.section) collectLine(state, line);
+    else if (state.section) collectLine(state, text);
   }
   flush(state);
   return { notes: state.notes, summaryDropped: state.summaryDropped };
