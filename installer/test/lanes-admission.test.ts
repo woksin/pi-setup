@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { laneCtx } from "./lanes-terminal.test.ts";
-import { admit, inventory, type AdmissionProcess } from "../src/lanes/admission.ts";
+import { admit, inventory, legacyStartUtc, type AdmissionProcess } from "../src/lanes/admission.ts";
 
 const owner = { pid: process.pid, ppid: 1, start: "owner", pi: false };
 const pi = (pid: number, cwd = `/work/${pid}`, ppid = 1): AdmissionProcess => ({ pid, ppid, start: `start-${pid}`, pi: true, cwd });
@@ -100,6 +100,27 @@ for (const process of [oldOwner, oldChild]) test(`a differing legacy start for P
   writeFileSync(file, JSON.stringify(recorded));
   await assert.rejects(admit(f.ctx, { ...f.request, cwd: "/new" }), (error: Error) => error.message.includes(file));
   assert.ok(existsSync(file));
+});
+test("a live legacy owner recorded in local time holds its lease; a dead legacy lease is reclaimed", async () => {
+  const tz = process.env.TZ; process.env.TZ = "Europe/Oslo";
+  try {
+    assert.equal(legacyStartUtc("Sun Nov 22 00:04:17 2026"), "Sat Nov 21 23:04:17 2026");
+    assert.equal(legacyStartUtc("Thu Jun  4 10:00:00 2026"), "Thu Jun 4 08:00:00 2026");
+    assert.equal(legacyStartUtc("jeu. juin 11 09:40:00 2026"), undefined);
+    const f = setup([{ ...oldOwner, ppid: 1, start: "Sat Nov 21 23:04:17 2026", pi: false }]);
+    const file = oldLease(f, oldChild, 1);
+    const recorded = JSON.parse(readFileSync(file, "utf8"));
+    recorded.owner.start = "Sun Nov 22 00:04:17 2026"; recorded.child.start = "Sun Nov 22 00:04:19 2026";
+    writeFileSync(file, JSON.stringify(recorded));
+    await assert.rejects(admit(f.ctx, f.request), /already running/);
+    const next = await admit(f.ctx, { ...f.request, cwd: "/new" });
+    assert.ok(existsSync(file));
+    await next.release();
+    f.ctx.admissionInventory = async () => [owner];
+    const after = await admit(f.ctx, f.request);
+    assert.ok(!existsSync(file));
+    await after.release();
+  } finally { if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz; }
 });
 test("native lease owner and child are recorded and compared in UTC and the C locale", async () => {
   const { ctx, request } = setup();
