@@ -464,7 +464,10 @@ for (const code of [
 for (const [description, samples] of [
 	["C# cancellation token named argument", [
 		"cancellationToken: cancellationToken",
+		"FindAsync(filter, cancellationToken: cancellationToken)",
+		"FindAsync(filter, cancellationToken: this.cancellationToken)",
 		"await collection.FindAsync(filter, cancellationToken: cancellationToken).ConfigureAwait(false);",
+		"await collection.FindAsync(filter, cancellationToken: CancellationToken).ConfigureAwait(false);",
 	]],
 	["C# OAuth configuration references", [
 		"ClientSecret = someConfigVariable",
@@ -484,11 +487,45 @@ for (const [description, samples] of [
 	["uppercase verdict prose", [
 		`On green + review PASS: ${["push", "PR", "merge"].join("/")} on green, release, then report.`,
 		`Tier 1 PASS: ${["build", "test", "lint"].join("/")}`,
-		...["PASS", "FAIL", "PASSED"].map(verdict => `${verdict}: ${["build", "test", "lint"].join("/")}`),
+		...["PASS", "FAIL", "PASSED"].map(verdict => `review ${verdict}: ${["build", "test", "lint"].join("/")}`),
+		`review PASS: ${["build", "test", "lint"].join("/")}.`,
+		`(review PASS: ${["build", "test", "lint"].join("/")})`,
+		`review PASS: ${["build", "test", "lint"].join("/")}\``,
+		`review PASS: ${["Build", "Test", "Lint"].join("/")}`,
 	]],
-	["lowercase teaching-pass prose", [`Teaching pass: ${["arc", "fundamentals"].join("+")}`]],
+	["lowercase teaching-pass prose", ["Teaching", "TEACHING"].map(label => `${label} pass: ${["arc", "fundamentals"].join("+")}`)],
 ] as const) test(`${description} is not a named credential field`, () => {
-	for (const text of samples) assert.deepEqual(scan(text), { text, kinds: [], count: 0, skipped: false });
+	for (const text of samples) {
+		for (const options of [{}, { mode: "outbound" }] as const) {
+			assert.deepEqual(scan(text, [], options), { text, kinds: [], count: 0, skipped: false });
+		}
+	}
+});
+
+for (const [description, prefix, value, suffix = ""] of [
+	["Wi-Fi pass", "wifi pass: ", ["purple", "monkey", "dishwasher"].join("+")],
+	["root pass", "the root pass: ", ["correct", "horse", "battery"].join("+")],
+	["database pass", "Database pass: ", ["correct", "horse", "battery", "staple"].join("+")],
+	["db pass", "db pass: ", ["correct", "horse", "battery", "staple"].join("+")],
+	["standalone PASS", "PASS: ", ["correct", "horse", "battery", "staple"].join("/")],
+	["standalone PASS with a shorter list", "PASS: ", ["hunter", "winter", "summer"].join("/")],
+	["compose PASS", "environment:\n  PASS: ", ["letmein", "please"].join("/")],
+	["PASS after prose on a different line", "review\nPASS: ", ["correct", "horse", "battery", "staple"].join("/")],
+	["mixed-case value after a verdict label", "review PASS: ", ["abCDef", "ghIJkl", "mnOPqr"].join("/")],
+	["password in connection details", "Connection details (password: ", "CedarVelvetHarborLantern", ")"],
+	["admin account password", "The admin account (password: ", "CorrectHorseBatteryStaple", ")"],
+	["password following a comma", "(user: admin, password: ", "CorrectHorseBatteryStaple", ") works"],
+	["login password assignment", "login(user, password=", "CorrectHorseBatteryStaple", ")"],
+	["API key assignment in a call", "curl(api_key=", "abcdEFGHabcdEFGHabcdXYZ", ")"],
+	["token in a call", "foo(token: ", "abcdEFGHabcdEFGHabcd", ")"],
+	["same-name value in an assignment", "foo(password=", "Password", ").ConfigureAwait(false);"],
+]) test(`${description} still masks the credential`, () => {
+	for (const options of [{}, { mode: "outbound" }] as const) {
+		const result = scan(prefix + value + suffix, [], options);
+		assert.equal(result.count, 1);
+		assert.deepEqual(result.kinds, ["connection-string"]);
+		assert.ok(!result.text.includes(value));
+	}
 });
 
 for (const field of ["password", "passwd", "passphrase", "db_pass", "secret", "token", "api_key"]) {
@@ -506,7 +543,7 @@ test("prose exceptions do not exempt quoted values, assignments, or secret-like 
 	const slash = ["push", "PR", "merge"].join("/");
 	const plus = ["arc", "fundamentals"].join("+");
 	for (const [prefix, value, suffix] of [
-		['PASS: "', slash, '"'], ["PASS=", slash, ""], ["pass: ", plus, ""],
+		['review PASS: "', slash, '"'], ["review PASS=", slash, ""], ["pass: ", plus, ""],
 		["Verdict PASS: ", slash, "&other"], ["Teaching pass: ", plus, "&other"],
 		["Verdict PASS: ", "qA9b/Rx2Y/tM7p", ""], ["Teaching pass: ", "qA9b+Rx2Y+tM7p", ""],
 	]) assert.equal(scan(prefix + value + suffix).text, prefix + "[REDACTED:connection-string]" + suffix);

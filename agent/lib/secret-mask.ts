@@ -316,24 +316,23 @@ function sourceLineReference(field: string, value: string): boolean {
 		&& /^\d+(?::\d+)?(?:[-–]\d+)?[`'")\],.;:]*$/.test(value);
 }
 
-function proseField(text: string, field: string, start: number, value: string): boolean {
-	// Look at actual delimiters so this applies to neither quoted values nor assignments.
-	if (!/^[\s,;]?$/.test(text[start + value.length] ?? "")) return false;
+function proseField(text: string, index: number, field: string, value: string): boolean {
 	if (field === "pass" && /^[a-z]+(?:\+[a-z]+)+$/.test(value)) {
-		// Unlike a standalone pass field, the lowercase prose label ends a phrase.
-		const teaching = /(?<=\w[ \t]+pass[ \t]*:[ \t]*)/y;
-		teaching.lastIndex = start;
+		// Other words before "pass" can describe the credential, not a review phase.
+		const teaching = /(?<=\bteaching[ \t]+)/iy;
+		teaching.lastIndex = index;
 		return teaching.test(text);
 	}
-	if (!/^(?:PASS|FAIL|PASSED)$/.test(field) || !/^(?:[a-z]+|[A-Z]+)(?:\/(?:[a-z]+|[A-Z]+))+$/.test(value)) return false;
-	const verdict = /(?<=\b(?:PASS|FAIL|PASSED)[ \t]*:[ \t]*)/y;
-	verdict.lastIndex = start;
+	if (!/^(?:PASS|FAIL|PASSED)$/.test(field) || !/^(?:[A-Z]?[a-z]+|[A-Z]+)(?:\/(?:[A-Z]?[a-z]+|[A-Z]+))+[.)`]?$/.test(value)) return false;
+	// The label follows prose on this line (e.g. "review" or "Tier 1"); it is not a standalone key.
+	const verdict = /(?<=\b[A-Za-z]+(?:[ \t]+[0-9]+)*[ \t]+)/y;
+	verdict.lastIndex = index;
 	return verdict.test(text);
 }
 
 function connectionCandidate(text: string, field: string, [start, end]: [number, number], out: Candidate[]): void {
 	const value = text.slice(start, end);
-	if (sourceLineReference(field, value) || proseField(text, field, start, value)) return;
+	if (sourceLineReference(field, value)) return;
 	// Bare captures may stop before a credential-bearing suffix. Never exempt only its public prefix.
 	if (!/[,;&\[\]{}()<>\\|`]/.test(text[end] ?? "") && publicEndpoint(field, value)) return;
 	const connection = connectionField(field);
@@ -349,15 +348,15 @@ function adoPassword(text: string, index: number, field: string, separator: stri
 	return afterConnectionField.test(text);
 }
 
-function sourceFieldValue(text: string, index: number, value: string, colon: boolean): boolean {
-	// secretValue already filters plain source identifiers. Recognize attached call or
-	// declaration syntax only in source-shaped context, without relaxing digit-bearing values.
-	if (/^[A-Za-z_]+(?:\.[A-Za-z_]+)*\)+(?:\.[A-Za-z_]+\([A-Za-z_]*\)\)*)*$/.test(value)) {
+function sourceFieldValue(text: string, index: number, field: string, value: string): boolean {
+	// A named argument can repeat the parameter name. Other values remain credential candidates.
+	const closedCall = /^(?:[A-Za-z_]+\.)*([A-Za-z_]+)\)+(?:\.[A-Za-z_]+\([A-Za-z_]*\)\)*)*$/.exec(value);
+	if (closedCall?.[1].toLowerCase() === field.toLowerCase()) {
 		const argument = /(?<=[(,]\s*)/y;
 		argument.lastIndex = index;
 		return argument.test(text);
 	}
-	if (!colon || !/^[A-Za-z_]+(?:\.[A-Za-z_]+)*\{$/.test(value)) return false;
+	if (!/^[A-Za-z_]+(?:\.[A-Za-z_]+)*\{$/.test(value)) return false;
 	const declaration = /(?<=\b(?:class|interface)[ \t]+)/y;
 	declaration.lastIndex = index;
 	return declaration.test(text);
@@ -378,8 +377,8 @@ function connections(text: string, out: Candidate[]): void {
 			&& /\b(?:const|let|var)[ \t]+$/.test(text.slice(text.lastIndexOf("\n", match.index) + 1, match.index));
 		if (value.length < 8 || regexLiteral || !secretValue(value, !!valueQuote, terminated)) continue;
 		// Do not infer prose or code from a bare prefix cut off by a quote or '&'.
-		const bare = !keyQuote && !valueQuote && /^[\s,;]?$/.test(text[end] ?? "");
-		if (bare && sourceFieldValue(text, match.index, value, separator === ":")) continue;
+		const bareColon = separator === ":" && !keyQuote && !valueQuote && /^[\s,;]?$/.test(text[end] ?? "");
+		if (bareColon && (proseField(text, match.index, field, value) || sourceFieldValue(text, match.index, field, value))) continue;
 		connectionCandidate(text, field, [start, end], out);
 	}
 }
