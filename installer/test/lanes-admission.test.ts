@@ -41,10 +41,11 @@ test("duplicate canonical cwd, malformed inventory and leases fail closed", asyn
 });
 const oldOwner = { pid: 999, start: "old" };
 const oldChild = { pid: 998, start: "old-child" };
-function oldLease({ ctx, request }: ReturnType<typeof setup>, child?: typeof oldChild, version = 2) {
+function oldLease({ ctx, request }: ReturnType<typeof setup>, child?: typeof oldChild, version = 2,
+  overrides: { owner?: typeof oldOwner; priorPi?: (typeof oldOwner)[] } = {}) {
   const dir = join(ctx.piAgentDir, "lanes-admission"); const file = join(dir, "old.json");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  writeFileSync(file, JSON.stringify({ ...request, version, token: "old", owner: oldOwner, child }));
+  writeFileSync(file, JSON.stringify({ ...request, version, token: "old", owner: oldOwner, child, ...overrides }));
   return file;
 }
 for (const [scenario, rows] of [
@@ -75,6 +76,42 @@ for (const [scenario, rows, child] of [
 ] as const) test(`${scenario} refuses admission and identifies the retained lease`, async () => {
   const f = setup(rows.map(row => ({ ...row, ppid: 1, pi: false })));
   const file = oldLease(f, child);
+  await assert.rejects(admit(f.ctx, { ...f.request, cwd: "/new" }), (error: Error) => error.message.includes(file));
+  assert.ok(existsSync(file));
+});
+const utcOldStart = "Thu Jun 11 09:59:59 2026";
+const admissionNow = "2026-06-11T11:00:00Z";
+for (const [scenario, version, start, now, reclaim] of [
+  ["old UTC", 2, utcOldStart, admissionNow, true],
+  ["old local", 1, "Thu Jun 11 11:59:59 2026", admissionNow, true],
+  ["recent UTC", 2, "Thu Jun 11 10:00:01 2026", admissionNow, false],
+  ["recent local", 1, "Thu Jun 11 12:00:01 2026", admissionNow, false],
+  ["exactly one hour old", 2, "Thu Jun 11 10:00:00 2026", admissionNow, false],
+  ["possibly recent after a local clock rollback", 1, "Sun Oct 25 02:30:00 2026", "2026-10-25T02:00:00Z", false],
+  ["unparseable", 2, "not an lstart", admissionNow, false],
+  ["invalid calendar date", 2, "Mon Feb 30 09:00:00 2026", admissionNow, false],
+] as const) test(`dead owner with no recorded child and ${scenario} start ${reclaim ? "is reclaimed" : "blocks admission"}`, async () => {
+  const tz = process.env.TZ; process.env.TZ = "Europe/Oslo";
+  try {
+    const f = setup(); f.ctx.now = () => new Date(now);
+    const file = oldLease(f, undefined, version, { owner: { ...oldOwner, start } });
+    if (reclaim) {
+      const next = await admit(f.ctx, f.request);
+      assert.ok(!existsSync(file));
+      await next.release();
+    } else {
+      await assert.rejects(admit(f.ctx, { ...f.request, cwd: "/new" }), (error: Error) => error.message.includes(file));
+      assert.ok(existsSync(file));
+    }
+  } finally { if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz; }
+});
+for (const scenario of ["Pi in its cwd", "unattributed Pi"] as const) test(`dead owner with no recorded child and ${scenario} blocks admission`, async () => {
+  const rows: AdmissionProcess[] = []; const f = setup(rows);
+  f.ctx.now = () => new Date(admissionNow);
+  if (scenario === "Pi in its cwd") rows.push(pi(200, f.request.cwd));
+  else rows.push(pi(200, "/elsewhere"));
+  const file = oldLease(f, undefined, 2, { owner: { ...oldOwner, start: utcOldStart },
+    priorPi: scenario === "Pi in its cwd" ? rows : [] });
   await assert.rejects(admit(f.ctx, { ...f.request, cwd: "/new" }), (error: Error) => error.message.includes(file));
   assert.ok(existsSync(file));
 });
