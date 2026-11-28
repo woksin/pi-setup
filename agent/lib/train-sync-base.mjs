@@ -6,7 +6,8 @@ import { selectTrain } from './train-resolve.mjs';
 
 async function fetchBase(api, manifest, dryRun) {
   const ref = `refs/heads/${baseBranch(manifest)}`;
-  await api.git(manifest.worktree, ['fetch', 'origin', ref], { mutate: true });
+  // A dry run must not move remote-tracking refs, so it only reads the remote.
+  if (!dryRun) await api.git(manifest.worktree, ['fetch', 'origin', ref], { mutate: true });
   const sha = dryRun
     ? (await api.git(manifest.worktree, ['ls-remote', 'origin', ref])).stdout.trim().split(/\s+/)[0]
     : (await api.git(manifest.worktree, ['rev-parse', 'FETCH_HEAD'])).stdout.trim();
