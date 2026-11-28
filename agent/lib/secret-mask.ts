@@ -382,7 +382,10 @@ function grepContent(text: string, [locationStart, start]: [number, number], fie
 	// Otherwise keep the pre-grep-location judgement of the whole bare value, but mask only the content.
 	const end = start + content.length, value = text.slice(locationStart, end);
 	if (value.length < 8 || !secretValue(value, false, text[end] === "," || text[end] === ";")) return;
-	connectionCandidate(text, field, [start, end], out);
+	// Base exemptions see the whole bare value, as before; only the content is redacted.
+	const before = out.length;
+	connectionCandidate(text, field, [locationStart, end], out);
+	if (out.length > before) out[out.length - 1].start = start;
 }
 
 function connections(text: string, out: Candidate[]): void {

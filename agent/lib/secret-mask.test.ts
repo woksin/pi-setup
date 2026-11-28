@@ -125,6 +125,17 @@ test("grep locations do not exempt named credentials", () => {
 	}
 });
 
+test("a digit-only credential after an rg column location stays masked and keeps the location", () => {
+	const pin = ["4815", "1623", "42"].join("");
+	const location = ["secret.json", "42", "7"].join(":") + ":";
+	for (const mode of [undefined, "outbound"] as const) {
+		const result = scan(location + pin, [], { mode });
+		assert.equal(result.count, 1);
+		assert.ok(!result.text.includes(pin));
+		assert.ok(result.text.startsWith(location));
+	}
+});
+
 test("grep locations keep masking short and dotted bare values", () => {
 	for (const value of [["Ab12", "Cd"].join(""), ["Ab12", "Cd34"].join("."), ["abcd", "efgh"].join(""), ["db_password", ["Ab12", "Cd"].join("")].join("="), ["password", "X9Q="].join("")]) {
 		const source = ["secret.json", "42", value].join(":");
