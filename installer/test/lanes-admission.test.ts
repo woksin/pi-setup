@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { laneCtx } from "./lanes-terminal.test.ts";
 import { admit, inventory, type AdmissionProcess } from "../src/lanes/admission.ts";
@@ -39,17 +39,44 @@ test("duplicate canonical cwd, malformed inventory and leases fail closed", asyn
   writeFileSync(join(ctx.piAgentDir, "lanes-admission", "bad.json"), "{}");
   await assert.rejects(admit(ctx, request), /lease/);
 });
-test("dead child and owner reclaim, PID reuse and unknown pending state retain", async () => {
-  const { ctx, request } = setup(); const lease = await admit(ctx, request); await lease.child(40).catch(() => {});
-  const dir = join(ctx.piAgentDir, "lanes-admission"); const file = join(dir, readdirSync(dir).find(n => n.endsWith(".json"))!);
-  const state = JSON.parse(readFileSync(file, "utf8"));
-  state.owner = { pid: 999, start: "old" }; state.child = { pid: 998, start: "old-child" }; writeFileSync(file, JSON.stringify(state));
-  const next = await admit(ctx, request); await next.release();
-  state.child = undefined; writeFileSync(file, JSON.stringify(state));
-  await assert.rejects(admit(ctx, request), /uncertain/);
-  state.child = { pid: 998, start: "old-child" }; writeFileSync(file, JSON.stringify(state));
-  ctx.admissionInventory = async () => [owner, { pid: 998, ppid: 1, start: "reused", pi: false }];
-  await assert.rejects(admit(ctx, request), /identity|uncertain/);
+const oldOwner = { pid: 999, start: "old" };
+const oldChild = { pid: 998, start: "old-child" };
+function oldLease({ ctx, request }: ReturnType<typeof setup>, child?: typeof oldChild, version = 2) {
+  const dir = join(ctx.piAgentDir, "lanes-admission"); const file = join(dir, "old.json");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(file, JSON.stringify({ ...request, version, token: "old", owner: oldOwner, child }));
+  return file;
+}
+for (const [scenario, rows] of [
+  ["missing", []],
+  ["reused owner", [{ ...oldOwner, start: "reused" }]],
+  ["reused child", [{ ...oldChild, start: "reused" }]],
+] as const) test(`stale lease with ${scenario} identities does not block admission`, async () => {
+  const f = setup(rows.map(row => ({ ...row, ppid: 1, pi: false })));
+  const active = await admit(f.ctx, { ...f.request, cwd: "/active", id: "L2" });
+  const file = oldLease(f, oldChild);
+  const next = await admit(f.ctx, f.request);
+  assert.ok(!existsSync(file));
+  await assert.rejects(admit(f.ctx, { ...f.request, cwd: "/active" }), /already running/);
+  await next.release(); await active.release();
+});
+test("a reused owner PID does not release a lease with a live recorded child", async () => {
+  const f = setup([{ ...oldOwner, start: "reused", ppid: 1, pi: false }, { ...oldChild, ppid: 1, pi: false }]);
+  const file = oldLease(f, oldChild);
+  await assert.rejects(admit(f.ctx, f.request), /already running/);
+  const next = await admit(f.ctx, { ...f.request, cwd: "/new" });
+  assert.ok(existsSync(file));
+  await next.release();
+});
+for (const [scenario, rows, child] of [
+  ["unrecorded child", [], undefined],
+  ["unreadable owner start", [{ ...oldOwner, start: "" }], oldChild],
+  ["unreadable child start", [{ ...oldChild, start: "" }], oldChild],
+] as const) test(`${scenario} refuses admission and identifies the retained lease`, async () => {
+  const f = setup(rows.map(row => ({ ...row, ppid: 1, pi: false })));
+  const file = oldLease(f, child);
+  await assert.rejects(admit(f.ctx, { ...f.request, cwd: "/new" }), (error: Error) => error.message.includes(file));
+  assert.ok(existsSync(file));
 });
 test("unattributed reparented Pi retains its lease even after its cwd changes", async () => {
   const rows: AdmissionProcess[] = []; const { ctx, request } = setup(rows); const lease = await admit(ctx, request);
@@ -64,6 +91,37 @@ test("failed preparation does not leak a pending reservation", async () => {
   const { ctx, request } = setup();
   await assert.rejects(admit(ctx, request, async () => { throw new Error("changed handoff"); }), /changed handoff/);
   assert.deepEqual(readdirSync(join(ctx.piAgentDir, "lanes-admission")), []);
+});
+for (const process of [oldOwner, oldChild]) test(`a differing legacy start for PID ${process.pid} retains the lease and refuses admission`, async () => {
+  const f = setup([{ ...process, ppid: 1, start: "Thu Jun 11 16:40:00 2026", pi: false }]);
+  const file = oldLease(f, oldChild, 1);
+  const recorded = JSON.parse(readFileSync(file, "utf8"));
+  recorded.owner.start = recorded.child.start = "Thu Jun 11 09:40:00 2026";
+  writeFileSync(file, JSON.stringify(recorded));
+  await assert.rejects(admit(f.ctx, { ...f.request, cwd: "/new" }), (error: Error) => error.message.includes(file));
+  assert.ok(existsSync(file));
+});
+test("native lease owner and child are recorded and compared in UTC and the C locale", async () => {
+  const { ctx, request } = setup();
+  delete ctx.admissionInventory;
+  const childPid = process.pid + 1;
+  const utcStart = "Thu Jun 11 16:40:00 2026";
+  let childLive = true;
+  ctx.run = async (_cmd, _args, options) => {
+    const utc = options?.env?.TZ === "UTC" && options.env.LC_ALL === "C";
+    const start = utc ? utcStart : "jeu. juin 11 09:40:00 2026";
+    const child = childLive ? `\n${childPid} ${process.pid} ${start} wrapper` : "";
+    return { code: 0, stdout: `${process.pid} 1 ${start} node${child}\n`, stderr: "", timedOut: false };
+  };
+  const lease = await admit(ctx, request);
+  await lease.child(childPid);
+  const dir = join(ctx.piAgentDir, "lanes-admission");
+  const { owner, child } = JSON.parse(readFileSync(join(dir, readdirSync(dir)[0]), "utf8"));
+  assert.equal(owner.start, utcStart);
+  assert.equal(child.start, utcStart);
+  await assert.rejects(lease.release());
+  childLive = false;
+  await lease.release();
 });
 test("native inventory never treats probe failure as empty", async () => {
   await assert.rejects(inventory(laneCtx()), /inventory/);

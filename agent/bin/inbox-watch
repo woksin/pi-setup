@@ -4,8 +4,9 @@
 # 1: no inbound changes; 2: usage/I/O error.
 # Names: SENDER-to-RCPT[-RCPT...]-topic.md or RCPT-from-SENDER-topic.md, optionally
 # prefixed with a numeric timestamp (20261023-074001-L0-to-L15-x.md).
-# Recipient/sender ids are the run of tokens starting with a capital
-# (L15, L18b, R-AI, R-Studio); the topic starts at the first lowercase or digit token.
+# On the topic side, ids are usually a run of capital-start tokens (L15, L18b,
+# R-AI, R-Studio). A lane or alias can use any case immediately after to/from or
+# cc, without otherwise changing where the parser starts the topic.
 # Inbound: a recipient is LANE, an alias, ALL or GROUP (or the name starts
 # with GROUP-/ALL-); messages the lane or an alias sent are skipped.
 # Aliases: --alias NAME (repeatable) or INBOX_ALIASES=R-AI,R-Studio.
@@ -65,6 +66,40 @@ for name in "$lane" ${group:+"$group"} ${aliases[@]+"${aliases[@]}"}; do
         exit 2
     fi
 done
+me=("$lane" ${aliases[@]+"${aliases[@]}"})
+# Keep exact addresses distinct even for legacy configs with case collisions.
+foldable_lanes=$(python3 - "${LANES_DIR:-}" "${me[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root, *own = sys.argv[1:]
+cwd = Path.cwd()
+path = Path(root) / "lanes.json" if root else next(
+    (parent / "lanes.json" for parent in (cwd, *cwd.parents) if (parent / "lanes.json").exists()), None
+)
+configured = {"ALL"}
+if path is not None:
+    try:
+        config = json.loads(path.read_text())
+        configured.update(lane["id"] for lane in config["lanes"])
+        if "coordinator" in config:
+            configured.add(config["coordinator"]["id"])
+        if "messages" in config:
+            configured.add(config["messages"]["broadcast"])
+        if not all(isinstance(id, str) for id in configured):
+            sys.exit(0)
+    except (OSError, ValueError, KeyError, TypeError):
+        sys.exit(0)  # If the config is unreadable, only match exact addresses.
+for id in own:
+    if not any(other != id and other.lower() == id.lower() for other in configured):
+        print(id)
+PY
+)
+foldable=()
+while IFS= read -r id; do
+    if [[ -n $id ]]; then foldable+=("$id"); fi
+done <<< "$foldable_lanes"
 if [[ ${INBOX_DIR+x} ]]; then
     dir=$INBOX_DIR
 else
@@ -240,9 +275,28 @@ if [[ ! -e $mark && ! -L $mark ]]; then
     exit 1
 fi
 args=(. -maxdepth 1 -type f -name '*.md')
-me=("$lane" ${aliases[@]+"${aliases[@]}"})
 # has LIST ID: LIST is "-a-b-c-"; ID may itself contain dashes (R-AI).
 has() { [[ $1 == *"-$2-"* ]]; }
+has_lane() (
+    local id
+    for id in "${me[@]}"; do has "$1" "$id" && return 0; done
+    shopt -s nocasematch
+    for id in ${foldable[@]+"${foldable[@]}"}; do has "$1" "$id" && return 0; done
+    return 1
+)
+match_prefix() {
+    local text=$1 id
+    shift
+    for id in "$@"; do
+        if [[ $text == "$id" || $text == "$id"-* ]]; then printf '%s\n' "$id"; return 0; fi
+    done
+    return 1
+}
+lane_prefix() (
+    match_prefix "$1" "${me[@]}" && return 0
+    shopt -s nocasematch
+    match_prefix "$1" ${foldable[@]+"${foldable[@]}"}
+)
 is_id() {
     local tok=$1 id
     for id in "${me[@]}" ALL ${group:+"$group"}; do [[ $tok == "$id" ]] && return 0; done
@@ -250,9 +304,10 @@ is_id() {
 }
 # Prints "kind|senders|recipients" with dash-wrapped lists, kind = to|from|none.
 parse() {
-    local base=${1%.md} i=0 k=-1 kind=none left='' right=''
+    local base=${1%.md} i=0 k=-1 kind=none left='' right='' explicit=1 id dashes
     local -a t
-    IFS='-' read -r -a t <<< "$base"
+    local IFS=-
+    read -r -a t <<< "$base"
     for (( i = 1; i < ${#t[@]}; i++ )); do
         if [[ ${t[i]} == to || ${t[i]} == from ]]; then k=$i; kind=${t[i]}; break; fi
     done
@@ -262,10 +317,17 @@ parse() {
     fi
     for (( i = 0; i < k; i++ )); do left+="-${t[i]}"; done
     for (( i = k + 1; i < ${#t[@]}; i++ )); do
-        # "cc" (SENDER-to-A-cc-B-topic) continues the recipient list.
-        [[ ${t[i]} == cc ]] && continue
-        is_id "${t[i]}" || break
-        right+="-${t[i]}"
+        # Do not mistake a lowercase topic token for another recipient without cc.
+        if [[ ${t[i]} == cc ]]; then explicit=1; continue; fi
+        if (( explicit )) && id=$(lane_prefix "${t[*]:i}"); then
+            right+="-$id"
+            dashes=${id//[^-]/}
+            i=$(( i + ${#dashes} ))
+        else
+            is_id "${t[i]}" || break
+            right+="-${t[i]}"
+        fi
+        explicit=0
     done
     if [[ $kind == to ]]; then
         printf 'to|%s-|%s-\n' "$left" "$right"
@@ -278,10 +340,11 @@ inbound() {
     parsed=$(parse "$name")
     parsed=${parsed#*|}
     senders=${parsed%%|*}; rcpts=${parsed#*|}
-    for id in "${me[@]}"; do has "$senders" "$id" && return 1; done
+    has_lane "$senders" && return 1
     [[ $name == ALL-* ]] && return 0
     [[ -n $group && $name == "$group"-* ]] && return 0
-    for id in "${me[@]}" ALL ${group:+"$group"}; do has "$rcpts" "$id" && return 0; done
+    has_lane "$rcpts" && return 0
+    for id in ALL ${group:+"$group"}; do has "$rcpts" "$id" && return 0; done
     return 1
 }
 settle=${INBOX_SETTLE_SECONDS:-15}

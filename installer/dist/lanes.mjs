@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 41de610e513fbec5384d64672f24ceee1ba181333e207df936a07cc7361b002f
+// pi-setup-source-sha256: 9a7c40869c8213e8c7f9309ef3e29755cf9ee20a01e585ea4b34aa3a8b16e1d0
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -101,6 +101,7 @@ import { join as join3, resolve as resolve2 } from "node:path";
 var ID = "(?:[A-Z][A-Z0-9]*[a-z]?|[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)+)";
 var validNewId = (s) => s.length <= 32 && /^(?:[A-Z][A-Z0-9]*[a-z]?|R-[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)$/.test(s);
 var validId = (s) => s.length <= 32 && new RegExp(`^${ID}$`).test(s);
+var validRecipientId = (s) => s.length <= 32 && /^[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*$/i.test(s);
 var validTopic = (s) => /^[a-z0-9][a-z0-9-]{0,47}$/.test(s);
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32).replace(/-$/, "") || "task";
 function messageName(from, to, topic, at, collision = 1) {
@@ -214,7 +215,8 @@ function validate(value, root = process.cwd(), home = homedir2()) {
     require2(typeof r.auto === "boolean", "messages.retention.auto");
     archiveDir(c, root, home);
   }
-  require2(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !["ALL", c.messages.broadcast].includes(c.coordinator.id), "coordinator.id");
+  const reservedIds = ["all", c.messages.broadcast.toLowerCase()];
+  require2(c.coordinator && typeof c.coordinator.id === "string" && validId(c.coordinator.id) && !reservedIds.includes(c.coordinator.id.toLowerCase()), "coordinator.id");
   require2(text2(c.coordinator.cwd), "coordinator.cwd");
   require2(text2(c.coordinator.prompt), "coordinator.prompt");
   if (c.coordinator.maxRunning === void 0) c.coordinator.maxRunning = 6;
@@ -231,11 +233,11 @@ function validate(value, root = process.cwd(), home = homedir2()) {
     require2(Array.isArray(c.github.excludeLabels) && c.github.excludeLabels.every(text2), "github.excludeLabels");
   }
   require2(Array.isArray(c.lanes), "lanes");
-  const ids = /* @__PURE__ */ new Set([c.coordinator.id, "ALL", c.messages.broadcast]);
+  const ids = /* @__PURE__ */ new Set([c.coordinator.id.toLowerCase(), ...reservedIds]);
   for (const [i, lane] of c.lanes.entries()) {
     const key = `lanes.${i}`;
-    require2(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id), `${key}.id`);
-    ids.add(lane.id);
+    require2(lane && typeof lane.id === "string" && validId(lane.id) && !ids.has(lane.id.toLowerCase()), `${key}.id`);
+    ids.add(lane.id.toLowerCase());
     require2(absentCwdIdentity(lane, lane.repo) || typeof lane.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(lane.repo), `${key}.repo`);
     require2(absentCwdIdentity(lane, lane.branch) || text2(lane.branch), `${key}.branch`);
     require2(text2(lane.prompt), `${key}.prompt`);
@@ -1318,7 +1320,7 @@ var FileBackend = class {
     this.broadcast = broadcast;
   }
   async send(m) {
-    if (!validId(m.from) || !validId(m.to) || !validTopic(m.topic)) throw new Error("invalid message name");
+    if (!validId(m.from) || !validRecipientId(m.to) || !validTopic(m.topic)) throw new Error("invalid message name");
     mkdirSync2(this.dir, { recursive: true });
     const at = this.now();
     for (let i = 1; ; i++) {
@@ -2753,10 +2755,11 @@ async function add(id, opts, c, root, ctx) {
   return 0;
 }
 function validateInput(id, opts, c) {
-  if (!validNewId(id) || ["ALL", c.messages.broadcast, c.coordinator.id].includes(id)) {
+  const key = id.toLowerCase();
+  if (!validNewId(id) || ["all", c.messages.broadcast.toLowerCase(), c.coordinator.id.toLowerCase()].includes(key)) {
     throw new UsageError("invalid lane id");
   }
-  if (c.lanes.some((l) => l.id === id)) throw new Error(`lane ${id} already exists`);
+  if (c.lanes.some((l) => l.id.toLowerCase() === key)) throw new Error(`lane ${id} already exists`);
   validateRepo(opts.repo);
   validateIssueAndGoal(opts);
 }
@@ -2821,7 +2824,7 @@ function newOrchestrator(lane, opts, c) {
   const name = lane.repo.split("/")[1];
   const id = opts["orchestrator-id"] || `R-${name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14)}`;
   const reserved = [lane.id, c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.map((l) => l.id)];
-  if (!validNewId(id) || reserved.includes(id)) {
+  if (!validNewId(id) || reserved.some((existing) => existing.toLowerCase() === id.toLowerCase())) {
     throw new Error("repo-orch ID collision or invalid ID; choose --orchestrator-id");
   }
   const lower = id.toLowerCase();
@@ -4013,6 +4016,13 @@ import { join as join37 } from "node:path";
 import { lstatSync as lstatSync6, mkdirSync as mkdirSync11, readFileSync as readFileSync18, readdirSync as readdirSync14, renameSync as renameSync6, rmdirSync, unlinkSync as unlinkSync5, writeFileSync as writeFileSync9 } from "node:fs";
 import { basename as basename5, join as join35 } from "node:path";
 import { randomUUID as randomUUID5 } from "node:crypto";
+var StartUnavailable = class extends Error {
+  pid;
+  constructor(pid) {
+    super(`admission inventory: start time unavailable for pid ${pid}`);
+    this.pid = pid;
+  }
+};
 var pause = (ms) => new Promise((done) => setTimeout(done, ms));
 async function bounded(work) {
   let timer;
@@ -4026,18 +4036,20 @@ async function bounded(work) {
 }
 async function inventory2(ctx) {
   const rows = await bounded(ctx.admissionInventory ? ctx.admissionInventory() : nativeInventory(ctx));
-  if (!Array.isArray(rows) || rows.length > 2e4 || rows.some((r) => !Number.isSafeInteger(r.pid) || r.pid < 1 || !Number.isSafeInteger(r.ppid) || r.ppid < 0 || typeof r.start !== "string" || !r.start.trim() || typeof r.pi !== "boolean" || r.pi && !r.cwd) || new Set(rows.map((r) => r.pid)).size !== rows.length) {
+  if (!Array.isArray(rows) || rows.length > 2e4 || rows.some((r) => !Number.isSafeInteger(r.pid) || r.pid < 1 || !Number.isSafeInteger(r.ppid) || r.ppid < 0 || typeof r.pi !== "boolean" || r.pi && !r.cwd) || new Set(rows.map((r) => r.pid)).size !== rows.length) {
     throw new Error("admission inventory malformed or identity unavailable");
   }
+  const unreadable = rows.find((r) => typeof r.start !== "string" || !r.start.trim());
+  if (unreadable) throw new StartUnavailable(unreadable.pid);
   return rows;
 }
 async function nativeInventory(ctx) {
-  const result2 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4e3 });
+  const result2 = await ctx.run("ps", ["-A", "-o", "pid=,ppid=,lstart=,comm="], { timeoutMs: 4e3, env: { TZ: "UTC", LC_ALL: "C" } });
   if (result2.code !== 0 || result2.timedOut || !result2.stdout.trim()) throw new Error("admission inventory unavailable");
   const rows = [];
   for (const line of result2.stdout.trim().split("\n")) {
     const m = /^(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.+)$/.exec(line.trim());
-    if (!m) throw new Error("admission inventory malformed");
+    if (!m) throw unreadableProcess(line);
     const row = { pid: Number(m[1]), ppid: Number(m[2]), start: m[3].replace(/\s+/g, " "), pi: basename5(m[4]) === "pi" };
     if (row.pi) {
       if (ctx.readCwd) row.cwd = await ctx.readCwd(row.pid);
@@ -4051,6 +4063,10 @@ async function nativeInventory(ctx) {
     rows.push(row);
   }
   return rows;
+}
+function unreadableProcess(line) {
+  const pid = /^\s*(\d+)\s+\d+(?:\s|$)/.exec(line);
+  return pid ? new StartUnavailable(Number(pid[1])) : new Error("admission inventory malformed");
 }
 function privateDir(path) {
   mkdirSync11(path, { recursive: true, mode: 448 });
@@ -4078,12 +4094,16 @@ async function locked(dir, work) {
   }
 }
 function identity(value) {
-  return value && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.start === "string" && value.start.length > 0;
+  return value && Number.isSafeInteger(value.pid) && value.pid > 0 && typeof value.start === "string" && value.start.trim().length > 0;
 }
 function readLease(file) {
   if (!lstatSync6(file).isFile()) throw new Error("admission lease is not a regular file");
   const v = JSON.parse(readFileSync18(file, "utf8"));
-  if (v?.version !== 1 || !identity(v.owner) || v.child !== void 0 && !identity(v.child) || v.priorPi !== void 0 && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)) || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some((s) => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
+  if (v?.version !== 1 && v?.version !== 2) throw new Error("admission lease malformed");
+  if (!identity(v.owner) || v.child !== void 0 && !identity(v.child)) {
+    throw uncertainLease(file, "recorded owner or child identity unreadable");
+  }
+  if (v.priorPi !== void 0 && (!Array.isArray(v.priorPi) || !v.priorPi.every(identity)) || !["worker", "orchestration"].includes(v.pool) || [v.token, v.root, v.cwd, v.id].some((s) => typeof s !== "string" || !s)) throw new Error("admission lease malformed");
   return v;
 }
 function store(file, lease) {
@@ -4092,9 +4112,7 @@ function store(file, lease) {
   renameSync6(temp, file);
 }
 function alive2(id, rows) {
-  const row = rows.find((r) => r.pid === id.pid);
-  if (row && row.start !== id.start) throw new Error(`admission identity uncertain: pid ${id.pid} reused`);
-  return Boolean(row);
+  return rows.some((row) => row.pid === id.pid && row.start === id.start);
 }
 function below2(row, owner, rows) {
   const seen = /* @__PURE__ */ new Set();
@@ -4119,15 +4137,35 @@ function registry2(dir) {
     return { file, lease: readLease(file) };
   });
 }
-function leases(dir, rows) {
-  const entries = registry2(dir);
-  const all = entries.map((e) => e.lease);
-  return entries.flatMap(({ file, lease }) => {
-    if (alive2(lease.owner, rows)) {
-      if (lease.child) alive2(lease.child, rows);
-      return [lease];
+function uncertainLease(file, detail) {
+  return new Error(`admission lease uncertain: ${file}: ${detail}; confirm neither the recorded owner nor any child is still running, then move this lease out of the admission directory`);
+}
+async function leaseInventory(ctx, entries) {
+  try {
+    return await inventory2(ctx);
+  } catch (error) {
+    if (error instanceof StartUnavailable) {
+      const entry2 = entries.find(({ lease }) => lease.owner.pid === error.pid || lease.child?.pid === error.pid);
+      if (entry2) throw uncertainLease(entry2.file, `start time unavailable for pid ${error.pid}`);
     }
-    if (!lease.child) throw new Error("admission lease uncertain: dead owner with unrecorded child");
+    throw error;
+  }
+}
+function checkLegacyStart({ file, lease }, rows) {
+  if (lease.version !== 1) return;
+  for (const id of [lease.owner, lease.child]) {
+    if (id && rows.some((row) => row.pid === id.pid && row.start !== id.start)) {
+      throw uncertainLease(file, `start time differs for pid ${id.pid} in a legacy lease without a known timezone or locale`);
+    }
+  }
+}
+function leases(entries, rows) {
+  const all = entries.map((e) => e.lease);
+  return entries.flatMap((entry2) => {
+    checkLegacyStart(entry2, rows);
+    const { file, lease } = entry2;
+    if (alive2(lease.owner, rows)) return [lease];
+    if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
     if (alive2(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
     unlinkSync5(file);
     return [];
@@ -4136,14 +4174,15 @@ function leases(dir, rows) {
 async function admit(ctx, request2, beforeLaunch) {
   const dir = join35(ctx.piAgentDir, "lanes-admission");
   const lease = await locked(dir, async () => {
-    const rows = await inventory2(ctx);
+    const entries = registry2(dir);
+    const rows = await leaseInventory(ctx, entries);
     const owner = rows.find((r) => r.pid === process.pid);
     if (!owner) throw new Error("admission controller identity unavailable");
-    const active = leases(dir, rows);
+    const active = leases(entries, rows);
     const pis = rows.filter((r) => r.pi);
     if (active.some((l) => l.cwd === request2.cwd) || pis.some((p) => p.cwd === request2.cwd)) throw new Error(`already running in ${request2.cwd}`);
     const value = {
-      version: 1,
+      version: 2,
       token: randomUUID5(),
       owner: { pid: owner.pid, start: owner.start },
       root: request2.root,
@@ -4177,8 +4216,9 @@ async function admit(ctx, request2, beforeLaunch) {
       await locked(dir, async () => {
         const current = readLease(file);
         if (current.token !== lease.token || current.owner.pid !== process.pid || current.owner.start !== lease.owner.start) throw new Error("admission lease ownership changed");
-        const rows = await inventory2(ctx);
-        if (lease.child && alive2(lease.child, rows) || uncertainPi(lease, registry2(dir).map((e) => e.lease), rows)) throw new Error("admission child cleanup uncertain; lease retained");
+        const entries = registry2(dir);
+        const rows = await leaseInventory(ctx, entries);
+        if (lease.child && alive2(lease.child, rows) || uncertainPi(lease, entries.map((e) => e.lease), rows)) throw new Error("admission child cleanup uncertain; lease retained");
         unlinkSync5(file);
       });
     }
@@ -4458,25 +4498,25 @@ function requireWorktree(path) {
 import { readFileSync as readFileSync19 } from "node:fs";
 import { resolve as resolve10 } from "node:path";
 async function send(args, opts, c, root, ctx) {
-  let [to, topic, file] = args;
-  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to, topic, file }, opts);
-  const known = [c.coordinator.id, "ALL", c.messages.broadcast, ...c.lanes.flatMap((l) => [l.id, l.group])];
-  if (!known.includes(to)) await warnUnknown(to, { c, root, ctx });
-  const refusal = await guardIssue(to, opts, { c, root, ctx });
+  const [recipient2, topic, file] = args;
+  const from = validateMessage({ from: opts.from || ctx.env.PI_ORCH_ID, to: recipient2, topic, file }, opts);
+  const deps = { c, root, ctx };
+  const to = await resolveRecipient(recipient2, deps);
+  const refusal = await guardIssue(to, opts, deps);
   if (refusal) return refusal;
   let body = await messageBody(file, opts, ctx);
   if (!body.trim()) throw new UsageError("empty message body");
   if (opts.force !== void 0) body = `Ownership override (--force): ${opts.force}
 
 ${body}`;
-  to = route({ to, from, direct: opts.direct }, c, ctx);
-  ctx.out((await backendFor(c, ctx, root).send({ from, to, topic, body })).path);
+  const target = route({ to, from, direct: opts.direct }, c, ctx);
+  ctx.out((await backendFor(c, ctx, root).send({ from, to: target, topic, body })).path);
   return 0;
 }
 function validateMessage(input, opts) {
   if (!input.from) throw new UsageError("set --from or PI_ORCH_ID");
   if (!validId(input.from)) throw new UsageError("invalid from");
-  if (!validId(input.to)) throw new UsageError("invalid to");
+  if (!validRecipientId(input.to)) throw new UsageError("invalid to");
   if (!validTopic(input.topic)) throw new UsageError("invalid topic");
   if (opts.m !== void 0 && input.file !== void 0) throw new UsageError("choose a file or -m, not both");
   return input.from;
@@ -4520,12 +4560,26 @@ function closestLive(to, rows) {
   ranked.sort((a, b) => b.prefix - a.prefix || a.distance - b.distance || Number(b.row.state === "idle") - Number(a.row.state === "idle") || a.row.lane.localeCompare(b.row.lane));
   return ranked.slice(0, 3).map(({ row }) => `${row.lane} [${row.identity}] ${row.repo ?? "-"} ${row.state}`).join(", ");
 }
-async function warnUnknown(to, deps) {
+function matchingRecipient(to, ids) {
+  if (ids.has(to)) return to;
+  const key = to.toLowerCase();
+  const matches = [...ids].filter((id) => id.toLowerCase() === key);
+  if (matches.length > 1) throw new UsageError(`ambiguous recipient ${to}: ${matches.sort().join(", ")}`);
+  return matches[0];
+}
+async function resolveRecipient(to, deps) {
+  const { c, ctx } = deps;
+  if (["ALL", c.messages.broadcast, ...c.lanes.map((l) => l.group)].includes(to)) return to;
   const live = await liveRoster(deps);
-  if (live.registered.has(to)) return;
-  deps.ctx.err(`warning: unknown recipient ${to}; sending anyway`);
+  const liveIds = live.rows.filter((row) => row.identity !== "unregistered").map((row) => row.lane);
+  const ids = /* @__PURE__ */ new Set([c.coordinator.id, ...c.lanes.map((l) => l.id), ...live.registered, ...liveIds]);
+  const canonical2 = matchingRecipient(to, ids);
+  if (canonical2) return canonical2;
+  if (!validId(to)) throw new UsageError("invalid to");
+  ctx.err(`warning: unknown recipient ${to}; sending anyway`);
   const candidates = closestLive(to, live.rows);
-  if (candidates) deps.ctx.err(`closest live: ${candidates}`);
+  if (candidates) ctx.err(`closest live: ${candidates}`);
+  return to;
 }
 function assignmentRepo(to, c) {
   const lanes = c.lanes.filter((l) => l.id === to && !l.retired && !l.closed);
