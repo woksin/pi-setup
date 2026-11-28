@@ -307,6 +307,10 @@ class Register:
     def active(self, deadline=None):
         records, unavailable = [], False
         try:
+            os.lstat(self.base)  # no register at all is empty, whatever the agent dir looks like
+        except FileNotFoundError:
+            return records, False
+        try:
             self.validate()
             with os.scandir(self.records) as entries:
                 for entry in entries:

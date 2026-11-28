@@ -98,6 +98,21 @@ cat "$HOME/roster.json"
         self.assertEqual(self.fresh("list").stdout, "")
         self.assertEqual(list(self.inbox.iterdir()), [])
 
+    def test_absent_register_is_empty_even_under_an_untrusted_agent_dir(self):
+        for kind in ("group-writable", "symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                real = Path(tmp) / "real"
+                real.mkdir(mode=0o775)
+                real.chmod(0o775)
+                agent = real
+                if kind == "symlink":
+                    agent = Path(tmp) / "link"
+                    agent.symlink_to(real)
+                register = holds.Register(agent / "holds")
+                self.assertEqual(register.active(), ([], False))
+                with self.assertRaises(holds.HoldError):
+                    register.add("L7", "Publish disabled", "server-upgraded", NOW, scheduler=lambda _: True)
+
     def test_disabled_scheduler_refuses_to_add_but_existing_hold_remains_accessible(self):
         with self.assertRaisesRegex(holds.HoldError, "--with holds"):
             self.register.add("L7", "Publish disabled", self.check.name, NOW, scheduler=lambda _: False)
