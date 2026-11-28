@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { defaults, expand, findRoot, loadConfig, saveConfig, UsageError, validate, type Config } from "../config.ts";
+import { defaults, expand, findRoot, loadConfig, rememberRoot, saveConfig, UsageError, validate, type Config } from "../config.ts";
 import type { LanesCtx } from "../ctx.ts";
 import { validId, validNewId } from "../names.ts";
 import { discover } from "../adopt/discover.ts";
@@ -9,7 +9,7 @@ import { requestedOrchestrates, requestedRoles } from "../adopt/roles.ts";
 import { mergeDiscovered, missingLanes, printProposal } from "../adopt/proposal.ts";
 
 export async function adopt(opts: Record<string, string>, ctx: LanesCtx): Promise<number> {
-  const root = adoptionRoot(opts.dir, ctx);
+  const root = await adoptionRoot(opts.dir, ctx);
   const path = join(root, "lanes.json"); const exists = existsSync(path);
   const c = exists ? loadConfig(root) : defaults(root, ctx.home);
   configure(c, opts, root, ctx);
@@ -29,7 +29,9 @@ export async function adopt(opts: Record<string, string>, ctx: LanesCtx): Promis
   const before = exists ? readFileSync(path, "utf8") : "";
   const after = JSON.stringify(c, null, 2) + "\n";
   printProposal({ rows, missing: missingLanes(c, rows), before, after }, ctx);
-  if (opts.write && before !== after) { saveConfig(root, c); ctx.out(`wrote ${path}`); }
+  if (!opts.write) return 0;
+  if (before !== after) { saveConfig(root, c); ctx.out(`wrote ${path}`); }
+  rememberRoot(root, ctx);
   return 0;
 }
 function configure(c: Config, opts: Record<string, string>, root: string, ctx: LanesCtx): void {
@@ -50,8 +52,7 @@ function excludedTtys(opts: Record<string, string>): string[] {
   if (excluded.some(tty => !/^ttys\d+$/.test(tty))) throw new UsageError("--exclude-tty requires ttysNNN");
   return excluded;
 }
-function adoptionRoot(dir: string | undefined, ctx: LanesCtx): string {
-  if (dir) return resolve(ctx.cwd, dir);
-  try { return findRoot(undefined, ctx.env, ctx.cwd); }
+async function adoptionRoot(dir: string | undefined, ctx: LanesCtx): Promise<string> {
+  try { return await findRoot(dir, ctx); }
   catch (e) { if (!(e instanceof UsageError)) throw e; return resolve(ctx.cwd); }
 }

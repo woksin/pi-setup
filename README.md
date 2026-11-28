@@ -206,7 +206,9 @@ For hand-started sessions, `lanes adopt --dir <root> --exclude-tty ttys004 --inv
 For guided setup, run `./install.sh lanes [--dir <folder>]`; it selects local repositories and issues or goals, creates locked worktrees, and offers to open the coordinator.
 Add work with `lanes --dir <dir> add L1 --repo owner/name --issue 123` (clone the repository first).
 Run `lanes --dir <dir> start coordinator` or `start L1`; the coordinator starts in the coordination folder.
-`lanes send <TO> <topic> -m "text" --from L0` sends a message; `lanes status` shows the lanes (use `--dir` outside the folder).
+`lanes send <TO> <topic> -m "text" --from L0` sends a message; `lanes status` shows the lanes.
+
+Lanes looks for its coordination folder in this order: `--dir`, `LANES_DIR`, the current directory and its parents, the Git worktree's main checkout and its parents, then the saved default. `lanes init <dir>` sets or changes the default in `~/.local/share/pi-setup/lanes/default-dir`. For an existing folder, running `lanes --dir <dir> status` saves it if no pointer exists. The saved default is ignored if its `lanes.json` is missing.
 
 `lanes who [--repo R] [--issue N|OWNER/REPO#N] [--json]` is the local routing roster: registered lanes, running sessions and recent message-only identities, with process/lease, issue-register, heartbeat, status and message evidence. Repository filters match a full slug or case-insensitive basename. Missing/error sources and stale heartbeats are labelled; context use is currently `-`/`null`, never inferred from file size. JSON includes `at`, `rows`, `sources` and a `suggest` rule (`issue-owner`, `delivered`, `unverified`, `idle-in-repo`, or `start-lane`). It is read-only and does not require pi-orch. Exit codes: 0 rows, 1 no matches, 2 usage/config/I/O failure.
 

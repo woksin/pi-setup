@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -191,15 +191,55 @@ export function archiveDir(c: Config, root: string, home: string): string {
     return destination;
   } catch (e) { throw new UsageError(`invalid messages.retention.archiveDir: ${(e as Error).message}`); }
 }
-export function findRoot(dir: string | undefined, env: Record<string, string | undefined>, cwd: string): string {
-  if (dir || env.LANES_DIR) return resolve(cwd, dir || env.LANES_DIR!);
-  let at = resolve(cwd);
-  while (!existsSync(join(at, "lanes.json"))) {
-    const parent = dirname(at);
-    if (parent === at) throw new UsageError("lanes.json not found; run lanes init or set --dir");
-    at = parent;
+type RootCtx = Pick<LanesCtx, "cwd" | "env" | "home" | "run">;
+const defaultDirPath = (home: string) => join(home, ".local/share/pi-setup/lanes/default-dir");
+function upwardRoot(start: string): string | undefined {
+  for (let at = resolve(start); ; at = dirname(at)) {
+    if (existsSync(join(at, "lanes.json"))) return at;
+    if (dirname(at) === at) return;
   }
-  return at;
+}
+async function mainCheckoutRoot({ cwd, env, run }: RootCtx): Promise<string | undefined> {
+  try {
+    const r = await run("git", ["rev-parse", "--is-inside-work-tree", "--path-format=absolute", "--git-common-dir"], { cwd, env, timeoutMs: 3000 });
+    if (r.code !== 0 || r.timedOut) return;
+    const inside = /^true\r?\n/.exec(r.stdout);
+    if (!inside) return;
+    const common = r.stdout.slice(inside[0].length).replace(/\r?\n$/, "");
+    // Only infer the checkout path when the common Git directory is in it.
+    if (isAbsolute(common) && basename(common) === ".git") return upwardRoot(dirname(common));
+  } catch { /* Git lookup is optional. */ }
+}
+function savedRoot(home: string): string | undefined {
+  try {
+    const path = defaultDirPath(home);
+    if (!statSync(path).isFile()) return;
+    const root = readFileSync(path, "utf8").replace(/\n$/, "");
+    if (isAbsolute(root) && statSync(join(root, "lanes.json")).isFile()) return root;
+  } catch { /* No usable default. */ }
+}
+export function findLocalRoot(dir: string | undefined, { cwd, env }: Pick<RootCtx, "cwd" | "env">): string | undefined {
+  const explicit = dir || env.LANES_DIR;
+  return explicit ? resolve(cwd, explicit) : upwardRoot(cwd);
+}
+export async function findRoot(dir: string | undefined, ctx: RootCtx): Promise<string> {
+  const root = findLocalRoot(dir, ctx) ?? await mainCheckoutRoot(ctx) ?? savedRoot(ctx.home);
+  if (root) return root;
+  throw new UsageError("lanes.json not found in this directory, the main Git checkout, their parents, or the saved default; use --dir <dir>, set LANES_DIR, or run lanes init <dir>");
+}
+
+export function rememberRoot(root: string, ctx: Pick<LanesCtx, "home" | "err">, replace = false): void {
+  const path = defaultDirPath(ctx.home);
+  if (replace ? savedRoot(ctx.home) === root : existsSync(path)) return;
+  const tmp = join(dirname(path), `.default-dir-${randomUUID()}.tmp`);
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(tmp, `${root}\n`, { flag: "wx", mode: 0o600 });
+    if (replace) renameSync(tmp, path);
+    else linkSync(tmp, path); // Publish atomically without replacing another command's default.
+  } catch (e) {
+    if (replace) ctx.err(`could not save the default lanes directory: ${(e as Error).message}`);
+  } finally { try { rmSync(tmp, { force: true }); } catch { /* Best effort. */ } }
 }
 export function loadConfig(root: string): Config {
   let c: unknown;
