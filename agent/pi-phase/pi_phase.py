@@ -1457,14 +1457,14 @@ def select_policy(state, args, options, fingerprint, *, history=None, identity=N
     if policy is None:
         policy, source = configured_policy(state, args, options, fingerprint, history=history, identity=identity)
     if policy == "direct":
-        policy = safe_direct_policy(state, args.kind, fingerprint, identity)
+        policy = safe_direct_policy(state, args.kind, fingerprint)
     if policy == "fast":
         policy = hinted_fast_policy(state, args, options["fast_lane"], fingerprint, history=history, identity=identity)
     return policy, source
 
 
-def safe_direct_policy(state, kind, fingerprint, identity=None):
-    refusal = direct_refusal(state, kind, fingerprint, identity)
+def safe_direct_policy(state, kind, fingerprint):
+    refusal = direct_refusal(state, kind, fingerprint)
     if refusal:
         note(f"direct policy ignored: {refusal}; queued")
         return "queued"
@@ -1477,15 +1477,21 @@ def hinted_fast_policy(state, args, settings, fingerprint, *, history=None, iden
     return "fast" if fast_phase(state, fast_args, settings, fingerprint, history=history, identity=identity) else "queued"
 
 
-def container_test_known(state, fingerprint, identity=None):
+def container_test_known(state, fingerprint):
+    # A family can mix container producers with unrelated commands in the same cwd.
+    return metadata(state / "container-tests.json").get(fingerprint) is True
+
+
+def light_container_veto(state, fingerprint, identity):
+    # The pressure exception stays conservative without classifying the command as a container test.
     known = metadata(state / "container-tests.json")
-    return known.get(fingerprint) is True or (identity is not None and known.get(f"family:{identity.family_key}") is True)
+    return known.get(fingerprint) is True or known.get(f"family:{identity.family_key}") is True
 
 
-def direct_refusal(state, kind, fingerprint, identity=None):
+def direct_refusal(state, kind, fingerprint):
     if kind == "integration":
         return "integration phase"
-    if container_test_known(state, fingerprint, identity):
+    if container_test_known(state, fingerprint):
         return "recorded container test"
     return None
 
@@ -1579,7 +1585,7 @@ def slow_fast_history(history, threshold):
 
 
 def fast_refusal(state, fingerprint, history, threshold, *, phase_history=None, identity=None):
-    if container_test_known(state, fingerprint, identity):
+    if container_test_known(state, fingerprint):
         return "recorded container test"
     if slow_fast_history(history, threshold):
         return "history says this phase is slow"
@@ -3069,15 +3075,36 @@ def worktree_group_paths(path):
 
 def worktree_groups_alive(path, info, deadline=None):
     groups = [info, *(metadata(group) for group in worktree_group_paths(path))]
-    if deadline is None:
-        return any(group_alive(group) is not False for group in groups)
     if any(group.get("unreadable") for group in groups):
         return True
+    if deadline is None:
+        return any(group_alive(group) is not False for group in groups)
     pgids = set().union(*(lease_groups(group) for group in groups))
     if not pgids:
         return False
     live = live_groups(min(0.5, deadline() - time.monotonic()))
     return live is None or bool(pgids & live)
+
+
+def worktree_lease_alive(path, info, deadline=None):
+    pid = info.get("pid")
+    if not info.get("retired") and type(pid) is int and pid > 0:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pass
+        except (OSError, OverflowError):
+            return True  # Permission denied or an indeterminate probe is not proof of death.
+        else:
+            return True
+    return worktree_groups_alive(path, info, deadline)
+
+
+def clear_worktree_groups(path):
+    residual = list(worktree_group_paths(path))
+    for group in residual:
+        group.unlink(missing_ok=True)
+    return bool(residual)
 
 
 class WorktreeLease:
@@ -3283,7 +3310,7 @@ class WorktreeAdmission:
             return None
         try:
             info = metadata(self.info_path)
-            if worktree_groups_alive(self.path, info, self.light_deadline):
+            if worktree_lease_alive(self.path, info, self.light_deadline):
                 return None
             self.publish_holder(fd, info)
             fd = None
@@ -3293,9 +3320,7 @@ class WorktreeAdmission:
                 os.close(fd)
 
     def publish_holder(self, fd, previous):
-        residual = list(worktree_group_paths(self.path))
-        for group in residual:
-            group.unlink(missing_ok=True)
+        residual = clear_worktree_groups(self.path)
         if previous and (residual or not previous.get("retired")):
             note(f"recovered stale worktree lock (was {previous.get('label', '?')} pid {previous.get('pid', '?')})")
         info = dict(token=self.token, pid=os.getpid(), label=self.args.label, kind=self.args.kind,
@@ -3393,13 +3418,42 @@ class WorktreeAdmission:
             self.lease.close(safe)
 
 
+def worktree_root_missing(info):
+    root = info.get("root")
+    if isinstance(root, str) and os.path.isabs(root):
+        try:
+            os.stat(root)
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError):
+            pass
+    return False
+
+
+def reap_missing_worktree(path):
+    # Serialize with claim, and keep the lock inode so concurrent claimants cannot split the lock.
+    fd = lock_file(path)
+    if fd is None:
+        return
+    try:
+        info_path = path.with_suffix(".json")
+        info = metadata(info_path)
+        if worktree_root_missing(info) and not worktree_lease_alive(path, info):
+            clear_worktree_groups(path)
+            info_path.unlink(missing_ok=True)
+    finally:
+        os.close(fd)
+
+
 def worktree_status(state):
     owners = []
     for path in sorted((state / "worktrees").glob("*.lock")):
         info = metadata(path.with_suffix(".json"))
         busy = readonly_busy(path)
-        if busy or worktree_groups_alive(path, info):
+        if busy or worktree_lease_alive(path, info):
             owners.append((info, not busy))
+        elif worktree_root_missing(info):
+            reap_missing_worktree(path)
     now = time.time()
     lines = []
     for info, orphan in owners:
@@ -4956,7 +5010,7 @@ def run(args, state, configuration, output=None):
             ledger.guard_level = guard_level(options)
         guard_noted = None
         if (args.kind == "test" and options["container_test_detection"] == "promote"
-                and container_test_known(state, fingerprint, identity)):
+                and container_test_known(state, fingerprint)):
             admission_args.kind = "integration"
             note("recorded container test: also claiming an integration permit (container_test_detection)")
         heavy, integration = settings
@@ -4982,7 +5036,7 @@ def run(args, state, configuration, output=None):
             deadline = light_queue.deadline(guard)
             admission_args.light = (light_proven and guard.get("level") in (2, 3)
                                     and not guard.get("stale")
-                                    and not container_test_known(state, fingerprint, identity))
+                                    and not light_container_veto(state, fingerprint, identity))
             if time.monotonic() >= deadline:
                 light_queue.timeout_note(hold)
                 if ledger:

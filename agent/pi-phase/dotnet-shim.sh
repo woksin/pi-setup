@@ -22,6 +22,7 @@ fi
 index=0
 subcommand=0
 subcommand_name=
+operand_seen=no
 assemblies=no
 cap=yes
 explicit_arg=
@@ -68,6 +69,12 @@ for arg do
                     build|test|publish|pack|msbuild|restore) subcommand=$index ;;
                 esac
                 ;;
+        esac
+    elif [ "$operand_seen" = no ]; then
+        case $arg in
+            -*) ;;
+            *.cs) exec "$real_dotnet" "$@" ;; # File-based apps must not receive MSBuild switches.
+            *) operand_seen=yes ;;
         esac
     fi
 done

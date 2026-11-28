@@ -292,13 +292,26 @@ class FastShapeTests(Harness):
         history = pi_phase.PhaseHistory([self.overrun(identity)])
         self.assertEqual(self.decide(["dotnet", "bin/Y.Specs.dll"], history)[0], ("fast", "shape"))
 
-    def test_container_test_family_is_refused(self):
+    def test_container_test_exact_fingerprint_is_refused(self):
         _, identity = self.decide()
+        fingerprint = pi_phase.test_fingerprint(os.getcwd(), self.COMMAND)
         self.state.mkdir(exist_ok=True)
-        (self.state / "container-tests.json").write_text(json.dumps({f"family:{identity.family_key}": True}))
+        pi_phase.save(self.state / "container-tests.json", {fingerprint: True, f"family:{identity.family_key}": True})
         self.assertEqual(self.decide()[0], ("queued", "default"))
-        self.assertEqual(self.decide([*self.COMMAND, "-class", "Foo"])[0], ("queued", "default"))
+        self.assertEqual(self.decide([*self.COMMAND, "-class", "Foo"])[0], ("fast", "shape"))
         self.assertEqual(self.decide(policy="direct")[0], ("queued", "flag"))
+
+    def test_direct_does_not_inherit_container_history_from_another_command(self):
+        producer = ["python3", "run-tests.py"]
+        verifier = ["python3", "verify.py", "verify-trx"]
+        cwd = os.getcwd()
+        identity = pi_phase.work_identity(cwd, producer, "test")
+        self.assertEqual(identity.family_key, pi_phase.work_identity(cwd, verifier, "test").family_key)
+        self.state.mkdir(exist_ok=True)
+        pi_phase.save(self.state / "container-tests.json", {
+            pi_phase.test_fingerprint(cwd, producer): True, f"family:{identity.family_key}": True})
+        self.assertEqual(self.decide(verifier, policy="direct")[0], ("direct", "flag"))
+        self.assertEqual(self.decide(producer, policy="direct")[0], ("queued", "flag"))
 
     def test_repo_circuit_breaker_after_three_shape_overruns_in_a_day(self):
         _, identity = self.decide()

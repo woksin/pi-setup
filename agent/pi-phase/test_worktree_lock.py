@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pi_phase
@@ -181,6 +182,36 @@ class WorktreeLockTests(Harness):
         code, output = self.done(self.phase("B", command=self.job("B", .01)))
         self.assertEqual(code, 0, output)
         self.assertIn("recovered stale worktree lock", output)
+
+    def test_missing_worktree_lease_recovery_requires_dead_holder_and_empty_groups(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        dead.wait(timeout=3)
+        cases = (("dead", dead.pid, dead.pid, True),
+                 ("holder-alive", os.getpid(), dead.pid, False),
+                 ("group-alive", dead.pid, os.getpgrp(), False))
+        for action in ("status", "claim"):
+            for case, pid, pgid, recovered in cases:
+                with self.subTest(action=action, case=case):
+                    root = os.path.realpath(self.root / f"{action}-{case}")
+                    path, info, key = pi_phase.worktree_paths(self.state, root)
+                    path.touch()
+                    pi_phase.save(info, dict(token="old", pid=pid, pgid=dead.pid, root=root))
+                    guard = path.with_suffix(".groups") / "nested.json"
+                    guard.parent.mkdir()
+                    pi_phase.save(guard, dict(token="old", pgid=pgid))
+                    if action == "status":
+                        code, output = self.done(self.start_in(self.repo, "status"))
+                        self.assertEqual(code, 0, output)
+                    else:
+                        args = SimpleNamespace(kind="test", label="new", policy="direct")
+                        admission = pi_phase.WorktreeAdmission(self.state, args, "new")
+                        admission.root, admission.path, admission.info_path, admission.key = root, path, info, key
+                        lease = admission.claim()
+                        if lease is not None:
+                            lease.close(safe=True)
+                        self.assertEqual(lease is not None, recovered)
+                    self.assertEqual(pi_phase.metadata(info).get("token") == "old", not recovered)
+                    self.assertEqual(guard.exists(), not recovered)
 
     def test_live_orphan_group_blocks_even_without_descriptor(self):
         owner = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(8)"], start_new_session=True)
