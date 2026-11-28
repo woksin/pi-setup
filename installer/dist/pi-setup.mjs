@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 87c6f6996db5fa68590becab41f28f05c032ae436f2632a2cbef03a29f87930d
+// pi-setup-source-sha256: 4e3c10bce82e73f19d2deb8863cb68a0c08cc4d5963412292ac277c6664cdc79
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -4806,11 +4806,26 @@ async function leaseInventory(ctx, entries) {
     throw error;
   }
 }
+function formatStartUtc(d) {
+  return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
+}
 function legacyStartUtc(start2) {
-  if (!/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(start2)) return void 0;
+  if (!LSTART.test(start2)) return void 0;
   const d = new Date(start2);
   if (Number.isNaN(d.getTime())) return void 0;
-  return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
+  return formatStartUtc(d);
+}
+function ownerStartMillis({ owner: { start: start2 }, version: version3 }) {
+  if (!LSTART.test(start2)) return NaN;
+  const utc = /* @__PURE__ */ new Date(`${start2} UTC`);
+  if (formatStartUtc(utc) !== start2.replace(/ +/g, " ")) return NaN;
+  if (version3 === 2) return utc.getTime();
+  const local = new Date(start2);
+  const offset = local.getTimezoneOffset();
+  if (local.getTime() - offset * 6e4 !== utc.getTime()) return NaN;
+  const nextOffset = new Date(local.getTime() + 24 * HOUR_MS).getTimezoneOffset();
+  const later = new Date(utc.getTime() + nextOffset * 6e4);
+  return later.getTimezoneOffset() === nextOffset ? Math.max(local.getTime(), later.getTime()) : local.getTime();
 }
 function checkLegacyStart({ file, lease }, rows) {
   if (lease.version !== 1) return;
@@ -4824,14 +4839,18 @@ function checkLegacyStart({ file, lease }, rows) {
   }
   for (const prior of lease.priorPi ?? []) prior.start = legacyStartUtc(prior.start) ?? prior.start;
 }
-function leases(entries, rows) {
+function checkUnrecordedChild({ file, lease }, all, rows, now) {
+  const age2 = now.getTime() - ownerStartMillis(lease);
+  if (!(age2 > HOUR_MS) || uncertainPi(lease, all, rows)) throw uncertainLease(file, "dead owner with unrecorded child");
+}
+function leases(entries, rows, ctx) {
   const all = entries.map((e) => e.lease);
   for (const entry2 of entries) checkLegacyStart(entry2, rows);
   return entries.flatMap((entry2) => {
     const { file, lease } = entry2;
     if (alive2(lease.owner, rows)) return [lease];
-    if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
-    if (alive2(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
+    if (!lease.child) checkUnrecordedChild(entry2, all, rows, ctx.now());
+    else if (alive2(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
     unlinkSync5(file);
     return [];
   });
@@ -4843,7 +4862,7 @@ async function admit(ctx, request2, beforeLaunch) {
     const rows = await leaseInventory(ctx, entries);
     const owner = rows.find((r2) => r2.pid === process.pid);
     if (!owner) throw new Error("admission controller identity unavailable");
-    const active = leases(entries, rows);
+    const active = leases(entries, rows, ctx);
     const pis = rows.filter((r2) => r2.pi);
     if (active.some((l2) => l2.cwd === request2.cwd) || pis.some((p) => p.cwd === request2.cwd)) throw new Error(`already running in ${request2.cwd}`);
     const value = {
@@ -4889,7 +4908,7 @@ async function admit(ctx, request2, beforeLaunch) {
     }
   };
 }
-var StartUnavailable, pause, DAYS, MONTHS, two;
+var StartUnavailable, pause, DAYS, MONTHS, two, LSTART, HOUR_MS;
 var init_admission = __esm({
   "src/lanes/admission.ts"() {
     StartUnavailable = class extends Error {
@@ -4903,6 +4922,8 @@ var init_admission = __esm({
     DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     two = (n3) => String(n3).padStart(2, "0");
+    LSTART = /^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
+    HOUR_MS = 60 * 60 * 1e3;
   }
 });
 
