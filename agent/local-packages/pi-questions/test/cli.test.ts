@@ -59,16 +59,18 @@ test("wait exits 1 while open, then 0 once answered", t => {
 	assert.equal(run("wait", "Q-9").code, 2);
 });
 
-test("get shows every comment, not the compact tool default", t => {
+test("CLI get shows every comment without clipping long notes", t => {
 	const root = tempDir(t);
 	const home = join(root, "home");
 	const repo = gitRepo(join(root, "r"), "git@github.com:acme/alpha.git");
 	const run = cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "s1" }, repo);
 	assert.equal(run("ask", ...RESEARCH_FLAGS, "--kind", "question", "--title", "Many comments").code, 0);
 	for (let i = 1; i <= 8; i++) commentItem(home, "Q-1", { kind: "user" } as any, `note number ${i}`);
+	commentItem(home, "Q-1", { kind: "user" } as any, `${"details ".repeat(50)}end of long note`);
 	const out = run("get", "Q-1").out;
 	assert.doesNotMatch(out, /earlier comment/);
 	for (let i = 1; i <= 8; i++) assert.match(out, new RegExp(`note number ${i}\\b`));
+	assert.ok(out.replace(/\s+/g, " ").includes("end of long note"));
 });
 
 test("list output: default scope, --all with the asker lane, and warnings", t => {
@@ -81,7 +83,7 @@ test("list output: default scope, --all with the asker lane, and warnings", t =>
 	const run = cli({ PI_QUESTIONS_HOME: home, PI_SESSION_ID: "sx" }, repoA);
 	const here = run("list");
 	assert.match(here.out, /Alpha question here/);
-	assert.doesNotMatch(here.out, /Beta matter/);
+	assert.doesNotMatch(here.out, /Beta matter|updated \d|created by/);
 	const all = run("list", "--all");
 	assert.match(all.out, /Beta matter/);
 	assert.match(all.out, /asker LANE-B/);
