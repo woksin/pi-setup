@@ -5,6 +5,7 @@ import { repoKey, listManifests } from './train-manifest.mjs';
 import { scanRepository } from './train-concurrency.mjs';
 import { initTrain, repository } from './train-init.mjs';
 import { foldTrain } from './train-fold.mjs';
+import { syncBase } from './train-sync-base.mjs';
 import { statusTrains } from './train-status.mjs';
 import { adoptTrain } from './train-adopt.mjs';
 import { shipTrain } from './train-ship.mjs';
@@ -18,6 +19,7 @@ export const HELP = `Usage: pi-train [--repo-dir path] [--dry-run] [--json] <com
   init <repo-dir> <train-branch> [--from origin/main] [--worktree path]
   init --adopt <repo-dir> <existing-train-branch> [--base origin/main]
   fold [PR#|branch] [--train branch] [--allow-foreign] [--eta when]
+  sync-base [--train branch]
   planned <PR#> <train-branch> [--allow-foreign] [--eta when]
   eta <PR#|branch> <when|clear> [--train branch]
   concurrency [--json]
@@ -93,7 +95,7 @@ function addArgument(argv, parsed) {
 function validateArity(command, args) {
   if (['close', 'fold'].includes(command) && args.length <= 1) return;
   if (command === 'concurrency' && args.length === 0) return;
-  const arity = new Map(Object.entries({ init: 2, fold: 1, planned: 2, eta: 2, status: 0, ship: 0, close: 0, hook: 1, guard: 0 }));
+  const arity = new Map(Object.entries({ init: 2, fold: 1, 'sync-base': 0, planned: 2, eta: 2, status: 0, ship: 0, close: 0, hook: 1, guard: 0 }));
   if (args.length !== arity.get(command)) throw new TrainError(HELP, 2);
 }
 
@@ -114,6 +116,7 @@ async function runGuard(ctx, options, repo) {
 async function mutateTrain(ctx, api, request, repo) {
   const { options, command, args } = request;
   if (command === 'eta') return setEta(ctx, repo, options, args);
+  if (command === 'sync-base') return syncBase(ctx, api, options, repo);
   if (command === 'ship') return shipTrain(ctx, api, options, repo);
   if (command === 'close') return closeTrain(ctx, repo, { ...options, train: args[0] ?? options.train });
   if (command === 'init') return (options.adopt ? adoptTrain : initTrain)(ctx, api, { ...options, repo, args });
