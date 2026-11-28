@@ -102,6 +102,17 @@ class Deadline(Base):
         self.assertIn("partial", log)
         self.assertNotIn(private_output, log)
 
+    def test_lsof_partial_failure_keeps_the_readable_cwds(self):
+        def probe(cmd, *, timeout, **kwargs):
+            if cmd[0] == "ps":
+                return subprocess.CompletedProcess(cmd, 0, "100 Wed Jan  1 00:00:00 2025 /bin/pi\n101 Wed Jan  1 00:00:00 2025 /bin/pi\n")
+            raise subprocess.CalledProcessError(1, cmd, output="p100\nn/work/a\n")
+
+        with patch.object(sw.subprocess, "run", side_effect=probe), sw.PassBudget(False) as budget:
+            procs = sw.live_pi_procs(budget)
+        self.assertEqual(list(procs), [100])
+        self.assertEqual(procs[100][0], "/work/a")
+
     def test_deadline_also_interrupts_session_enumeration(self):
         calls = self.patch_notify()
         start = time.monotonic()

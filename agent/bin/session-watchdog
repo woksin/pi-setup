@@ -117,13 +117,16 @@ class PassBudget:
         finally:
             self.timings.append((name, time.monotonic() - started))
 
-    def probe(self, name, cap, cmd, **kwargs):
+    def probe(self, name, cap, cmd, partial_ok=False, **kwargs):
         try:
             with self.stage(name):
                 return subprocess.run(cmd, capture_output=True, text=True, check=True,
                                       timeout=min(cap, self.remaining()), **kwargs).stdout
         except subprocess.TimeoutExpired:
             raise PassStopped(f"{name} timed out") from None
+        except subprocess.CalledProcessError as e:
+            # lsof exits 1 when one listed pid vanished or is unreadable but still reports the others.
+            return e.stdout if partial_ok and e.stdout and e.stdout.strip() else None
         except (OSError, subprocess.SubprocessError, UnicodeError):
             return None
 
@@ -342,7 +345,7 @@ def live_pi_procs(budget):
                 continue
     if not procs:
         return {}
-    out = budget.probe("lsof-cwd", 30, ["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(map(str, procs))])
+    out = budget.probe("lsof-cwd", 30, ["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(map(str, procs))], partial_ok=True)
     if out is None:
         raise PassStopped("lsof-cwd failed")
     pid = None
