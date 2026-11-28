@@ -140,12 +140,31 @@ async function leaseInventory(ctx: LanesCtx, entries: LeaseEntry[]): Promise<Adm
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const two = (n: number) => String(n).padStart(2, "0");
+const LSTART = /^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
+const HOUR_MS = 60 * 60 * 1000;
+function formatStartUtc(d: Date): string {
+  return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
+}
 /** A v1 C-locale lstart written in this host's local timezone, re-expressed as the v2 UTC/C lstart. */
 export function legacyStartUtc(start: string): string | undefined {
-  if (!/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(start)) return undefined;
+  if (!LSTART.test(start)) return undefined;
   const d = new Date(start);
   if (Number.isNaN(d.getTime())) return undefined;
-  return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()}`;
+  return formatStartUtc(d);
+}
+function ownerStartMillis({ owner: { start }, version }: Lease): number {
+  if (!LSTART.test(start)) return NaN;
+  const utc = new Date(`${start} UTC`);
+  if (formatStartUtc(utc) !== start.replace(/ +/g, " ")) return NaN;
+  if (version === 2) return utc.getTime();
+
+  const local = new Date(start);
+  const offset = local.getTimezoneOffset();
+  if (local.getTime() - offset * 60_000 !== utc.getTime()) return NaN;
+  // If a legacy wall time repeated when the clocks went back, use the later start.
+  const nextOffset = new Date(local.getTime() + 24 * HOUR_MS).getTimezoneOffset();
+  const later = new Date(utc.getTime() + nextOffset * 60_000);
+  return later.getTimezoneOffset() === nextOffset ? Math.max(local.getTime(), later.getTime()) : local.getTime();
 }
 /** v1 leases recorded local time. A live PID whose start matches either as recorded or converted to UTC is the
  * same process (normalised in memory); any other differing start stays uncertain and is never reclaimed. */
@@ -161,14 +180,18 @@ function checkLegacyStart({ file, lease }: LeaseEntry, rows: AdmissionProcess[])
   }
   for (const prior of lease.priorPi ?? []) prior.start = legacyStartUtc(prior.start) ?? prior.start;
 }
-function leases(entries: LeaseEntry[], rows: AdmissionProcess[]): Lease[] {
+function checkUnrecordedChild({ file, lease }: LeaseEntry, all: Lease[], rows: AdmissionProcess[], now: Date): void {
+  const age = now.getTime() - ownerStartMillis(lease);
+  if (!(age > HOUR_MS) || uncertainPi(lease, all, rows)) throw uncertainLease(file, "dead owner with unrecorded child");
+}
+function leases(entries: LeaseEntry[], rows: AdmissionProcess[], ctx: LanesCtx): Lease[] {
   const all = entries.map(e => e.lease);
   for (const entry of entries) checkLegacyStart(entry, rows);
   return entries.flatMap(entry => {
     const { file, lease } = entry;
     if (alive(lease.owner, rows)) return [lease];
-    if (!lease.child) throw uncertainLease(file, "dead owner with unrecorded child");
-    if (alive(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
+    if (!lease.child) checkUnrecordedChild(entry, all, rows, ctx.now());
+    else if (alive(lease.child, rows) || uncertainPi(lease, all, rows)) return [lease];
     unlinkSync(file); return [];
   });
 }
@@ -178,7 +201,7 @@ export async function admit(ctx: LanesCtx, request: AdmissionRequest, beforeLaun
     const entries = registry(dir); const rows = await leaseInventory(ctx, entries);
     const owner = rows.find(r => r.pid === process.pid);
     if (!owner) throw new Error("admission controller identity unavailable");
-    const active = leases(entries, rows); const pis = rows.filter(r => r.pi);
+    const active = leases(entries, rows, ctx); const pis = rows.filter(r => r.pi);
     if (active.some(l => l.cwd === request.cwd) || pis.some(p => p.cwd === request.cwd)) throw new Error(`already running in ${request.cwd}`);
     const value: Lease = { version: 2, token: randomUUID(), owner: { pid: owner.pid, start: owner.start }, root: request.root, cwd: request.cwd, id: request.id, pool: request.pool,
       priorPi: pis.map(p => ({ pid: p.pid, start: p.start })) };
