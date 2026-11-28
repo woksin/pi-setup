@@ -390,7 +390,7 @@ test("mutating actions return a one-line status", async t => {
 	assert.ok(status.split(" · ")[3].length <= 60);
 });
 
-test("get shows every history entry in order with clipped notes and no private metadata", async t => {
+test("get shows the last comments by default, every entry with all, and no private metadata", async t => {
 	const { root, home } = env(t);
 	const now = () => Date.parse("2026-05-01T10:00:00Z");
 	writeUser(root, "alice");
@@ -398,18 +398,20 @@ test("get shows every history entry in order with clipped notes and no private m
 	const b = session(t, { root, home, sessionId: "private-actor-session", lane: "PRIVATE-ACTOR-LANE", now });
 	await a.call({ action: "ask", kind: "decision", title: "Select library", options: [{ key: "hidden-field", text: "Alpha" }] });
 	for (let i = 1; i <= 6; i++) await b.call({ action: "comment", id: "Q-1", text: `note number ${i}` });
-	await b.call({ action: "comment", id: "Q-1", text: `Long note\n${"details ".repeat(50)}clipped-tail` });
+	await b.call({ action: "comment", id: "Q-1", text: `Long note ${"details ".repeat(20)}full-tail` });
 	await b.type("private-input-prefix: Use Alpha.");
 	await b.call({ action: "record_answer", id: "Q-1", quote: "Use Alpha.", option: "hidden-field" });
 
-	const out = text(await a.call({ action: "get", id: "Q-1" }));
+	const brief = text(await a.call({ action: "get", id: "Q-1" }));
+	assert.match(brief, /2 earlier comments \(get with all: true\)/);
+	assert.ok(!brief.includes("note number 2") && brief.includes("note number 3"));
+
+	const out = text(await a.call({ action: "get", id: "Q-1", all: true }));
 	assert.match(out, /Answer .*Use Alpha\. \(by alice via quote in chat/);
 	const [, history] = out.split("\nHistory:\n");
 	assert.deepEqual(Array.from(history.matchAll(/^  #(\d+)/gm), match => Number(match[1])), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
-	assert.match(history, /2026-05-01 10:00Z created by agent/);
 	for (let i = 1; i <= 6; i++) assert.ok(history.includes(`note number ${i}`));
-	assert.match(history, /comment by agent: Long note details[\s\S]*…/);
-	assert.match(history, /decided by user alice: Use Alpha\./);
-	assert.doesNotMatch(out, /private-actor-session|PRIVATE-ACTOR-LANE|private-input-prefix|clipped-tail/);
+	assert.match(history, /full-tail/);
+	for (const o of [brief, out]) assert.doesNotMatch(o, /private-actor-session|PRIVATE-ACTOR-LANE|private-input-prefix/);
 	assert.doesNotMatch(history, /hidden-field/);
 });

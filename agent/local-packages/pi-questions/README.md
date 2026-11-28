@@ -24,7 +24,7 @@ One tool with an `action`:
 
 - `ask`: kind, title, body, evidence, review, options, recommended, urgency, blocking, links, tags, cc, for, global, project, distinctFrom. Research and review are checked before the duplicate check (below).
 - `list`: default is open and deferred-due items for the current repo, global items and your own. `all: true` shows every repo with the asker lane on each item. `project`, `repo`, `status` (or `all`), `mine` filter. Each item shows its last update (UTC) and latest history event (type, actor and age). `sort: "activity"` orders all matches newest-first by their latest event instead of grouping by priority.
-- `get`: `format: "text"` includes the current item, any answer and the full history (type, UTC time, actor and a short note per entry). `format: "record"` is the unchanged plain decision record for exporting by hand.
+- `get`: `format: "text"` shows the item, any answer and its history with the last 5 comments (`all: true` shows every comment). `format: "record"` is a plain decision record for exporting by hand.
 - `search`: all statuses, so agents check decided and closed items before asking again.
 - `update`: your own open or deferred items, including setting or replacing evidence and review. On any item you may add links, or add yourself to cc.
 - `comment`: any item.

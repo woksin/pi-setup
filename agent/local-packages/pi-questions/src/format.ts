@@ -130,8 +130,8 @@ export function statusLine(item: Item): string {
 	return `${item.id} [${item.kind}] ${item.status} · rev ${item.rev} · ${n} comment${n === 1 ? "" : "s"} · ${title}`;
 }
 
-/** Full item text. Compact history includes every entry with clipped notes. */
-export function renderItem(item: Item, now: number, duplicateOf?: string, historyMode: boolean | "compact" = false): string {
+/** Full item text. Shows the last SHOWN_COMMENTS comments unless allComments; other history events always show. */
+export function renderItem(item: Item, now: number, duplicateOf?: string, allComments = false): string {
 	const lines: string[] = [];
 	lines.push(...wrap(`${item.id} [${item.kind}] ${item.title}`, WIDTH, "  "));
 	lines.push(`Status: ${item.status}${item.deferredUntil ? ` until ${item.deferredUntil.slice(0, 10)}` : ""}   Urgency: ${item.urgency}   Age: ${ageOf(item.createdAt, now)}   rev ${item.rev}`);
@@ -151,15 +151,7 @@ export function renderItem(item: Item, now: number, duplicateOf?: string, histor
 	}
 	const a = answerLine(item);
 	if (a) lines.push("", ...wrap(a, WIDTH, "  "));
-	const history = historyMode === "compact" ? item.history.flatMap(compactHistoryEntry) : historyLines(item.history, historyMode);
-	return plain(lines.concat("", "History:", history).flatMap(l => fit(l)));
-}
-
-function compactHistoryEntry(h: HistoryEntry): string[] {
-	const limit = 80;
-	const text = h.text?.trim().replace(/\s+/g, " ") ?? "";
-	const note = text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text;
-	return wrap(`  #${h.seq} ${utcMinute(h.at)} ${h.type} by ${historyActor(h)}${note ? `: ${note}` : ""}`, WIDTH, "      ");
+	return plain(lines.concat("", "History:", historyLines(item.history, allComments)).flatMap(l => fit(l)));
 }
 
 function historyLines(history: HistoryEntry[], allComments: boolean): string[] {

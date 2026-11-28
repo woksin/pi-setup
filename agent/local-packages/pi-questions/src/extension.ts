@@ -82,7 +82,7 @@ const PARAMETERS = {
 		distinctFrom: { ...strList, description: "ask: ids of every duplicate candidate, to create anyway" },
 		status: { type: "string", enum: ["open", "answered", "decided", "deferred", "withdrawn", "superseded", "closed", "all"] },
 		repo: { type: "string", description: "Owner/Name" },
-		all: { type: "boolean", description: "list: every repo, with the asker lane on each item" },
+		all: { type: "boolean", description: "list: every repo, with the asker lane on each item; get: show all comments" },
 		mine: { type: "boolean", description: "list: only your own items" },
 		sort: { type: "string", enum: ["activity"], description: "list: newest activity first; omit for the default priority groups" },
 		query: str,
@@ -359,7 +359,7 @@ export function createQuestionsExtension(opts: Options = {}) {
 					}
 					case "get": {
 						const item = actions.getItem(home, need(params.id, "id"));
-						return text(params.format === "record" ? renderRecord(item) : renderItem(item, now, possibleDuplicates(listItems(home).items).get(item.id), "compact"), { item });
+						return text(params.format === "record" ? renderRecord(item) : renderItem(item, now, possibleDuplicates(listItems(home).items).get(item.id), !!params.all), { item });
 					}
 					case "search": {
 						const { items, warnings } = listItems(home);
