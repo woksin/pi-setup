@@ -2,7 +2,7 @@ import { handoff } from "./commands/handoff.ts";
 import { reap } from "./commands/reap.ts";
 import { snooze } from "./commands/snooze.ts";
 import { type LanesCtx } from "./ctx.ts";
-import { findRoot, loadConfig, UsageError, type Config } from "./config.ts";
+import { findRoot, loadConfig, rememberRoot, UsageError, type Config } from "./config.ts";
 import { init } from "./commands/init.ts";
 import { adopt } from "./commands/adopt.ts";
 import { add } from "./commands/add.ts";
@@ -169,6 +169,11 @@ function errorCode({ e, command }: { e: unknown; command: string }): number {
   return e instanceof UsageError || ["idle-check", "nudge", "resume-check", "green-prs", "close", "reap",
     "snooze", "handoff", "unacked"].includes(command) ? 2 : 1;
 }
+function isDryRun({ command, opts }: Invocation): boolean {
+  if (opts["dry-run"]) return true;
+  if (opts.apply) return false;
+  return command === "reap" || (command === "close" && Boolean(opts.inactive));
+}
 export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
   let command = "";
   try {
@@ -177,8 +182,10 @@ export async function main(argv: string[], ctx: LanesCtx): Promise<number> {
     const input = { command, positional, opts }; validateInvocation(input);
     if (command === "init") return await init(positional, opts, ctx);
     if (command === "adopt") return await adopt(opts, ctx);
-    const root = findRoot(opts.dir, ctx.env, ctx.cwd); const c = loadConfig(root);
-    return await dispatch(input, { c, root, ctx });
+    const root = await findRoot(opts.dir, ctx); const c = loadConfig(root);
+    const code = await dispatch(input, { c, root, ctx });
+    if (code === 0 && !isDryRun(input)) rememberRoot(root, ctx);
+    return code;
   } catch (e) { ctx.err((e as Error).message); return errorCode({ e, command }); }
 }
 

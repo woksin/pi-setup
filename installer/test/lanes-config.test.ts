@@ -49,7 +49,7 @@ test("legacy named recipients are delimited by HHMM with an optional topic suffi
   for (const name of ["L0-to-ai-skills-resume.md", "L0-to-ai-skills-2460.md", "L0-to-ai-skills-1406.exe", "bad-to-ai-skills-1406.md"]) assert.equal(parseMessageName(name), undefined);
 });
 
-test("config expansion, validation, root lookup and atomic saves preserve unknown keys", () => {
+test("config expansion, validation, root lookup and atomic saves preserve unknown keys", async () => {
   const root = tempDir("lanes-config");
   const home = tempDir("lanes-home");
   const c = defaults(root, home, "~/src");
@@ -59,9 +59,10 @@ test("config expansion, validation, root lookup and atomic saves preserve unknow
   c.extra = { keep: true };
   saveConfig(root, c);
   const sub = join(root, "a/b"); mkdirSync(sub, { recursive: true });
-  assert.equal(findRoot(undefined, {}, sub), root);
-  assert.equal(findRoot(root, {}, sub), root);
-  assert.equal(findRoot(undefined, { LANES_DIR: root }, sub), root);
+  const ctx = { cwd: sub, home, env: {}, run: async () => { throw new Error("no Git lookup needed"); } };
+  assert.equal(await findRoot(undefined, ctx), root);
+  assert.equal(await findRoot(root, ctx), root);
+  assert.equal(await findRoot(undefined, { ...ctx, env: { LANES_DIR: root } }), root);
   assert.deepEqual(loadConfig(root).extra, { keep: true });
   saveConfig(root, c);
   assert.deepEqual(readdirSync(root).sort(), ["a", "lanes.json"]);
