@@ -3630,6 +3630,16 @@ class DotnetShimTests(unittest.TestCase):
                                  [command, "-m:3", "-p:UseSharedCompilation=false",
                                   "-nodeReuse:false", "a.csproj"])
 
+    def test_file_based_apps_receive_original_arguments(self):
+        for args in (("restore", "Tools/Inspect.cs", "--force-evaluate"),
+                     ("build", "--no-restore", "Tools/Inspect Me.cs"),
+                     ("run", "--no-build", "Tools/Inspect.cs", "--", "argument")):
+            with self.subTest(command=args[0]):
+                self.assertEqual(self.invoke(*args), list(args))
+        self.assertEqual(self.invoke("build", "a.csproj", "Tools/Inspect.cs"),
+                         ["build", "-m:3", "-p:UseSharedCompilation=false", "-nodeReuse:false",
+                          "a.csproj", "Tools/Inspect.cs"])
+
     def test_explicit_cpu_cap_does_not_disable_lifetime_controls(self):
         self.assertEqual(self.invoke("build", "-m:1"),
                          ["build", "-p:UseSharedCompilation=false", "-nodeReuse:false", "-m:1"])
