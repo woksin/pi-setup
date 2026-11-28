@@ -40,6 +40,14 @@ async function setup(t: any, init = true) {
   if (init) { await saveManifest(path, manifest); await mkdir(manifest.worktree, { recursive: true }); }
   const ghRoutes = {
     'api user': () => ok('me\n'),
+    [`api repos/${REPO}/pulls/42`]: async (args: string[]) => {
+      assert.equal(args[args.indexOf('--method') + 1], 'PATCH');
+      const field = args[args.indexOf('--field') + 1];
+      assert.ok(field.startsWith('body=@'));
+      state.trainPR.body = await readFile(field.slice('body=@'.length), 'utf8');
+      state.edits++;
+      return ok();
+    },
     'repo view': () => ok(JSON.stringify({ defaultBranchRef: { name: state.defaultBranch } })),
     'pr view': () => ok(JSON.stringify(state.pr)),
     'pr list': (args: string[]) => {
@@ -1004,11 +1012,11 @@ for (const closed of [false, true]) {
 const generatedNotes = '## Fixed\n\n- Fix widgets (#7)';
 const generatedMarker = '<!-- pi-train:generated-notes -->';
 for (const [previous, suffix] of [
-  ['marked', `\n\n${generatedMarker}\n\n## Fixed\n\n- Stale`],
-  ['unmarked summary', ''],
-  ['legacy generated', `\n\n${generatedNotes}`],
+  ['a marked', `\n\n${generatedMarker}\n\n## Fixed\n\n- Stale`],
+  ['an unmarked', ''],
+  ['a legacy generated', `\n\n${generatedNotes}`],
 ]) {
-  test(`re-ship preserves the human summary of a ${previous} body and replaces notes once`, async t => {
+  test(`re-ship preserves the human summary of ${previous} body and replaces notes once`, async t => {
     const f = await readyToShip(t);
     const summary = ['## Summary', '', 'Human summary', '', '```markdown', generatedMarker, '```', '', '## Changed', '', '- Human note'].join('\n');
     f.state.trainPR = { number: 42, body: `${summary}${suffix}\n`, labels: [{ name: 'minor' }], comments: [] };
