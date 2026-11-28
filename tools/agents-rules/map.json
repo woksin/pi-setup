@@ -25,14 +25,5 @@
   "to": "agent/AGENTS.md",
   "new": "It is not a major release (see the merge exception under \"GitHub issues and pull requests\") and nothing in it needs a product decision from the user.",
   "reason": "The merge exception lives in the GitHub issues section; the reference now names that section instead of 'above'."
- },
- {
-  "ids": [
-   "local-docker-2026-10-20-docker-must-keep-working-without-a-human-2-011728be"
-  ],
-  "kind": "reworded",
-  "to": "agent/AGENTS.md",
-  "new": "Docker guardian image cleanup runs only when `pi-phase status` reports no active phases or only `build`, `test`, or `ci`. An active integration phase or unknown phase status blocks image removal even under disk pressure. At or above the cleanup floor (40 GiB by default), it protects pinned globs (`~/.pi/agent/docker-guardian/pinned.txt`), floating tags and images younger than 6 h. Below the floor, pins and floating tags no longer protect images and the minimum age drops to 1 h. It keeps all container-used images and uses only `docker rmi` without force. Under confirmed local disk pressure, build cache retention drops to 0 even if the image pass is skipped.",
-  "reason": "Clarify the fail-closed phase gate and separate image safety from build-cache retention under disk pressure (#245)."
  }
 ]

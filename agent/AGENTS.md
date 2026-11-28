@@ -72,7 +72,6 @@ Decide technical questions yourself. Ask the user (`user_questions`, then end th
 - Disk: below 40 GiB free run `pi-cleanup` dry-run and report; below 25 GiB start no worktree or heavy phase.
 - Never lose uncommitted/untracked work or unreferenced commits: no `git clean -fdx`, forced worktree removal, blanket `.ai-work/` deletion or deleting a live session's cwd. Scratch goes in ignored `.ai-work/`.
 - Never `docker image prune -a` / `docker system prune -a`.
-- Docker guardian image cleanup runs only when `pi-phase status` reports no active phases or only `build`, `test`, or `ci`. An active integration phase or unknown phase status blocks image removal even under disk pressure. At or above the cleanup floor (40 GiB by default), it protects pinned globs (`~/.pi/agent/docker-guardian/pinned.txt`), floating tags and images younger than 6 h. Below the floor, pins and floating tags no longer protect images and the minimum age drops to 1 h. It keeps all container-used images and uses only `docker rmi` without force. Under confirmed local disk pressure, build cache retention drops to 0 even if the image pass is skipped.
 - Guards are the user's switch: report blocks, never disable or bypass them. State-changing MCP calls need approval. Never route around a model refusal.
 - Reproducible setup defects: `report-setup-issue`. Never patch the live install to work around them.
 
