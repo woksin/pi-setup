@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pi-setup-source-sha256: 292706a66312e04b1b1dd8424cc7b83417d05de4921fe54e9a8d6ffbd3099cdf
+// pi-setup-source-sha256: 87c6f6996db5fa68590becab41f28f05c032ae436f2632a2cbef03a29f87930d
 
 // src/lanes/cli.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -1656,6 +1656,10 @@ function launchCommand(c, root, cwd, id, _prompt, _wrapper, messages2, launcher 
   if (opts["handoff-digest"]) args.push("--handoff-digest", opts["handoff-digest"]);
   return `cd ${shellQuote(cwd)} && env ${unset ? `${unset} ` : ""}PI_ORCH_ID=${id} LANES_DIR=${shellQuote(root)} INBOX_DIR=${shellQuote(messages2)} LANE_STATUS_DIR=${shellQuote(join17(messages2, "status"))} ${args.map(shellQuote).join(" ")}`;
 }
+function appleScriptTabCommand(command) {
+  const delay = 30;
+  return appleScriptString(`${command} || { printf '\\nLane launch failed (exit %s); this shell will exit in %s seconds.\\n' "$?" ${delay} >&2; sleep ${delay}; exit 0; }`);
+}
 function terminalBackend(name) {
   if (!BACKENDS.includes(name) || name === "auto") throw new UsageError("invalid terminal.backend");
   return { quit: (ctx, tty, guard) => nudgeTerminal(name, ctx, { tty, text: "/quit" }, guard), nudge: (ctx, input, guard) => nudgeTerminal(name, ctx, input, guard), async start(ctx, { id, cwd, command }) {
@@ -1667,12 +1671,12 @@ function terminalBackend(name) {
     let args;
     if (name === "terminal-app") {
       cmd = "osascript";
-      args = ["-e", `tell application "Terminal" to do script "${appleScriptString(command)}"`, "-e", 'tell application "Terminal" to activate'];
+      args = ["-e", `tell application "Terminal" to do script "${appleScriptTabCommand(command)}"`, "-e", 'tell application "Terminal" to activate'];
     } else if (name === "iterm") {
       cmd = "osascript";
       args = ["-e", `tell application "iTerm2"
 create window with default profile
-tell current session of current window to write text "${appleScriptString(command)}"
+tell current session of current window to write text "${appleScriptTabCommand(command)}"
 activate
 end tell`];
     } else {
