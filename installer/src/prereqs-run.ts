@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { Options } from "./args.ts";
 import { EXTRA_LINKS, formatCommand, shownCommand, installCommand, isRequired, packageManager, piStep, planPrereqs, TOOLS } from "./prereqs.ts";
 import type { Step } from "./prereqs.ts";
+import { installWithPiChunks } from "./pi-chunks.ts";
 import { setupCmd } from "./doctor-checks.ts";
 import { CANCEL, SetupError } from "./types.ts";
 import type { Ctx, Prompter } from "./types.ts";
@@ -106,8 +107,12 @@ async function runStep(ctx: Ctx, step: Step, nonInteractive: boolean): Promise<v
   }
   ctx.out(`→ ${step.label}: ${command}`);
   appendLog(ctx, `\n$ ${command}\n`);
-  const r = await ctx.run(step.argv[0], step.argv.slice(1), { timeoutMs: 1_800_000, inherit: step.sudo && !nonInteractive });
-  appendLog(ctx, `${r.stdout}${r.stderr}\n[exit ${r.code}]\n`);
+  const run = async () => {
+    const result = await ctx.run(step.argv[0], step.argv.slice(1), { timeoutMs: 1_800_000, inherit: step.sudo && !nonInteractive });
+    appendLog(ctx, `${result.stdout}${result.stderr}\n[exit ${result.code}]\n`);
+    return result;
+  };
+  const r = await (step.piPrefix ? installWithPiChunks(ctx, step.piPrefix, run) : run());
   if (r.code === 0 && !r.timedOut) { ctx.out(`✓ ${step.label}`); return; }
   record(ctx, { label: step.label, command });
   const why = r.timedOut ? "timed out" : `exit code ${r.code}`;

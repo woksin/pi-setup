@@ -36,6 +36,7 @@ function fake(b: Sandbox, platform: string, have: string[], extra: { root?: bool
       if (cmd === "id") return { ...ok, stdout: extra.root ? "0\n" : "1000\n" };
       if (cmd === "pi") return { ...ok, stdout: extra.piVersion ?? "0.85.1\n" };
       if (cmd === "npm" && args[0] === "prefix") return { ...ok, stdout: `${extra.prefix ?? "/nonexistent/prefix"}\n` };
+      if (cmd === "npm" && args[0] === "root") return { ...ok, stdout: `${join(args[3], "lib/node_modules")}\n` };
       state.ran.push({ argv: [cmd, ...args], inherit: o?.inherit });
       if (extra.fail && [cmd, ...args].join(" ").includes(extra.fail)) return { ...ok, code: 100, stderr: "boom" };
       for (const t of ["gh", "jq", "rg", "fd", "python3", "git", "gitleaks", "tmux", "pi", "npm"]) state.have.add(t);
